@@ -1,24 +1,26 @@
 use crate::{
-    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelGpuConfig,
-    PlanetaryVoxelResidency, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TransvoxelGpuError,
+    max_meshlets_for_indices, FrameUpdateOutcome, GpuResidencyError, GpuTerrainCullCounters,
+    GpuTerrainCullUniforms, GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds,
+    GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, TransvoxelGpuError,
     TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
     TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionGpuError,
+    TERRAIN_MESHLET_BUILD_WGSL, TERRAIN_MESHLET_CULL_WGSL, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
-    PassContext, PrepareContext, RenderPass, Result as HelioResult,
     graph::{ResourceBuilder, ResourceSize},
+    PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_planet_voxel_core::{
     CellWord, ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, SourceGeneration, TRANSITION_FACE_MASK, UploadOutcome,
-    VisibilityOutcome, VisiblePageSet,
+    PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+    TRANSITION_FACE_MASK,
 };
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::{
-        Mutex,
         mpsc::{self, Receiver, TryRecvError},
+        Mutex,
     },
 };
 use wgpu::util::DeviceExt;
@@ -26,9 +28,60 @@ use wgpu::util::DeviceExt;
 const SURFACE_BANKS: u32 = 2;
 const COPY_WORKGROUP_SIZE: u32 = 64;
 const DRAW_ARGS_BYTES: u64 = 20;
+const TERRAIN_DRAW_BYTES: u64 = core::mem::size_of::<GpuTerrainDraw>() as u64;
 
 pub const SURFACE_PUBLISH_WGSL: &str = include_str!("surface_publish.wgsl");
 pub const SURFACE_DRAW_WGSL: &str = include_str!("surface_draw.wgsl");
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PlanetaryDrawPath {
+    #[default]
+    PageIndexed,
+    Meshlets,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PlanetaryDebugView {
+    #[default]
+    Material = 0,
+    Meshlets = 1,
+    ResidentPages = 2,
+    Lod = 3,
+    TransitionSeams = 4,
+    Normals = 5,
+}
+
+impl PlanetaryDebugView {
+    pub const ALL: [Self; 6] = [
+        Self::Material,
+        Self::Meshlets,
+        Self::ResidentPages,
+        Self::Lod,
+        Self::TransitionSeams,
+        Self::Normals,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Material => "material",
+            Self::Meshlets => "meshlets",
+            Self::ResidentPages => "resident-pages",
+            Self::Lod => "lod",
+            Self::TransitionSeams => "transition-seams",
+            Self::Normals => "normals",
+        }
+    }
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+struct GpuTerrainDebugUniform {
+    mode: u32,
+    draw_path: u32,
+    _pad: [u32; 2],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanetaryVoxelRenderConfig {
@@ -49,6 +102,24 @@ impl PlanetaryVoxelRenderConfig {
                 .expect("validation regular extraction configuration is valid"),
             transition: TransvoxelGpuTransitionExtractorConfig::new(49_152, 147_456)
                 .expect("validation transition extraction configuration is valid"),
+            max_surface_bytes: 128 * 1024 * 1024,
+        }
+    }
+
+    /// Bounded culling-heavy fixture used by the unattended matched benchmark.
+    ///
+    /// The extraction capacities remain comfortably above the plane fixture's
+    /// actual output while avoiding the production-sized per-page reservation
+    /// that would make a 64-page benchmark needlessly expensive.
+    pub fn benchmark_demo() -> Self {
+        Self {
+            residency: PlanetaryVoxelGpuConfig::new(64, 256, 64, 64, 64, 4)
+                .expect("benchmark residency configuration is valid"),
+            max_pending_surfaces: 64,
+            regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
+                .expect("benchmark regular extraction configuration is valid"),
+            transition: TransvoxelGpuTransitionExtractorConfig::new(2_048, 6_144)
+                .expect("benchmark transition extraction configuration is valid"),
             max_surface_bytes: 128 * 1024 * 1024,
         }
     }
@@ -83,6 +154,32 @@ impl PlanetaryVoxelRenderConfig {
             u64::from(self.transition.max_indices),
             core::mem::size_of::<u32>() as u64,
         ])?;
+        let regular_meshlets = max_meshlets_for_indices(self.regular.max_indices);
+        let transition_meshlets = max_meshlets_for_indices(self.transition.max_indices);
+        let regular_meshlet_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(regular_meshlets),
+            core::mem::size_of::<GpuTerrainMeshlet>() as u64,
+        ])?;
+        let regular_meshlet_bounds_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(regular_meshlets),
+            core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
+        ])?;
+        let transition_meshlet_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(transition_meshlets),
+            core::mem::size_of::<GpuTerrainMeshlet>() as u64,
+        ])?;
+        let transition_meshlet_bounds_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(transition_meshlets),
+            core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
+        ])?;
         let state_bytes = pages
             .checked_mul(core::mem::size_of::<GpuSurfaceState>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
@@ -93,24 +190,57 @@ impl PlanetaryVoxelRenderConfig {
         let indirect_bytes = pages
             .checked_mul(DRAW_ARGS_BYTES)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let diagnostic_readback_bytes =
-            [feedback_bytes, state_bytes, indirect_bytes, indirect_bytes]
-                .into_iter()
-                .try_fold(0_u64, |total, bytes| {
-                    total
-                        .checked_add(bytes)
-                        .ok_or(PlanetaryRenderError::ArithmeticOverflow)
-                })?;
+        let regular_meshlet_draw_capacity = pages
+            .checked_mul(u64::from(regular_meshlets))
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let transition_meshlet_draw_capacity = pages
+            .checked_mul(u64::from(transition_meshlets))
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let regular_meshlet_indirect_bytes = regular_meshlet_draw_capacity
+            .checked_mul(DRAW_ARGS_BYTES)
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let transition_meshlet_indirect_bytes = transition_meshlet_draw_capacity
+            .checked_mul(DRAW_ARGS_BYTES)
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let regular_meshlet_draw_bytes = regular_meshlet_draw_capacity
+            .checked_mul(TERRAIN_DRAW_BYTES)
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let transition_meshlet_draw_bytes = transition_meshlet_draw_capacity
+            .checked_mul(TERRAIN_DRAW_BYTES)
+            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let cull_counter_bytes = core::mem::size_of::<GpuTerrainCullCounters>() as u64;
+        let diagnostic_readback_bytes = [
+            feedback_bytes,
+            cull_counter_bytes,
+            state_bytes,
+            indirect_bytes,
+            indirect_bytes,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or(PlanetaryRenderError::ArithmeticOverflow)
+        })?;
         let total_bytes = [
             regular_vertex_bytes,
             regular_index_bytes,
             transition_vertex_bytes,
             transition_index_bytes,
+            regular_meshlet_bytes,
+            regular_meshlet_bounds_bytes,
+            transition_meshlet_bytes,
+            transition_meshlet_bounds_bytes,
             state_bytes,
             draw_page_bytes,
             feedback_bytes,
             indirect_bytes,
             indirect_bytes,
+            regular_meshlet_indirect_bytes,
+            transition_meshlet_indirect_bytes,
+            regular_meshlet_draw_bytes,
+            transition_meshlet_draw_bytes,
+            cull_counter_bytes,
             diagnostic_readback_bytes,
         ]
         .into_iter()
@@ -130,10 +260,23 @@ impl PlanetaryVoxelRenderConfig {
             regular_index_bytes,
             transition_vertex_bytes,
             transition_index_bytes,
+            regular_meshlet_bytes,
+            regular_meshlet_bounds_bytes,
+            transition_meshlet_bytes,
+            transition_meshlet_bounds_bytes,
             state_bytes,
             draw_page_bytes,
             feedback_bytes,
             indirect_bytes,
+            regular_meshlet_draw_capacity: u32::try_from(regular_meshlet_draw_capacity)
+                .map_err(|_| PlanetaryRenderError::ArithmeticOverflow)?,
+            transition_meshlet_draw_capacity: u32::try_from(transition_meshlet_draw_capacity)
+                .map_err(|_| PlanetaryRenderError::ArithmeticOverflow)?,
+            regular_meshlet_indirect_bytes,
+            transition_meshlet_indirect_bytes,
+            regular_meshlet_draw_bytes,
+            transition_meshlet_draw_bytes,
+            cull_counter_bytes,
             diagnostic_readback_bytes,
             total_bytes,
         })
@@ -150,11 +293,48 @@ impl PlanetaryVoxelRenderConfig {
                 true,
             ),
             ("transition index arena", plan.transition_index_bytes, true),
+            ("regular meshlet arena", plan.regular_meshlet_bytes, true),
+            (
+                "regular meshlet bounds",
+                plan.regular_meshlet_bounds_bytes,
+                true,
+            ),
+            (
+                "transition meshlet arena",
+                plan.transition_meshlet_bytes,
+                true,
+            ),
+            (
+                "transition meshlet bounds",
+                plan.transition_meshlet_bounds_bytes,
+                true,
+            ),
             ("surface state", plan.state_bytes, true),
             ("draw pages", plan.draw_page_bytes, true),
             ("surface feedback", plan.feedback_bytes, true),
             ("regular indirect", plan.indirect_bytes, true),
             ("transition indirect", plan.indirect_bytes, true),
+            (
+                "regular meshlet indirect",
+                plan.regular_meshlet_indirect_bytes,
+                true,
+            ),
+            (
+                "transition meshlet indirect",
+                plan.transition_meshlet_indirect_bytes,
+                true,
+            ),
+            (
+                "regular meshlet draw metadata",
+                plan.regular_meshlet_draw_bytes,
+                true,
+            ),
+            (
+                "transition meshlet draw metadata",
+                plan.transition_meshlet_draw_bytes,
+                true,
+            ),
+            ("meshlet cull counters", plan.cull_counter_bytes, true),
             ("diagnostic readback", plan.diagnostic_readback_bytes, false),
         ] {
             if bytes > limits.max_buffer_size
@@ -184,10 +364,21 @@ pub struct PlanetarySurfaceAllocationPlan {
     pub regular_index_bytes: u64,
     pub transition_vertex_bytes: u64,
     pub transition_index_bytes: u64,
+    pub regular_meshlet_bytes: u64,
+    pub regular_meshlet_bounds_bytes: u64,
+    pub transition_meshlet_bytes: u64,
+    pub transition_meshlet_bounds_bytes: u64,
     pub state_bytes: u64,
     pub draw_page_bytes: u64,
     pub feedback_bytes: u64,
     pub indirect_bytes: u64,
+    pub regular_meshlet_draw_capacity: u32,
+    pub transition_meshlet_draw_capacity: u32,
+    pub regular_meshlet_indirect_bytes: u64,
+    pub transition_meshlet_indirect_bytes: u64,
+    pub regular_meshlet_draw_bytes: u64,
+    pub transition_meshlet_draw_bytes: u64,
+    pub cull_counter_bytes: u64,
     pub diagnostic_readback_bytes: u64,
     pub total_bytes: u64,
 }
@@ -249,8 +440,15 @@ pub struct PlanetaryRenderDiagnostics {
     pub regular_indices: u64,
     pub transition_vertices: u64,
     pub transition_indices: u64,
+    pub regular_meshlets: u64,
+    pub transition_meshlets: u64,
     pub visible_regular_draws: u32,
     pub visible_transition_draws: u32,
+    pub meshlet_draw_overflow: u32,
+    pub meshlet_stale_rejections: u32,
+    pub meshlet_frustum_rejections: u32,
+    pub meshlet_cone_rejections: u32,
+    pub meshlet_invalid_candidates: u32,
     pub readback_failures: u64,
 }
 
@@ -265,6 +463,9 @@ struct GpuSurfaceJob {
     regular_max_indices: u32,
     transition_max_vertices: u32,
     transition_max_indices: u32,
+    regular_max_meshlets: u32,
+    transition_max_meshlets: u32,
+    _pad: [u32; 2],
 }
 
 impl GpuSurfaceJob {
@@ -283,6 +484,9 @@ impl GpuSurfaceJob {
             regular_max_indices: config.regular.max_indices,
             transition_max_vertices: config.transition.max_vertices,
             transition_max_indices: config.transition.max_indices,
+            regular_max_meshlets: max_meshlets_for_indices(config.regular.max_indices),
+            transition_max_meshlets: max_meshlets_for_indices(config.transition.max_indices),
+            _pad: [0; 2],
         }
     }
 }
@@ -298,6 +502,9 @@ struct GpuSurfaceState {
     regular_index_count: u32,
     transition_vertex_count: u32,
     transition_index_count: u32,
+    regular_meshlet_count: u32,
+    transition_meshlet_count: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -341,6 +548,7 @@ struct PendingDiagnosticsReadback {
 
 #[derive(Clone, Copy)]
 struct DiagnosticsReadbackLayout {
+    cull_counter_offset: u64,
     state_offset: u64,
     regular_draw_offset: u64,
     transition_draw_offset: u64,
@@ -360,7 +568,7 @@ pub struct PlanetaryVoxelRenderPass {
     transition_extractor: TransvoxelGpuTransitionExtractor,
     pending: VecDeque<PlanetarySurfaceUpload>,
     prepared: bool,
-    visible: BTreeSet<PlanetPageKey>,
+    visible: BTreeMap<PlanetPageKey, u8>,
     counters: PlanetaryRenderCounters,
     job_buffer: wgpu::Buffer,
     state_buffer: wgpu::Buffer,
@@ -370,20 +578,47 @@ pub struct PlanetaryVoxelRenderPass {
     regular_index_arena: wgpu::Buffer,
     transition_vertex_arena: wgpu::Buffer,
     transition_index_arena: wgpu::Buffer,
+    regular_meshlet_arena: wgpu::Buffer,
+    regular_meshlet_bounds: wgpu::Buffer,
+    transition_meshlet_arena: wgpu::Buffer,
+    transition_meshlet_bounds: wgpu::Buffer,
     regular_indirect: wgpu::Buffer,
     transition_indirect: wgpu::Buffer,
+    regular_meshlet_indirect: wgpu::Buffer,
+    transition_meshlet_indirect: wgpu::Buffer,
+    regular_meshlet_draws: wgpu::Buffer,
+    transition_meshlet_draws: wgpu::Buffer,
+    meshlet_cull_counters: wgpu::Buffer,
+    regular_cull_uniform: wgpu::Buffer,
+    transition_cull_uniform: wgpu::Buffer,
+    debug_uniform: wgpu::Buffer,
     regular_copy_pipeline: wgpu::ComputePipeline,
     transition_copy_pipeline: wgpu::ComputePipeline,
+    regular_meshlet_build_pipeline: wgpu::ComputePipeline,
+    transition_meshlet_build_pipeline: wgpu::ComputePipeline,
     publish_pipeline: wgpu::ComputePipeline,
     visibility_pipeline: wgpu::ComputePipeline,
+    regular_meshlet_cull_pipeline: wgpu::ComputePipeline,
+    transition_meshlet_cull_pipeline: wgpu::ComputePipeline,
     regular_copy_bind_group: wgpu::BindGroup,
     transition_copy_bind_group: wgpu::BindGroup,
+    regular_meshlet_build_bind_group: wgpu::BindGroup,
+    transition_meshlet_build_bind_group: wgpu::BindGroup,
     publish_bind_group: wgpu::BindGroup,
     visibility_bind_group: wgpu::BindGroup,
-    render_pipeline: wgpu::RenderPipeline,
+    regular_meshlet_cull_bind_group: Option<wgpu::BindGroup>,
+    transition_meshlet_cull_bind_group: Option<wgpu::BindGroup>,
+    page_render_pipeline: wgpu::RenderPipeline,
+    meshlet_render_pipeline: wgpu::RenderPipeline,
     render_bind_group_layout: wgpu::BindGroupLayout,
-    render_bind_group: Option<wgpu::BindGroup>,
+    regular_render_bind_group: Option<wgpu::BindGroup>,
+    transition_render_bind_group: Option<wgpu::BindGroup>,
     render_camera_key: Option<usize>,
+    draw_path: PlanetaryDrawPath,
+    debug_view: PlanetaryDebugView,
+    use_count_indirect: bool,
+    regular_meshlet_draw_capacity: u32,
+    transition_meshlet_draw_capacity: u32,
     diagnostic_available: Option<wgpu::Buffer>,
     diagnostic_readback: Option<PendingDiagnosticsReadback>,
     diagnostics_cache: PlanetaryRenderDiagnostics,
@@ -485,6 +720,30 @@ impl PlanetaryVoxelRenderPass {
             plan.transition_index_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDEX,
         );
+        let regular_meshlet_arena = create_buffer(
+            device,
+            "Planetary Regular Meshlet Arena",
+            plan.regular_meshlet_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let regular_meshlet_bounds = create_buffer(
+            device,
+            "Planetary Regular Meshlet Bounds",
+            plan.regular_meshlet_bounds_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let transition_meshlet_arena = create_buffer(
+            device,
+            "Planetary Transition Meshlet Arena",
+            plan.transition_meshlet_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let transition_meshlet_bounds = create_buffer(
+            device,
+            "Planetary Transition Meshlet Bounds",
+            plan.transition_meshlet_bounds_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
         let indirect_usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::INDIRECT
             | wgpu::BufferUsages::COPY_SRC
@@ -501,6 +760,69 @@ impl PlanetaryVoxelRenderPass {
             plan.indirect_bytes,
             indirect_usage,
         );
+        let regular_meshlet_indirect = create_buffer(
+            device,
+            "Planetary Regular Meshlet Indirect Draws",
+            plan.regular_meshlet_indirect_bytes,
+            indirect_usage,
+        );
+        let transition_meshlet_indirect = create_buffer(
+            device,
+            "Planetary Transition Meshlet Indirect Draws",
+            plan.transition_meshlet_indirect_bytes,
+            indirect_usage,
+        );
+        let regular_meshlet_draws = create_buffer(
+            device,
+            "Planetary Regular Meshlet Draw Metadata",
+            plan.regular_meshlet_draw_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let transition_meshlet_draws = create_buffer(
+            device,
+            "Planetary Transition Meshlet Draw Metadata",
+            plan.transition_meshlet_draw_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let meshlet_cull_counters = create_zeroed_buffer::<GpuTerrainCullCounters>(
+            device,
+            "Planetary Meshlet Cull Counters",
+            1,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        );
+        let regular_cull_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Planetary Regular Meshlet Cull Uniform"),
+            contents: bytemuck::bytes_of(&GpuTerrainCullUniforms {
+                max_meshlets_per_bank: max_meshlets_for_indices(config.regular.max_indices),
+                draw_capacity: plan.regular_meshlet_draw_capacity,
+                surface_kind: 0,
+                _pad: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let transition_cull_uniform =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Planetary Transition Meshlet Cull Uniform"),
+                contents: bytemuck::bytes_of(&GpuTerrainCullUniforms {
+                    max_meshlets_per_bank: max_meshlets_for_indices(config.transition.max_indices),
+                    draw_capacity: plan.transition_meshlet_draw_capacity,
+                    surface_kind: 1,
+                    _pad: 0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let debug_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Planetary Terrain Debug Uniform"),
+            contents: bytemuck::bytes_of(&GpuTerrainDebugUniform {
+                mode: PlanetaryDebugView::Material as u32,
+                draw_path: PlanetaryDrawPath::PageIndexed as u32,
+                _pad: [0; 2],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let diagnostic_readback_buffer = create_buffer(
             device,
             "Planetary Surface Diagnostics Readback",
@@ -516,6 +838,14 @@ impl PlanetaryVoxelRenderPass {
             compute_pipeline(device, &publish_shader, "copy_regular_surface");
         let transition_copy_pipeline =
             compute_pipeline(device, &publish_shader, "copy_transition_surface");
+        let meshlet_build_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Planetary Terrain Meshlet Build Shader"),
+            source: wgpu::ShaderSource::Wgsl(TERRAIN_MESHLET_BUILD_WGSL.into()),
+        });
+        let regular_meshlet_build_pipeline =
+            compute_pipeline(device, &meshlet_build_shader, "build_regular");
+        let transition_meshlet_build_pipeline =
+            compute_pipeline(device, &meshlet_build_shader, "build_transition");
         let publish_pipeline = compute_pipeline(device, &publish_shader, "publish_surface");
         let visibility_pipeline = compute_pipeline(device, &publish_shader, "refresh_visibility");
         let regular_copy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -546,6 +876,36 @@ impl PlanetaryVoxelRenderPass {
                 buffer_entry(12, &transition_index_arena),
             ],
         });
+        let regular_meshlet_build_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Planetary Regular Meshlet Build Bind Group"),
+                layout: &regular_meshlet_build_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &job_buffer),
+                    buffer_entry(1, residency.metadata_buffer()),
+                    buffer_entry(2, &state_buffer),
+                    buffer_entry(3, regular_extractor.counters_buffer()),
+                    buffer_entry(4, &regular_vertex_arena),
+                    buffer_entry(5, &regular_index_arena),
+                    buffer_entry(6, &regular_meshlet_arena),
+                    buffer_entry(7, &regular_meshlet_bounds),
+                ],
+            });
+        let transition_meshlet_build_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Planetary Transition Meshlet Build Bind Group"),
+                layout: &transition_meshlet_build_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &job_buffer),
+                    buffer_entry(1, residency.metadata_buffer()),
+                    buffer_entry(2, &state_buffer),
+                    buffer_entry(8, transition_extractor.counters_buffer()),
+                    buffer_entry(9, &transition_vertex_arena),
+                    buffer_entry(10, &transition_index_arena),
+                    buffer_entry(11, &transition_meshlet_arena),
+                    buffer_entry(12, &transition_meshlet_bounds),
+                ],
+            });
         let publish_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Planetary Surface Publish Bind Group"),
             layout: &publish_pipeline.get_bind_group_layout(0),
@@ -571,6 +931,15 @@ impl PlanetaryVoxelRenderPass {
             ],
         });
 
+        let meshlet_cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Planetary Terrain Meshlet Cull Shader"),
+            source: wgpu::ShaderSource::Wgsl(TERRAIN_MESHLET_CULL_WGSL.into()),
+        });
+        let regular_meshlet_cull_pipeline =
+            compute_pipeline(device, &meshlet_cull_shader, "cull_meshlets");
+        let transition_meshlet_cull_pipeline =
+            compute_pipeline(device, &meshlet_cull_shader, "cull_meshlets");
+
         let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Planetary Surface Draw Shader"),
             source: wgpu::ShaderSource::Wgsl(SURFACE_DRAW_WGSL.into()),
@@ -581,6 +950,8 @@ impl PlanetaryVoxelRenderPass {
                 entries: &[
                     uniform_layout_entry(0, wgpu::ShaderStages::VERTEX),
                     storage_layout_entry(1, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
+                    storage_layout_entry(2, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
+                    uniform_layout_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 ],
             });
         let render_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -588,66 +959,72 @@ impl PlanetaryVoxelRenderPass {
             bind_group_layouts: &[Some(&render_bind_group_layout)],
             immediate_size: 0,
         });
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Planetary Surface Draw Pipeline"),
-            layout: Some(&render_layout),
-            vertex: wgpu::VertexState {
-                module: &render_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 28,
-                            shader_location: 3,
-                        },
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &render_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let create_render_pipeline = |label: &'static str, vertex_entry: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&render_layout),
+                vertex: wgpu::VertexState {
+                    module: &render_shader,
+                    entry_point: Some(vertex_entry),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 28,
+                                shader_location: 3,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &render_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let page_render_pipeline =
+            create_render_pipeline("Planetary Page Surface Draw Pipeline", "vs_page");
+        let meshlet_render_pipeline =
+            create_render_pipeline("Planetary Meshlet Surface Draw Pipeline", "vs_meshlet");
 
         Ok(Self {
             config,
@@ -656,7 +1033,7 @@ impl PlanetaryVoxelRenderPass {
             transition_extractor,
             pending: VecDeque::new(),
             prepared: false,
-            visible: BTreeSet::new(),
+            visible: BTreeMap::new(),
             counters: PlanetaryRenderCounters::default(),
             job_buffer,
             state_buffer,
@@ -666,20 +1043,49 @@ impl PlanetaryVoxelRenderPass {
             regular_index_arena,
             transition_vertex_arena,
             transition_index_arena,
+            regular_meshlet_arena,
+            regular_meshlet_bounds,
+            transition_meshlet_arena,
+            transition_meshlet_bounds,
             regular_indirect,
             transition_indirect,
+            regular_meshlet_indirect,
+            transition_meshlet_indirect,
+            regular_meshlet_draws,
+            transition_meshlet_draws,
+            meshlet_cull_counters,
+            regular_cull_uniform,
+            transition_cull_uniform,
+            debug_uniform,
             regular_copy_pipeline,
             transition_copy_pipeline,
+            regular_meshlet_build_pipeline,
+            transition_meshlet_build_pipeline,
             publish_pipeline,
             visibility_pipeline,
+            regular_meshlet_cull_pipeline,
+            transition_meshlet_cull_pipeline,
             regular_copy_bind_group,
             transition_copy_bind_group,
+            regular_meshlet_build_bind_group,
+            transition_meshlet_build_bind_group,
             publish_bind_group,
             visibility_bind_group,
-            render_pipeline,
+            regular_meshlet_cull_bind_group: None,
+            transition_meshlet_cull_bind_group: None,
+            page_render_pipeline,
+            meshlet_render_pipeline,
             render_bind_group_layout,
-            render_bind_group: None,
+            regular_render_bind_group: None,
+            transition_render_bind_group: None,
             render_camera_key: None,
+            draw_path: PlanetaryDrawPath::PageIndexed,
+            debug_view: PlanetaryDebugView::Material,
+            use_count_indirect: device
+                .features()
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+            regular_meshlet_draw_capacity: plan.regular_meshlet_draw_capacity,
+            transition_meshlet_draw_capacity: plan.transition_meshlet_draw_capacity,
             diagnostic_available: Some(diagnostic_readback_buffer),
             diagnostic_readback: None,
             diagnostics_cache: PlanetaryRenderDiagnostics::default(),
@@ -700,6 +1106,67 @@ impl PlanetaryVoxelRenderPass {
         let mut counters = self.counters;
         counters.queued_surfaces = self.pending.len();
         counters
+    }
+
+    pub const fn draw_path(&self) -> PlanetaryDrawPath {
+        self.draw_path
+    }
+
+    pub const fn debug_view(&self) -> PlanetaryDebugView {
+        self.debug_view
+    }
+
+    pub fn set_draw_path(&mut self, queue: &wgpu::Queue, draw_path: PlanetaryDrawPath) {
+        self.draw_path = draw_path;
+        if draw_path == PlanetaryDrawPath::PageIndexed
+            && self.debug_view == PlanetaryDebugView::Meshlets
+        {
+            // A page-sized baseline draw has no meshlet identity to visualize.
+            // Never present page colors under the truthful meshlet label.
+            self.debug_view = PlanetaryDebugView::Material;
+        }
+        self.write_debug_uniform(queue);
+    }
+
+    pub fn toggle_draw_path(&mut self, queue: &wgpu::Queue) -> PlanetaryDrawPath {
+        let draw_path = match self.draw_path {
+            PlanetaryDrawPath::PageIndexed => PlanetaryDrawPath::Meshlets,
+            PlanetaryDrawPath::Meshlets => PlanetaryDrawPath::PageIndexed,
+        };
+        self.set_draw_path(queue, draw_path);
+        self.draw_path
+    }
+
+    pub fn set_debug_view(&mut self, queue: &wgpu::Queue, debug_view: PlanetaryDebugView) {
+        self.debug_view = debug_view;
+        if debug_view == PlanetaryDebugView::Meshlets {
+            self.draw_path = PlanetaryDrawPath::Meshlets;
+        }
+        self.write_debug_uniform(queue);
+    }
+
+    pub fn cycle_debug_view(&mut self, queue: &wgpu::Queue) -> PlanetaryDebugView {
+        let index = PlanetaryDebugView::ALL
+            .iter()
+            .position(|view| *view == self.debug_view)
+            .unwrap_or(0);
+        self.set_debug_view(
+            queue,
+            PlanetaryDebugView::ALL[(index + 1) % PlanetaryDebugView::ALL.len()],
+        );
+        self.debug_view
+    }
+
+    fn write_debug_uniform(&self, queue: &wgpu::Queue) {
+        queue.write_buffer(
+            &self.debug_uniform,
+            0,
+            bytemuck::bytes_of(&GpuTerrainDebugUniform {
+                mode: self.debug_view as u32,
+                draw_path: self.draw_path as u32,
+                _pad: [0; 2],
+            }),
+        );
     }
 
     /// Polls a bounded asynchronous readback of publication state and starts
@@ -759,11 +1226,14 @@ impl PlanetaryVoxelRenderPass {
 
     fn diagnostics_readback_layout(&self) -> DiagnosticsReadbackLayout {
         let pages = u64::from(self.config.residency.max_resident_pages);
-        let state_offset = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
+        let cull_counter_offset = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
+        let state_offset =
+            cull_counter_offset + core::mem::size_of::<GpuTerrainCullCounters>() as u64;
         let regular_draw_offset =
             state_offset + pages * core::mem::size_of::<GpuSurfaceState>() as u64;
         let transition_draw_offset = regular_draw_offset + pages * DRAW_ARGS_BYTES;
         DiagnosticsReadbackLayout {
+            cull_counter_offset,
             state_offset,
             regular_draw_offset,
             transition_draw_offset,
@@ -790,6 +1260,13 @@ impl PlanetaryVoxelRenderPass {
             &readback,
             0,
             core::mem::size_of::<GpuSurfaceFeedback>() as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            &self.meshlet_cull_counters,
+            0,
+            &readback,
+            layout.cull_counter_offset,
+            layout.state_offset - layout.cull_counter_offset,
         );
         encoder.copy_buffer_to_buffer(
             &self.state_buffer,
@@ -834,8 +1311,11 @@ impl PlanetaryVoxelRenderPass {
                 return false;
             }
         };
-        let feedback_bytes = &mapped[..layout.state_offset as usize];
+        let feedback_bytes = &mapped[..layout.cull_counter_offset as usize];
         let feedback = *bytemuck::from_bytes::<GpuSurfaceFeedback>(feedback_bytes);
+        let cull_counters = *bytemuck::from_bytes::<GpuTerrainCullCounters>(
+            &mapped[layout.cull_counter_offset as usize..layout.state_offset as usize],
+        );
         let states = bytemuck::cast_slice::<u8, GpuSurfaceState>(
             &mapped[layout.state_offset as usize..layout.regular_draw_offset as usize],
         );
@@ -871,14 +1351,38 @@ impl PlanetaryVoxelRenderPass {
             .filter(|state| state.valid != 0)
             .map(|state| u64::from(state.transition_index_count))
             .sum();
-        self.diagnostics_cache.visible_regular_draws = regular_draws
+        self.diagnostics_cache.regular_meshlets = states
             .iter()
-            .filter(|draw| draw.instance_count != 0 && draw.index_count != 0)
-            .count() as u32;
-        self.diagnostics_cache.visible_transition_draws = transition_draws
+            .filter(|state| state.valid != 0)
+            .map(|state| u64::from(state.regular_meshlet_count))
+            .sum();
+        self.diagnostics_cache.transition_meshlets = states
             .iter()
-            .filter(|draw| draw.instance_count != 0 && draw.index_count != 0)
-            .count() as u32;
+            .filter(|state| state.valid != 0)
+            .map(|state| u64::from(state.transition_meshlet_count))
+            .sum();
+        match self.draw_path {
+            PlanetaryDrawPath::PageIndexed => {
+                self.diagnostics_cache.visible_regular_draws = regular_draws
+                    .iter()
+                    .filter(|draw| draw.instance_count != 0 && draw.index_count != 0)
+                    .count() as u32;
+                self.diagnostics_cache.visible_transition_draws = transition_draws
+                    .iter()
+                    .filter(|draw| draw.instance_count != 0 && draw.index_count != 0)
+                    .count()
+                    as u32;
+            }
+            PlanetaryDrawPath::Meshlets => {
+                self.diagnostics_cache.visible_regular_draws = cull_counters.regular_draws;
+                self.diagnostics_cache.visible_transition_draws = cull_counters.transition_draws;
+            }
+        }
+        self.diagnostics_cache.meshlet_draw_overflow = cull_counters.overflow;
+        self.diagnostics_cache.meshlet_stale_rejections = cull_counters.stale;
+        self.diagnostics_cache.meshlet_frustum_rejections = cull_counters.frustum_rejects;
+        self.diagnostics_cache.meshlet_cone_rejections = cull_counters.cone_rejects;
+        self.diagnostics_cache.meshlet_invalid_candidates = cull_counters.invalid_candidates;
         drop(mapped);
         buffer.unmap();
         true
@@ -976,7 +1480,11 @@ impl PlanetaryVoxelRenderPass {
         queue: &wgpu::Queue,
         set: VisiblePageSet,
     ) -> Result<VisibilityOutcome, PlanetaryRenderError> {
-        let candidate: BTreeSet<_> = set.pages.iter().map(|page| page.key).collect();
+        let candidate: BTreeMap<_, _> = set
+            .pages
+            .iter()
+            .map(|page| (page.key, page.transition_mask))
+            .collect();
         let outcome = self.residency.apply_visible_set(queue, set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             self.visible = candidate;
@@ -1070,8 +1578,8 @@ impl PlanetaryVoxelRenderPass {
                 lod0_cell_size_m: frame.lod0_cell_size_m,
                 generation_low: resident.publication_generation as u32,
                 generation_high: (resident.publication_generation >> 32) as u32,
-                transition_mask: 0,
-                visible: u32::from(self.visible.contains(&key)),
+                transition_mask: u32::from(self.visible.get(&key).copied().unwrap_or(0)),
+                visible: u32::from(self.visible.contains_key(&key)),
             };
         }
         queue.write_buffer(&self.draw_page_buffer, 0, bytemuck::cast_slice(&pages));
@@ -1169,6 +1677,22 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             );
             dispatch_compute(
                 compute,
+                &self.regular_meshlet_build_pipeline,
+                &self.regular_meshlet_build_bind_group,
+                max_meshlets_for_indices(self.config.regular.max_indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Regular Meshlet Build",
+            );
+            dispatch_compute(
+                compute,
+                &self.transition_meshlet_build_pipeline,
+                &self.transition_meshlet_build_bind_group,
+                max_meshlets_for_indices(self.config.transition.max_indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Transition Meshlet Build",
+            );
+            dispatch_compute(
+                compute,
                 &self.publish_pipeline,
                 &self.publish_bind_group,
                 1,
@@ -1191,53 +1715,174 @@ impl RenderPass for PlanetaryVoxelRenderPass {
 
         let camera_key = ctx.scene.camera as *const _ as usize;
         if self.render_camera_key != Some(camera_key) {
-            self.render_bind_group =
+            self.regular_meshlet_cull_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Planetary Surface Draw Bind Group"),
+                    label: Some("Planetary Regular Meshlet Cull Bind Group"),
+                    layout: &self.regular_meshlet_cull_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(1, &self.regular_cull_uniform),
+                        buffer_entry(2, &self.state_buffer),
+                        buffer_entry(3, &self.draw_page_buffer),
+                        buffer_entry(4, &self.regular_meshlet_arena),
+                        buffer_entry(5, &self.regular_meshlet_bounds),
+                        buffer_entry(6, &self.regular_meshlet_indirect),
+                        buffer_entry(7, &self.regular_meshlet_draws),
+                        buffer_entry(8, &self.meshlet_cull_counters),
+                    ],
+                }));
+            self.transition_meshlet_cull_bind_group = Some(
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Planetary Transition Meshlet Cull Bind Group"),
+                    layout: &self
+                        .transition_meshlet_cull_pipeline
+                        .get_bind_group_layout(0),
+                    entries: &[
+                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(1, &self.transition_cull_uniform),
+                        buffer_entry(2, &self.state_buffer),
+                        buffer_entry(3, &self.draw_page_buffer),
+                        buffer_entry(4, &self.transition_meshlet_arena),
+                        buffer_entry(5, &self.transition_meshlet_bounds),
+                        buffer_entry(6, &self.transition_meshlet_indirect),
+                        buffer_entry(7, &self.transition_meshlet_draws),
+                        buffer_entry(8, &self.meshlet_cull_counters),
+                    ],
+                }),
+            );
+            self.regular_render_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Planetary Regular Surface Draw Bind Group"),
                     layout: &self.render_bind_group_layout,
                     entries: &[
                         buffer_entry(0, ctx.scene.camera),
                         buffer_entry(1, &self.draw_page_buffer),
+                        buffer_entry(2, &self.regular_meshlet_draws),
+                        buffer_entry(3, &self.debug_uniform),
+                    ],
+                }));
+            self.transition_render_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Planetary Transition Surface Draw Bind Group"),
+                    layout: &self.render_bind_group_layout,
+                    entries: &[
+                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(1, &self.draw_page_buffer),
+                        buffer_entry(2, &self.transition_meshlet_draws),
+                        buffer_entry(3, &self.debug_uniform),
                     ],
                 }));
             self.render_camera_key = Some(camera_key);
         }
+
+        // Keep diagnostics truthful on the page baseline as well: no meshlet
+        // work in that mode means zero current-frame meshlet counters.
+        compute.clear_buffer(&self.meshlet_cull_counters, 0, None);
+        if self.draw_path == PlanetaryDrawPath::Meshlets {
+            if !self.use_count_indirect {
+                compute.clear_buffer(&self.regular_meshlet_indirect, 0, None);
+                compute.clear_buffer(&self.transition_meshlet_indirect, 0, None);
+            }
+            dispatch_compute(
+                compute,
+                &self.regular_meshlet_cull_pipeline,
+                self.regular_meshlet_cull_bind_group
+                    .as_ref()
+                    .expect("regular meshlet cull bind group"),
+                self.regular_meshlet_draw_capacity
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Regular Meshlet Cull",
+            );
+            dispatch_compute(
+                compute,
+                &self.transition_meshlet_cull_pipeline,
+                self.transition_meshlet_cull_bind_group
+                    .as_ref()
+                    .expect("transition meshlet cull bind group"),
+                self.transition_meshlet_draw_capacity
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Transition Meshlet Cull",
+            );
+        }
+
         let render = unsafe { &mut *ctx.active_render_pass_ptr().expect("render pass is active") };
-        render.set_pipeline(&self.render_pipeline);
-        render.set_bind_group(0, self.render_bind_group.as_ref().unwrap(), &[]);
+        render.set_pipeline(match self.draw_path {
+            PlanetaryDrawPath::PageIndexed => &self.page_render_pipeline,
+            PlanetaryDrawPath::Meshlets => &self.meshlet_render_pipeline,
+        });
+        render.set_bind_group(
+            0,
+            self.regular_render_bind_group
+                .as_ref()
+                .expect("regular render bind group"),
+            &[],
+        );
         render.set_vertex_buffer(0, self.regular_vertex_arena.slice(..));
         render.set_index_buffer(
             self.regular_index_arena.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        render.multi_draw_indexed_indirect(
-            &self.regular_indirect,
-            0,
-            self.config.residency.max_resident_pages,
-        );
-        #[cfg(target_arch = "wasm32")]
-        for index in 0..self.config.residency.max_resident_pages {
-            render
-                .draw_indexed_indirect(&self.regular_indirect, u64::from(index) * DRAW_ARGS_BYTES);
+        match self.draw_path {
+            PlanetaryDrawPath::PageIndexed => {
+                draw_indirect_range(
+                    render,
+                    &self.regular_indirect,
+                    self.config.residency.max_resident_pages,
+                );
+            }
+            PlanetaryDrawPath::Meshlets if self.use_count_indirect => {
+                render.multi_draw_indexed_indirect_count(
+                    &self.regular_meshlet_indirect,
+                    0,
+                    &self.meshlet_cull_counters,
+                    0,
+                    self.regular_meshlet_draw_capacity,
+                );
+            }
+            PlanetaryDrawPath::Meshlets => {
+                draw_indirect_range(
+                    render,
+                    &self.regular_meshlet_indirect,
+                    self.regular_meshlet_draw_capacity,
+                );
+            }
         }
+        render.set_bind_group(
+            0,
+            self.transition_render_bind_group
+                .as_ref()
+                .expect("transition render bind group"),
+            &[],
+        );
         render.set_vertex_buffer(0, self.transition_vertex_arena.slice(..));
         render.set_index_buffer(
             self.transition_index_arena.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        render.multi_draw_indexed_indirect(
-            &self.transition_indirect,
-            0,
-            self.config.residency.max_resident_pages,
-        );
-        #[cfg(target_arch = "wasm32")]
-        for index in 0..self.config.residency.max_resident_pages {
-            render.draw_indexed_indirect(
-                &self.transition_indirect,
-                u64::from(index) * DRAW_ARGS_BYTES,
-            );
+        match self.draw_path {
+            PlanetaryDrawPath::PageIndexed => {
+                draw_indirect_range(
+                    render,
+                    &self.transition_indirect,
+                    self.config.residency.max_resident_pages,
+                );
+            }
+            PlanetaryDrawPath::Meshlets if self.use_count_indirect => {
+                render.multi_draw_indexed_indirect_count(
+                    &self.transition_meshlet_indirect,
+                    0,
+                    &self.meshlet_cull_counters,
+                    core::mem::size_of::<u32>() as u64,
+                    self.transition_meshlet_draw_capacity,
+                );
+            }
+            PlanetaryDrawPath::Meshlets => {
+                draw_indirect_range(
+                    render,
+                    &self.transition_meshlet_indirect,
+                    self.transition_meshlet_draw_capacity,
+                );
+            }
         }
         Ok(())
     }
@@ -1287,6 +1932,15 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             occlusion_query_set: None,
             multiview_mask: None,
         })
+    }
+}
+
+fn draw_indirect_range(render: &mut wgpu::RenderPass<'_>, buffer: &wgpu::Buffer, count: u32) {
+    #[cfg(not(target_arch = "wasm32"))]
+    render.multi_draw_indexed_indirect(buffer, 0, count);
+    #[cfg(target_arch = "wasm32")]
+    for index in 0..count {
+        render.draw_indexed_indirect(buffer, u64::from(index) * DRAW_ARGS_BYTES);
     }
 }
 
@@ -1464,9 +2118,30 @@ mod tests {
         assert_eq!(plan.feedback_bytes, 32);
         assert_eq!(
             plan.diagnostic_readback_bytes,
-            plan.feedback_bytes + plan.state_bytes + plan.indirect_bytes * 2
+            plan.feedback_bytes
+                + plan.cull_counter_bytes
+                + plan.state_bytes
+                + plan.indirect_bytes * 2
+        );
+        assert_eq!(
+            plan.regular_meshlet_indirect_bytes,
+            u64::from(plan.regular_meshlet_draw_capacity) * DRAW_ARGS_BYTES
+        );
+        assert_eq!(
+            plan.transition_meshlet_draw_bytes,
+            u64::from(plan.transition_meshlet_draw_capacity) * TERRAIN_DRAW_BYTES
         );
         assert_eq!(core::mem::size_of::<DrawIndexedIndirectArgs>(), 20);
+    }
+
+    #[test]
+    fn benchmark_config_is_bounded_and_below_its_declared_budget() {
+        let config = PlanetaryVoxelRenderConfig::benchmark_demo();
+        let plan = config.allocation_plan().unwrap();
+        assert!(plan.total_bytes <= config.max_surface_bytes);
+        assert_eq!(config.residency.max_resident_pages, 64);
+        assert_eq!(config.max_pending_surfaces, 64);
+        assert_eq!(plan.indirect_bytes, 64 * DRAW_ARGS_BYTES);
     }
 
     #[test]
