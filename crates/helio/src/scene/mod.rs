@@ -65,6 +65,7 @@ mod core;
 mod editor_debug;
 mod errors;
 mod flush;
+mod foliage;
 mod groups;
 mod helpers;
 mod lifecycle;
@@ -85,6 +86,9 @@ pub use actor::{
 };
 pub use camera::Camera;
 pub use core::Scene;
+pub use foliage::{
+    FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFoliageInteractor,
+};
 pub use errors::*;
 pub use types::{ObjectDescriptor, PickableObject, VoxelVolumeDescriptor};
 pub use voxel::VoxelMode;

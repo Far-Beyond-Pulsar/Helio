@@ -238,3 +238,7 @@ log = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
+
+[[bin]]
+name = "foliage_demo"
+path = "foliage_demo.rs"

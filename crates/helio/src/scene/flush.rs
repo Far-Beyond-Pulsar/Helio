@@ -252,6 +252,10 @@ impl Scene {
             self.vg_instance_version = self.vg_instance_version.wrapping_add(1);
         }
 
+        // Foliage type/interactor mirrors. Both are internally dirty-gated, so this is a
+        // pair of predictable-branch no-ops in the overwhelmingly common steady state.
+        self.rebuild_foliage_buffers();
+
         // ── Voxel volume flush ───────────────────────────────────────────────
         {
             let mut any_dirty = false;

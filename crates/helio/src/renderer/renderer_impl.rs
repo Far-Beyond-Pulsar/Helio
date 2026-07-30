@@ -121,6 +121,7 @@ pub struct Renderer {
     pub(crate) corona_emitter_generation: u64,
     pub(crate) water_volumes_buffer: wgpu::Buffer,
     pub(crate) water_hitboxes_buffer: wgpu::Buffer,
+    pub(crate) foliage_interactors_buffer: wgpu::Buffer,
     pub(crate) pp_volumes_buffer: wgpu::Buffer,
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,

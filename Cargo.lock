@@ -2840,6 +2840,7 @@ dependencies = [
  "glam 0.33.2",
  "helio-bake",
  "helio-core",
+ "helio-foliage-core",
  "helio-pass-postprocess",
  "helio-voxel-core",
  "image",
@@ -3050,6 +3051,30 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-foliage-gbuffer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-foliage-core",
+ "libhelio",
+ "log",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-foliage-place"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-foliage-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 

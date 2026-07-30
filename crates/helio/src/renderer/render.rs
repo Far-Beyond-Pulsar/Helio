@@ -231,6 +231,21 @@ impl Renderer {
             self.scene.clear_water_hitboxes_dirty();
         }
 
+        if self.scene.foliage_interactors_dirty() {
+            let interactors = self.scene.foliage_interactors_gpu_slice();
+            if let Some((start, end)) = self.scene.foliage_interactors_dirty_range() {
+                let end = end.min(interactors.len());
+                if start < end {
+                    self.queue.write_buffer(
+                        &self.foliage_interactors_buffer,
+                        (start * std::mem::size_of::<crate::scene::GpuFoliageInteractor>()) as u64,
+                        bytemuck::cast_slice(&interactors[start..end]),
+                    );
+                }
+            }
+            self.scene.clear_foliage_interactors_dirty();
+        }
+
         let pp_count = self.scene.post_process_volumes_count();
         if pp_count > 0 && self.scene.post_process_volumes_dirty() {
             let range = self.scene.consume_post_process_volumes_dirty_range();
@@ -400,6 +415,20 @@ impl Renderer {
         if let Some(vg_data) = self.scene.vg_frame_data() {
             frame_resources.vg.write(vg_data, "Renderer");
         }
+        // Foliage. `foliage_frame_data()` returns None when the scene registers no foliage
+        // types, and the slot is then deliberately left unwritten — that is the mechanism
+        // the foliage passes early-out on, and it is what makes an unplanted scene cost
+        // exactly nothing. Do not "helpfully" write an empty struct here.
+        let foliage_interactor_count = self.scene.foliage_interactor_count();
+        if let Some(foliage_data) = self.scene.foliage_frame_data() {
+            frame_resources.foliage.write(foliage_data, "Renderer");
+            if foliage_interactor_count > 0 {
+                frame_resources
+                    .foliage_interactors
+                    .write(&self.foliage_interactors_buffer, "Renderer");
+            }
+        }
+        frame_resources.foliage_interactor_count = foliage_interactor_count;
         frame_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
             frame_resources.baked_ao.write(ao, "Renderer");

@@ -104,6 +104,17 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Fixed 256-interactor ceiling, matching the water-hitbox buffer above. The
+        // interaction field is 64 m across; more than a couple of hundred bodies inside it
+        // at once is a gameplay problem, not a rendering one, and a fixed size keeps this
+        // off the per-frame allocation path entirely.
+        let foliage_interactors_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Foliage Interactors Buffer"),
+            size: 256 * std::mem::size_of::<crate::scene::GpuFoliageInteractor>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let pp_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Volumes Buffer"),
             size: 256 * std::mem::size_of::<libhelio::GpuPostProcessVolume>() as u64,
@@ -179,6 +190,7 @@ impl Renderer {
             corona_emitter_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
+            foliage_interactors_buffer,
             pp_volumes_buffer,
             postprocess_buffer,
             last_render_time: Instant::now(),

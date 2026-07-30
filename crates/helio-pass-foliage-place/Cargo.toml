@@ -1,0 +1,13 @@
+[package]
+name = "helio-pass-foliage-place"
+version = "0.1.0"
+edition = "2021"
+description = "Foliage tile residency, GPU placement, tile/cluster culling and per-LOD compaction for Helio"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-foliage-core = { workspace = true }
+libhelio = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+log = { workspace = true }

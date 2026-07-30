@@ -29,9 +29,9 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PostProcessVolumeId,
-    ReflectionCaptureId, SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId,
-    WaterHitboxId, WaterVolumeId,
+    DecalId, FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId,
+    MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
+    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -45,7 +45,8 @@ pub use renderer::{
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
 };
 pub use scene::{
-    Camera, DecalActor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
+    Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
+    GpuFoliageInteractor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
     ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
     SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
     WaterHitboxActor, WaterHitboxDescriptor,
