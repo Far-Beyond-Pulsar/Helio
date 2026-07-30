@@ -331,6 +331,9 @@ pub struct FrameResources<'a> {
     /// 3D colour grading LUT texture (Rgba16Float, optional).
     /// Populated by LUT builder pass, consumed by PostProcessPass.
     pub color_grading_lut: Tracked<&'a wgpu::TextureView>,
+    /// IES light profile texture array (R8Unorm, 256×256 per slice, optional).
+    /// Populated by Renderer, consumed by DeferredLightPass.
+    pub ies_textures: Tracked<&'a wgpu::TextureView>,
 
     /// Reflection capture storage buffer
     pub reflection_captures: Tracked<&'a wgpu::Buffer>,
@@ -472,6 +475,7 @@ impl<'a> FrameResources<'a> {
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
             color_grading_lut: Tracked::empty(),
+            ies_textures: Tracked::empty(),
             reflection_captures: Tracked::empty(),
             reflection_capture_count: 0,
             ssr_trace: Tracked::empty(),
@@ -541,6 +545,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
             reset_field!(color_grading_lut);
+            reset_field!(ies_textures);
             reset_field!(reflection_captures);
             reset_field!(ssr_trace);
             reset_field!(planar_reflection);

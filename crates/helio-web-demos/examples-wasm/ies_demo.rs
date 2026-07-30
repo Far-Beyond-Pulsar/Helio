@@ -21,8 +21,8 @@ impl HelioWasmApp for Demo {
 
     fn render_scale() -> f32 { 1.0 }
 
-    fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-            _queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
+    fn init(renderer: &mut Renderer, device: Arc<wgpu::Device>,
+            queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
         let floor_mat = renderer.scene_mut().insert_material(make_material(
             [0.15, 0.15, 0.16, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0,
         ));
@@ -55,6 +55,52 @@ impl HelioWasmApp for Demo {
             };
             renderer.scene_mut().insert_actor(helio::SceneActor::light(light)).as_light().unwrap()
         });
+
+        // Upload a 2-layer IES texture array
+        const IES_W: u32 = 64;
+        const IES_H: u32 = 64;
+        let mut ies_pixels = Vec::with_capacity((IES_W * IES_H * 2) as usize);
+        for y in 0..IES_H {
+            for x in 0..IES_W {
+                let u = (x as f32 + 0.5) / IES_W as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / IES_H as f32 * 2.0 - 1.0;
+                let dist = (u * u + v * v).sqrt();
+                let val = (-dist * dist * 6.0).exp();
+                ies_pixels.push((val.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        for y in 0..IES_H {
+            for x in 0..IES_W {
+                let tile = ((x / 6) + (y / 6)) & 1;
+                ies_pixels.push(if tile == 0 { 235u8 } else { 30u8 });
+            }
+        }
+        let ies_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Demo IES Textures"),
+            size: wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 2 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &ies_pixels[..(IES_W * IES_H) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
+            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+        );
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            &ies_pixels[(IES_W * IES_H) as usize..],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
+            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+        );
+        let ies_view = ies_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        renderer.set_ies_texture_view(ies_view);
 
         Self {
             cam_pos: Vec3::new(0.0, 2.0, 5.0),

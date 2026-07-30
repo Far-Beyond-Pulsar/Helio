@@ -96,7 +96,7 @@ impl App {
                 _ => 0.80,
             };
             if enabled {
-                light.ies_profile_index = 0;  // layer 0 = spotlight gradient
+                light.ies_profile_index = 0;
                 light.ies_angle_scale = match i {
                     0 => 0.5,
                     1 => 1.0,
@@ -104,7 +104,7 @@ impl App {
                 };
             }
             if state.gobo_enabled {
-                light.light_function_index = 1;  // layer 1 = checkerboard gobo
+                light.light_function_index = 1;
             }
             let _ = state.renderer.scene_mut().update_light(
                 state.light_ids[i],
@@ -237,6 +237,56 @@ impl ApplicationHandler for App {
             };
             renderer.scene_mut().insert_actor(helio::SceneActor::light(light)).as_light().unwrap()
         });
+
+        // Upload a 2-layer IES texture array: layer 0 = spotlight gradient, layer 1 = checkerboard gobo
+        const IES_W: u32 = 64;
+        const IES_H: u32 = 64;
+        let mut ies_pixels = Vec::with_capacity((IES_W * IES_H * 2) as usize);
+        // Layer 0: gaussian spotlight
+        for y in 0..IES_H {
+            for x in 0..IES_W {
+                let u = (x as f32 + 0.5) / IES_W as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / IES_H as f32 * 2.0 - 1.0;
+                let dist = (u * u + v * v).sqrt();
+                let val = (-dist * dist * 6.0).exp(); // tight gaussian
+                ies_pixels.push((val.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        // Layer 1: checkerboard gobo
+        for y in 0..IES_H {
+            for x in 0..IES_W {
+                let tile = ((x / 6) + (y / 6)) & 1;
+                ies_pixels.push(if tile == 0 { 235u8 } else { 30u8 });
+            }
+        }
+        let ies_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Demo IES Textures"),
+            size: wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 2 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // Write layer 0
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &ies_pixels[..(IES_W * IES_H) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
+            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+        );
+        // Write layer 1
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            &ies_pixels[(IES_W * IES_H) as usize..],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
+            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+        );
+        let ies_view = ies_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        renderer.set_ies_texture_view(ies_view);
 
         self.state = Some(AppState {
             window, surface, device, queue, surface_format, renderer,

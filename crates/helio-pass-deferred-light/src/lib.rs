@@ -686,6 +686,7 @@ impl RenderPass for DeferredLightPass {
             "baked_lightmap_sampler",
             "ssr_trace",
             "planar_reflection",
+            "ies_textures",
         ]
     }
 
@@ -695,6 +696,7 @@ impl RenderPass for DeferredLightPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
+        builder.read("ies_textures");
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
@@ -948,10 +950,12 @@ impl RenderPass for DeferredLightPass {
                         binding: 17,
                         resource: wgpu::BindingResource::Sampler(&self.planar_sampler),
                     },
-                    // IES textures (binding 18) — fallback to identity if no IES profiles loaded
+                    // IES textures (binding 18) — from frame resources, fallback to identity
                     wgpu::BindGroupEntry {
                         binding: 18,
-                        resource: wgpu::BindingResource::TextureView(&self.fallback_ies_view),
+                        resource: wgpu::BindingResource::TextureView(
+                            ctx.resources.ies_textures.get().unwrap_or(&self.fallback_ies_view)
+                        ),
                     },
                     // IES sampler (binding 19)
                     wgpu::BindGroupEntry {

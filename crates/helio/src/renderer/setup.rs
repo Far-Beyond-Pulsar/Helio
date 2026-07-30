@@ -184,6 +184,7 @@ impl Renderer {
             last_render_time: Instant::now(),
             delta_time: 0.0,
             color_grading_lut_view: None,
+            ies_texture_view: None,
             cull_stats_staging,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],

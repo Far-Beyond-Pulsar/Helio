@@ -387,6 +387,9 @@ impl Renderer {
         if let Some(ref lut) = self.color_grading_lut_view {
             frame_resources.color_grading_lut.write(lut, "Renderer");
         }
+        if let Some(ref ies) = self.ies_texture_view {
+            frame_resources.ies_textures.write(ies, "Renderer");
+        }
         frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
         if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
             frame_resources.full_res_depth.write(v, "Renderer");
