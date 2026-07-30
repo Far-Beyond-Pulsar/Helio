@@ -11,6 +11,32 @@ pub enum PerfOverlayMode {
     PassOutput = 4,
 }
 
+/// Select the best available surface texture format for the given HDR output mode.
+///
+/// * `Ldr` — prefers an sRGB format (`Rgba8UnormSrgb` / `Bgra8UnormSrgb`)
+/// * `Hdr10` — prefers `Rgba16Float` (PQ encoded in shader; system handles display)
+/// * `ScRgb` — prefers `Rgba16Float` (linear float, Windows HDR / macOS EDR)
+/// * `Passthrough` — prefers `Rgba16Float` (raw HDR float)
+///
+/// Falls back to the first available format if no preferred format is found.
+pub fn select_hdr_surface_format(
+    caps: &wgpu::SurfaceCapabilities,
+    mode: libhelio::HdrOutputMode,
+) -> wgpu::TextureFormat {
+    let preferred = match mode {
+        libhelio::HdrOutputMode::Ldr => {
+            caps.formats.iter().find(|f| f.is_srgb()).copied()
+        }
+        libhelio::HdrOutputMode::Hdr10
+        | libhelio::HdrOutputMode::ScRgb
+        | libhelio::HdrOutputMode::Passthrough => {
+            caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba16Float).copied()
+                .or_else(|| caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba32Float).copied())
+        }
+    };
+    preferred.unwrap_or(caps.formats[0])
+}
+
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
@@ -181,6 +207,8 @@ pub struct RendererConfig {
     /// pure black without it. It is also a poor performance lever — one cubemap
     /// sample per pixel, versus SSR's per-pixel Hi-Z trace.
     pub enable_environment_reflections: bool,
+    /// HDR display output mode. Default `Ldr`.
+    pub hdr_output_mode: libhelio::HdrOutputMode,
 }
 
 impl RendererConfig {
@@ -199,6 +227,7 @@ impl RendererConfig {
             enable_ssr: false,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
+            hdr_output_mode: libhelio::HdrOutputMode::Ldr,
         }
     }
 
@@ -237,6 +266,11 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_hdr_output_mode(mut self, mode: libhelio::HdrOutputMode) -> Self {
+        self.hdr_output_mode = mode;
         self
     }
 

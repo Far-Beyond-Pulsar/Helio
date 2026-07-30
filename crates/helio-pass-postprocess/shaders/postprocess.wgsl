@@ -123,7 +123,12 @@ struct GpuPostProcessUniforms {
     fog_color:                 vec3<f32>, // 336
     _pad_fog_color:            f32,   // 348
     fog_emissive:              vec3<f32>, // 352
-    _pad_fog_emissive:         f32,   // 364 → struct ends at 368
+    _pad_fog_emissive:         f32,   // 364
+    // ── HDR Output (16 bytes) ──
+    hdr_output_mode:           u32,   // 368
+    hdr_max_nits:              f32,   // 372
+    hdr_ui_brightness:         f32,   // 376
+    _pad_hdr_end:              f32,   // 380 → struct ends at 384
 }
 
 struct CameraUniforms {
@@ -284,12 +289,15 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.fog_scattering_anisotropy = lerpf(base.fog_scattering_anisotropy, vol.fog_scattering_anisotropy, t);
     r.fog_color                 = lerp3v(base.fog_color, vol.fog_color, t);
     r.fog_emissive              = lerp3v(base.fog_emissive, vol.fog_emissive, t);
+    r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t > 0.5);
+    r.hdr_max_nits              = lerpf(base.hdr_max_nits, vol.hdr_max_nits, t);
+    r.hdr_ui_brightness         = lerpf(base.hdr_ui_brightness, vol.hdr_ui_brightness, t);
     // Padding fields are implicitly copied via the field-by-field assignment above.
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
     r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
-    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0;
+    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0; r._pad_hdr_end = 0.0;
     return r;
 }
 
@@ -748,6 +756,28 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     color = apply_motion_blur(color, uv, dims);
 
     //%P3
+
+    // 11. HDR display encoding
+    if postprocess.hdr_output_mode == 1u {
+        // HDR10: PQ ST 2084 per-channel + BT.2020 gamut
+        const PQ_M1: f32 = 0.1593017578125;
+        const PQ_M2: f32 = 78.84375;
+        const PQ_C1: f32 = 0.8359375;
+        const PQ_C2: f32 = 18.8515625;
+        const PQ_C3: f32 = 18.6875;
+        const REC709_TO_BT2020: mat3x3<f32> = mat3x3<f32>(
+            vec3<f32>(0.6274, 0.0691, 0.0164),
+            vec3<f32>(0.3293, 0.9355, 0.1370),
+            vec3<f32>(0.0433, -0.0046, 0.8466),
+        );
+        color = REC709_TO_BT2020 * color;
+        let Y = pow(color / vec3<f32>(10000.0), vec3<f32>(PQ_M1));
+        color = pow((PQ_C1 + PQ_C2 * Y) / (vec3<f32>(1.0) + PQ_C3 * Y), vec3<f32>(PQ_M2));
+    } else if postprocess.hdr_output_mode == 2u {
+        // scRGB: linear float, 1.0 = 80 cd/m²
+        color = color / 80.0;
+    }
+    // LDR (mode 0) and Passthrough (mode 3): pass through as-is
 
     return vec4<f32>(color, 1.0);
 }
