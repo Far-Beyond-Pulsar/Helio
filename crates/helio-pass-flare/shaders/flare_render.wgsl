@@ -55,6 +55,16 @@ fn sample_atlas_chromatic(idx: u32, offset: vec2<f32>, chroma_shift: f32) -> vec
     return vec3<f32>(r, g, b);
 }
 
+fn anamorphic_streak(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f32>,
+                     screen_dims: vec2<f32>, dir: vec2<f32>) -> vec3<f32> {
+    let delta = input_uv - flare_uv;
+    let parallel = dot(delta, dir);
+    let perp_vec = delta - dir * parallel;
+    let perp_len = length(perp_vec * screen_dims);
+    let streak = exp(-perp_len * perp_len * 0.003) * 0.12;
+    return light_col * streak;
+}
+
 @fragment
 fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
     let num_flares = flare_count[0];
@@ -78,6 +88,10 @@ fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
         let dist_px = length(to_centre * screen_dims);
         let dir = select(normalize(to_centre), vec2<f32>(1.0, 0.0), dist_px < 1.0);
         let dist_norm = dist_px / length(screen_dims);
+
+        // Streaks
+        result += anamorphic_streak(input.uv, flare_uv, light_col, screen_dims, vec2<f32>(1.0, 0.0));
+        result += anamorphic_streak(input.uv, flare_uv, light_col * 0.5, screen_dims, vec2<f32>(0.0, 1.0));
 
         // Ghost reflections (use atlas cells 0-5)
         for (var gi = 0u; gi < 6u; gi++) {
