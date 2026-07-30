@@ -29,6 +29,30 @@ pub struct GpuTerrainDraw {
     pub lod: u32,
 }
 
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct GpuTerrainCullUniforms {
+    pub max_meshlets_per_bank: u32,
+    pub draw_capacity: u32,
+    pub surface_kind: u32,
+    pub _pad: u32,
+}
+
+/// Shared counters written by the regular and transition meshlet cull passes.
+/// The first two words can be consumed directly as indirect draw counts.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct GpuTerrainCullCounters {
+    pub regular_draws: u32,
+    pub transition_draws: u32,
+    pub overflow: u32,
+    pub stale: u32,
+    pub frustum_rejects: u32,
+    pub cone_rejects: u32,
+    pub invalid_candidates: u32,
+    pub _reserved: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainMeshletBuild {
     pub descriptor: GpuTerrainMeshlet,
@@ -65,7 +89,7 @@ pub fn build_terrain_meshlets(
     generation: u64,
     flags: u32,
 ) -> Result<Vec<TerrainMeshletBuild>, TerrainMeshletBuildError> {
-    if indices.len() % 3 != 0 {
+    if !indices.len().is_multiple_of(3) {
         return Err(TerrainMeshletBuildError::IncompleteTriangle);
     }
 
@@ -181,7 +205,7 @@ fn compute_bounds(vertices: &[GpuTerrainVertex], indices: &[u32]) -> GpuTerrainM
         normals
             .iter()
             .copied()
-            .fold([0.0; 3], |sum, normal| add(sum, normal)),
+            .fold([0.0; 3], add),
     ) else {
         return disabled_bounds(center, radius);
     };

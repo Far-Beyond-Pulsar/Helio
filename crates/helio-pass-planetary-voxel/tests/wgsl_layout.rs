@@ -6,7 +6,8 @@ use helio_pass_planetary_voxel::{
     GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell,
     GpuTransvoxelTransitionCounters, GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL,
     RESIDENCY_WGSL, SURFACE_DRAW_WGSL, SURFACE_PUBLISH_WGSL, TERRAIN_MESHLET_BUILD_WGSL,
-    TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
+    TERRAIN_MESHLET_CULL_WGSL, TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL,
+    TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -61,6 +62,7 @@ fn planetary_surface_shaders_parse_and_validate() {
         ("surface publication", SURFACE_PUBLISH_WGSL),
         ("surface draw", SURFACE_DRAW_WGSL),
         ("terrain meshlet build", TERRAIN_MESHLET_BUILD_WGSL),
+        ("terrain meshlet cull", TERRAIN_MESHLET_CULL_WGSL),
     ] {
         let module = wgsl::parse_str(source)
             .unwrap_or_else(|error| panic!("planetary {name} WGSL must parse: {error}"));

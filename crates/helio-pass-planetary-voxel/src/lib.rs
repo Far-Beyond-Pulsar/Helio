@@ -34,6 +34,7 @@ pub use transvoxel_transition_gpu::*;
 pub const EXTRACTION_LAYOUT_WGSL: &str = include_str!("extraction_layout.wgsl");
 pub const RESIDENCY_WGSL: &str = include_str!("residency.wgsl");
 pub const TERRAIN_MESHLET_BUILD_WGSL: &str = include_str!("terrain_meshlet_build.wgsl");
+pub const TERRAIN_MESHLET_CULL_WGSL: &str = include_str!("terrain_meshlet_cull.wgsl");
 pub const TRANSVOXEL_CLASSIFY_WGSL: &str = include_str!("transvoxel_classify.wgsl");
 pub const TRANSVOXEL_EMIT_WGSL: &str = include_str!("transvoxel_emit.wgsl");
 pub const TRANSVOXEL_TRANSITION_GPU_WGSL: &str = include_str!("transvoxel_transition_gpu.wgsl");
