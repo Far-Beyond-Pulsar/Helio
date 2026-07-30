@@ -505,50 +505,68 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
     (kind as u32) | (flags & !FOLIAGE_KIND_MASK)
 }
 
-/// Foliage type descriptor shared by placement and rasterisation. Exactly 64 bytes.
+/// Foliage type descriptor shared by placement and rasterisation. Exactly 96 bytes.
 ///
-/// One entry per authored grass or mesh type, read by every placement lane and every
-/// foliage vertex shader invocation. 64 bytes is a hard requirement rather than a
-/// preference: the descriptor array is the hottest read in the placement inner loop, and
-/// at 64 bytes a full 256-entry array is 16 KiB — it stays in L1 on every tier in the
-/// platform matrix. It is also exactly one cache line, so a lane touching any field
-/// touches exactly one line.
+/// One entry per *authored type* — not per instance. A scene has tens of foliage types,
+/// so the whole table is a few kilobytes and stays permanently hot in L1 no matter how
+/// often the placement and raster shaders read it. That is the fact that sets the size
+/// policy for this struct: there is no measurable win from squeezing it, so every field
+/// is stored in its natural form and nothing needs decoding on either side of the
+/// CPU/GPU boundary.
 ///
-/// # Deviation from the plan's §4.3
+/// # Why 96 and not 64
 ///
-/// The field list in the plan does not fit in 64 bytes as plain `f32`: the stated
-/// members sum to 84. Four of them are stored as packed `f16` pairs to hit the size,
-/// chosen because they are the only ones whose values are precision-tolerant *and* have
-/// a single-instruction WGSL decode (`unpack2x16float`):
+/// The plan's §4.3 heads this struct "64 bytes", but its own field list sums to **84** —
+/// the header was simply wrong, and the fields are what matter. Rounding up to 96 leaves
+/// 12 bytes of tail padding in [`GpuFoliageType::_pad`], which is **deliberate and meant
+/// to be spent**: §4.3 is a first draft of what a foliage type needs, and this table will
+/// grow. Fill the padding before widening the struct, and when it runs out grow to 128
+/// rather than reintroducing packing.
 ///
-/// | Field | Storage | Worst-case error | Why it is safe |
-/// |---|---|---|---|
-/// | `height_range` | 2 × f16 | 0.05 % | metre-scale plant dimensions |
-/// | `width_range` | 2 × f16 | 0.05 % | as above |
-/// | `slope_range` | 2 × f16 | 5e-4 absolute | a cosine acceptance band, already fuzzy |
-/// | `lod_distances` | 4 × f16 | 0.06 m at 120 m | far below one frame of camera motion |
+/// The earlier draft of this type hit 64 bytes by storing `height_range`, `width_range`,
+/// `slope_range` and `lod_distances` as `f16` pairs. That bought about two kilobytes —
+/// nothing — and cost a decode on both sides, a standing risk that the WGSL
+/// `unpack2x16float` path and the Rust packer disagree at some edge value, and a struct
+/// with no room to grow. Packing is the wrong trade for a per-type table. It is the right
+/// trade for [`GpuBladeInstance`], which is per-instance and multiplied by a million.
 ///
-/// `altitude_range` deliberately stays `f32`. It is the one range that can carry
-/// planetary magnitudes, and f16 precision at 10 km is ±8 m — enough to move a treeline
-/// visibly. `wind_response` and `interaction_stiffness` stay `f32` because they are read
-/// per-vertex by the wind evaluator and a decode there is not free.
+/// `altitude_range` is worth a specific note even now that everything is `f32`: it is the
+/// one range here that can carry planetary magnitudes, and it must never be narrowed. At
+/// 10 km, `f16` resolution is ±8 m — enough to move a treeline visibly. If a future
+/// packing pass ever comes back to this struct, this is the field to leave alone.
 ///
-/// This leaves no padding slot. Adding a field means taking one, not appending.
+/// # WGSL mirroring — every field is a scalar
 ///
-/// # Layout (64 bytes, 4-byte aligned)
+/// **Declare all of these as scalars or `array<f32, N>` in WGSL. Not one of them may be
+/// a vector type.** With this field order no member lands on the alignment a WGSL vector
+/// requires: `height_range` at offset 4, `width_range` at 12, `slope_range` at 20 and
+/// `altitude_range` at 28 are all misaligned for `vec2<f32>` (8), `lod_distances` at 36
+/// is misaligned for `vec4<f32>` (16), and `wind_response` at 52 is misaligned for
+/// `vec3<f32>` (16).
+///
+/// `wind_response` is the dangerous one, because it is the one someone will reach for
+/// `vec3<f32>` on without thinking. WGSL gives `vec3<f32>` a 16-byte alignment, so that
+/// single declaration would push the field from offset 52 to 64 and shift **every field
+/// after it** — `interaction_stiffness`, `material_id`, `density_layer`,
+/// `kind_and_flags` and `mesh_or_impostor_id` all read from the wrong offset. Nothing
+/// crashes: trees render with a random material, foliage kinds resolve to the wrong
+/// pipeline, and the cause is twelve bytes of padding rules in a language spec.
+///
+/// # Layout (96 bytes, 4-byte aligned)
 /// ```text
 ///  0..4   density:               f32
-///  4..8   packed_height_range:   u32       2 × f16 (min, max)
-///  8..12  packed_width_range:    u32       2 × f16 (min, max)
-/// 12..16  packed_slope_range:    u32       2 × f16 (min, max) cos(slope)
-/// 16..24  altitude_range:        vec2<f32> (WGSL vec2 is safe: offset is 8-aligned)
-/// 24..32  packed_lod_distances:  vec2<u32> 4 × f16
-/// 32..44  wind_response:         f32 × 3   MUST be three scalars in WGSL, not vec3
-/// 44..48  interaction_stiffness: f32
-/// 48..52  material_id:           u32
-/// 52..56  density_layer:         u32
-/// 56..60  kind_and_flags:        u32
-/// 60..64  mesh_or_impostor_id:   u32
+///  4..12  height_range:          f32 × 2    scalars in WGSL (offset 4 is not vec2-aligned)
+/// 12..20  width_range:           f32 × 2    scalars in WGSL (offset 12)
+/// 20..28  slope_range:           f32 × 2    scalars in WGSL (offset 20), cos(slope) band
+/// 28..36  altitude_range:        f32 × 2    scalars in WGSL (offset 28)
+/// 36..52  lod_distances:         f32 × 4    scalars in WGSL (offset 36 is not vec4-aligned)
+/// 52..64  wind_response:         f32 × 3    scalars in WGSL — NEVER vec3, see above
+/// 64..68  interaction_stiffness: f32
+/// 68..72  material_id:           u32
+/// 72..76  density_layer:         u32
+/// 76..80  kind_and_flags:        u32
+/// 80..84  mesh_or_impostor_id:   u32
+/// 84..96  _pad:                  u32 × 3    reserved headroom, spend before widening
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -558,37 +576,36 @@ pub struct GpuFoliageType {
     /// also the knob that decides whether the arena overflows.
     pub density: f32,
 
-    /// Min and max blade/plant height in metres, as two f16. Use
+    /// Min and max blade/plant height in metres. Also available as
     /// [`GpuFoliageType::height_range`].
-    pub packed_height_range: u32,
+    pub height_range: [f32; 2],
 
-    /// Min and max width in metres, as two f16. Use [`GpuFoliageType::width_range`].
-    pub packed_width_range: u32,
+    /// Min and max width in metres. Also available as [`GpuFoliageType::width_range`].
+    pub width_range: [f32; 2],
 
-    /// Acceptance band on `cos(slope)`, as two f16. Use
+    /// Acceptance band on `cos(slope)`. Also available as
     /// [`GpuFoliageType::slope_range`].
     ///
     /// Cosine rather than the angle because that is what the terrain capture's normal
     /// gives directly — comparing cosines avoids an `acos` in the placement inner loop,
     /// which runs once per candidate rather than once per surviving blade.
-    pub packed_slope_range: u32,
+    pub slope_range: [f32; 2],
 
-    /// Min and max world altitude in metres. Full `f32`; see the deviation note on the
-    /// struct.
+    /// Min and max world altitude in metres. See the note on the struct: this is the one
+    /// range that carries planetary magnitudes and must stay full `f32`.
     pub altitude_range: [f32; 2],
 
-    /// The four LOD transition distances as four f16: L0→L1, L1→L2, L2→L3, and
-    /// L3→terrain-shading. Use [`GpuFoliageType::lod_distances`].
+    /// The four LOD transition distances: L0→L1, L1→L2, L2→L3, and L3→terrain-shading.
     ///
     /// The fourth entry is the point past which no geometry is drawn at all and the
     /// terrain material takes over. It is a transition, not a cull distance — see
     /// [`crate::FOLIAGE_LOD_NONE`].
-    pub packed_lod_distances: [u32; 2],
+    pub lod_distances: [f32; 4],
 
     /// Wind band gains: trunk, branch, leaf.
     ///
-    /// **Declare as three scalars in WGSL.** `vec3<f32>` has 16-byte alignment there and
-    /// would push this field from offset 32 to 48, silently shifting everything after it.
+    /// **Three scalars in WGSL. Never `vec3<f32>`** — that declaration silently shifts
+    /// every field after this one. See the struct's WGSL mirroring section.
     pub wind_response: [f32; 3],
 
     /// Interaction recovery constant. Larger is stiffer, i.e. it snaps back faster;
@@ -607,63 +624,72 @@ pub struct GpuFoliageType {
     pub kind_and_flags: u32,
 
     /// `VirtualMeshId` when the kind is [`FoliageKind::Mesh`], impostor atlas page
-    /// otherwise. Overloading one slot keeps the struct at 64 bytes and costs nothing:
-    /// no type is ever both.
+    /// otherwise. Overloading one slot costs nothing: no type is ever both.
     pub mesh_or_impostor_id: u32,
+
+    /// Reserved headroom. **Must be written as zero.**
+    ///
+    /// This padding exists to be spent. §4.3 is a first draft of what a foliage type
+    /// needs — `wpo_extent`, a cull-distance override and an impostor transition band are
+    /// all plausible next fields — and three spare slots mean the next one lands without
+    /// touching the size assert, the WGSL struct's tail, or anything that reads this
+    /// table. Zeroing it is what makes that safe: a future build can then tell "this
+    /// field was left at its default" from "this data predates the field".
+    pub _pad: [u32; 3],
 }
 
 impl GpuFoliageType {
-    /// Decoded `[min, max]` height in metres.
+    /// `[min, max]` height in metres.
+    ///
+    /// A plain field read. The accessor pair is kept — here and for the three ranges
+    /// below — so the storage form stays an implementation detail: an earlier draft
+    /// packed these as `f16` pairs, and if a future one ever has cause to again, it is a
+    /// change to four functions rather than to every call site in the foliage stack.
     #[inline]
     pub fn height_range(&self) -> [f32; 2] {
-        unpack_f16x2(self.packed_height_range)
+        self.height_range
     }
 
-    /// Set the height range, quantising to f16.
+    /// Set the height range.
     #[inline]
     pub fn set_height_range(&mut self, range: [f32; 2]) {
-        self.packed_height_range = pack_f16x2(range[0], range[1]);
+        self.height_range = range;
     }
 
-    /// Decoded `[min, max]` width in metres.
+    /// `[min, max]` width in metres.
     #[inline]
     pub fn width_range(&self) -> [f32; 2] {
-        unpack_f16x2(self.packed_width_range)
+        self.width_range
     }
 
-    /// Set the width range, quantising to f16.
+    /// Set the width range.
     #[inline]
     pub fn set_width_range(&mut self, range: [f32; 2]) {
-        self.packed_width_range = pack_f16x2(range[0], range[1]);
+        self.width_range = range;
     }
 
-    /// Decoded `[min, max]` acceptance band on `cos(slope)`.
+    /// `[min, max]` acceptance band on `cos(slope)`.
     #[inline]
     pub fn slope_range(&self) -> [f32; 2] {
-        unpack_f16x2(self.packed_slope_range)
+        self.slope_range
     }
 
-    /// Set the slope acceptance band, quantising to f16.
+    /// Set the slope acceptance band.
     #[inline]
     pub fn set_slope_range(&mut self, range: [f32; 2]) {
-        self.packed_slope_range = pack_f16x2(range[0], range[1]);
+        self.slope_range = range;
     }
 
-    /// Decoded LOD transition distances, in the order [`crate::select_blade_lod`] wants.
+    /// LOD transition distances, in the order [`crate::select_blade_lod`] wants.
     #[inline]
     pub fn lod_distances(&self) -> [f32; 4] {
-        let low = unpack_f16x2(self.packed_lod_distances[0]);
-        let high = unpack_f16x2(self.packed_lod_distances[1]);
-        [low[0], low[1], high[0], high[1]]
+        self.lod_distances
     }
 
-    /// Set the LOD transition distances, quantising to f16.
+    /// Set the LOD transition distances.
     #[inline]
     pub fn set_lod_distances(&mut self, distances: [f32; 4]) {
-        self.packed_lod_distances = [
-            pack_f16x2(distances[0], distances[1]),
-            pack_f16x2(distances[2], distances[3]),
-        ];
+        self.lod_distances = distances;
     }
 
     /// Decoded [`FoliageKind`]. `None` means the low byte holds a discriminant this
@@ -696,13 +722,15 @@ impl Default for GpuFoliageType {
     /// A grass-shaped default matching the plan's §11 example, so a type authored with
     /// `..Default::default()` renders something plausible rather than nothing.
     fn default() -> Self {
-        let mut value = Self {
+        Self {
             density: 40.0,
-            packed_height_range: 0,
-            packed_width_range: 0,
-            packed_slope_range: 0,
+            height_range: [0.15, 0.45],
+            width_range: [0.01, 0.03],
+            // cos(35°)..cos(0°): accept anything flatter than a 35° slope. Written as
+            // the computation rather than 0.8191 so the intent survives a retune.
+            slope_range: [35f32.to_radians().cos(), 1.0],
             altitude_range: [f32::MIN, f32::MAX],
-            packed_lod_distances: [0, 0],
+            lod_distances: crate::DEFAULT_LOD_DISTANCES,
             wind_response: [0.0, 0.3, 1.0],
             interaction_stiffness: 6.0,
             material_id: 0,
@@ -712,13 +740,8 @@ impl Default for GpuFoliageType {
                 FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_RECEIVES_INTERACTION,
             ),
             mesh_or_impostor_id: 0,
-        };
-        value.set_height_range([0.15, 0.45]);
-        value.set_width_range([0.01, 0.03]);
-        // cos(35°)..cos(0°): accept anything flatter than a 35° slope.
-        value.set_slope_range([35f32.to_radians().cos(), 1.0]);
-        value.set_lod_distances(crate::DEFAULT_LOD_DISTANCES);
-        value
+            _pad: [0; 3],
+        }
     }
 }
 
@@ -736,8 +759,8 @@ const _: () = {
         "GpuFoliageTile must be exactly 32 bytes"
     );
     assert!(
-        std::mem::size_of::<GpuFoliageType>() == 64,
-        "GpuFoliageType must be exactly 64 bytes"
+        std::mem::size_of::<GpuFoliageType>() == 96,
+        "GpuFoliageType must be exactly 96 bytes"
     );
 };
 
@@ -749,12 +772,73 @@ mod tests {
     fn gpu_foliage_layouts_are_stable() {
         assert_eq!(std::mem::size_of::<GpuBladeInstance>(), 16);
         assert_eq!(std::mem::size_of::<GpuFoliageTile>(), 32);
-        assert_eq!(std::mem::size_of::<GpuFoliageType>(), 64);
+        assert_eq!(std::mem::size_of::<GpuFoliageType>(), 96);
         assert_eq!(std::mem::align_of::<GpuBladeInstance>(), 4);
         assert_eq!(std::mem::align_of::<GpuFoliageTile>(), 4);
         assert_eq!(std::mem::align_of::<GpuFoliageType>(), 4);
         assert_eq!(std::mem::size_of::<TileState>(), 4);
         assert_eq!(std::mem::size_of::<FoliageKind>(), 4);
+    }
+
+    #[test]
+    fn foliage_type_field_offsets_match_the_documented_layout() {
+        // The WGSL mirror is written against the offset table in this struct's doc
+        // comment. Pinning the offsets here means a reordered or resized field fails in
+        // CI rather than in a shader that reads `material_id` out of `wind_response`.
+        let value = GpuFoliageType::zeroed();
+        let base = &value as *const _ as usize;
+        let offset_of = |field: *const u8| field as usize - base;
+
+        assert_eq!(offset_of(&value.density as *const f32 as *const u8), 0);
+        assert_eq!(offset_of(value.height_range.as_ptr() as *const u8), 4);
+        assert_eq!(offset_of(value.width_range.as_ptr() as *const u8), 12);
+        assert_eq!(offset_of(value.slope_range.as_ptr() as *const u8), 20);
+        assert_eq!(offset_of(value.altitude_range.as_ptr() as *const u8), 28);
+        assert_eq!(offset_of(value.lod_distances.as_ptr() as *const u8), 36);
+        assert_eq!(offset_of(value.wind_response.as_ptr() as *const u8), 52);
+        assert_eq!(
+            offset_of(&value.interaction_stiffness as *const f32 as *const u8),
+            64
+        );
+        assert_eq!(offset_of(&value.material_id as *const u32 as *const u8), 68);
+        assert_eq!(offset_of(&value.density_layer as *const u32 as *const u8), 72);
+        assert_eq!(offset_of(&value.kind_and_flags as *const u32 as *const u8), 76);
+        assert_eq!(
+            offset_of(&value.mesh_or_impostor_id as *const u32 as *const u8),
+            80
+        );
+        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 84);
+
+        // 12 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
+        // to 128 rather than reintroducing packing.
+        assert_eq!(std::mem::size_of::<GpuFoliageType>() - 84, 12);
+    }
+
+    #[test]
+    fn no_foliage_type_field_is_wgsl_vector_aligned() {
+        // Every field in this struct must be declared as a scalar in WGSL. This test
+        // proves the claim rather than trusting the comment: if a future reorder happens
+        // to land `wind_response` on a 16-byte boundary, someone will reach for
+        // `vec3<f32>`, it will work, and the next reorder after that will break it
+        // silently. Better to keep "all scalars, always" unconditionally true.
+        let value = GpuFoliageType::zeroed();
+        let base = &value as *const _ as usize;
+        let offset_of = |field: *const u8| field as usize - base;
+
+        for offset in [
+            offset_of(value.height_range.as_ptr() as *const u8),
+            offset_of(value.width_range.as_ptr() as *const u8),
+            offset_of(value.slope_range.as_ptr() as *const u8),
+            offset_of(value.altitude_range.as_ptr() as *const u8),
+        ] {
+            assert_ne!(offset % 8, 0, "offset {offset} is vec2<f32>-aligned in WGSL");
+        }
+        for offset in [
+            offset_of(value.lod_distances.as_ptr() as *const u8),
+            offset_of(value.wind_response.as_ptr() as *const u8),
+        ] {
+            assert_ne!(offset % 16, 0, "offset {offset} is vec3/vec4-aligned in WGSL");
+        }
     }
 
     #[test]
@@ -961,7 +1045,9 @@ mod tests {
     }
 
     #[test]
-    fn foliage_type_accessors_round_trip_through_the_packed_fields() {
+    fn foliage_type_accessors_are_lossless() {
+        // Nothing in this struct quantises any more, so these are exact equalities
+        // rather than tolerances — which is the whole point of the 96-byte layout.
         let mut ty = GpuFoliageType::zeroed();
         ty.set_height_range([0.15, 0.45]);
         ty.set_width_range([0.01, 0.03]);
@@ -969,18 +1055,25 @@ mod tests {
         ty.set_lod_distances([8.0, 20.0, 45.0, 120.0]);
         ty.set_kind_and_flags(FoliageKind::Card, FOLIAGE_FLAG_CASTS_SHADOW);
 
-        let height = ty.height_range();
-        assert!((height[0] - 0.15).abs() < 1.0e-3 && (height[1] - 0.45).abs() < 1.0e-3);
-        let width = ty.width_range();
-        assert!((width[0] - 0.01).abs() < 1.0e-4 && (width[1] - 0.03).abs() < 1.0e-4);
+        assert_eq!(ty.height_range(), [0.15, 0.45]);
+        assert_eq!(ty.width_range(), [0.01, 0.03]);
         assert_eq!(ty.slope_range(), [-1.0, 1.0]);
-        // Powers of two and small integers are exact in f16; the LOD ladder was chosen
-        // from values that are.
         assert_eq!(ty.lod_distances(), [8.0, 20.0, 45.0, 120.0]);
         assert_eq!(ty.kind(), Some(FoliageKind::Card));
         assert!(ty.has_flag(FOLIAGE_FLAG_CASTS_SHADOW));
         assert!(!ty.has_flag(FOLIAGE_FLAG_TWO_SIDED));
         assert_eq!(ty.flags(), FOLIAGE_FLAG_CASTS_SHADOW);
+
+        // The accessors and the public fields are two views of the same storage.
+        assert_eq!(ty.height_range(), ty.height_range);
+        assert_eq!(ty.width_range(), ty.width_range);
+        assert_eq!(ty.slope_range(), ty.slope_range);
+        assert_eq!(ty.lod_distances(), ty.lod_distances);
+
+        // Planetary altitudes survive intact — the reason altitude_range was never a
+        // candidate for narrowing.
+        ty.altitude_range = [-11_000.0, 9_000.5];
+        assert_eq!(ty.altitude_range, [-11_000.0, 9_000.5]);
     }
 
     #[test]

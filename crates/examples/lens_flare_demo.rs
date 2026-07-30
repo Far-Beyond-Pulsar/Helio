@@ -91,15 +91,14 @@ impl ApplicationHandler for App {
         }))
         .expect("adapter");
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }))
-            .expect("device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
+        .expect("device");
 
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -245,74 +244,88 @@ impl ApplicationHandler for App {
         // ── Lighting ───────────────────────────────────────────────────────────
         // Bright directional light shining toward the scene from above-right-front
         let sun_dir = glam::Vec3::new(-0.4, -0.6, 0.7).normalize();
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(GpuLight {
-            position_range: [0.0, 0.0, 0.0, f32::MAX],
-            direction_outer: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            color_intensity: [1.0, 0.95, 0.85, 6.0],
-            shadow_index: 0,
-            light_type: LightType::Directional as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            god_rays_enabled: 0,
-            god_rays_density: 1.0,
-            god_rays_weight: 0.6,
-            god_rays_decay: 1.0,
-            god_rays_exposure: 0.7,
-            flare_enabled: 0,
-            flare_type: 0,
-            flare_intensity: 0.0,
-            flare_scale: 0.0,
-            flare_tint_r: 0.0,
-            flare_tint_g: 0.0,
-            flare_tint_b: 0.0,
-            _pad2: [0; 4],
-        }));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+                color_intensity: [1.0, 0.95, 0.85, 6.0],
+                shadow_index: 0,
+                light_type: LightType::Directional as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                god_rays_enabled: 0,
+                god_rays_density: 1.0,
+                god_rays_weight: 0.6,
+                god_rays_decay: 1.0,
+                god_rays_exposure: 0.7,
+                flare_enabled: 0,
+                flare_type: 0,
+                flare_intensity: 0.0,
+                flare_scale: 0.0,
+                flare_tint_r: 0.0,
+                flare_tint_g: 0.0,
+                flare_tint_b: 0.0,
+                ies_profile_index: 0,
+                light_function_index: 0,
+                ies_angle_scale: 0.0,
+                ies_angle_offset: 0.0,
+            }));
 
         // A few fill point lights
         // Bright point light with lens flare — placed off-centre so the ghosts spread diagonally
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(GpuLight {
-            position_range: [-1.5, 2.0, -1.0, 8.0],
-            direction_outer: [0.0, -1.0, 0.0, 0.0],
-            color_intensity: [1.0, 0.85, 0.55, 8.0],
-            shadow_index: u32::MAX,
-            light_type: LightType::Point as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            god_rays_enabled: 0,
-            god_rays_density: 1.0,
-            god_rays_weight: 0.6,
-            god_rays_decay: 1.0,
-            god_rays_exposure: 0.7,
-            flare_enabled: 1,
-            flare_type: 1,
-            flare_intensity: 0.25,
-            flare_scale: 1.0,
-            flare_tint_r: 1.0,
-            flare_tint_g: 0.7,
-            flare_tint_b: 0.35,
-            _pad2: [0; 4],
-        }));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(GpuLight {
+                position_range: [-1.5, 2.0, -1.0, 8.0],
+                direction_outer: [0.0, -1.0, 0.0, 0.0],
+                color_intensity: [1.0, 0.85, 0.55, 8.0],
+                shadow_index: u32::MAX,
+                light_type: LightType::Point as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                god_rays_enabled: 0,
+                god_rays_density: 1.0,
+                god_rays_weight: 0.6,
+                god_rays_decay: 1.0,
+                god_rays_exposure: 0.7,
+                flare_enabled: 1,
+                flare_type: 1,
+                flare_intensity: 0.25,
+                flare_scale: 1.0,
+                flare_tint_r: 1.0,
+                flare_tint_g: 0.7,
+                flare_tint_b: 0.35,
+                ies_profile_index: 0,
+                light_function_index: 0,
+                ies_angle_scale: 0.0,
+                ies_angle_offset: 0.0,
+            }));
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(GpuLight {
-            position_range: [-3.0, 1.0, -3.0, 5.0],
-            direction_outer: [0.0, -1.0, 0.0, 0.0],
-            color_intensity: [0.3, 0.4, 0.6, 2.0],
-            shadow_index: 0,
-            light_type: LightType::Point as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        }));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(GpuLight {
-            position_range: [3.0, 1.0, 2.0, 4.0],
-            direction_outer: [0.0, -1.0, 0.0, 0.0],
-            color_intensity: [0.6, 0.3, 0.2, 1.5],
-            shadow_index: 0,
-            light_type: LightType::Point as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        }));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(GpuLight {
+                position_range: [-3.0, 1.0, -3.0, 5.0],
+                direction_outer: [0.0, -1.0, 0.0, 0.0],
+                color_intensity: [0.3, 0.4, 0.6, 2.0],
+                shadow_index: 0,
+                light_type: LightType::Point as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            }));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(GpuLight {
+                position_range: [3.0, 1.0, 2.0, 4.0],
+                direction_outer: [0.0, -1.0, 0.0, 0.0],
+                color_intensity: [0.6, 0.3, 0.2, 1.5],
+                shadow_index: 0,
+                light_type: LightType::Point as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            }));
 
         renderer.set_ambient([0.05, 0.05, 0.08], 0.02);
         renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
@@ -413,10 +426,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
-                let dt = now
-                    .duration_since(state.last_frame)
-                    .as_secs_f32()
-                    .min(0.05);
+                let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
                 state.update(dt);
 
