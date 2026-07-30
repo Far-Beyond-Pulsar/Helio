@@ -65,25 +65,28 @@ fn anamorphic_streak(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f
     return light_col * streak;
 }
 
-fn diffraction_spike(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f32>,
-                     screen_dims: vec2<f32>, spike_count: u32) -> vec3<f32> {
+fn aperture_spike(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f32>,
+                  screen_dims: vec2<f32>, blade_count: u32) -> vec3<f32> {
     let delta = input_uv - flare_uv;
     let dist = length(delta * screen_dims);
     if dist < 1.0 { return vec3<f32>(0.0); }
     let angle = atan2(delta.y, delta.x);
-    let spike_width = 0.04;
+    let spike_angle = 3.1416 / f32(blade_count);
     var spike = 0.0;
-    for (var i = 0u; i < spike_count; i++) {
-        let a = f32(i) * 6.2832 / f32(spike_count) + 1.5708;
+    for (var i = 0u; i < blade_count; i++) {
+        let a = f32(i) * 6.2832 / f32(blade_count);
         let d = abs(angle - a);
         let norm = d % 6.2832;
         let wrapped = min(norm, 6.2832 - norm);
-        if wrapped < spike_width {
-            spike = max(spike, 1.0 - wrapped / spike_width);
+        let width = 0.015 + dist * 0.00001;
+        if wrapped < width {
+            let intensity = 1.0 - wrapped / width;
+            let shape = pow(intensity, 0.5 + dist * 0.001);
+            spike = max(spike, shape);
         }
     }
-    let falloff = exp(-dist * 0.004);
-    return light_col * spike * falloff * 0.004;
+    let falloff = exp(-dist * 0.003);
+    return light_col * spike * falloff * 0.006;
 }
 
 @fragment
@@ -112,27 +115,33 @@ fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
         let dir = select(normalize(to_centre), vec2<f32>(1.0, 0.0), dist_px < 1.0);
         let dist_norm = dist_px / length(screen_dims);
 
+        // --- Cinematic: edge-dependent chromatic boost ---
+        let screen_edge_factor = length(flare_uv - 0.5) * 2.0;
+
         // Streaks
         result += anamorphic_streak(input.uv, flare_uv, light_col, screen_dims, vec2<f32>(1.0, 0.0));
         result += anamorphic_streak(input.uv, flare_uv, light_col * 0.5, screen_dims, vec2<f32>(0.0, 1.0));
 
-        // Diffraction spikes
-        result += diffraction_spike(input.uv, flare_uv, light_col, screen_dims, 6u);
+        // Aperture diffraction spikes
+        result += aperture_spike(input.uv, flare_uv, light_col, screen_dims, 6u);
 
-        // Ghost reflections (use atlas cells 0-5)
+        // Ghost reflections with anamorphic vertical squeeze
         for (var gi = 0u; gi < 6u; gi++) {
             let t = (f32(gi) + 1.0) / 7.0;
             let ghost_dist = dist_px * t;
-            let chroma = 0.002 + dist_norm * t * 0.008;
+            let chroma_edge = 1.0 + screen_edge_factor * 2.0;
+            let chroma = (0.002 + dist_norm * t * 0.008) * chroma_edge;
             let ghost_uv = flare_uv + dir * ghost_dist / screen_dims;
             let dx = input.uv - ghost_uv;
             let ghost_size = (20.0 + t * 40.0) * (1.0 + dist_norm * 0.5);
-            let ghost_r = length(dx * screen_dims) / ghost_size;
 
-            if ghost_r < 1.0 {
-                let atlas_offset = dx / vec2<f32>(ghost_size) * 1.2;
+            if length(dx * screen_dims) < ghost_size {
+                let horizon = abs(dir.x);
+                let anamorphic_squeeze = 1.0 / (1.0 + horizon * 2.0);
+                let atlas_offset = dx / vec2<f32>(ghost_size) * vec2<f32>(1.2, 1.2 * anamorphic_squeeze);
                 let atlas_col = sample_atlas_chromatic(gi, atlas_offset, chroma * 5.0);
-                let alpha = (1.0 - ghost_r) * (1.0 - t) * 0.2;
+                let ghost_r = length(dx * screen_dims) / ghost_size;
+                let alpha = (1.0 - ghost_r) * (1.0 - t) * 0.2 * anamorphic_squeeze;
                 let occlusion = 1.0 - dist_norm * 0.3;
                 result += light_col * atlas_col * alpha * occlusion;
             }
@@ -142,13 +151,23 @@ fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
         let dh = input.uv - flare_uv;
         let hr = length(dh * screen_dims);
         let halo_alpha = exp(-hr * hr * 0.0003) * 0.3;
-        let chroma_h = 0.003 + dist_norm * 0.005;
+        let chroma_h = (0.003 + dist_norm * 0.005) * (1.0 + screen_edge_factor * 2.0);
         let halo_uv = cell_uv(6u, dh * 0.3);
         let halo_r = textureSampleLevel(flare_atlas, flare_sampler, halo_uv + vec2<f32>(chroma_h, 0.0), 0.0).r;
         let halo_g = textureSampleLevel(flare_atlas, flare_sampler, halo_uv, 0.0).g;
         let halo_b = textureSampleLevel(flare_atlas, flare_sampler, halo_uv - vec2<f32>(chroma_h, 0.0), 0.0).b;
         result += light_col * vec3<f32>(halo_r, halo_g, halo_b) * halo_alpha;
+
+        // Veiling glare — wide soft radial glow
+        let glare = exp(-dist_px * 0.0015) * 0.04;
+        result += light_col * glare;
     }
+
+    // Cinematic color response: per-channel bloom + soft clip
+    let bloom_threshold = vec3<f32>(0.8, 0.7, 0.6);
+    let bloom = max(result - bloom_threshold, vec3<f32>(0.0)) * 2.0;
+    result = result + bloom * 0.3;
+    result = 1.0 - exp(-result * 2.0);
 
     return vec4<f32>(result, 1.0);
 }

@@ -61,13 +61,14 @@ impl super::super::Scene {
         // Default lights to Movable (most common case for real-time lighting).
         // Static lights are opt-in for baking scenarios.
         let movability = movability.unwrap_or(libhelio::Movability::Movable);
+        let gpu_index = self.gpu_scene.lights.push(light) as u32;
         let (id, dense_index) = self.lights.insert(LightRecord {
             gpu: light,
             movability,
             user_tag,
+            gpu_index,
         });
-        let pushed = self.gpu_scene.lights.push(light);
-        debug_assert_eq!(pushed, dense_index);
+        debug_assert_eq!(gpu_index as usize, dense_index);
         
         // Invalidate any previous bake if this is a static/stationary light
         if !movability.can_move() {
@@ -103,7 +104,7 @@ impl super::super::Scene {
     /// scene.update_light(light_id, light)?;
     /// ```
     pub fn update_light(&mut self, id: LightId, light: GpuLight) -> Result<()> {
-        let Some((dense_index, record)) = self.lights.get_mut_with_index(id) else {
+        let Some((_dense_index, record)) = self.lights.get_mut_with_index(id) else {
             return Err(invalid("light"));
         };
         // Enforce movability: Static lights cannot have position/direction updated
@@ -134,8 +135,9 @@ impl super::super::Scene {
             self.gpu_scene.movable_lights_generation = self.movable_lights_generation;
         }
 
-        let updated = self.gpu_scene.lights.update(dense_index, light);
-        debug_assert!(updated);
+        let gpu_index = record.gpu_index as usize;
+        let updated = self.gpu_scene.lights.update(gpu_index, light);
+        debug_assert!(updated, "GPU light index {} out of bounds (len {}) — flush may have mis-indexed this light", gpu_index, self.gpu_scene.lights.len());
         Ok(())
     }
 

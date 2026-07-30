@@ -147,6 +147,8 @@ pub(crate) struct LightRecord {
     pub movability: libhelio::Movability,
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,
+    /// Index in the GPU lights buffer (may differ from arena dense_index after flush filtering).
+    pub gpu_index: u32,
 }
 
 /// Internal record for a scene object.

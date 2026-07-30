@@ -78,10 +78,13 @@ impl Scene {
         {
             let light_rec_count = self.lights.dense_len();
             let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+            let mut gpu_idx = 0u32;
 
             for i in 0..light_rec_count {
-                if let Some(record) = self.lights.get_dense(i) {
+                if let Some(record) = self.lights.get_dense_mut(i) {
                     if record.movability.can_move() {
+                        record.gpu_index = gpu_idx;
+                        gpu_idx += 1;
                         movable_lights.push(record.gpu);
                     }
                 }
