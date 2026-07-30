@@ -825,14 +825,23 @@ fn pbr_direct_light(
             let light_to_surface = world_pos - light.position_range.xyz;
             let light_dir = normalize(light.direction_outer.xyz);
             let projected = light_to_surface - dot(light_to_surface, light_dir) * light_dir;
-            let gobo_right = normalize(cross(light_dir, vec3<f32>(0.0, 1.0, 0.0)));
+            let proj_len = max(length(projected), 0.0001);
+            let projected_n = projected / proj_len;
+            // Build tangent frame: handle degenerate case where light_dir ≈ up
+            let gobo_up_vec = select(
+                vec3<f32>(0.0, 1.0, 0.0),
+                vec3<f32>(0.0, 0.0, 1.0),
+                abs(dot(light_dir, vec3<f32>(0.0, 1.0, 0.0))) > 0.99,
+            );
+            let gobo_right = normalize(cross(light_dir, gobo_up_vec));
             let gobo_up = cross(gobo_right, light_dir);
             let gobo_uv = vec2<f32>(
                 dot(projected, gobo_right) / (light.position_range.w * 0.5) + 0.5,
                 dot(projected, gobo_up) / (light.position_range.w * 0.5) + 0.5,
             );
             let gobo_sample = textureSampleLevel(
-                ies_textures, ies_sampler, gobo_uv, u32(light.light_function_index), 0.0
+                ies_textures, ies_sampler, clamp(gobo_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                u32(light.light_function_index), 0.0
             ).r;
             atten *= gobo_sample;
         }
