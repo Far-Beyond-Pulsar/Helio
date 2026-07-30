@@ -322,6 +322,7 @@ mod tests {
             model,
             normal_mat: [0.0; 12],
             bounds: [0.0; 4],
+            prev_model: model,
             mesh_id: 0,
             material_id: 0,
             flags: 0,

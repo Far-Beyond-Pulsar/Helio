@@ -123,6 +123,7 @@ pub(super) fn object_gpu_data(
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
             bounds: desc.bounds,
+            prev_model: desc.transform.to_cols_array(),
             mesh_id: mesh.slot(),
             material_id: material_slot as u32,
             flags: desc.flags,

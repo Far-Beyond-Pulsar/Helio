@@ -83,6 +83,7 @@ impl super::super::Scene {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
             bounds: desc.bounds,
+            prev_model: desc.transform.to_cols_array(),
             mesh_id: mesh_id.slot(),
             material_id: desc.material_id,
             flags: desc.flags,

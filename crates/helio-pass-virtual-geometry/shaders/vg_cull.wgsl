@@ -42,13 +42,14 @@ struct VgObjectData {
     lod_meshlet_counts:   array<u32, 8>,
 }
 
-/// Mirrors GpuInstanceData (Rust, 144 bytes).
+/// Mirrors GpuInstanceData (Rust, 208 bytes).
 struct InstanceData {
     transform:    mat4x4<f32>,
     normal_mat_0: vec4<f32>,
     normal_mat_1: vec4<f32>,
     normal_mat_2: vec4<f32>,
     bounds:       vec4<f32>,
+    prev_model:   mat4x4<f32>,
     mesh_id:      u32,
     material_id:  u32,
     flags:        u32,

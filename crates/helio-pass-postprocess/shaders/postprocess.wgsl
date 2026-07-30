@@ -178,6 +178,7 @@ struct GpuPostProcessVolume {
 // integrated from the camera to that froxel's depth. Bound to a 1x1x1 (0,0,0,1)
 // fallback when no fog pass is in the graph, which composites to a no-op.
 @group(0) @binding(17) var                     fog_input:    texture_3d<f32>;
+@group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 
@@ -638,20 +639,25 @@ fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> ve
 
 // ── Motion blur ────────────────────────────────────────────────────────────────
 
-fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     if postprocess.motion_blur_enabled == 0u { return color; }
-    var blurred = color;
-    let samples = 8u;
-    let amount = postprocess.motion_blur_amount * postprocess.blend_weight_motion_blur;
-    if amount <= 0.0 { return color; }
-    let velocity = vec2<f32>(amount, 0.0);
-    let max_len = postprocess.motion_blur_max / f32(textureDimensions(hdr_input).x);
-    for (var i = 1u; i < samples; i++) {
+
+    let velocity = textureLoad(velocity_tex, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0).rg;
+    let vel_len = length(velocity);
+    if vel_len < 0.5 { return color; }
+
+    let max_len = postprocess.motion_blur_max;
+    let clamped_vel = normalize(velocity) * min(vel_len, max_len);
+    let samples = min(i32(vel_len / 2.0 + 2.0), 16);
+    let step = clamped_vel / f32(samples) / dims;
+
+    var blurred = vec3<f32>(0.0);
+    for (var i = 0; i < samples; i++) {
         let t = f32(i) / f32(samples);
-        let sample_uv = uv - velocity * t * max_len;
+        let sample_uv = uv - step * f32(i);
         blurred += textureSampleLevel(hdr_input, linear_samp, sample_uv, 0.0).rgb;
     }
-    return blurred / f32(samples + 1u);
+    return blurred / f32(samples + 1);
 }
 
 // ── fs_uber ────────────────────────────────────────────────────────────────────
@@ -739,7 +745,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     color = apply_dof(color, uv, raw_depth, dims);
 
     // 10. Motion blur
-    color = apply_motion_blur(color, uv);
+    color = apply_motion_blur(color, uv, dims);
 
     //%P3
 

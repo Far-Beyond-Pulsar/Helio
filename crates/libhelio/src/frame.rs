@@ -197,6 +197,9 @@ pub struct FrameResources<'a> {
     /// aniso_rotation, bitcast<f32>(surface_flags).
     /// Populated by GBufferPass, consumed by DeferredLightPass.
     pub gbuffer_extra: Tracked<&'a wgpu::TextureView>,
+    /// GBuffer velocity buffer (Rg16Float): screen-space motion in pixels/frame.
+    /// Populated by GBufferPass, consumed by PostProcessPass (motion blur) and TaAPass.
+    pub gbuffer_velocity: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
@@ -423,6 +426,7 @@ impl<'a> FrameResources<'a> {
             gbuffer_lightmap_uv: Tracked::empty(),
             gbuffer_sss: Tracked::empty(),
             gbuffer_extra: Tracked::empty(),
+            gbuffer_velocity: Tracked::empty(),
             shadow_atlas: Tracked::empty(),
             static_shadow_atlas: Tracked::empty(),
             shadow_sampler: Tracked::empty(),
@@ -495,6 +499,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(gbuffer_lightmap_uv);
             reset_field!(gbuffer_sss);
             reset_field!(gbuffer_extra);
+            reset_field!(gbuffer_velocity);
             reset_field!(shadow_atlas);
             reset_field!(static_shadow_atlas);
             reset_field!(shadow_sampler);

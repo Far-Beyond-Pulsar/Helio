@@ -44,20 +44,24 @@ struct CullParams {
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
 
-// GpuInstanceData: 144 bytes, must match libhelio/src/instance.rs exactly.
+// GpuInstanceData: 208 bytes, must match libhelio/src/instance.rs exactly.
 struct GpuInstanceData {
-    model_col0:  vec4<f32>,  //   0 – 15
-    model_col1:  vec4<f32>,  //  16 – 31
-    model_col2:  vec4<f32>,  //  32 – 47
-    model_col3:  vec4<f32>,  //  48 – 63
-    normal_col0: vec4<f32>,  //  64 – 79   (w = padding)
-    normal_col1: vec4<f32>,  //  80 – 95
-    normal_col2: vec4<f32>,  //  96 – 111
-    bounds:      vec4<f32>,  // 112 – 127  (xyz = world-space sphere center, w = radius)
-    mesh_id:     u32,        // 128
-    material_id: u32,        // 132
-    flags:       u32,        // 136
-    _pad:        u32,        // 140
+    model_col0:      vec4<f32>,  //   0 – 15
+    model_col1:      vec4<f32>,  //  16 – 31
+    model_col2:      vec4<f32>,  //  32 – 47
+    model_col3:      vec4<f32>,  //  48 – 63
+    normal_col0:     vec4<f32>,  //  64 – 79   (w = padding)
+    normal_col1:     vec4<f32>,  //  80 – 95
+    normal_col2:     vec4<f32>,  //  96 – 111
+    bounds:          vec4<f32>,  // 112 – 127  (xyz = world-space sphere center, w = radius)
+    prev_model_col0: vec4<f32>,  // 128 – 143
+    prev_model_col1: vec4<f32>,  // 144 – 159
+    prev_model_col2: vec4<f32>,  // 160 – 175
+    prev_model_col3: vec4<f32>,  // 176 – 191
+    mesh_id:         u32,        // 192
+    material_id:     u32,        // 196
+    flags:           u32,        // 200
+    _pad:            u32,        // 204
 }
 @group(0) @binding(2) var<storage, read> instances: array<GpuInstanceData>;
 

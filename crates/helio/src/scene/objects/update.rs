@@ -82,6 +82,7 @@ impl super::super::Scene {
             );
             return Ok(()); // No-op instead of error
         }
+        record.instance.prev_model = record.instance.model;
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
 
