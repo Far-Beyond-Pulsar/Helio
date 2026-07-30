@@ -61,7 +61,7 @@ fn anamorphic_streak(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f
     let parallel = dot(delta, dir);
     let perp_vec = delta - dir * parallel;
     let perp_len = length(perp_vec * screen_dims);
-    let streak = exp(-perp_len * perp_len * 0.003) * 0.03;
+    let streak = exp(-perp_len * perp_len * 0.003) * 0.008;
     return light_col * streak;
 }
 
@@ -83,7 +83,7 @@ fn diffraction_spike(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f
         }
     }
     let falloff = exp(-dist * 0.004);
-    return light_col * spike * falloff * 0.015;
+    return light_col * spike * falloff * 0.004;
 }
 
 @fragment
