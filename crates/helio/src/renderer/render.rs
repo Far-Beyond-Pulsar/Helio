@@ -248,6 +248,7 @@ impl Renderer {
         {
             // Upload camera defaults as base; GPU volume blending (in PostProcessPass)
             // will blend toward active volumes if any are present.
+            // The camera's postprocess_settings.hdr_output_mode controls HDR output.
             let pp = camera.postprocess_settings.to_gpu();
             self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
 

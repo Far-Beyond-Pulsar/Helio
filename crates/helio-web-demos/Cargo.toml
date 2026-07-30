@@ -44,6 +44,7 @@ ship_flight         = []
 simple_graph        = []
 outdoor_rocks       = []
 editor_demo         = []
+hdr_demo            = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]

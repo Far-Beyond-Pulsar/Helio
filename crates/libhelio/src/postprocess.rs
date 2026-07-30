@@ -22,6 +22,21 @@ pub enum ExposureMode {
     Auto = 1,
 }
 
+// ── HDR output mode ────────────────────────────────────────────────────────────
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrOutputMode {
+    /// Tonemap → sRGB (current behaviour)
+    Ldr = 0,
+    /// Tonemap → PQ ST 2084 → BT.2020 → 10-bit
+    Hdr10 = 1,
+    /// Linear float output (scRGB, Windows HDR)
+    ScRgb = 2,
+    /// Raw HDR float, no tonemap (for external grading or recording)
+    Passthrough = 3,
+}
+
 // ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
 //
 // Flat uniform struct uploaded to GPU each frame. All fields are driven by the
@@ -136,15 +151,21 @@ pub struct GpuPostProcessUniforms {
     pub pad_fog_color: f32,             // 348
     pub fog_emissive: [f32; 3],         // 352 ← 16-aligned
     pub pad_fog_emissive: f32,          // 364
+
+    // ── HDR Output (16 bytes) ──
+    pub hdr_output_mode: u32,           // 368
+    pub hdr_max_nits: f32,              // 372
+    pub hdr_ui_brightness: f32,         // 376
+    pub pad_hdr_end: f32,               // 380
 }
 
-// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 = 368 bytes
-// WGSL uniform buffer rule: must be multiple of 16 → 368 / 16 = 23 slots. ✓
+// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 + 16 = 384 bytes
+// WGSL uniform buffer rule: must be multiple of 16 → 384 / 16 = 24 slots. ✓
 //
 // This struct is mirrored by hand in helio-pass-postprocess/shaders/postprocess.wgsl
 // and is embedded in GpuPostProcessVolume, which cs_volume_blend reads as a storage
 // array. A field added here without updating that mirror misreads the buffer silently.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 368);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 384);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
 
 // ── GpuFogUniforms ─────────────────────────────────────────────────────────────
@@ -186,11 +207,12 @@ impl GpuPostProcessUniforms {
 const _: () = assert!(std::mem::size_of::<GpuFogUniforms>() == 64);
 // wgpu requires copy offsets to be 4-byte aligned; the fog pass copies from this offset.
 const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 4 == 0);
-// The block must be the tail of GpuPostProcessUniforms for a single flat copy to
-// capture it. A field appended after the fog block would break this.
+// HDR fields (hdr_output_mode, hdr_max_nits, hdr_ui_brightness, pad_hdr_end)
+// follow the fog block. The fog copy pass copies exactly GpuFogUniforms bytes
+// starting at FOG_BLOCK_OFFSET, so the fields after fog are not included.
 const _: () = assert!(
-    std::mem::size_of::<GpuPostProcessUniforms>()
-        == GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
+    GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
+        == std::mem::offset_of!(GpuPostProcessUniforms, hdr_output_mode)
 );
 
 // ── Fog mode ───────────────────────────────────────────────────────────────────
@@ -286,6 +308,11 @@ impl Default for GpuPostProcessUniforms {
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
             pad_bw: 0.0,
+
+            hdr_output_mode: HdrOutputMode::Ldr as u32,
+            hdr_max_nits: 1000.0,
+            hdr_ui_brightness: 200.0,
+            pad_hdr_end: 0.0,
 
             fog_enabled: 0,
             fog_mode: FogMode::Uniform as u32,
@@ -385,6 +412,11 @@ pub struct PostProcessSettings {
     pub blend_weight_grain: f32,
     pub blend_weight_exposure: f32,
 
+    // HDR Output
+    pub hdr_output_mode: HdrOutputMode,
+    pub hdr_max_nits: f32,
+    pub hdr_ui_brightness: f32,
+
     // Volumetric Fog
     pub fog_enabled: bool,
     pub fog_mode: FogMode,
@@ -479,6 +511,11 @@ impl PostProcessSettings {
             blend_weight_exposure: self.blend_weight_exposure,
             pad_bw: 0.0,
 
+            hdr_output_mode: self.hdr_output_mode as u32,
+            hdr_max_nits: self.hdr_max_nits,
+            hdr_ui_brightness: self.hdr_ui_brightness,
+            pad_hdr_end: 0.0,
+
             fog_enabled: self.fog_enabled as u32,
             fog_mode: self.fog_mode as u32,
             fog_density: self.fog_density.max(0.0),
@@ -555,6 +592,10 @@ impl Default for PostProcessSettings {
             motion_blur_max: 64.0,
             motion_blur_enabled: false,
 
+            hdr_output_mode: HdrOutputMode::Ldr,
+            hdr_max_nits: 1000.0,
+            hdr_ui_brightness: 200.0,
+
             blend_weight_bloom: 1.0,
             blend_weight_dof: 1.0,
             blend_weight_motion_blur: 1.0,
@@ -604,7 +645,8 @@ pub struct GpuPostProcessVolume {
 // WGSL places `settings` at 64 because GpuPostProcessUniforms aligns to 16.
 const _: () = assert!(std::mem::offset_of!(GpuPostProcessVolume, settings) == 64);
 // Storage-buffer array stride must match WGSL's, which rounds to the 16-byte alignment.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 432);
+// 64 (header) + 384 (settings) = 448.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 448);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() % 16 == 0);
 
 // ── PostProcessVolume descriptor (CPU-side) ────────────────────────────────────
@@ -793,6 +835,10 @@ impl PostProcessBlender {
             blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
             blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
 
+            hdr_output_mode: if t > 0.5 { b.hdr_output_mode } else { a.hdr_output_mode },
+            hdr_max_nits: lerp(a.hdr_max_nits, b.hdr_max_nits, t),
+            hdr_ui_brightness: lerp(a.hdr_ui_brightness, b.hdr_ui_brightness, t),
+
             fog_enabled: if t > 0.5 { b.fog_enabled } else { a.fog_enabled },
             fog_mode: if t > 0.5 { b.fog_mode } else { a.fog_mode },
             fog_density: lerp(a.fog_density, b.fog_density, t),
@@ -814,6 +860,14 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 
 fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
     PostProcessSettings {
+        hdr_output_mode: match gpu.hdr_output_mode {
+            1 => HdrOutputMode::Hdr10,
+            2 => HdrOutputMode::ScRgb,
+            3 => HdrOutputMode::Passthrough,
+            _ => HdrOutputMode::Ldr,
+        },
+        hdr_max_nits: gpu.hdr_max_nits,
+        hdr_ui_brightness: gpu.hdr_ui_brightness,
         exposure_mode: if gpu.exposure_mode == 0 { ExposureMode::Manual } else { ExposureMode::Auto },
         exposure_compensation: gpu.exposure_compensation,
         exposure_min: gpu.exposure_min,
