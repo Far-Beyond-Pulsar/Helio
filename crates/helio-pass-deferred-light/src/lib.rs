@@ -55,7 +55,7 @@ pub struct DeferredLightPass {
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_2_key:
-        Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
+        Option<[usize; 14]>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -84,6 +84,8 @@ pub struct DeferredLightPass {
     fallback_planar_view: wgpu::TextureView,
     /// Linear clamp sampler for planar reflection blending.
     planar_sampler: wgpu::Sampler,
+    fallback_ies_view: wgpu::TextureView,
+    ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
     /// Whether the environment cubemap contributes indirect specular.
     pub enable_env_reflections: bool,
@@ -296,6 +298,24 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // IES texture array (binding 18)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // IES sampler (binding 19)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 19,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -411,6 +431,38 @@ impl DeferredLightPass {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // IES fallback: 1×1×1 array (single black texel, acts as identity multiplier 0)
+        let fallback_ies_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DeferredLight IES Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[255u8],  // 255 = identity multiplier (1.0)
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_ies_view = fallback_ies_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let ies_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("DeferredLight IES Sampler"),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
 
@@ -550,6 +602,8 @@ impl DeferredLightPass {
             fallback_ssr_view,
             fallback_planar_view,
             planar_sampler,
+            fallback_ies_view,
+            ies_sampler,
             debug_mode: 0,
             enable_env_reflections: false,
         }
@@ -784,7 +838,7 @@ impl RenderPass for DeferredLightPass {
         // Planar reflection texture from PlanarReflectionPass
         let planar_view = ctx.resources.planar_reflection.get().unwrap_or(&self.fallback_planar_view);
 
-        let scene_key = (
+        let scene_key = [
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
             static_shadow_view as *const _ as usize,
@@ -797,7 +851,9 @@ impl RenderPass for DeferredLightPass {
             ctx.scene.reflection_captures as *const _ as usize,
             planar_view as *const _ as usize,
             &self.planar_sampler as *const _ as usize,
-        );
+            &self.fallback_ies_view as *const _ as usize,
+            &self.ies_sampler as *const _ as usize,
+        ];
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG2"),
@@ -862,6 +918,16 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 17,
                         resource: wgpu::BindingResource::Sampler(&self.planar_sampler),
+                    },
+                    // IES textures (binding 18) — fallback to identity if no IES profiles loaded
+                    wgpu::BindGroupEntry {
+                        binding: 18,
+                        resource: wgpu::BindingResource::TextureView(&self.fallback_ies_view),
+                    },
+                    // IES sampler (binding 19)
+                    wgpu::BindGroupEntry {
+                        binding: 19,
+                        resource: wgpu::BindingResource::Sampler(&self.ies_sampler),
                     },
                 ],
             }));

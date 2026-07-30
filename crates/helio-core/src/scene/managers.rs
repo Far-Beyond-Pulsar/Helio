@@ -95,6 +95,11 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
         }
     }
 
+    /// Returns a mutable reference to the CPU-side data Vec.
+    pub fn data_mut(&mut self) -> &mut Vec<T> {
+        &mut self.data
+    }
+
     /// Replaces the entire contents. Marks dirty.
     pub fn set_data(&mut self, data: Vec<T>) {
         self.data = data;
@@ -344,6 +349,15 @@ impl GpuInstanceBuffer {
             wgpu::BufferUsages::STORAGE,
             "Instance Buffer",
         ))
+    }
+
+    /// Cycle `prev_model = model` for all instances after each frame's flush.
+    /// This ensures the velocity buffer uses the correct previous-frame transform.
+    pub fn cycle_prev_models(&mut self) {
+        for inst in self.0.data.iter_mut() {
+            inst.prev_model = inst.model;
+        }
+        self.0.dirty_range = (!self.0.data.is_empty()).then_some((0, self.0.data.len()));
     }
 }
 

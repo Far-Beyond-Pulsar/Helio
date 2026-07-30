@@ -203,6 +203,10 @@ path = "hdr_demo.rs"
 name = "color_grading_demo"
 path = "color_grading_demo.rs"
 
+[[bin]]
+name = "ies_demo"
+path = "ies_demo.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }

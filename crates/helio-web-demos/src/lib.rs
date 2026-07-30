@@ -58,6 +58,10 @@ mod hdr_demo;
 #[path = "../examples-wasm/color_grading_demo.rs"]
 mod color_grading_demo;
 
+#[cfg(feature = "ies_demo")]
+#[path = "../examples-wasm/ies_demo.rs"]
+mod ies_demo;
+
 #[cfg(feature = "indoor_cathedral")]
 #[path = "../examples-wasm/indoor_cathedral.rs"]
 mod indoor_cathedral;
@@ -262,6 +266,11 @@ pub fn start() {
         helio_wasm::launch::<color_grading_demo::Demo>();
         return;
     }
+    #[cfg(feature = "ies_demo")]
+    {
+        helio_wasm::launch::<ies_demo::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -396,6 +405,11 @@ pub fn main() {
     #[cfg(feature = "color_grading_demo")]
     {
         helio_wasm::launch::<color_grading_demo::Demo>();
+        return;
+    }
+    #[cfg(feature = "ies_demo")]
+    {
+        helio_wasm::launch::<ies_demo::Demo>();
         return;
     }
 
