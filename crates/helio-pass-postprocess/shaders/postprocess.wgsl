@@ -128,7 +128,22 @@ struct GpuPostProcessUniforms {
     hdr_output_mode:           u32,   // 368
     hdr_max_nits:              f32,   // 372
     hdr_ui_brightness:         f32,   // 376
-    _pad_hdr_end:              f32,   // 380 → struct ends at 384
+    _pad_hdr_end:              f32,   // 380
+    // ── Advanced Color Grading (80 bytes) ──
+    lift_color:                vec3<f32>, // 384
+    _pad_lift:                 f32,   // 396
+    gamma_color:               vec3<f32>, // 400
+    _pad_gamma:                f32,   // 412
+    gain_color:                vec3<f32>, // 416
+    _pad_gain:                 f32,   // 428
+    shadows_max:               f32,   // 432
+    highlights_min:            f32,   // 436
+    shadow_highlight_balance:  f32,   // 440
+    hue_shift:                 f32,   // 444
+    lut_generation:            u32,   // 448
+    lut_intensity:             f32,   // 452
+    lut_platform:              u32,   // 456
+    _pad_grading_end:          f32,   // 460 → struct ends at 464
 }
 
 struct CameraUniforms {
@@ -184,6 +199,7 @@ struct GpuPostProcessVolume {
 // fallback when no fog pass is in the graph, which composites to a no-op.
 @group(0) @binding(17) var                     fog_input:    texture_3d<f32>;
 @group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
+@group(0) @binding(19) var                     lut_tex:      texture_3d<f32>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 
@@ -292,12 +308,23 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t > 0.5);
     r.hdr_max_nits              = lerpf(base.hdr_max_nits, vol.hdr_max_nits, t);
     r.hdr_ui_brightness         = lerpf(base.hdr_ui_brightness, vol.hdr_ui_brightness, t);
+    r.lift_color                = lerp3v(base.lift_color, vol.lift_color, t);
+    r.gamma_color               = lerp3v(base.gamma_color, vol.gamma_color, t);
+    r.gain_color                = lerp3v(base.gain_color, vol.gain_color, t);
+    r.shadows_max               = lerpf(base.shadows_max, vol.shadows_max, t);
+    r.highlights_min            = lerpf(base.highlights_min, vol.highlights_min, t);
+    r.shadow_highlight_balance  = lerpf(base.shadow_highlight_balance, vol.shadow_highlight_balance, t);
+    r.hue_shift                 = lerpf(base.hue_shift, vol.hue_shift, t);
+    r.lut_generation            = select(base.lut_generation, vol.lut_generation, t > 0.5);
+    r.lut_intensity             = lerpf(base.lut_intensity, vol.lut_intensity, t);
+    r.lut_platform              = select(base.lut_platform, vol.lut_platform, t > 0.5);
     // Padding fields are implicitly copied via the field-by-field assignment above.
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
     r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
     r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0; r._pad_hdr_end = 0.0;
+    r._pad_lift = 0.0; r._pad_gamma = 0.0; r._pad_gain = 0.0; r._pad_grading_end = 0.0;
     return r;
 }
 
@@ -547,7 +574,57 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
 
 // ── Color grading ──────────────────────────────────────────────────────────────
 
+fn apply_lift_gamma_gain(c: vec3<f32>) -> vec3<f32> {
+    // Lift/Gamma/Gain colour wheels
+    // shadows = c * (1 - lift) + lift  (lift shifts shadows)
+    // midtones = pow(c, gamma)
+    // highlights = c * gain
+    var result = c;
+    let lift  = postprocess.lift_color;
+    let gamma = postprocess.gamma_color;
+    let gain  = postprocess.gain_color;
+    result = result * (vec3<f32>(1.0) - lift) + lift;
+    result = pow(max(result, vec3<f32>(0.0)), gamma + vec3<f32>(1.0));
+    result = result * gain;
+    return result;
+}
+
+fn hue_shift_rgb(c: vec3<f32>, shift_deg: f32) -> vec3<f32> {
+    if abs(shift_deg) < 0.001 { return c; }
+    let angle = shift_deg * 3.14159265 / 180.0;
+    let cos_a = cos(angle);
+    let sin_a = sin(angle);
+    // RGB hue rotation matrix
+    let m = mat3x3<f32>(
+        vec3<f32>(0.213, 0.213 - 0.213 * cos_a + 0.144 * sin_a, 0.213 - 0.213 * cos_a - 0.756 * sin_a),
+        vec3<f32>(0.715, 0.715 - 0.715 * cos_a - 0.283 * sin_a, 0.715 - 0.715 * cos_a + 0.416 * sin_a),
+        vec3<f32>(0.072, 0.072 - 0.072 * cos_a + 0.860 * sin_a, 0.072 - 0.072 * cos_a - 0.461 * sin_a),
+    );
+    return m * c;
+}
+
+fn sample_lut(c: vec3<f32>) -> vec3<f32> {
+    let uv = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return textureSampleLevel(lut_tex, linear_samp, uv, 0.0).rgb;
+}
+
+fn apply_lut_grade(color: vec3<f32>) -> vec3<f32> {
+    // Pre-LUT: hue shift
+    var c = hue_shift_rgb(color, postprocess.hue_shift);
+    // Sample LUT
+    let graded = sample_lut(c);
+    // Blend by intensity
+    c = mix(c, graded, postprocess.lut_intensity);
+    // Post-LUT: lift/gamma/gain
+    c = apply_lift_gamma_gain(c);
+    return c;
+}
+
 fn color_grade(color: vec3<f32>) -> vec3<f32> {
+    if postprocess.lut_platform > 0u {
+        return apply_lut_grade(color);
+    }
+    // Simple path (backward compatibility)
     var c = color;
     c = c * postprocess.color_gain + postprocess.color_offset;
     c = pow(max(c, vec3<f32>(0.0)), postprocess.color_gamma);

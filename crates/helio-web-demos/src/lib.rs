@@ -54,6 +54,10 @@ mod outdoor_canyon;
 #[path = "../examples-wasm/hdr_demo.rs"]
 mod hdr_demo;
 
+#[cfg(feature = "color_grading_demo")]
+#[path = "../examples-wasm/color_grading_demo.rs"]
+mod color_grading_demo;
+
 #[cfg(feature = "indoor_cathedral")]
 #[path = "../examples-wasm/indoor_cathedral.rs"]
 mod indoor_cathedral;
@@ -253,6 +257,11 @@ pub fn start() {
         helio_wasm::launch::<hdr_demo::Demo>();
         return;
     }
+    #[cfg(feature = "color_grading_demo")]
+    {
+        helio_wasm::launch::<color_grading_demo::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -382,6 +391,11 @@ pub fn main() {
     #[cfg(feature = "hdr_demo")]
     {
         helio_wasm::launch::<hdr_demo::Demo>();
+        return;
+    }
+    #[cfg(feature = "color_grading_demo")]
+    {
+        helio_wasm::launch::<color_grading_demo::Demo>();
         return;
     }
 

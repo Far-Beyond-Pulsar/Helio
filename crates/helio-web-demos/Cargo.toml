@@ -45,6 +45,7 @@ simple_graph        = []
 outdoor_rocks       = []
 editor_demo         = []
 hdr_demo            = []
+color_grading_demo  = ["dep:helio-pass-postprocess"]
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]

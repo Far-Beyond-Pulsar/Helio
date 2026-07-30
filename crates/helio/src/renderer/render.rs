@@ -384,6 +384,9 @@ impl Renderer {
         frame_resources.pp_volumes.write(&self.pp_volumes_buffer, "Renderer");
         frame_resources.pp_volume_count = pp_count;
         frame_resources.postprocess_uniforms.write(&self.postprocess_buffer, "Renderer");
+        if let Some(ref lut) = self.color_grading_lut_view {
+            frame_resources.color_grading_lut.write(lut, "Renderer");
+        }
         frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
         if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
             frame_resources.full_res_depth.write(v, "Renderer");

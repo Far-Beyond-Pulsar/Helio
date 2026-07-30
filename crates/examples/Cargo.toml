@@ -199,6 +199,10 @@ path = "lens_flare_demo.rs"
 name = "hdr_demo"
 path = "hdr_demo.rs"
 
+[[bin]]
+name = "color_grading_demo"
+path = "color_grading_demo.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
