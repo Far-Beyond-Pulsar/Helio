@@ -328,6 +328,9 @@ pub struct FrameResources<'a> {
     /// Post-process uniform buffer (written by the Renderer, read by PostProcessPass).
     /// Points to the pass's own `GpuPostProcessUniforms` buffer.
     pub postprocess_uniforms: Tracked<&'a wgpu::Buffer>,
+    /// 3D colour grading LUT texture (Rgba16Float, optional).
+    /// Populated by LUT builder pass, consumed by PostProcessPass.
+    pub color_grading_lut: Tracked<&'a wgpu::TextureView>,
 
     /// Reflection capture storage buffer
     pub reflection_captures: Tracked<&'a wgpu::Buffer>,
@@ -468,6 +471,7 @@ impl<'a> FrameResources<'a> {
             baked_pvs: Tracked::empty(),
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
+            color_grading_lut: Tracked::empty(),
             reflection_captures: Tracked::empty(),
             reflection_capture_count: 0,
             ssr_trace: Tracked::empty(),
@@ -536,6 +540,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
+            reset_field!(color_grading_lut);
             reset_field!(reflection_captures);
             reset_field!(ssr_trace);
             reset_field!(planar_reflection);

@@ -125,6 +125,8 @@ pub struct Renderer {
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
+    /// Optional 3D LUT texture view for colour grading, set by the application.
+    pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
@@ -560,6 +562,11 @@ impl Renderer {
         &self.queue
     }
 
+    /// Returns a reference to the GPU device.
+    pub fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+
     pub fn renderer_config(&self) -> RendererConfig {
         RendererConfig {
             width: self.output_width,
@@ -577,5 +584,22 @@ impl Renderer {
             enable_environment_reflections: self.enable_environment_reflections,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
         }
+    }
+
+    /// Returns a reference to the post-process uniform buffer.
+    pub fn postprocess_buffer(&self) -> &wgpu::Buffer {
+        &self.postprocess_buffer
+    }
+
+    /// Set or clear the 3D colour grading LUT texture.
+    /// Call with `None` to disable LUT grading.
+    /// The LUT texture must be `Rgba16Float`, `TextureDimension::D3`.
+    pub fn set_color_grading_lut(&mut self, view: Option<wgpu::TextureView>) {
+        self.color_grading_lut_view = view;
+    }
+
+    /// Returns the current colour grading LUT view, if any.
+    pub fn color_grading_lut(&self) -> Option<&wgpu::TextureView> {
+        self.color_grading_lut_view.as_ref()
     }
 }
