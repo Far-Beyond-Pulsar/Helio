@@ -85,13 +85,26 @@ pub struct GpuLight {
     pub god_rays_decay: f32,
     /// Final scale applied to the accumulated shaft radiance.
     pub god_rays_exposure: f32,
-    pub _pad2: [u32; 3],
+    // ── Lens flare ──
+    /// Non-zero to enable lens flare for this light.
+    pub flare_enabled: u32,
+    /// 0=none, 1=ghost, 2=anamorphic, 3=simple
+    pub flare_type: u32,
+    /// Overall intensity multiplier for the flare.
+    pub flare_intensity: f32,
+    /// Overall size multiplier for the flare.
+    pub flare_scale: f32,
+    /// Flare tint (RGB).
+    pub flare_tint_r: f32,
+    pub flare_tint_g: f32,
+    pub flare_tint_b: f32,
+    pub _pad2: [u32; 4],
 }
 
 // The WGSL mirrors above assume this exact size. A storage-buffer array of
 // GpuLight strides by size_of::<GpuLight>(), so any drift shifts every light
 // after index 0.
-const _: () = assert!(std::mem::size_of::<GpuLight>() == 96);
+const _: () = assert!(std::mem::size_of::<GpuLight>() == 128);
 // WGSL rounds the array stride up to the struct's alignment, which is 16 here
 // (vec4<f32> members). If the Rust size were not a multiple of 16 the two sides
 // would stride differently even at identical field counts.
@@ -116,7 +129,15 @@ impl Default for GpuLight {
             god_rays_weight: 0.6,
             god_rays_decay: 1.0,
             god_rays_exposure: 0.7,
-            _pad2: [0; 3],
+            // Off by default — only explicitly marked lights produce flares.
+            flare_enabled: 0,
+            flare_type: 0,
+            flare_intensity: 1.0,
+            flare_scale: 1.0,
+            flare_tint_r: 1.0,
+            flare_tint_g: 1.0,
+            flare_tint_b: 1.0,
+            _pad2: [0; 4],
         }
     }
 }

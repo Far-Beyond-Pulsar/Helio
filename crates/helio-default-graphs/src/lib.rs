@@ -6,6 +6,7 @@ use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
+use helio_pass_flare::LensFlarePass;
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
@@ -476,6 +477,15 @@ fn build_default_graph_internal(
     let camera_buf = scene.gpu_scene().camera.buffer();
     let instances_buf = scene.gpu_scene().instances.buffer();
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
+
+    graph.add_pass(Box::new(LensFlarePass::new(
+        device,
+        queue,
+        scene.gpu_scene().lights.buffer(),
+        iw,
+        ih,
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
