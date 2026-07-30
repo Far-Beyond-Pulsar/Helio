@@ -50,6 +50,10 @@ mod outdoor_night;
 #[path = "../examples-wasm/outdoor_canyon.rs"]
 mod outdoor_canyon;
 
+#[cfg(feature = "hdr_demo")]
+#[path = "../examples-wasm/hdr_demo.rs"]
+mod hdr_demo;
+
 #[cfg(feature = "indoor_cathedral")]
 #[path = "../examples-wasm/indoor_cathedral.rs"]
 mod indoor_cathedral;
@@ -244,6 +248,11 @@ pub fn start() {
         helio_wasm::launch::<vhs_backrooms::Demo>();
         return;
     }
+    #[cfg(feature = "hdr_demo")]
+    {
+        helio_wasm::launch::<hdr_demo::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -368,6 +377,11 @@ pub fn main() {
     #[cfg(feature = "vhs_backrooms")]
     {
         helio_wasm::launch::<vhs_backrooms::Demo>();
+        return;
+    }
+    #[cfg(feature = "hdr_demo")]
+    {
+        helio_wasm::launch::<hdr_demo::Demo>();
         return;
     }
 

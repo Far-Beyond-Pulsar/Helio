@@ -758,6 +758,11 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     //%P3
 
     // 11. HDR display encoding
+    //
+    // Scene values are in arbitrary linear units. The uniform fields
+    // hdr_max_nits and hdr_ui_brightness map them to cd/m²:
+    //   scene value = hdr_ui_brightness  →  hdr_max_nits cd/m²
+    //   scene value = 1.0                →  hdr_max_nits / hdr_ui_brightness cd/m²
     if postprocess.hdr_output_mode == 1u {
         // HDR10: PQ ST 2084 per-channel + BT.2020 gamut
         const PQ_M1: f32 = 0.1593017578125;
@@ -770,12 +775,19 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
             vec3<f32>(0.3293, 0.9355, 0.1370),
             vec3<f32>(0.0433, -0.0046, 0.8466),
         );
+        // Map scene units → absolute linear cd/m²
+        let scene_to_nits = postprocess.hdr_max_nits / max(postprocess.hdr_ui_brightness, 0.001);
+        color = color * (scene_to_nits / 10000.0);  // normalise to [0, 1] where 1 = 10000 nits
+        // BT.2020 primaries (applied to linear scene values)
         color = REC709_TO_BT2020 * color;
-        let Y = pow(color / vec3<f32>(10000.0), vec3<f32>(PQ_M1));
+        // PQ ST 2084 per-channel: linear light → non-linear code values
+        let Y = pow(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(PQ_M1));
         color = pow((PQ_C1 + PQ_C2 * Y) / (vec3<f32>(1.0) + PQ_C3 * Y), vec3<f32>(PQ_M2));
     } else if postprocess.hdr_output_mode == 2u {
         // scRGB: linear float, 1.0 = 80 cd/m²
-        color = color / 80.0;
+        let scene_to_nits = postprocess.hdr_max_nits / max(postprocess.hdr_ui_brightness, 0.001);
+        color = color * (scene_to_nits / 80.0);
+        color = clamp(color, vec3<f32>(0.0), vec3<f32>(65504.0)); // f16 max
     }
     // LDR (mode 0) and Passthrough (mode 3): pass through as-is
 

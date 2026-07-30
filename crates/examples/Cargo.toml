@@ -195,6 +195,10 @@ path = "one_million_cubes.rs"
 name = "lens_flare_demo"
 path = "lens_flare_demo.rs"
 
+[[bin]]
+name = "hdr_demo"
+path = "hdr_demo.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }

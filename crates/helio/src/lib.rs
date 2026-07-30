@@ -65,7 +65,7 @@ pub use helio_core::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
     RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
-pub use libhelio::{LightType, Movability, ShadowQuality, SkyActor, VolumetricClouds};
+pub use libhelio::{HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator, VolumetricClouds};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].
