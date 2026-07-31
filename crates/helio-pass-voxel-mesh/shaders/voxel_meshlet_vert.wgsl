@@ -23,12 +23,12 @@ struct VertexInput {
     @location(0) data: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_pos = camera.view_proj * vec4(v.data.xyz, 1.0);
+    out.clip_pos = cameras[0].view_proj * vec4(v.data.xyz, 1.0);
     out.material = u32(v.data.w);
     out.world_pos = v.data.xyz;
     return out;

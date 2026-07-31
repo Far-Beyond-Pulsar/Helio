@@ -494,6 +494,7 @@ fn create_case_buffers(
             0.0, 0.0, 1.0, 0.0,
         ],
         bounds: [0.0, 0.0, -10.0, 1.0],
+        prev_model: identity,
         mesh_id: 0,
         material_id: 0,
         flags: 0,
@@ -569,7 +570,13 @@ fn create_case_buffers(
         _pad2: 0,
     };
 
-    let camera_buffer = init_buffer(device, "Benchmark Camera", bytemuck::bytes_of(&camera), wgpu::BufferUsages::UNIFORM);
+    let camera_data = [camera, camera];
+    let camera_buffer = init_buffer(
+        device,
+        "Benchmark Camera",
+        bytemuck::cast_slice(&camera_data),
+        wgpu::BufferUsages::STORAGE,
+    );
     let cull_buffer = init_buffer(device, "Benchmark Cull Uniforms", bytemuck::bytes_of(&cull_uniforms), wgpu::BufferUsages::UNIFORM);
     let meshlet_buffer = init_buffer(device, "Benchmark Meshlets", bytemuck::cast_slice(&meshlets), wgpu::BufferUsages::STORAGE);
     let object_buffer = init_buffer(device, "Benchmark Objects", bytemuck::cast_slice(&objects), wgpu::BufferUsages::STORAGE);

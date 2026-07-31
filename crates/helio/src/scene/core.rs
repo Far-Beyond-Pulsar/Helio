@@ -175,6 +175,39 @@ pub struct Scene {
     /// Dirty range of water hitboxes that need GPU upload.
     pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
 
+    // ── Foliage ───────────────────────────────────────────────────────────────
+    /// Registered foliage types (grass, bushes, trees).
+    pub(in crate::scene) foliage_types:
+        DenseArena<super::foliage::FoliageTypeRecord, crate::handles::FoliageTypeId>,
+
+    /// Set when foliage type or layer *topology* changes. Never set by a wind change —
+    /// see `scene::foliage`'s module header for why that distinction is load-bearing.
+    pub(in crate::scene) foliage_types_dirty: bool,
+
+    /// CPU mirror of the foliage type table, published as raw bytes each frame.
+    pub(in crate::scene) foliage_cpu_types: Vec<helio_foliage_core::GpuFoliageType>,
+
+    /// Version of the foliage type table. Gates re-upload; must not advance for wind.
+    pub(in crate::scene) foliage_generation: u64,
+
+    /// Foliage layers (where each type grows).
+    pub(in crate::scene) foliage_layers:
+        DenseArena<super::foliage::FoliageLayerRecord, crate::handles::FoliageLayerId>,
+
+    /// Bodies that displace foliage.
+    pub(in crate::scene) foliage_interactors:
+        DenseArena<super::foliage::FoliageInteractorRecord, crate::handles::FoliageInteractorId>,
+
+    pub(in crate::scene) foliage_interactors_dirty: bool,
+
+    pub(in crate::scene) foliage_interactors_dirty_range: Option<(usize, usize)>,
+
+    /// CPU mirror of the interactor buffer.
+    pub(in crate::scene) foliage_cpu_interactors: Vec<super::foliage::GpuFoliageInteractor>,
+
+    /// Global wind state. Advanced once per frame via `Scene::advance_wind`.
+    pub(in crate::scene) wind: libhelio::Wind,
+
     // ── Post-process volumes ─────────────────────────────────────────────────────
     /// Post-process volumes (dense array)
     pub(in crate::scene) pp_volumes: DenseArena<PostProcessVolumeRecord, PostProcessVolumeId>,
@@ -316,6 +349,16 @@ impl Scene {
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
             water_volumes_dirty_range: None,
+            foliage_types: DenseArena::new(),
+            foliage_types_dirty: false,
+            foliage_cpu_types: Vec::new(),
+            foliage_generation: 0,
+            foliage_layers: DenseArena::new(),
+            foliage_interactors: DenseArena::new(),
+            foliage_interactors_dirty: false,
+            foliage_interactors_dirty_range: None,
+            foliage_cpu_interactors: Vec::new(),
+            wind: libhelio::Wind::default(),
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
             water_hitboxes_dirty_range: None,
@@ -474,5 +517,17 @@ impl Scene {
     /// or when the TLAS has not been built yet.
     pub fn tlas(&self) -> Option<&wgpu::Tlas> {
         self.gpu_scene.tlas_manager.tlas()
+    }
+
+    /// Store a type-erased template registry on the GpuScene so the GBufferPass
+    /// can find it across graph rebuilds (window resize).
+    pub fn set_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
+        self.gpu_scene.template_registry = Some(reg);
+    }
+
+    /// Store a type-erased TRANSPARENT template registry on the GpuScene so the
+    /// TransparentPass can find it across graph rebuilds.
+    pub fn set_transparent_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
+        self.gpu_scene.transparent_template_registry = Some(reg);
     }
 }

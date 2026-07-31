@@ -192,12 +192,24 @@ pub struct SceneResources<'a> {
     /// PSO works for all indirect entries it covers.
     /// Built during scene flush.
     pub material_class_ranges: &'a [(u32, u64, u32, u32)],
+    pub transparent_material_class_ranges: &'a [(u32, u64, u32, u32)],
+    /// Forward-shaded material class ranges (excluded from GBuffer pass).
+    pub forward_material_class_ranges: &'a [(u32, u64, u32, u32)],
 
     /// Graph hashes indexed by material slot. Populated during flush.
     pub material_graph_hashes: &'a [u64],
 
     /// Compiled graph WGSL snippets keyed by hash. Populated during flush.
     pub graph_wgsl_snippets: &'a std::collections::HashMap<u64, String>,
+
+    /// Custom template registrations that survive graph rebuilds.
+    /// GBufferPass downcasts to `RadiantTemplateRegistry` before each frame.
+    pub template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
+
+    /// Separate template registry for transparent materials (water, glass, etc.).
+    /// TransparentPass reads this instead of `template_registry` to avoid picking
+    /// up gbuffer templates with incompatible bind group layouts.
+    pub transparent_template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
 
     /// Reflection capture storage buffer.
     pub reflection_captures: &'a wgpu::Buffer,

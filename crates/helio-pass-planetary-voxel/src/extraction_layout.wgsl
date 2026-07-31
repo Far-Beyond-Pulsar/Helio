@@ -40,6 +40,22 @@ struct GpuTerrainMeshlet {
     _pad: u32,
 };
 
+struct GpuTerrainMeshletBounds {
+    center: vec3<f32>,
+    radius: f32,
+    cone_apex: vec3<f32>,
+    cone_cutoff: f32,
+    cone_axis: vec3<f32>,
+    _pad: f32,
+};
+
+struct GpuTerrainDraw {
+    page_slot: u32,
+    meshlet_index: u32,
+    surface_kind: u32,
+    lod: u32,
+};
+
 struct GpuExtractionCounters {
     requests: atomic<u32>,
     active_cells: atomic<u32>,

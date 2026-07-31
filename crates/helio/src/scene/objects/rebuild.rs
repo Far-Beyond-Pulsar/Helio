@@ -60,6 +60,8 @@ impl super::super::Scene {
             self.gpu_scene.compacted_indices.set_data(Vec::new());
             self.gpu_scene.compacted_indices_2.set_data(Vec::new());
             self.gpu_scene.material_class_ranges.clear();
+            self.gpu_scene.transparent_material_class_ranges.clear();
+            self.gpu_scene.forward_material_class_ranges.clear();
             return;
         }
 
@@ -85,10 +87,15 @@ impl super::super::Scene {
         let mut visibility: Vec<u32> = Vec::with_capacity(n);
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
-        // Track the (material_class, graph_hash) of each draw group for range building.
-        let mut group_keys: Vec<(u32, u64)> = Vec::new();
+            // Track the (material_class, graph_hash) of each draw group for range building.
+            // group_transparent tracks whether the group's material has FLAG_TRANSPARENT_ONLY.
+            // group_forward tracks whether the group's material has FLAG_FORWARD_SHADING.
+            let mut group_keys: Vec<(u32, u64)> = Vec::new();
+            let mut group_transparent: Vec<bool> = Vec::new();
+            let mut group_forward: Vec<bool> = Vec::new();
 
         let group_hidden = self.group_hidden;
+
 
         let mut i = 0;
         while i < order.len() {
@@ -139,11 +146,23 @@ impl super::super::Scene {
                 first_instance: group_start,
             });
             group_keys.push((class, graph_hash));
+            // Determine transparency and forward-shading from the material flags
+            let is_transparent = self.materials.get(r0.material)
+                .map(|m| (m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0)
+                .unwrap_or(false);
+            let is_forward = self.materials.get(r0.material)
+                .map(|m| (m.gpu.flags & libhelio::FLAG_FORWARD_SHADING) != 0)
+                .unwrap_or(false);
+            group_transparent.push(is_transparent);
+            group_forward.push(is_forward);
         }
 
         // Build material class ranges from consecutive draw groups with the same
         // (class, graph_hash) so each range can use a single PSO.
-        let mut ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        // Split into opaque, transparent, and forward-shaded ranges.
+        let mut opaque_ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut transparent_ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut forward_ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
         let mut gi = 0;
         while gi < group_keys.len() {
             let (class, graph_hash) = group_keys[gi];
@@ -153,9 +172,25 @@ impl super::super::Scene {
                 count += 1;
                 gi += 1;
             }
-            ranges.push((class, graph_hash, start, count));
+            // Check if any group in this range is forward-shaded (takes priority)
+            let is_forward = group_forward[gi - count as usize];
+            if is_forward {
+                forward_ranges.push((class, graph_hash, start, count));
+            } else {
+                // Check if any group in this range is transparent
+                let is_transparent = group_transparent[gi - count as usize];
+                if is_transparent {
+                    transparent_ranges.push((class, graph_hash, start, count));
+                } else {
+                    opaque_ranges.push((class, graph_hash, start, count));
+                }
+            }
         }
-        self.gpu_scene.material_class_ranges = ranges;
+        log::info!("[Scene] rebuilt material_class_ranges: opaque={:?} transparent={:?} forward={:?} ({} objects, {} draw groups)",
+            opaque_ranges, transparent_ranges, forward_ranges, n, draw_calls.len());
+        self.gpu_scene.material_class_ranges = opaque_ranges;
+        self.gpu_scene.transparent_material_class_ranges = transparent_ranges;
+        self.gpu_scene.forward_material_class_ranges = forward_ranges;
 
         // Patch each ObjectRecord with its new GPU slot so that in-frame
         // `update_object_transform` / `update_object_bounds` can update in-place.

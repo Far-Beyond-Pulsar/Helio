@@ -80,6 +80,7 @@ struct GpuInstanceData {
     normal_mat_1: vec4<f32>,
     normal_mat_2: vec4<f32>,
     bounds:       vec4<f32>,
+    prev_model:   mat4x4<f32>,
     mesh_id:      u32,
     material_id:  u32,
     flags:        u32,
@@ -94,7 +95,7 @@ struct VgDrawMetadata {
     reserved:       u32,
 }
 
-@group(0) @binding(0) var<uniform>       camera:        Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>       globals:       Globals;
 @group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read> draw_metadata: array<VgDrawMetadata>;
@@ -145,7 +146,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) draw_slot: u32) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
+    out.clip_position  = cameras[0].view_proj * world_pos;
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
@@ -308,7 +309,7 @@ fn vs_debug_lod(v: Vertex, @builtin(instance_index) draw_slot: u32) -> LodVertex
     let inst      = instance_data[draw.instance_index];
     let world_pos = inst.transform * vec4<f32>(v.position, 1.0);
     var out: LodVertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
+    out.clip_position  = cameras[0].view_proj * world_pos;
     out.world_position = world_pos.xyz;
     out.lod_level      = f32(lod_level);
     return out;

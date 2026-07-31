@@ -11,6 +11,8 @@ mod material_converter;
 mod mesh_converter;
 mod scene_converter;
 mod texture_loader;
+mod lut;
+mod ies;
 
 use helio::MeshId;
 use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, TextureId};
@@ -26,6 +28,8 @@ pub use mesh_converter::{convert_primitive, convert_vertex};
 pub use scene_converter::{
     convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
 };
+pub use lut::{CubeLut, LutError};
+pub use ies::{IesProfile, IesError};
 
 use std::path::Path;
 

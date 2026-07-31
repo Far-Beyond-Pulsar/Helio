@@ -19,6 +19,9 @@ struct GpuSurfaceJob {
     regular_max_indices: u32,
     transition_max_vertices: u32,
     transition_max_indices: u32,
+    regular_max_meshlets: u32,
+    transition_max_meshlets: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -32,6 +35,9 @@ struct GpuSurfaceState {
     regular_index_count: u32,
     transition_vertex_count: u32,
     transition_index_count: u32,
+    regular_meshlet_count: u32,
+    transition_meshlet_count: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -128,13 +134,13 @@ struct Camera {
     prev_view_proj: mat4x4<f32>,
 }
 struct Probe { combined: vec4<f32>, split: vec4<f32> }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read_write> probe: Probe;
 @compute @workgroup_size(1)
 fn main() {
     let world = vec4<f32>(2.6, -1.55, 0.0, 1.0);
-    probe.combined = camera.view_proj * world;
-    probe.split = camera.proj * (camera.view * world);
+    probe.combined = cameras[0].view_proj * world;
+    probe.split = cameras[0].proj * (cameras[0].view * world);
 }
 "#
                 .into(),
@@ -143,9 +149,9 @@ fn main() {
         let pipeline = compute_pipeline(&device, &shader, "main");
         let camera_buffer = initialized_buffer(
             &device,
-            "Camera Matrix Contract Uniform",
+            "Camera Matrix Contract Storage",
             bytemuck::bytes_of(&camera),
-            wgpu::BufferUsages::UNIFORM,
+            wgpu::BufferUsages::STORAGE,
         );
         let probe_buffer = initialized_buffer(
             &device,
@@ -431,6 +437,8 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
                 regular_index_count: 27,
                 transition_vertex_count: 13,
                 transition_index_count: 21,
+                regular_meshlet_count: 1,
+                transition_meshlet_count: 1,
                 ..Default::default()
             }
         );

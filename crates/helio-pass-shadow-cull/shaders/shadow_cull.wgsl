@@ -9,18 +9,22 @@ struct GpuShadowMatrix {
 }
 
 struct GpuInstance {
-    model_0:     vec4<f32>,
-    model_1:     vec4<f32>,
-    model_2:     vec4<f32>,
-    model_3:     vec4<f32>,
-    normal_0:    vec4<f32>,
-    normal_1:    vec4<f32>,
-    normal_2:    vec4<f32>,
-    bounds:      vec4<f32>,
-    mesh_id:     u32,
-    material_id: u32,
-    flags:       u32,
-    _pad:        u32,
+    model_0:      vec4<f32>,  //   0
+    model_1:      vec4<f32>,  //  16
+    model_2:      vec4<f32>,  //  32
+    model_3:      vec4<f32>,  //  48
+    normal_0:     vec4<f32>,  //  64
+    normal_1:     vec4<f32>,  //  80
+    normal_2:     vec4<f32>,  //  96
+    bounds:       vec4<f32>,  // 112
+    prev_model_0: vec4<f32>,  // 128
+    prev_model_1: vec4<f32>,  // 144
+    prev_model_2: vec4<f32>,  // 160
+    prev_model_3: vec4<f32>,  // 176
+    mesh_id:      u32,        // 192
+    material_id:  u32,        // 196
+    flags:        u32,        // 200
+    _pad:         u32,        // 204
 }
 
 struct DrawIndexedIndirect {
@@ -54,6 +58,9 @@ fn normalize_plane(p: vec4<f32>) -> vec4<f32> {
     return p;
 }
 
+/// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
+const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+
 fn sphere_in_frustum(vp: mat4x4<f32>, center: vec3<f32>, radius: f32) -> bool {
     let p0 = normalize_plane(vp[3] + vp[0]);
     if dot(p0.xyz, center) + p0.w + radius < 0.0 { return false; }
@@ -85,7 +92,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if face_dirty[face] == 0u { continue; }
 
         let vp = shadow_matrices[face].mat;
-        if sphere_in_frustum(vp, center, radius) {
+        // `INSTANCE_FLAG_ALWAYS_VISIBLE` disables *every* cull path for an instance, this
+        // one included. An object whose bounding sphere is too poor to test against the
+        // camera frustum is no better to test against a shadow frustum, and having it
+        // culled here would drop its shadow while the geometry itself still renders —
+        // a shadow that blinks out as the light moves.
+        if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u
+            || sphere_in_frustum(vp, center, radius) {
             let slot = atomicAdd(&face_counts[face], 1u);
             if slot < uniforms.max_draws_per_face {
                 let base = face * uniforms.max_draws_per_face;

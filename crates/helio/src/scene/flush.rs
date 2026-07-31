@@ -78,10 +78,13 @@ impl Scene {
         {
             let light_rec_count = self.lights.dense_len();
             let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+            let mut gpu_idx = 0u32;
 
             for i in 0..light_rec_count {
-                if let Some(record) = self.lights.get_dense(i) {
+                if let Some(record) = self.lights.get_dense_mut(i) {
                     if record.movability.can_move() {
+                        record.gpu_index = gpu_idx;
+                        gpu_idx += 1;
                         movable_lights.push(record.gpu);
                     }
                 }
@@ -248,6 +251,10 @@ impl Scene {
             self.vg_published_instance_dirty_range = Some(range);
             self.vg_instance_version = self.vg_instance_version.wrapping_add(1);
         }
+
+        // Foliage type/interactor mirrors. Both are internally dirty-gated, so this is a
+        // pair of predictable-branch no-ops in the overwhelmingly common steady state.
+        self.rebuild_foliage_buffers();
 
         // ── Voxel volume flush ───────────────────────────────────────────────
         {

@@ -1,6 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use std::borrow::Cow;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -55,7 +56,7 @@ pub struct DeferredLightPass {
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_2_key:
-        Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
+        Option<[usize; 14]>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -84,6 +85,8 @@ pub struct DeferredLightPass {
     fallback_planar_view: wgpu::TextureView,
     /// Linear clamp sampler for planar reflection blending.
     planar_sampler: wgpu::Sampler,
+    fallback_ies_view: wgpu::TextureView,
+    ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
     /// Whether the environment cubemap contributes indirect specular.
     pub enable_env_reflections: bool,
@@ -110,11 +113,21 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let raw_src = include_str!("../shaders/deferred_lighting.wgsl");
+        let src = if raw_src.contains("//!use pbr_eval") {
+            let mut resolved = String::with_capacity(
+                raw_src.len() + libhelio::shader::PBR_EVAL.len(),
+            );
+            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push('\n');
+            resolved.push_str(raw_src);
+            Cow::Owned(resolved)
+        } else {
+            Cow::Borrowed(raw_src)
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Deferred Lighting Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/deferred_lighting.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(src),
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -145,7 +158,7 @@ impl DeferredLightPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -296,6 +309,24 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // IES texture array (binding 18)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // IES sampler (binding 19)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 19,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -411,6 +442,67 @@ impl DeferredLightPass {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // IES fallback: 32×32, 2 layers.
+        // Layer 0 = spotlight gradient (bright centre, gaussian falloff) — for IES profiles
+        // Layer 1 = checkerboard grid — for gobo/cookie projection
+        const IES_FALLBACK_SIZE: u32 = 32;
+        let mut ies_data = Vec::with_capacity((IES_FALLBACK_SIZE * IES_FALLBACK_SIZE * 2) as usize);
+        // Layer 0: gaussian spotlight
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let u = (x as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let dist = (u * u + v * v).sqrt();
+                let gaussian = (-dist * dist * 4.0).exp();
+                ies_data.push((gaussian.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        // Layer 1: checkerboard gobo (alternating 4px squares)
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let tile = ((x / 4) + (y / 4)) & 1;
+                ies_data.push(if tile == 0 { 255u8 } else { 40u8 });
+            }
+        }
+        let fallback_ies_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DeferredLight IES Fallback"),
+            size: wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 2 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // Write layer 0 (IES spotlight)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[..(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
+        );
+        // Write layer 1 (gobo checkerboard)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize..],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
+        );
+        let fallback_ies_view = fallback_ies_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let ies_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("DeferredLight IES Sampler"),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
 
@@ -550,6 +642,8 @@ impl DeferredLightPass {
             fallback_ssr_view,
             fallback_planar_view,
             planar_sampler,
+            fallback_ies_view,
+            ies_sampler,
             debug_mode: 0,
             enable_env_reflections: false,
         }
@@ -603,6 +697,7 @@ impl RenderPass for DeferredLightPass {
             "baked_lightmap_sampler",
             "ssr_trace",
             "planar_reflection",
+            "ies_textures",
         ]
     }
 
@@ -612,6 +707,7 @@ impl RenderPass for DeferredLightPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
+        builder.read("ies_textures");
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
@@ -784,7 +880,7 @@ impl RenderPass for DeferredLightPass {
         // Planar reflection texture from PlanarReflectionPass
         let planar_view = ctx.resources.planar_reflection.get().unwrap_or(&self.fallback_planar_view);
 
-        let scene_key = (
+        let scene_key = [
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
             static_shadow_view as *const _ as usize,
@@ -797,7 +893,9 @@ impl RenderPass for DeferredLightPass {
             ctx.scene.reflection_captures as *const _ as usize,
             planar_view as *const _ as usize,
             &self.planar_sampler as *const _ as usize,
-        );
+            &self.fallback_ies_view as *const _ as usize,
+            &self.ies_sampler as *const _ as usize,
+        ];
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG2"),
@@ -862,6 +960,18 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 17,
                         resource: wgpu::BindingResource::Sampler(&self.planar_sampler),
+                    },
+                    // IES textures (binding 18) — from frame resources, fallback to identity
+                    wgpu::BindGroupEntry {
+                        binding: 18,
+                        resource: wgpu::BindingResource::TextureView(
+                            ctx.resources.ies_textures.get().unwrap_or(&self.fallback_ies_view)
+                        ),
+                    },
+                    // IES sampler (binding 19)
+                    wgpu::BindGroupEntry {
+                        binding: 19,
+                        resource: wgpu::BindingResource::Sampler(&self.ies_sampler),
                     },
                 ],
             }));

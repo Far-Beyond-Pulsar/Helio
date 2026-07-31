@@ -8,7 +8,7 @@ use web_time::Instant;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 
-use super::config::{PerfOverlayMode, RendererConfig};
+use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<
@@ -27,6 +27,7 @@ pub type GraphRebuilder = Arc<
 
 use crate::groups::GroupId;
 use crate::mesh::MeshBuffers;
+use crate::radiant::RadiantTemplateRegistry;
 use crate::scene::Scene;
 
 use super::config::GiConfig;
@@ -84,6 +85,12 @@ pub struct Renderer {
     pub(crate) shadow_face_capacity: u32,
     /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
     pub(crate) enable_ssr: bool,
+    /// Persisted so the resize rebuild reconstructs the same graph. Every flag the
+    /// rebuilder needs has to live here — a literal in `resize.rs` silently produces a
+    /// *different* pipeline after the first resize, which is exactly what happened when
+    /// this field was first added.
+    pub(crate) enable_foliage: bool,
+    pub(crate) foliage_blades_per_m2: Option<f32>,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
     /// TSR quality preset, preserved across graph rebuilds.
@@ -103,10 +110,14 @@ pub struct Renderer {
     pub(crate) corona_emitter_generation: u64,
     pub(crate) water_volumes_buffer: wgpu::Buffer,
     pub(crate) water_hitboxes_buffer: wgpu::Buffer,
+    pub(crate) foliage_interactors_buffer: wgpu::Buffer,
     pub(crate) pp_volumes_buffer: wgpu::Buffer,
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
+    /// Optional 3D LUT texture view for colour grading, set by the application.
+    pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
+    pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
@@ -127,6 +138,80 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+
+    /// Whether the graph was built with the sky passes present.
+    ///
+    /// `SkyLutPass`/`SkyPass` are added conditionally on `Scene::sky_context().has_sky` at
+    /// graph *build* time, but the natural call order is `Renderer::new(scene, graph)` and
+    /// only then populate the scene — so a scene that gains a sky afterwards has a graph
+    /// that will never draw it. Tracking what the graph was built with is what lets
+    /// `rebuild_graph_if_sky_changed` notice.
+    pub(crate) graph_has_sky: bool,
+
+    /// Engine-world transform of the headset's stage origin — the locomotion hook.
+    ///
+    /// Identity means the player stands at the world origin. Translating/rotating this
+    /// moves the player through the world without touching the scene, which is what
+    /// joystick locomotion drives. Applied to the located eye poses, so it moves the
+    /// cameras and nothing else.
+    pub(crate) xr_stage_transform: glam::Mat4,
+    /// Templates registered by the user for the gbuffer (opaque) path.
+    /// Preserved across graph rebuilds (resize).
+    pub(crate) template_registry: RadiantTemplateRegistry,
+
+    /// Templates registered by the user for the transparent path.
+    /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
+    pub(crate) transparent_template_registry: RadiantTemplateRegistry,
+    pub(crate) render_mode: RenderMode,
+    /// Whether the render graph was built in OpenXR multiview mode. Mirrors
+    /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
+    /// opt-in is not silently lost.
+    pub(crate) enable_xr: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR instance (owned so the runtime binding is kept alive).
+    pub(crate) xr_instance: Option<helio_xr::instance::XrInstance>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR session (frame waiter/stream, spaces). `None` in desktop
+    /// mirror mode.
+    pub(crate) xr: Option<helio_xr::session::XrSession>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// OpenXR swapchain whose images are wrapped as wgpu textures.
+    pub(crate) xr_swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Two-layer array depth texture for the multiview render pass. Distinct
+    /// from `depth_texture` (single-layer, used by passes that *sample* scene
+    /// depth as a plain `texture_depth_2d`).
+    pub(crate) xr_depth_texture: Option<wgpu::Texture>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_depth_view: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Layer-0 `D2` view of `xr_depth_texture` for depth-sampling passes.
+    pub(crate) xr_depth_view_layer0: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Consecutive frames skipped because the session was not focused/visible or
+    /// the runtime asked us not to render. Used to rate-limit diagnostic logs.
+    pub(crate) xr_idle_skips: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Application-provided camera template for XR frames: supplies
+    /// `postprocess_settings`, near/far and the representative position used
+    /// for RC bounds and the debug state. The per-eye view/proj are overridden
+    /// by the headset each frame.
+    pub(crate) xr_camera: Option<crate::scene::Camera>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// PC mirror blit: samples the acquired XR swapchain image (2-layer array)
+    /// and draws both eyes side-by-side to the mirror window surface.
+    pub(crate) xr_mirror_pipeline: Option<wgpu::RenderPipeline>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bgl: Option<wgpu::BindGroupLayout>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_sampler: Option<wgpu::Sampler>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bind_group: Option<(u32, wgpu::BindGroup)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Colour format of the PC mirror window surface; the blit pipeline's color
+    /// target must match it (usually Bgra8UnormSrgb on Windows), not the XR
+    /// swapchain format. Set via [`Renderer::set_xr_mirror_format`].
+    pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
 }
 
 pub struct DebugBatch<'a> {
@@ -410,6 +495,30 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
+    /// Access the gbuffer template registry (preserved across graph rebuilds).
+    /// Register custom surface templates here instead of through the pass
+    /// directly to ensure they survive window resize.
+    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
+        &mut self.template_registry
+    }
+
+    /// Access the transparent template registry for alpha-blended materials.
+    pub fn transparent_template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
+        &mut self.transparent_template_registry
+    }
+
+    /// Sync the renderer's template registries into the GpuScene so passes
+    /// can find them across graph rebuilds.
+    pub(crate) fn sync_template_registry_to_scene(&mut self) {
+        // Gbuffer templates
+        let reg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.template_registry.clone());
+        self.scene.set_template_registry(reg);
+
+        // Transparent templates (separate registry to avoid binding layout conflicts)
+        let treg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.transparent_template_registry.clone());
+        self.scene.set_transparent_template_registry(treg);
+    }
+
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
     }
@@ -506,6 +615,11 @@ impl Renderer {
         &self.queue
     }
 
+    /// Returns a reference to the GPU device.
+    pub fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+
     pub fn renderer_config(&self) -> RendererConfig {
         RendererConfig {
             width: self.output_width,
@@ -522,6 +636,137 @@ impl Renderer {
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
             tsr_quality: self.tsr_quality,
+            hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: self.render_mode,
+            enable_xr: self.enable_xr,
+            enable_foliage: self.enable_foliage,
+            foliage_blades_per_m2: self.foliage_blades_per_m2,
         }
+    }
+
+    /// Hand the renderer an OpenXR session and swapchain created by the
+    /// application (via `helio-xr`). All three are optional: `None` fields keep
+    /// the renderer in desktop (window) mode, which is the fallback when no
+    /// headset is connected.
+    ///
+    /// The swapchain must have been created from `session` and both must belong
+    /// to the same `wgpu::Device` the renderer was built with.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_session(
+        &mut self,
+        instance: Option<helio_xr::instance::XrInstance>,
+        session: Option<helio_xr::session::XrSession>,
+        swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    ) {
+        self.xr_instance = instance;
+        self.xr = session;
+        self.xr_swapchain = swapchain;
+    }
+
+    /// Predicted display time of the most recent XR frame, used to locate
+    /// controller poses (see `helio_xr::XrInput::grip_pose_matrices`) at the
+    /// same instant the eye views were located. `None` in desktop mode or
+    /// before the first XR frame has been waited on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_last_display_time(&self) -> Option<helio_xr::Time> {
+        self.xr.as_ref().map(|session| session.last_display_time)
+    }
+
+    /// Set the camera template used for XR frames (postprocess settings,
+    /// near/far planes, RC bounds position). The per-eye view/projection
+    /// matrices are overridden by the headset pose each frame; only the
+    /// post-processing settings and clip distances are read back.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_camera(&mut self, camera: crate::scene::Camera) {
+        self.xr_camera = Some(camera);
+    }
+
+    /// Set the PC mirror window's colour format (from the mirror surface's
+    /// capabilities) so the XR mirror blit pipeline's color target matches.
+    /// Usually `Bgra8UnormSrgb` on Windows.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
+        if self.xr_mirror_format != Some(format) {
+            self.xr_mirror_format = Some(format);
+            // The pipeline is keyed on the format; drop it so it is rebuilt.
+            self.xr_mirror_pipeline = None;
+        }
+    }
+
+    /// Whether the renderer was built with the OpenXR multiview path enabled.
+    pub fn xr_enabled(&self) -> bool {
+        self.enable_xr
+    }
+
+    /// Returns a reference to the post-process uniform buffer.
+    pub fn postprocess_buffer(&self) -> &wgpu::Buffer {
+        &self.postprocess_buffer
+    }
+
+    /// Set or clear the 3D colour grading LUT texture.
+    /// Call with `None` to disable LUT grading.
+    /// The LUT texture must be `Rgba16Float`, `TextureDimension::D3`.
+    pub fn set_color_grading_lut(&mut self, view: Option<wgpu::TextureView>) {
+        self.color_grading_lut_view = view;
+    }
+
+    /// Returns the current colour grading LUT view, if any.
+    pub fn color_grading_lut(&self) -> Option<&wgpu::TextureView> {
+        self.color_grading_lut_view.as_ref()
+    }
+
+    /// Upload an IES profile texture to the scene's IES texture array.
+    ///
+    /// The texture should be a single R8Unorm 256×256 layer containing the
+    /// IES angular intensity distribution. Returns the layer index to use
+    /// as `ies_profile_index` / `light_function_index` on GpuLight.
+    ///
+    /// Currently creates a new array texture each call (single-profile).
+    /// Multi-profile support can be added by growing the array.
+    pub fn upload_ies_texture(&mut self, data: &[u8], width: u32, height: u32) -> Option<u32> {
+        if data.len() < (width * height) as usize {
+            return None;
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("IES Texture Array"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        self.ies_texture_view = Some(view);
+        Some(0) // always layer 0 for now
+    }
+
+    /// Returns the current IES texture array view, if any.
+    pub fn ies_texture_view(&self) -> Option<&wgpu::TextureView> {
+        self.ies_texture_view.as_ref()
+    }
+
+    /// Set the IES texture array view directly (for multi-layer arrays).
+    pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
+        self.ies_texture_view = Some(view);
     }
 }

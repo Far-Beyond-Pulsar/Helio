@@ -24,7 +24,7 @@ struct Camera {
     position_near: vec4<f32>,     // bytes 256 – 271
     direction_far: vec4<f32>,     // bytes 272 – 287
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 struct CullParams {
     screen_width:         u32,
@@ -44,20 +44,24 @@ struct CullParams {
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
 
-// GpuInstanceData: 144 bytes, must match libhelio/src/instance.rs exactly.
+// GpuInstanceData: 208 bytes, must match libhelio/src/instance.rs exactly.
 struct GpuInstanceData {
-    model_col0:  vec4<f32>,  //   0 – 15
-    model_col1:  vec4<f32>,  //  16 – 31
-    model_col2:  vec4<f32>,  //  32 – 47
-    model_col3:  vec4<f32>,  //  48 – 63
-    normal_col0: vec4<f32>,  //  64 – 79   (w = padding)
-    normal_col1: vec4<f32>,  //  80 – 95
-    normal_col2: vec4<f32>,  //  96 – 111
-    bounds:      vec4<f32>,  // 112 – 127  (xyz = world-space sphere center, w = radius)
-    mesh_id:     u32,        // 128
-    material_id: u32,        // 132
-    flags:       u32,        // 136
-    _pad:        u32,        // 140
+    model_col0:      vec4<f32>,  //   0 – 15
+    model_col1:      vec4<f32>,  //  16 – 31
+    model_col2:      vec4<f32>,  //  32 – 47
+    model_col3:      vec4<f32>,  //  48 – 63
+    normal_col0:     vec4<f32>,  //  64 – 79   (w = padding)
+    normal_col1:     vec4<f32>,  //  80 – 95
+    normal_col2:     vec4<f32>,  //  96 – 111
+    bounds:          vec4<f32>,  // 112 – 127  (xyz = world-space sphere center, w = radius)
+    prev_model_col0: vec4<f32>,  // 128 – 143
+    prev_model_col1: vec4<f32>,  // 144 – 159
+    prev_model_col2: vec4<f32>,  // 160 – 175
+    prev_model_col3: vec4<f32>,  // 176 – 191
+    mesh_id:         u32,        // 192
+    material_id:     u32,        // 196
+    flags:           u32,        // 200
+    _pad:            u32,        // 204
 }
 @group(0) @binding(2) var<storage, read> instances: array<GpuInstanceData>;
 
@@ -123,7 +127,7 @@ fn ndc_to_uv(ndc_xy: vec2<f32>) -> vec2<f32> {
 /// proj[1][1] = cot(fovY/2) = 2n/h for a standard perspective matrix.
 fn screen_radius_px(world_radius: f32, clip_w: f32) -> f32 {
     let half_h = f32(params.screen_height) * 0.5;
-    return abs(world_radius / clip_w * camera.proj[1][1] * half_h);
+    return abs(world_radius / clip_w * cameras[0].proj[1][1] * half_h);
 }
 
 /// Select HiZ mip level for a sphere footprint of `r_px` pixels.
@@ -136,7 +140,7 @@ fn pick_mip(r_px: f32) -> u32 {
 /// Conservative sphere near depth in NDC [0,1].
 /// Projects the point on the sphere nearest to the camera into NDC depth.
 fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
     let to_center = center - cam_pos;
     let dist_sq = dot(to_center, to_center);
     if dist_sq <= radius * radius {
@@ -145,7 +149,7 @@ fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
     }
     let dir = to_center * (1.0 / sqrt(dist_sq));
     let near_ws = center - dir * radius;
-    let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+    let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
     // Protect against near_clip.w <= 0 (shouldn't happen since camera is outside)
     if near_clip.w <= 0.0 {
         return 0.0;
@@ -165,14 +169,14 @@ fn instance_hiz_occluded(inst: GpuInstanceData) -> bool {
         return false;
     }
 
-    let clip = camera.view_proj * vec4<f32>(center, 1.0);
+    let clip = cameras[0].view_proj * vec4<f32>(center, 1.0);
     if clip.w <= 0.0 {
         return false;
     }
 
     let ndc_r = max(
-        abs(radius * camera.proj[0][0] / clip.w),
-        abs(radius * camera.proj[1][1] / clip.w),
+        abs(radius * cameras[0].proj[0][0] / clip.w),
+        abs(radius * cameras[0].proj[1][1] / clip.w),
     );
     let ndc = clip.xyz / clip.w;
     let uv = ndc_to_uv(ndc.xy);
@@ -230,7 +234,15 @@ fn instance_pvs_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
 
 /// Returns true when an instance is occluded by either Hi-Z or static PVS.
 /// Matches original logic: occluded if (HiZ occluded) OR (PVS occluded when available).
+/// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
+const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+
 fn instance_is_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
+    // Per-object cull opt-out — must be honoured here as well as in the frustum stage,
+    // or an object marked always-visible still vanishes behind the Hi-Z test.
+    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+        return false;
+    }
     if instance_hiz_occluded(inst) {
         return true;
     }
@@ -259,7 +271,7 @@ fn main(
     }
 
     let dc = draw_calls[idx];
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
 
     // Cooperatively Hi-Z-test only the instances that already survived
     // frustum culling (`visible_count` of them, packed in `compacted_indices`

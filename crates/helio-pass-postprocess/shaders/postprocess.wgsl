@@ -123,7 +123,27 @@ struct GpuPostProcessUniforms {
     fog_color:                 vec3<f32>, // 336
     _pad_fog_color:            f32,   // 348
     fog_emissive:              vec3<f32>, // 352
-    _pad_fog_emissive:         f32,   // 364 → struct ends at 368
+    _pad_fog_emissive:         f32,   // 364
+    // ── HDR Output (16 bytes) ──
+    hdr_output_mode:           u32,   // 368
+    hdr_max_nits:              f32,   // 372
+    hdr_ui_brightness:         f32,   // 376
+    _pad_hdr_end:              f32,   // 380
+    // ── Advanced Color Grading (80 bytes) ──
+    lift_color:                vec3<f32>, // 384
+    _pad_lift:                 f32,   // 396
+    gamma_color:               vec3<f32>, // 400
+    _pad_gamma:                f32,   // 412
+    gain_color:                vec3<f32>, // 416
+    _pad_gain:                 f32,   // 428
+    shadows_max:               f32,   // 432
+    highlights_min:            f32,   // 436
+    shadow_highlight_balance:  f32,   // 440
+    hue_shift:                 f32,   // 444
+    lut_generation:            u32,   // 448
+    lut_intensity:             f32,   // 452
+    lut_platform:              u32,   // 456
+    _pad_grading_end:          f32,   // 460 → struct ends at 464
 }
 
 struct CameraUniforms {
@@ -157,7 +177,7 @@ struct GpuPostProcessVolume {
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
-@group(0) @binding(1)  var<uniform>            camera:       CameraUniforms;
+@group(0) @binding(1)  var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(2)  var                     hdr_input:    texture_2d<f32>;
 @group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
 @group(0) @binding(4)  var                     linear_samp:  sampler;
@@ -178,6 +198,8 @@ struct GpuPostProcessVolume {
 // integrated from the camera to that froxel's depth. Bound to a 1x1x1 (0,0,0,1)
 // fallback when no fog pass is in the graph, which composites to a no-op.
 @group(0) @binding(17) var                     fog_input:    texture_3d<f32>;
+@group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
+@group(0) @binding(19) var                     lut_tex:      texture_3d<f32>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 
@@ -284,18 +306,32 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.fog_scattering_anisotropy = lerpf(base.fog_scattering_anisotropy, vol.fog_scattering_anisotropy, t);
     r.fog_color                 = lerp3v(base.fog_color, vol.fog_color, t);
     r.fog_emissive              = lerp3v(base.fog_emissive, vol.fog_emissive, t);
+    r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t > 0.5);
+    r.hdr_max_nits              = lerpf(base.hdr_max_nits, vol.hdr_max_nits, t);
+    r.hdr_ui_brightness         = lerpf(base.hdr_ui_brightness, vol.hdr_ui_brightness, t);
+    r.lift_color                = lerp3v(base.lift_color, vol.lift_color, t);
+    r.gamma_color               = lerp3v(base.gamma_color, vol.gamma_color, t);
+    r.gain_color                = lerp3v(base.gain_color, vol.gain_color, t);
+    r.shadows_max               = lerpf(base.shadows_max, vol.shadows_max, t);
+    r.highlights_min            = lerpf(base.highlights_min, vol.highlights_min, t);
+    r.shadow_highlight_balance  = lerpf(base.shadow_highlight_balance, vol.shadow_highlight_balance, t);
+    r.hue_shift                 = lerpf(base.hue_shift, vol.hue_shift, t);
+    r.lut_generation            = select(base.lut_generation, vol.lut_generation, t > 0.5);
+    r.lut_intensity             = lerpf(base.lut_intensity, vol.lut_intensity, t);
+    r.lut_platform              = select(base.lut_platform, vol.lut_platform, t > 0.5);
     // Padding fields are implicitly copied via the field-by-field assignment above.
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
-    r._pad13 = 0.0; r._pad14 = 0.0;
-    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0;
+    r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
+    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0; r._pad_hdr_end = 0.0;
+    r._pad_lift = 0.0; r._pad_gamma = 0.0; r._pad_gain = 0.0; r._pad_grading_end = 0.0;
     return r;
 }
 
 @compute @workgroup_size(1, 1, 1)
 fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
     var vol_count: u32 = 0u;
 
     // Phase 1: evaluate all active volumes, store weight + index
@@ -539,7 +575,57 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
 
 // ── Color grading ──────────────────────────────────────────────────────────────
 
+fn apply_lift_gamma_gain(c: vec3<f32>) -> vec3<f32> {
+    // Lift/Gamma/Gain colour wheels
+    // shadows = c * (1 - lift) + lift  (lift shifts shadows)
+    // midtones = pow(c, gamma)
+    // highlights = c * gain
+    var result = c;
+    let lift  = postprocess.lift_color;
+    let gamma = postprocess.gamma_color;
+    let gain  = postprocess.gain_color;
+    result = result * (vec3<f32>(1.0) - lift) + lift;
+    result = pow(max(result, vec3<f32>(0.0)), gamma + vec3<f32>(1.0));
+    result = result * gain;
+    return result;
+}
+
+fn hue_shift_rgb(c: vec3<f32>, shift_deg: f32) -> vec3<f32> {
+    if abs(shift_deg) < 0.001 { return c; }
+    let angle = shift_deg * 3.14159265 / 180.0;
+    let cos_a = cos(angle);
+    let sin_a = sin(angle);
+    // RGB hue rotation matrix
+    let m = mat3x3<f32>(
+        vec3<f32>(0.213, 0.213 - 0.213 * cos_a + 0.144 * sin_a, 0.213 - 0.213 * cos_a - 0.756 * sin_a),
+        vec3<f32>(0.715, 0.715 - 0.715 * cos_a - 0.283 * sin_a, 0.715 - 0.715 * cos_a + 0.416 * sin_a),
+        vec3<f32>(0.072, 0.072 - 0.072 * cos_a + 0.860 * sin_a, 0.072 - 0.072 * cos_a - 0.461 * sin_a),
+    );
+    return m * c;
+}
+
+fn sample_lut(c: vec3<f32>) -> vec3<f32> {
+    let uv = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return textureSampleLevel(lut_tex, linear_samp, uv, 0.0).rgb;
+}
+
+fn apply_lut_grade(color: vec3<f32>) -> vec3<f32> {
+    // Pre-LUT: hue shift
+    var c = hue_shift_rgb(color, postprocess.hue_shift);
+    // Sample LUT
+    let graded = sample_lut(c);
+    // Blend by intensity
+    c = mix(c, graded, postprocess.lut_intensity);
+    // Post-LUT: lift/gamma/gain
+    c = apply_lift_gamma_gain(c);
+    return c;
+}
+
 fn color_grade(color: vec3<f32>) -> vec3<f32> {
+    if postprocess.lut_platform > 0u {
+        return apply_lut_grade(color);
+    }
+    // Simple path (backward compatibility)
     var c = color;
     c = c * postprocess.color_gain + postprocess.color_offset;
     c = pow(max(c, vec3<f32>(0.0)), postprocess.color_gamma);
@@ -611,7 +697,7 @@ fn apply_grain(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 //   dof_aperture_shape > 0 → DOF_MODE_BOKEH with floor(shape) blades
 
 fn dof_coc(depth: f32) -> f32 {
-    let linear_depth = -camera.proj[3][2] / (depth * 2.0 - 1.0 + camera.proj[2][2]);
+    let linear_depth = -cameras[0].proj[3][2] / (depth * 2.0 - 1.0 + cameras[0].proj[2][2]);
     let focal_dist = postprocess.dof_focal_distance;
     let focal_region = postprocess.dof_focal_region;
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0) / max(postprocess.dof_near_transition, 0.001);
@@ -653,20 +739,25 @@ fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> ve
 
 // ── Motion blur ────────────────────────────────────────────────────────────────
 
-fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     if postprocess.motion_blur_enabled == 0u { return color; }
-    var blurred = color;
-    let samples = 8u;
-    let amount = postprocess.motion_blur_amount * postprocess.blend_weight_motion_blur;
-    if amount <= 0.0 { return color; }
-    let velocity = vec2<f32>(amount, 0.0);
-    let max_len = postprocess.motion_blur_max / f32(textureDimensions(hdr_input).x);
-    for (var i = 1u; i < samples; i++) {
+
+    let velocity = textureLoad(velocity_tex, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0).rg;
+    let vel_len = length(velocity);
+    if vel_len < 0.5 { return color; }
+
+    let max_len = postprocess.motion_blur_max;
+    let clamped_vel = normalize(velocity) * min(vel_len, max_len);
+    let samples = min(i32(vel_len / 2.0 + 2.0), 16);
+    let step = clamped_vel / f32(samples) / dims;
+
+    var blurred = vec3<f32>(0.0);
+    for (var i = 0; i < samples; i++) {
         let t = f32(i) / f32(samples);
-        let sample_uv = uv - velocity * t * max_len;
+        let sample_uv = uv - step * f32(i);
         blurred += textureSampleLevel(hdr_input, linear_samp, sample_uv, 0.0).rgb;
     }
-    return blurred / f32(samples + 1u);
+    return blurred / f32(samples + 1);
 }
 
 // ── fs_uber ────────────────────────────────────────────────────────────────────
@@ -699,7 +790,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
         let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
         // Slices are planes of constant view depth, so convert the buffer value
         // rather than using radial distance.
-        let view_depth = helio_view_depth(fog_d, camera.position_near.w, camera.forward_far.w);
+        let view_depth = helio_view_depth(fog_d, cameras[0].position_near.w, cameras[0].forward_far.w);
         let slice = clamp(
             helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance),
             0.0,
@@ -754,9 +845,43 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     color = apply_dof(color, uv, raw_depth, dims);
 
     // 10. Motion blur
-    color = apply_motion_blur(color, uv);
+    color = apply_motion_blur(color, uv, dims);
 
     //%P3
+
+    // 11. HDR display encoding
+    //
+    // Scene values are in arbitrary linear units. The uniform fields
+    // hdr_max_nits and hdr_ui_brightness map them to cd/m²:
+    //   scene value = hdr_ui_brightness  →  hdr_max_nits cd/m²
+    //   scene value = 1.0                →  hdr_max_nits / hdr_ui_brightness cd/m²
+    if postprocess.hdr_output_mode == 1u {
+        // HDR10: PQ ST 2084 per-channel + BT.2020 gamut
+        const PQ_M1: f32 = 0.1593017578125;
+        const PQ_M2: f32 = 78.84375;
+        const PQ_C1: f32 = 0.8359375;
+        const PQ_C2: f32 = 18.8515625;
+        const PQ_C3: f32 = 18.6875;
+        const REC709_TO_BT2020: mat3x3<f32> = mat3x3<f32>(
+            vec3<f32>(0.6274, 0.0691, 0.0164),
+            vec3<f32>(0.3293, 0.9355, 0.1370),
+            vec3<f32>(0.0433, -0.0046, 0.8466),
+        );
+        // Map scene units → absolute linear cd/m²
+        let scene_to_nits = postprocess.hdr_max_nits / max(postprocess.hdr_ui_brightness, 0.001);
+        color = color * (scene_to_nits / 10000.0);  // normalise to [0, 1] where 1 = 10000 nits
+        // BT.2020 primaries (applied to linear scene values)
+        color = REC709_TO_BT2020 * color;
+        // PQ ST 2084 per-channel: linear light → non-linear code values
+        let Y = pow(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(PQ_M1));
+        color = pow((PQ_C1 + PQ_C2 * Y) / (vec3<f32>(1.0) + PQ_C3 * Y), vec3<f32>(PQ_M2));
+    } else if postprocess.hdr_output_mode == 2u {
+        // scRGB: linear float, 1.0 = 80 cd/m²
+        let scene_to_nits = postprocess.hdr_max_nits / max(postprocess.hdr_ui_brightness, 0.001);
+        color = color * (scene_to_nits / 80.0);
+        color = clamp(color, vec3<f32>(0.0), vec3<f32>(65504.0)); // f16 max
+    }
+    // LDR (mode 0) and Passthrough (mode 3): pass through as-is
 
     return vec4<f32>(color, 1.0);
 }

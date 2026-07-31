@@ -1,6 +1,19 @@
 use crate::material::MAX_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// G-buffer → deferred lighting (current default)
+    #[default]
+    Deferred,
+    /// Forward-lit pass for all opaque geometry, no G-buffer.
+    /// Transparent pass still runs on top. Suitable for VR stereo.
+    ForwardOpaque,
+    /// Everything forward — both opaque and transparent use forward passes.
+    /// Suitable for WebGPU low-end or simple scenes.
+    ForwardOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum PerfOverlayMode {
     #[default]
@@ -9,6 +22,32 @@ pub enum PerfOverlayMode {
     ShaderComplexity = 2,
     TileLightCount = 3,
     PassOutput = 4,
+}
+
+/// Select the best available surface texture format for the given HDR output mode.
+///
+/// * `Ldr` — prefers an sRGB format (`Rgba8UnormSrgb` / `Bgra8UnormSrgb`)
+/// * `Hdr10` — prefers `Rgba16Float` (PQ encoded in shader; system handles display)
+/// * `ScRgb` — prefers `Rgba16Float` (linear float, Windows HDR / macOS EDR)
+/// * `Passthrough` — prefers `Rgba16Float` (raw HDR float)
+///
+/// Falls back to the first available format if no preferred format is found.
+pub fn select_hdr_surface_format(
+    caps: &wgpu::SurfaceCapabilities,
+    mode: libhelio::HdrOutputMode,
+) -> wgpu::TextureFormat {
+    let preferred = match mode {
+        libhelio::HdrOutputMode::Ldr => {
+            caps.formats.iter().find(|f| f.is_srgb()).copied()
+        }
+        libhelio::HdrOutputMode::Hdr10
+        | libhelio::HdrOutputMode::ScRgb
+        | libhelio::HdrOutputMode::Passthrough => {
+            caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba16Float).copied()
+                .or_else(|| caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba32Float).copied())
+        }
+    };
+    preferred.unwrap_or(caps.formats[0])
 }
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
@@ -98,6 +137,19 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
             .min(adapter_limits.max_sampled_textures_per_shader_stage),
         max_samplers_per_shader_stage: (MAX_TEXTURES as u32)
             .min(adapter_limits.max_samplers_per_shader_stage),
+        // Clamped to 4 GiB - 1 because wgpu-core's indirect-draw validation asserts
+        // `max_buffer_size <= u32::MAX` while building its helper pipelines, and that
+        // assertion runs at *device creation*:
+        //
+        //   wgpu-core/src/indirect_validation/draw.rs:72
+        //   assertion failed: limits.max_buffer_size <= u32::MAX as u64
+        //
+        // Every other limit here is taken straight from the adapter, and on a GPU
+        // reporting more than 4 GiB of addressable buffer that spread is a hard panic
+        // before a single frame is drawn. Helio allocates nothing near this ceiling — the
+        // largest single buffer in the engine is the foliage blade arena at a few hundred
+        // MiB — so lowering it costs nothing real.
+        max_buffer_size: adapter_limits.max_buffer_size.min(u32::MAX as u64),
         ..adapter_limits
     }
 }
@@ -163,6 +215,26 @@ pub struct RendererConfig {
     /// 1×1 black fallback when the pass is absent, so disabling it costs only
     /// the reflection contribution.
     pub enable_ssr: bool,
+    /// Enable the foliage passes. Default `true`.
+    ///
+    /// This is the outermost of three independent zero-cost guarantees, and the only one
+    /// that removes the passes from the graph entirely. The other two are runtime: with
+    /// the passes present but no foliage types registered, `Scene` leaves the `foliage`
+    /// frame slot unwritten and both passes early-out; with types registered but the ring
+    /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
+    ///
+    /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
+    /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
+    pub enable_foliage: bool,
+    /// Foliage density budget in blades per square metre, or `None` for the quality
+    /// preset default.
+    ///
+    /// Sizes the blade arena at graph-build time: `blades_per_tile = density * 64`, times
+    /// the ring's tile count, times 16 bytes. Density is a ceiling set by allocation, so
+    /// raising it here is the only way to get denser grass — raising the quality preset
+    /// does not, because a wider ring grows the tile count as its square and the per-tile
+    /// slab barely moves. Range and density are separate axes.
+    pub foliage_blades_per_m2: Option<f32>,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -184,16 +256,30 @@ pub struct RendererConfig {
 
     /// Temporal Super-Resolution quality preset.
     ///
-    /// When `Some`, the graph builder replaces the simple bilinear upscale in
-    /// `TaaPass` with a full [`TsrPass`](helio_pass_tsr::TsrPass).  The preset
+    /// When `Some`, the graph builder replaces `FxaaPass` (and the old bilinear
+    /// TAA upscale) with a full [`TsrPass`](helio_pass_tsr::TsrPass).  The preset
     /// controls the neighbourhood tap count and temporal accumulation rate.
     ///
     /// Setting this automatically adjusts the recommended `render_scale`:
     /// call [`with_tsr_quality`](Self::with_tsr_quality) instead of setting
     /// this field directly so that `render_scale` is kept consistent.
     ///
-    /// `None` (default) keeps the existing TAA-only path.
+    /// `None` (default) keeps the existing FXAA-only path.
     pub tsr_quality: Option<helio_pass_tsr::TsrQuality>,
+
+    /// HDR display output mode. Default `Ldr`.
+    pub hdr_output_mode: libhelio::HdrOutputMode,
+    pub render_mode: RenderMode,
+    /// Enable the OpenXR render path. When `true` the graph is built in
+    /// multiview mode (2-layer array targets, `multiview_mask = 0b11`) and the
+    /// app is expected to drive the headset through
+    /// [`Renderer::render_xr`](crate::Renderer#method.render_xr) instead of
+    /// [`Renderer::render`](crate::Renderer#method.render). Default `false`.
+    ///
+    /// Note: this does *not* create an OpenXR session — the app still has to
+    /// create the `helio-xr` session/swapchain and hand it to the renderer via
+    /// [`Renderer::set_xr_session`](crate::Renderer#method.set_xr_session).
+    pub enable_xr: bool,
 }
 
 impl RendererConfig {
@@ -210,9 +296,14 @@ impl RendererConfig {
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
             enable_ssr: false,
+            enable_foliage: true,
+            foliage_blades_per_m2: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,
+            hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: RenderMode::Deferred,
+            enable_xr: false,
         }
     }
 
@@ -251,6 +342,28 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
+        self
+    }
+
+    /// Enable/disable the OpenXR (multiview) render path.
+    ///
+    /// When `true` the graph allocates its internal targets as 2-layer arrays
+    /// and every render pass uses `multiview_mask = 0b11`, so both eye layers
+    /// are written in a single pass. The demo should pair this with
+    /// [`RenderMode::ForwardOpaque`] and set width/height to the XR eye
+    /// resolution reported by the runtime.
+    pub fn with_xr_mode(mut self, active: bool) -> Self {
+        self.enable_xr = active;
+        self
+    }
+
+    pub fn with_hdr_output_mode(mut self, mode: libhelio::HdrOutputMode) -> Self {
+        self.hdr_output_mode = mode;
         self
     }
 

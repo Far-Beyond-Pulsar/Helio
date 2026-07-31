@@ -41,9 +41,17 @@ struct GpuLight {
     god_rays_weight:   f32,
     god_rays_decay:    f32,
     god_rays_exposure: f32,
-    _pad2_0:           u32,
-    _pad2_1:           u32,
-    _pad2_2:           u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct MeshletParams {
@@ -53,14 +61,14 @@ struct MeshletParams {
     _pad2:       u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(2) var<uniform> params: MeshletParams;
 
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_pos = camera.view_proj * vec4(v.data.xyz, 1.0);
+    out.clip_pos = cameras[0].view_proj * vec4(v.data.xyz, 1.0);
     out.material = u32(v.data.w);
     out.world_pos = v.data.xyz;
     out.world_normal = normalize(v.normal.xyz);

@@ -78,12 +78,12 @@ impl LightCullPass {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LightCull BGL"),
             entries: &[
-                // 0: camera uniform
+                // 0: camera storage
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -241,6 +241,15 @@ impl RenderPass for LightCullPass {
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         frame.tile_light_lists.write(&self.tile_light_lists, "LightCull");
         frame.tile_light_counts.write(&self.tile_light_counts, "LightCull");
+        frame.cluster_light_grid.write(
+            libhelio::ClusterLightGrid {
+                tile_light_lists: &self.tile_light_lists,
+                tile_light_counts: &self.tile_light_counts,
+                num_tiles_x: self.num_tiles_x,
+                num_tiles_y: self.num_tiles_y,
+            },
+            "LightCull",
+        );
     }
 
     fn render_pass_descriptor<'a>(

@@ -121,12 +121,12 @@ impl OcclusionCullPass {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("OcclusionCull BGL"),
             entries: &[
-                // 0: Camera uniform
+                // 0: Camera storage
                 wgpu::BindGroupLayoutEntry {
                     binding:    0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Uniform,
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size:   None,
                     },

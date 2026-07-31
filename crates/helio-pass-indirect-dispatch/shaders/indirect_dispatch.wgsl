@@ -21,18 +21,22 @@ struct CullUniforms {
 }
 
 struct GpuInstance {
-    model_0:     vec4<f32>,
-    model_1:     vec4<f32>,
-    model_2:     vec4<f32>,
-    model_3:     vec4<f32>,
-    normal_0:    vec4<f32>,
-    normal_1:    vec4<f32>,
-    normal_2:    vec4<f32>,
-    bounds:      vec4<f32>,  // xyz = world-space center, w = world-space radius
-    mesh_id:     u32,
-    material_id: u32,
-    flags:       u32,
-    _pad:        u32,
+    model_0:      vec4<f32>,  //   0
+    model_1:      vec4<f32>,  //  16
+    model_2:      vec4<f32>,  //  32
+    model_3:      vec4<f32>,  //  48
+    normal_0:     vec4<f32>,  //  64
+    normal_1:     vec4<f32>,  //  80
+    normal_2:     vec4<f32>,  //  96
+    bounds:       vec4<f32>,  // 112 — xyz = world-space center, w = world-space radius
+    prev_model_0: vec4<f32>,  // 128
+    prev_model_1: vec4<f32>,  // 144
+    prev_model_2: vec4<f32>,  // 160
+    prev_model_3: vec4<f32>,  // 176
+    mesh_id:      u32,        // 192
+    material_id:  u32,        // 196
+    flags:        u32,        // 200
+    _pad:         u32,        // 204
 }
 
 struct GpuDrawCall {
@@ -58,7 +62,7 @@ struct DrawIndexedIndirect {
     first_instance: u32,
 }
 
-@group(0) @binding(0) var<uniform>            camera:     Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>            cull:       CullUniforms;
 @group(0) @binding(2) var<storage, read>      instances:  array<GpuInstance>;
 @group(0) @binding(3) var<storage, read>      draw_calls: array<GpuDrawCall>;
@@ -109,7 +113,17 @@ fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
     return true;
 }
 
+/// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
+const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+
 fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> bool {
+    // Per-object cull opt-out. Culling here is driven by one world-space bounding sphere,
+    // which is a poor fit for very large or very flat geometry (a ground plane's sphere
+    // is set by its diagonal): such objects cull almost nothing and are easy to bound
+    // wrongly in the direction that deletes visible geometry.
+    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+        return true;
+    }
     let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
     let aabb_degenerate = all(aabb.min == aabb.max);
     let sphere_visible = sphere_in_frustum(inst.bounds.xyz, inst.bounds.w);
@@ -139,11 +153,28 @@ fn main(
             compacted_indices[dc.first_instance + slot] = slot_idx;
 
             // Sub-pixel test: check if this instance projects to ≥ 1 pixel.
-            let clip_pos = camera.view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
-            if clip_pos.w > 0.0 {
-                let r_ndc = abs(inst.bounds.w * camera.proj[1][1] / clip_pos.w);
-                if r_ndc >= 0.001 {
-                    atomicStore(&wg_nonsubpixel, 1u);
+            //
+            // This is a third rejection path, independent of the frustum and Hi-Z tests:
+            // a batch where no instance is marked non-subpixel is dropped wholesale
+            // below, so an instance that passes `test_instance` still disappears if it
+            // fails to set this flag.
+            //
+            // It is evaluated at the bounding sphere's *centre*, which is why a large
+            // object needs the opt-out: the ground plane's centre is the world origin, so
+            // as soon as the camera looks away from the origin `clip_pos.w <= 0.0`, the
+            // test is skipped, nothing sets `wg_nonsubpixel`, and the whole ground is
+            // culled as "subpixel only" — while covering the screen. Direction-dependent
+            // disappearance of large geometry is the signature of this path, not of
+            // frustum culling.
+            if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+                atomicStore(&wg_nonsubpixel, 1u);
+            } else {
+                let clip_pos = cameras[0].view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
+                if clip_pos.w > 0.0 {
+                    let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
+                    if r_ndc >= 0.001 {
+                        atomicStore(&wg_nonsubpixel, 1u);
+                    }
                 }
             }
             if (inst.flags & 1u) != 0u {

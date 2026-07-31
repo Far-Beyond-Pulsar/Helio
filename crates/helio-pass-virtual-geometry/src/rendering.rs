@@ -136,7 +136,7 @@ impl VirtualGeometryPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -284,7 +284,7 @@ impl VirtualGeometryPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -618,7 +618,7 @@ impl VirtualGeometryPass {
     fn make_instance_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Buffer"),
-            size: capacity * 144,
+            size: capacity * std::mem::size_of::<GpuInstanceData>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -762,7 +762,7 @@ impl RenderPass for VirtualGeometryPass {
                 self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
             }
-            let instance_capacity = self.instance_buf.size() / 144;
+            let instance_capacity = self.instance_buf.size() / std::mem::size_of::<GpuInstanceData>() as u64;
             if (vg.object_count as u64) > instance_capacity {
                 self.instance_buf = Self::make_instance_buf(ctx.device, vg.object_count as u64 * 2);
                 self.instance_cull_buf =
@@ -1279,7 +1279,17 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         {
-            let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            // Standalone execution with no fused render pass (e.g. a forward
+            // graph without a G-buffer): VirtualGeometry has no target to write
+            // to. Skip rather than panic so a forward graph containing VG
+            // objects degrades to "not rendered" instead of crashing the frame.
+            let Some(active) = ctx.active_render_pass_ptr() else {
+                log::warn!(
+                    "VirtualGeometryPass: no active render pass (forward graph without G-buffer); skipping VG draw"
+                );
+                return Ok(());
+            };
+            let rpass = unsafe { &mut *active };
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);

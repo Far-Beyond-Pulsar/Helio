@@ -29,9 +29,9 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PostProcessVolumeId,
-    ReflectionCaptureId, SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId,
-    WaterHitboxId, WaterVolumeId,
+    DecalId, FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId,
+    MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
+    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -42,11 +42,12 @@ pub use picking::{PickHit, ScenePicker};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, DebugCameraUniform, DebugDrawPass,
-    DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
+    DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererConfig,
 };
 pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
-    Camera, DecalActor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
+    Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
+    GpuFoliageInteractor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
     ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
     SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
     WaterHitboxActor, WaterHitboxDescriptor,
@@ -66,7 +67,7 @@ pub use helio_core::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
     RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
-pub use libhelio::{LightType, Movability, ShadowQuality, SkyActor, VolumetricClouds};
+pub use libhelio::{HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator, VolumetricClouds};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].

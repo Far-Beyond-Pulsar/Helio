@@ -181,4 +181,27 @@ impl Scene {
         self.gpu_scene.camera.update(uniforms);
         self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
     }
+
+    /// Upload the left/right eye camera uniforms for the OpenXR multiview path.
+    ///
+    /// The GPU camera storage buffer is `array<Camera, 2>`, so both eyes are
+    /// written in a single `queue.write_buffer`. Unlike [`Scene::update_camera`]
+    /// this bypasses the dirty/flush mechanism on purpose: `flush()` would
+    /// otherwise overwrite the second (right) element with a single-uniform
+    /// upload. Call it immediately before `flush()` for the rest of the scene
+    /// buffers.
+    ///
+    /// The left eye is also cached CPU-side (position/forward) and becomes this
+    /// frame's `prev_view_proj` for temporal effects.
+    pub fn update_stereo_cameras(
+        &mut self,
+        left: &GpuCameraUniforms,
+        right: &GpuCameraUniforms,
+    ) {
+        self.gpu_scene
+            .camera
+            .update_stereo(&self.gpu_scene.queue, left, right);
+        self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
+        self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
+    }
 }

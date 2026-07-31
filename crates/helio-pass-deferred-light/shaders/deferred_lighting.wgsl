@@ -1,3 +1,5 @@
+//!use pbr_eval
+
 //! Deferred lighting pass.
 //!
 //! Runs as a fullscreen triangle (no vertex buffer) over the G-buffer written
@@ -80,9 +82,17 @@ struct GpuLight {
     god_rays_weight:   f32,
     god_rays_decay:    f32,
     god_rays_exposure: f32,
-    _pad2_0:           u32,
-    _pad2_1:           u32,
-    _pad2_2:           u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct LightMatrix { mat: mat4x4<f32> }
@@ -124,7 +134,7 @@ struct ShadowConfig {
     pcf_sample_count:     u32,                      // Standard PCF sample count (4/8/12/16)
 }
 
-@group(0) @binding(0) var <uniform> camera:        Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var <uniform> globals:       Globals;
 @group(0) @binding(7) var <uniform> shadow_config: ShadowConfig;
 
@@ -169,6 +179,9 @@ struct ShadowConfig {
 // Planar reflection texture (Rgba16Float, full resolution)
 @group(2) @binding(16) var planar_tex: texture_2d<f32>;
 @group(2) @binding(17) var planar_sampler: sampler;
+// IES light profile textures (R8Unorm, 256×256 per slice, C type angular distribution)
+@group(2) @binding(18) var ies_textures: texture_2d_array<f32>;
+@group(2) @binding(19) var ies_sampler: sampler;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -187,8 +200,7 @@ struct GpuReflectionCapture {
 const CAPTURE_SHAPE_SPHERE: u32 = 0u;
 const CAPTURE_SHAPE_BOX:    u32 = 1u;
 
-// Highest mip index in the pre-filtered chain. roughness 1.0 maps here.
-const ENV_MAX_LOD: f32 = 8.0;
+// ENV_MAX_LOD imported from pbr_eval.wgsl
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -468,7 +480,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
         layer = light.shadow_index + point_light_face(to_frag);
         return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
     } else if light.light_type == 0u {  // Directional light (type 0)
-        let dist = length(world_pos - camera.position_near.xyz);
+        let dist = length(world_pos - cameras[0].position_near.xyz);
         let splits = globals.csm_splits;
         
         // Determine cascades and blend factor
@@ -554,83 +566,9 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
 
 // ── Surface flags (read from gbuf_extra.a) ──────────────────────────────────
 
-const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
-const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
-const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
+// SURFACE_FLAG_* and ENV_MAX_LOD imported from pbr_eval.wgsl
 
-// ── BRDF helpers ─────────────────────────────────────────────────────────────
-
-const PI: f32 = 3.14159265359;
-
-fn pow5(x: f32) -> f32 { let x2 = x * x; return x2 * x2 * x; }
-
-fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
-    let a    = roughness * roughness;
-    let a2   = a * a;
-    let NdH  = max(dot(N, H), 0.0);
-    let denom = NdH * NdH * (a2 - 1.0) + 1.0;
-    return a2 / (PI * denom * denom + 0.0001);
-}
-
-fn distribution_ggx_anisotropic(NdotH: f32, ax: f32, ay: f32, phi_h: f32) -> f32 {
-    let cos2_h = NdotH * NdotH;
-    let sin2_h = 1.0 - cos2_h;
-    let ax2 = ax * ax;
-    let ay2 = ay * ay;
-    let cos_phi = cos(phi_h);
-    let sin_phi = sin(phi_h);
-    let denom = cos2_h + sin2_h * (cos_phi * cos_phi / ax2 + sin_phi * sin_phi / ay2);
-    return 1.0 / (PI * ax * ay * denom * denom + 0.0001);
-}
-
-fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
-    let r = roughness + 1.0;
-    let k = (r * r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k + 0.0001);
-}
-
-fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
-    let NdV = max(dot(N, V), 0.0);
-    let NdL = max(dot(N, L), 0.0);
-    return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
-}
-
-fn geometry_smith_anisotropic(NdotV: f32, NdotL: f32, ax: f32, ay: f32) -> f32 {
-    let Gv = NdotV / (NdotV + sqrt(ax*ax + (1.0 - ax*ax) * NdotV * NdotV) + 0.0001);
-    let Gl = NdotL / (NdotL + sqrt(ay*ay + (1.0 - ay*ay) * NdotL * NdotL) + 0.0001);
-    return Gv * Gl;
-}
-
-fn compute_phi_h(N: vec3<f32>, H: vec3<f32>, T: vec3<f32>, B: vec3<f32>) -> f32 {
-    let H_tangent = dot(H, T);
-    let H_bitangent = dot(H, B);
-    return atan2(H_bitangent, H_tangent);
-}
-
-fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
-    return F0 + (1.0 - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
-}
-
-fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let one_minus_r = vec3<f32>(1.0 - roughness);
-    return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
-}
-
-// Split-sum DFG term: the second half of Karis' split-sum approximation,
-// returning (scale, bias) so specular = F0 * scale + bias.
-//
-// This is Lazarov's analytic fit to the same integral a baked BRDF LUT would
-// store. It replaces an ad-hoc curve that was not the split-sum term at all and
-// left grazing-angle specular visibly wrong. A precomputed LUT texture would be
-// marginally more accurate; the fit avoids another binding for error well under
-// what the pre-filtered cubemap itself introduces.
-fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r  = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
-    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
-}
+// env_brdf_approx imported from pbr_eval.wgsl
 
 // ── Reflection captures ──────────────────────────────────────────────────────
 
@@ -792,6 +730,47 @@ fn pbr_direct_light(
         if light.light_type == 2u {  // Spot light
             let cos_a = dot(-L, light.direction_outer.xyz);
             atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
+        }
+        // IES light profile: sample angular intensity distribution
+        if light.ies_profile_index >= 0 {
+            let light_dir = normalize(light.direction_outer.xyz);
+            let theta = acos(clamp(dot(-L, light_dir), -1.0, 1.0));
+            let cross_dir = cross(-L, light_dir);
+            let phi = atan2(cross_dir.x, cross_dir.y);
+            let ies_uv = vec2<f32>(
+                phi / 6.2831853 + 0.5,
+                theta * 0.6366198,
+            ) * vec2<f32>(light.ies_angle_scale, light.ies_angle_scale)
+            + vec2<f32>(light.ies_angle_offset / 360.0, 0.0);
+            let ies_sample = textureSampleLevel(
+                ies_textures, ies_sampler, ies_uv, u32(light.ies_profile_index), 0.0
+            ).r;
+            atten *= ies_sample;
+        }
+        // Light function (gobo/cookie) projection
+        if light.light_function_index >= 0 {
+            let light_to_surface = world_pos - light.position_range.xyz;
+            let light_dir = normalize(light.direction_outer.xyz);
+            let projected = light_to_surface - dot(light_to_surface, light_dir) * light_dir;
+            let proj_len = max(length(projected), 0.0001);
+            let projected_n = projected / proj_len;
+            // Build tangent frame: handle degenerate case where light_dir ≈ up
+            let gobo_up_vec = select(
+                vec3<f32>(0.0, 1.0, 0.0),
+                vec3<f32>(0.0, 0.0, 1.0),
+                abs(dot(light_dir, vec3<f32>(0.0, 1.0, 0.0))) > 0.99,
+            );
+            let gobo_right = normalize(cross(light_dir, gobo_up_vec));
+            let gobo_up = cross(gobo_right, light_dir);
+            let gobo_uv = vec2<f32>(
+                dot(projected, gobo_right) / (light.position_range.w * 0.5) + 0.5,
+                dot(projected, gobo_up) / (light.position_range.w * 0.5) + 0.5,
+            );
+            let gobo_sample = textureSampleLevel(
+                ies_textures, ies_sampler, clamp(gobo_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                u32(light.light_function_index), 0.0
+            ).r;
+            atten *= gobo_sample;
         }
         radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }
@@ -1064,7 +1043,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
     let uv_01       = in.clip_pos.xy / screen_size;
     let ndc_xy      = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
-    let world_h     = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_h     = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos   = world_h.xyz / world_h.w;
 
     // ── Debug mode 10: shadow factor heatmap ──────────────────────────────────
@@ -1122,7 +1101,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
-    let V   = normalize(camera.position_near.xyz - world_pos);
+    let V   = normalize(cameras[0].position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
     // ── SSS / Extra surface data ──────────────────────────────────────────────

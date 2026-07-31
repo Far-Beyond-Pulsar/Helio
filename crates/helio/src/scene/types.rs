@@ -69,7 +69,15 @@ pub struct ObjectDescriptor {
     /// at cull time. The radius scales by the maximum scale component of the transform.
     pub bounds: [f32; 4],
 
-    /// Render flags: bit 0 = casts shadow, bit 1 = receives shadow.
+    /// Render flags. See the `INSTANCE_FLAG_*` constants in `libhelio`:
+    /// bit 0 = casts shadow, bit 1 = receives shadow,
+    /// bit 2 = [`libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`] (skip GPU culling entirely).
+    ///
+    /// Reach for `ALWAYS_VISIBLE` when [`Self::bounds`] cannot describe the mesh
+    /// usefully — ground planes, skyboxes, a shell the camera sits inside — where a
+    /// single bounding sphere culls almost nothing and is easy to get wrong in the
+    /// direction that deletes visible geometry. It is an escape hatch, not a default:
+    /// flagged instances are submitted every frame regardless of where the camera looks.
     pub flags: u32,
 
     /// Group membership bitmask for batch visibility control.
@@ -147,6 +155,8 @@ pub(crate) struct LightRecord {
     pub movability: libhelio::Movability,
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,
+    /// Index in the GPU lights buffer (may differ from arena dense_index after flush filtering).
+    pub gpu_index: u32,
 }
 
 /// Internal record for a scene object.

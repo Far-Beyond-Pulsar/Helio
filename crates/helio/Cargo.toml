@@ -12,6 +12,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
+helio-foliage-core = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
 
@@ -33,6 +34,15 @@ bake = ["helio-bake", "uuid"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
+
+# OpenXR (Vulkan) integration. Native-only: helio-xr compiles out entirely on
+# wasm32 (its crate root is `#![cfg(not(target_arch = "wasm32"))]`), and the
+# openxr/ash/liblocing deps it pulls in do not build for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+helio-xr = { workspace = true }
+# Matches the openxr version helio-xr builds against; only the session-state /
+# frame-state enums used by the XR render loop are referenced directly.
+openxr = "0.21"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).

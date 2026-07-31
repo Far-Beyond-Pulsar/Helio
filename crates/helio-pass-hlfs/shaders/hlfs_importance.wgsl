@@ -45,9 +45,17 @@ struct GpuLight {
     god_rays_weight:   f32,
     god_rays_decay:    f32,
     god_rays_exposure: f32,
-    _pad2_0:           u32,
-    _pad2_1:           u32,
-    _pad2_2:           u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct LightSample {
@@ -58,7 +66,7 @@ struct LightSample {
     radiance:  vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera:    Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
@@ -85,7 +93,7 @@ fn reconstruct_world_pos(pixel_pos: vec2<u32>, depth: f32) -> vec3<f32> {
         depth,
         1.0,
     );
-    let world_h = camera.view_proj_inv * ndc;
+    let world_h = cameras[0].view_proj_inv * ndc;
     return world_h.xyz / world_h.w;
 }
 
@@ -113,8 +121,8 @@ fn importance_sample_light(pixel_pos: vec2<u32>, sample_idx: u32) -> LightSample
     var sample: LightSample;
 
     if (globals.light_count == 0u) {
-        sample.position = camera.position_near.xyz;
-        sample.direction = camera.forward_far.xyz;
+        sample.position = cameras[0].position_near.xyz;
+        sample.direction = cameras[0].forward_far.xyz;
         sample.radiance = vec4<f32>(0.0);
         return sample;
     }

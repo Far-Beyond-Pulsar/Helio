@@ -40,9 +40,17 @@ struct GpuLight {
     god_rays_weight: f32,
     god_rays_decay: f32,
     god_rays_exposure: f32,
-    _pad2_0: u32,
-    _pad2_1: u32,
-    _pad2_2: u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct ShadowConfig {
@@ -71,7 +79,7 @@ struct LightMatrix {
 @group(0) @binding(4) var clip_stack_sampler: sampler;
 @group(0) @binding(5) var pre_aa_texture: texture_2d<f32>;
 @group(0) @binding(6) var<uniform> globals: HlfsGlobals;
-@group(0) @binding(7) var<uniform> camera: Camera;
+@group(0) @binding(7) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(8) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(9) var<uniform> shadow_config: ShadowConfig;
 @group(0) @binding(10) var shadow_atlas: texture_depth_2d_array;
@@ -254,9 +262,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
     let uv_01 = in.clip_pos.xy / screen_size;
     let ndc_xy = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
-    let world_h = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos = world_h.xyz / world_h.w;
-    let V = normalize(camera.position_near.xyz - world_pos);
+    let V = normalize(cameras[0].position_near.xyz - world_pos);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var direct_lighting = vec3<f32>(0.0);

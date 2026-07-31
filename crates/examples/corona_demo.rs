@@ -271,23 +271,15 @@ impl ApplicationHandler for App {
         renderer.scene_mut().insert_actor(SceneActor::sky(
             SkyActor::new().with_sky_color([0.08, 0.10, 0.20]),
         ));
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [-0.3, -1.0, -0.5, 0.0],
-                color_intensity: [0.9, 0.85, 0.75, 3.0],
-                shadow_index: 0,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                god_rays_decay: 0.0,
-                god_rays_density: 0.0,
-                god_rays_enabled: 0,
-                god_rays_weight: 0.0,
-                god_rays_exposure: 0.0,
-                _pad2: [0, 0, 0],
-                _pad: 0,
-            }));
+        renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [-0.3, -1.0, -0.5, 0.0],
+            color_intensity: [0.9, 0.85, 0.75, 3.0],
+            shadow_index: 0,
+            light_type: LightType::Directional as u32,
+            inner_angle: 0.0,
+            ..Default::default()
+        }));
         renderer.set_ambient([0.08, 0.10, 0.18], 0.6);
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 

@@ -20,15 +20,31 @@ struct GpuDrawPage {
     visible: u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+struct GpuTerrainDraw {
+    page_slot: u32,
+    meshlet_index: u32,
+    surface_kind: u32,
+    lod: u32,
+}
+
+struct GpuTerrainDebugUniform {
+    mode: u32,
+    draw_path: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> pages: array<GpuDrawPage>;
+@group(0) @binding(2) var<storage, read> draws: array<GpuTerrainDraw>;
+@group(0) @binding(3) var<uniform> debug: GpuTerrainDebugUniform;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) material: u32,
     @location(2) normal: vec3<f32>,
     @location(3) flags: u32,
-    @builtin(instance_index) page_slot: u32,
+    @builtin(instance_index) draw_index: u32,
 }
 
 struct VertexOutput {
@@ -37,25 +53,59 @@ struct VertexOutput {
     @location(1) world_position: vec3<f32>,
     @location(2) @interpolate(flat) material: u32,
     @location(3) @interpolate(flat) lod: u32,
+    @location(4) @interpolate(flat) page_slot: u32,
+    @location(5) @interpolate(flat) meshlet_index: u32,
+    @location(6) @interpolate(flat) surface_kind: u32,
+    @location(7) @interpolate(flat) transition_mask: u32,
+    @location(8) @interpolate(flat) transition_face_bit: u32,
 }
 
-@vertex
-fn vs_main(input: VertexInput) -> VertexOutput {
-    let page = pages[input.page_slot];
+fn transform_vertex(
+    input: VertexInput,
+    page_slot: u32,
+    meshlet_index: u32,
+    surface_kind: u32,
+) -> VertexOutput {
+    let page = pages[page_slot];
     let lod_scale = exp2(f32(page.lod));
-    let local_lod0_cell = input.position * lod_scale;
-    let relative_cell = vec3<f32>(page.relative_lod0_cell_min) + local_lod0_cell;
+    let relative_cell =
+        vec3<f32>(page.relative_lod0_cell_min) + input.position * lod_scale;
     let world = relative_cell * page.lod0_cell_size_m - page.camera_relative_m;
     var output: VertexOutput;
-    // Keep the view and projection transforms split. The indirect multi-draw
-    // path clipped the same vertices on the precombined field on D3D12, while
-    // the uploaded matrices and this split transform pass the GPU contract.
-    output.clip_position = camera.proj * (camera.view * vec4<f32>(world, 1.0));
+    // Keep view and projection split. This is the stable D3D12 contract used
+    // by the retained page baseline as well as the compact meshlet path.
+    output.clip_position = cameras[0].proj * (cameras[0].view * vec4<f32>(world, 1.0));
     output.normal = normalize(input.normal);
     output.world_position = world;
     output.material = input.material;
     output.lod = page.lod;
+    output.page_slot = page_slot;
+    output.meshlet_index = meshlet_index;
+    output.surface_kind = surface_kind;
+    output.transition_mask = page.transition_mask;
+    output.transition_face_bit = input.flags & 0x3fu;
     return output;
+}
+
+@vertex
+fn vs_page(input: VertexInput) -> VertexOutput {
+    return transform_vertex(input, input.draw_index, 0u, 0u);
+}
+
+@vertex
+fn vs_page_transition(input: VertexInput) -> VertexOutput {
+    return transform_vertex(input, input.draw_index, 0u, 1u);
+}
+
+@vertex
+fn vs_meshlet(input: VertexInput) -> VertexOutput {
+    let draw = draws[input.draw_index];
+    return transform_vertex(
+        input,
+        draw.page_slot,
+        draw.meshlet_index,
+        draw.surface_kind,
+    );
 }
 
 fn material_color(material: u32) -> vec3<f32> {
@@ -71,12 +121,52 @@ fn material_color(material: u32) -> vec3<f32> {
     }
 }
 
+fn hash_color(value: u32) -> vec3<f32> {
+    var x = value * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    x = (x >> 22u) ^ x;
+    return vec3<f32>(
+        f32(x & 255u),
+        f32((x >> 8u) & 255u),
+        f32((x >> 16u) & 255u),
+    ) / 255.0 * 0.75 + vec3<f32>(0.2);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let sun = normalize(vec3<f32>(0.35, 0.82, 0.44));
-    let diffuse = max(dot(normalize(input.normal), sun), 0.0);
-    let ambient = 0.16;
-    let lod_tint = vec3<f32>(0.02, 0.015, 0.04) * f32(input.lod);
-    let color = material_color(input.material) * (ambient + diffuse * 0.84) + lod_tint;
+    if input.surface_kind != 0u &&
+        (input.transition_face_bit & input.transition_mask) == 0u {
+        discard;
+    }
+    let normal = normalize(input.normal);
+    var color: vec3<f32>;
+    switch debug.mode {
+        case 1u: {
+            // This is keyed by the actual compact draw's meshlet descriptor.
+            color = hash_color(input.meshlet_index ^ (input.surface_kind * 0x9e3779b9u));
+        }
+        case 2u: {
+            color = hash_color(input.page_slot);
+        }
+        case 3u: {
+            color = hash_color(input.lod * 131u + 17u);
+        }
+        case 4u: {
+            color = select(
+                vec3<f32>(0.12, 0.15, 0.18),
+                vec3<f32>(1.0, 0.12, 0.7),
+                input.surface_kind != 0u && input.transition_mask != 0u,
+            );
+        }
+        case 5u: {
+            color = normal * 0.5 + vec3<f32>(0.5);
+        }
+        default: {
+            let sun = normalize(vec3<f32>(0.35, 0.82, 0.44));
+            let diffuse = max(dot(normal, sun), 0.0);
+            let lod_tint = vec3<f32>(0.02, 0.015, 0.04) * f32(input.lod);
+            color = material_color(input.material) * (0.16 + diffuse * 0.84) + lod_tint;
+        }
+    }
     return vec4<f32>(color, 1.0);
 }

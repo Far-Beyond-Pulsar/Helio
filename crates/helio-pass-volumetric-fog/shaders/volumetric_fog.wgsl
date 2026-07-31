@@ -63,9 +63,17 @@ struct GpuLight {
     god_rays_weight:   f32,
     god_rays_decay:    f32,
     god_rays_exposure: f32,
-    _pad2_0:           u32,
-    _pad2_1:           u32,
-    _pad2_2:           u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct LightMatrix { mat: mat4x4<f32> }
@@ -88,7 +96,7 @@ const LIGHT_SPOT:        u32 = 2u;
 
 const NO_SHADOW: u32 = 4294967295u;
 
-@group(0) @binding(0) var<uniform>       camera:          Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>       fog:             FogUniforms;
 @group(0) @binding(2) var<uniform>       fog_globals:     FogGlobals;
 @group(0) @binding(3) var<storage, read> lights:          array<GpuLight>;
@@ -146,8 +154,8 @@ fn froxel_world_pos(uv: vec2<f32>, slice_norm: f32) -> vec3<f32> {
     // Ray through this pixel: unproject the near and far plane points. Cheaper
     // schemes exist, but this one cannot disagree with the depth reconstruction
     // the rest of the engine does.
-    let p_near = camera.view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
-    let p_far  = camera.view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
+    let p_near = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
+    let p_far  = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
     let wn = p_near.xyz / p_near.w;
     let wf = p_far.xyz / p_far.w;
     let dir = normalize(wf - wn);
@@ -157,9 +165,9 @@ fn froxel_world_pos(uv: vec2<f32>, slice_norm: f32) -> vec3<f32> {
     // Slices are planes of constant *view depth*, not spheres of constant radius,
     // so the radial distance along this ray is view_depth / cos(angle to forward).
     // Skipping this bows the grid toward the camera at the screen edges.
-    let fwd = normalize(camera.forward_far.xyz);
+    let fwd = normalize(cameras[0].forward_far.xyz);
     let cos_a = max(dot(dir, fwd), 1e-4);
-    return camera.position_near.xyz + dir * (view_depth / cos_a);
+    return cameras[0].position_near.xyz + dir * (view_depth / cos_a);
 }
 
 // ── Shadowing ───────────────────────────────────────────────────────────────
@@ -176,7 +184,7 @@ fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> f32 {
     var layer = light.shadow_index;
 
     if light.light_type == LIGHT_DIRECTIONAL {
-        let dist = length(p - camera.position_near.xyz);
+        let dist = length(p - cameras[0].position_near.xyz);
         let sel = helio_csm_select(dist, fog_globals.csm_splits);
         layer = light.shadow_index + sel.cascade_a;
     } else if light.light_type == LIGHT_POINT {
@@ -252,7 +260,7 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>) -> vec
 /// the camera last frame has nothing to blend with, and reusing a clamped edge
 /// sample there smears fog across the screen edges as the camera turns.
 fn sample_history(p: vec3<f32>) -> vec4<f32> {
-    let prev_clip = camera.prev_view_proj * vec4<f32>(p, 1.0);
+    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(p, 1.0);
     // For the engine's perspective matrix, clip.w is the positive view depth.
     if prev_clip.w <= HELIO_FROXEL_NEAR { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
 
@@ -299,7 +307,7 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slice_norm = (f32(gid.z) + j) / f32(dims.z);
 
     let p = froxel_world_pos(uv, slice_norm);
-    let ray_dir = normalize(p - camera.position_near.xyz);
+    let ray_dir = normalize(p - cameras[0].position_near.xyz);
 
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
     var density = effective_density_at(p, view_depth);
@@ -315,7 +323,7 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dd = textureDimensions(scene_depth);
         let dc = vec2<i32>(i32(uv.x * f32(dd.x)), i32(uv.y * f32(dd.y)));
         let scene_raw = textureLoad(scene_depth, dc, 0);
-        let scene_z = helio_view_depth(scene_raw, camera.position_near.w, camera.forward_far.w);
+        let scene_z = helio_view_depth(scene_raw, cameras[0].position_near.w, cameras[0].forward_far.w);
         if froxel_near > scene_z + 0.1 {
             density = 0.0;
         }
@@ -359,10 +367,10 @@ fn cs_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     // further between two slices than one down the centre. Without this the fog
     // thins toward the corners.
     let ndc = helio_uv_to_ndc(uv);
-    let p_near = camera.view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
-    let p_far  = camera.view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
+    let p_near = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
+    let p_far  = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
     let dir = normalize(p_far.xyz / p_far.w - p_near.xyz / p_near.w);
-    let cos_a = max(dot(dir, normalize(camera.forward_far.xyz)), 1e-4);
+    let cos_a = max(dot(dir, normalize(cameras[0].forward_far.xyz)), 1e-4);
 
     var accum = vec3<f32>(0.0);
     var transmittance = 1.0;

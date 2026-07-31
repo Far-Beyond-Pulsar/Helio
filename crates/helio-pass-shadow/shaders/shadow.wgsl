@@ -10,17 +10,18 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-// Per-instance world transform.  Must match GpuInstanceData in libhelio (144 bytes).
+// Per-instance world transform.  Must match GpuInstanceData in libhelio (208 bytes).
 struct GpuInstanceData {
     transform:    mat4x4<f32>,   // offset   0
     normal_mat_0: vec4<f32>,     // offset  64  (unused in shadow pass)
     normal_mat_1: vec4<f32>,     // offset  80
     normal_mat_2: vec4<f32>,     // offset  96
     bounds:       vec4<f32>,     // offset 112
-    mesh_id:      u32,           // offset 128
-    material_id:  u32,           // offset 132
-    flags:        u32,           // offset 136
-    _pad:         u32,           // offset 140
+    prev_model:   mat4x4<f32>,   // offset 128  (unused in shadow pass)
+    mesh_id:      u32,           // offset 192
+    material_id:  u32,           // offset 196
+    flags:        u32,           // offset 200
+    _pad:         u32,           // offset 204
 }
 
 // Which shadow atlas face is being rendered this pass.

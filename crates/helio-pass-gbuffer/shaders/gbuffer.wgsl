@@ -2,11 +2,12 @@ enable wgpu_binding_array;
 
 //! G-buffer write pass (GPU-driven).
 //!
-//! Rasterises scene geometry into four screen-sized textures:
-//!   target 0 – albedo   (Rgba8Unorm)
-//!   target 1 – normal   (Rgba16Float)
-//!   target 2 – orm      (Rgba8Unorm)
-//!   target 3 – emissive (Rgba16Float)
+//! Rasterises scene geometry into screen-sized textures:
+//!   target 0 – albedo    (Rgba8Unorm)
+//!   target 1 – normal    (Rgba16Float)
+//!   target 2 – orm       (Rgba8Unorm)
+//!   target 3 – emissive  (Rgba16Float)
+//!   target 7 – velocity  (Rg16Float)  — screen-space motion in pixels/frame
 //!
 //! Resolved F0 is packed into unused alpha channels:
 //!   normal.a   = F0.r
@@ -34,9 +35,9 @@ struct Globals {
     rc_world_max: vec4<f32>,
     csm_splits: vec4<f32>,
     debug_mode: u32,
+    screen_width: f32,
+    screen_height: f32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
 }
 
 /// GPU material (112 bytes, matches libhelio::GpuMaterial)
@@ -85,17 +86,18 @@ struct MaterialTextureData {
     params:             vec4<f32>,  // x=normal_scale, y=occlusion_strength, z=alpha_cutoff
 }
 
-/// Per-instance data (144 bytes). Must match `GpuInstanceData` in libhelio.
+/// Per-instance data (208 bytes). Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
     transform:      mat4x4<f32>,  // offset   0  (64 bytes)
     normal_mat_0:   vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
     normal_mat_1:   vec4<f32>,    // offset  80
     normal_mat_2:   vec4<f32>,    // offset  96
     bounds:         vec4<f32>,    // offset 112
-    mesh_id:        u32,          // offset 128
-    material_id:    u32,          // offset 132
-    flags:          u32,          // offset 136
-    lightmap_index: u32,          // offset 140 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
+    prev_model:     mat4x4<f32>,  // offset 128  (64 bytes) — previous frame model matrix
+    mesh_id:        u32,          // offset 192
+    material_id:    u32,          // offset 196
+    flags:          u32,          // offset 200
+    lightmap_index: u32,          // offset 204 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
 }
 
 /// Lightmap atlas region for a mesh (32 bytes).
@@ -109,7 +111,7 @@ struct LightmapAtlasRegion {
     uv_clamp_max: vec2<f32>,  // uv_offset + uv_scale - 0.5/atlas_size
 }
 
-@group(0) @binding(0) var<uniform>          camera:                 Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>          globals:                Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
@@ -137,13 +139,14 @@ struct Vertex {
 
 struct VertexOutput {
     @invariant @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_position: vec3<f32>,
-    @location(1) world_normal:   vec3<f32>,
-    @location(2) tex_coords:     vec2<f32>,
-    @location(3) world_tangent:  vec3<f32>,
-    @location(4) bitangent_sign: f32,
+    @location(0) world_position:     vec3<f32>,
+    @location(1) world_normal:       vec3<f32>,
+    @location(2) tex_coords:         vec2<f32>,
+    @location(3) world_tangent:      vec3<f32>,
+    @location(4) bitangent_sign:     f32,
     @location(5) @interpolate(flat) material_id:    u32,
-    @location(6) lightmap_uv:    vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
+    @location(6) lightmap_uv:        vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
+    @location(7) prev_clip_position: vec4<f32>,  // Previous frame clip-space position (velocity)
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -170,14 +173,19 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
         inst.transform[2].xyz,
     );
 
+    // Previous-frame clip position for velocity buffer
+    let prev_world  = inst.prev_model * vec4<f32>(v.position, 1.0);
+    let prev_clip   = cameras[0].prev_view_proj * prev_world;
+
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
-    out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
-    out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
-    out.bitangent_sign = v.bitangent_sign;
-    out.tex_coords     = v.tex_coords;
-    out.material_id    = inst.material_id;
+    out.clip_position      = cameras[0].view_proj * world_pos;
+    out.world_position     = world_pos.xyz;
+    out.world_normal       = normalize(normal_mat  * decode_snorm8x4(v.normal));
+    out.world_tangent      = normalize(model_mat3  * decode_snorm8x4(v.tangent));
+    out.bitangent_sign     = v.bitangent_sign;
+    out.tex_coords         = v.tex_coords;
+    out.material_id        = inst.material_id;
+    out.prev_clip_position = prev_clip;
     
     // Compute lightmap UV from atlas region.
     //
@@ -228,6 +236,7 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
+    @location(7) velocity:    vec2<f32>,  // screen-space motion in pixels/frame
 }
 
 // ── Surface data passed to GBuffer packing ──────────────────────────────────
@@ -384,6 +393,14 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     return s;
 }
 
+fn compute_velocity(input: VertexOutput) -> vec2<f32> {
+    let prev_ndc = input.prev_clip_position.xy / input.prev_clip_position.w;
+    let prev_pixel_x = (prev_ndc.x * 0.5 + 0.5) * globals.screen_width;
+    let prev_pixel_y = (0.5 - prev_ndc.y * 0.5) * globals.screen_height;
+    let prev_pixel = vec2<f32>(prev_pixel_x, prev_pixel_y);
+    return input.clip_position.xy - prev_pixel;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material_id];
@@ -399,7 +416,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0),
             vec2<f32>(0.0),
             vec4<f32>(0.0),
-            vec4<f32>(0.0)
+            vec4<f32>(0.0),
+            compute_velocity(input)
         );
     }
 
@@ -413,7 +431,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0),
             vec2<f32>(0.0),
             vec4<f32>(0.0),
-            vec4<f32>(0.0)
+            vec4<f32>(0.0),
+            compute_velocity(input)
         );
     }
 
@@ -433,7 +452,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0),
             vec2<f32>(0.0),
             vec4<f32>(0.0),
-            vec4<f32>(0.0)
+            vec4<f32>(0.0),
+            compute_velocity(input)
         );
     }
 
@@ -452,5 +472,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
     out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y,
                           surface.aniso_rotation, bitcast<f32>(surface.flags));
+    out.velocity = compute_velocity(input);
     return out;
 }

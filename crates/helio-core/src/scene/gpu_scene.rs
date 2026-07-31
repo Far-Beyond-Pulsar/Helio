@@ -250,6 +250,10 @@ pub struct GpuScene {
     /// PSO works for all indirect entries it covers.
     /// Built during `rebuild_instance_buffers_*`.
     pub material_class_ranges: Vec<(u32, u64, u32, u32)>,
+    pub transparent_material_class_ranges: Vec<(u32, u64, u32, u32)>,
+    /// Forward-shaded material class ranges (excluded from GBuffer pass).
+    /// Drawn by the forward-lit pass instead.
+    pub forward_material_class_ranges: Vec<(u32, u64, u32, u32)>,
 
     /// Graph hashes for each material slot (indexed by material buffer slot).
     /// Populated by [`Scene`](helio::Scene) during flush.
@@ -260,6 +264,16 @@ pub struct GpuScene {
     /// Populated from Scene's [`RadiantGraphRegistry`](helio::radiant::RadiantGraphRegistry)
     /// during flush.  The GBuffer pass looks up WGSL by hash when building PSOs.
     pub graph_wgsl_snippets: std::collections::HashMap<u64, String>,
+
+    /// Custom template registrations that survive graph rebuilds.
+    /// Stored as `Box<dyn Any>` — the GBufferPass downcasts it to
+    /// `RadiantTemplateRegistry` at the start of every frame.
+    pub template_registry: Option<Box<dyn std::any::Any + Send + Sync>>,
+
+    /// Type-erased transparent template registry (`RadiantTemplateRegistry`).
+    /// Separate from `template_registry` because transparent templates use a
+    /// different base shader and bind group layout than gbuffer templates.
+    pub transparent_template_registry: Option<Box<dyn std::any::Any + Send + Sync>>,
 
     /// Reflection capture GPU storage buffer.
     pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
@@ -382,8 +396,12 @@ impl GpuScene {
             voxel_volumes_generation: 0,
             voxel_ring_write_index: 0,
             material_class_ranges: Vec::new(),
+            transparent_material_class_ranges: Vec::new(),
+            forward_material_class_ranges: Vec::new(),
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
+            template_registry: None,
+            transparent_template_registry: None,
             reflection_captures,
             blas_manager: BlasManager::new(device_for_rt.clone()),
             tlas_manager: TlasManager::new(device_for_rt, 65536),
@@ -454,8 +472,12 @@ impl GpuScene {
             voxel_volume_count: self.voxel_volume_count,
             voxel_volumes_generation: self.voxel_volumes_generation,
             material_class_ranges: &self.material_class_ranges,
+            transparent_material_class_ranges: &self.transparent_material_class_ranges,
+            forward_material_class_ranges: &self.forward_material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
+            template_registry: &self.template_registry,
+            transparent_template_registry: &self.transparent_template_registry,
             reflection_captures: self.reflection_captures.buffer(),
             reflection_capture_count: self.reflection_captures.len() as u32,
             rt_available: self.tlas_manager.is_rt_available(),
@@ -535,6 +557,10 @@ impl GpuScene {
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
         self.reflection_captures.flush(queue);
+
+        // After flush, cycle prev_model = model so that next frame's velocity
+        // buffer captures the movement between this frame and the next.
+        self.instances.cycle_prev_models();
     }
 
     pub fn components_mut(&mut self) -> &mut ComponentRegistry {

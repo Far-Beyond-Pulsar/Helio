@@ -29,7 +29,7 @@ const MOVE_EPSILON: f32 = 0.0001;
 
 // ── Structs ───────────────────────────────────────────────────────────────────
 
-/// Must match GpuInstanceData in libhelio/src/instance.rs (144 bytes).
+/// Must match GpuInstanceData in libhelio/src/instance.rs (208 bytes).
 /// We only need the transform and bounds, so we read partial data.
 struct GpuInstance {
     transform:    mat4x4f,  // model matrix, 64 bytes
@@ -37,6 +37,7 @@ struct GpuInstance {
     normal_mat_1: vec4f,    // 16 bytes
     normal_mat_2: vec4f,    // 16 bytes
     bounds:       vec4f,    // xyz = world-space bounding sphere center, w = radius
+    prev_model:   mat4x4f,  // 64 bytes
     mesh_id:      u32,
     material_id:  u32,
     flags:        u32,

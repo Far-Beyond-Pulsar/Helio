@@ -22,6 +22,21 @@ pub enum ExposureMode {
     Auto = 1,
 }
 
+// ── HDR output mode ────────────────────────────────────────────────────────────
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrOutputMode {
+    /// Tonemap → sRGB (current behaviour)
+    Ldr = 0,
+    /// Tonemap → PQ ST 2084 → BT.2020 → 10-bit
+    Hdr10 = 1,
+    /// Linear float output (scRGB, Windows HDR)
+    ScRgb = 2,
+    /// Raw HDR float, no tonemap (for external grading or recording)
+    Passthrough = 3,
+}
+
 // ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
 //
 // Flat uniform struct uploaded to GPU each frame. All fields are driven by the
@@ -140,15 +155,37 @@ pub struct GpuPostProcessUniforms {
     pub pad_fog_color: f32,             // 348
     pub fog_emissive: [f32; 3],         // 352 ← 16-aligned
     pub pad_fog_emissive: f32,          // 364
+
+    // ── HDR Output (16 bytes) ──
+    pub hdr_output_mode: u32,           // 368
+    pub hdr_max_nits: f32,              // 372
+    pub hdr_ui_brightness: f32,         // 376
+    pub pad_hdr_end: f32,               // 380
+
+    // ── Advanced Color Grading (48 bytes) ──
+    pub lift_color: [f32; 3],          // 384 — shadow tint
+    pub pad_lift: f32,                 // 396
+    pub gamma_color: [f32; 3],         // 400 — midtone tint
+    pub pad_gamma: f32,                // 412
+    pub gain_color: [f32; 3],          // 416 — highlight tint
+    pub pad_gain: f32,                 // 428
+    pub shadows_max: f32,              // 432 — luminance threshold for shadow region
+    pub highlights_min: f32,           // 436 — luminance threshold for highlight region
+    pub shadow_highlight_balance: f32,  // 440 — 0-1 blend between shadow and highlight
+    pub hue_shift: f32,                // 444 — global hue rotation (degrees)
+    pub lut_generation: u32,           // 448 — incremented when LUT needs rebuilding
+    pub lut_intensity: f32,            // 452 — blend 0-1 between graded and ungraded
+    pub lut_platform: u32,             // 456 — 0=none, 1=16x16x16, 2=32x32x32
+    pub pad_grading_end: f32,          // 460
 }
 
-// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 = 368 bytes
-// WGSL uniform buffer rule: must be multiple of 16 → 368 / 16 = 23 slots. ✓
+// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 + 16 + 48 = 464 bytes
+// WGSL uniform buffer rule: must be multiple of 16 → 464 / 16 = 29 slots. ✓
 //
 // This struct is mirrored by hand in helio-pass-postprocess/shaders/postprocess.wgsl
 // and is embedded in GpuPostProcessVolume, which cs_volume_blend reads as a storage
 // array. A field added here without updating that mirror misreads the buffer silently.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 368);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 464);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
 
 // ── GpuFogUniforms ─────────────────────────────────────────────────────────────
@@ -190,11 +227,12 @@ impl GpuPostProcessUniforms {
 const _: () = assert!(std::mem::size_of::<GpuFogUniforms>() == 64);
 // wgpu requires copy offsets to be 4-byte aligned; the fog pass copies from this offset.
 const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 4 == 0);
-// The block must be the tail of GpuPostProcessUniforms for a single flat copy to
-// capture it. A field appended after the fog block would break this.
+// HDR fields (hdr_output_mode, hdr_max_nits, hdr_ui_brightness, pad_hdr_end)
+// follow the fog block. The fog copy pass copies exactly GpuFogUniforms bytes
+// starting at FOG_BLOCK_OFFSET, so the fields after fog are not included.
 const _: () = assert!(
-    std::mem::size_of::<GpuPostProcessUniforms>()
-        == GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
+    GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
+        == std::mem::offset_of!(GpuPostProcessUniforms, hdr_output_mode)
 );
 
 // ── Fog mode ───────────────────────────────────────────────────────────────────
@@ -291,6 +329,11 @@ impl Default for GpuPostProcessUniforms {
             blend_weight_exposure: 1.0,
             pad_bw: 0.0,
 
+            hdr_output_mode: HdrOutputMode::Ldr as u32,
+            hdr_max_nits: 1000.0,
+            hdr_ui_brightness: 200.0,
+            pad_hdr_end: 0.0,
+
             fog_enabled: 0,
             fog_mode: FogMode::Uniform as u32,
             fog_density: 0.02,
@@ -303,6 +346,21 @@ impl Default for GpuPostProcessUniforms {
             pad_fog_color: 0.0,
             fog_emissive: [0.0, 0.0, 0.0],
             pad_fog_emissive: 0.0,
+
+            lift_color: [0.0; 3],
+            pad_lift: 0.0,
+            gamma_color: [0.0; 3],
+            pad_gamma: 0.0,
+            gain_color: [1.0; 3],
+            pad_gain: 0.0,
+            shadows_max: 0.3,
+            highlights_min: 0.7,
+            shadow_highlight_balance: 0.5,
+            hue_shift: 0.0,
+            lut_generation: 0,
+            lut_intensity: 1.0,
+            lut_platform: 0,
+            pad_grading_end: 0.0,
         }
     }
 }
@@ -391,6 +449,11 @@ pub struct PostProcessSettings {
     pub blend_weight_grain: f32,
     pub blend_weight_exposure: f32,
 
+    // HDR Output
+    pub hdr_output_mode: HdrOutputMode,
+    pub hdr_max_nits: f32,
+    pub hdr_ui_brightness: f32,
+
     // Volumetric Fog
     pub fog_enabled: bool,
     pub fog_mode: FogMode,
@@ -406,6 +469,18 @@ pub struct PostProcessSettings {
     pub fog_color: [f32; 3],
     /// Self-illumination, added independently of any light (lava glow, etc.).
     pub fog_emissive: [f32; 3],
+
+    // Advanced Color Grading
+    pub lift_color: [f32; 3],
+    pub gamma_color: [f32; 3],
+    pub gain_color: [f32; 3],
+    pub shadows_max: f32,
+    pub highlights_min: f32,
+    pub shadow_highlight_balance: f32,
+    pub hue_shift: f32,
+    pub lut_generation: u32,
+    pub lut_intensity: f32,
+    pub lut_platform: u32,
 }
 
 impl PostProcessSettings {
@@ -485,6 +560,11 @@ impl PostProcessSettings {
             blend_weight_exposure: self.blend_weight_exposure,
             pad_bw: 0.0,
 
+            hdr_output_mode: self.hdr_output_mode as u32,
+            hdr_max_nits: self.hdr_max_nits,
+            hdr_ui_brightness: self.hdr_ui_brightness,
+            pad_hdr_end: 0.0,
+
             fog_enabled: self.fog_enabled as u32,
             fog_mode: self.fog_mode as u32,
             fog_density: self.fog_density.max(0.0),
@@ -498,6 +578,21 @@ impl PostProcessSettings {
             pad_fog_color: 0.0,
             fog_emissive: self.fog_emissive,
             pad_fog_emissive: 0.0,
+
+            lift_color: self.lift_color,
+            pad_lift: 0.0,
+            gamma_color: self.gamma_color,
+            pad_gamma: 0.0,
+            gain_color: self.gain_color,
+            pad_gain: 0.0,
+            shadows_max: self.shadows_max,
+            highlights_min: self.highlights_min,
+            shadow_highlight_balance: self.shadow_highlight_balance,
+            hue_shift: self.hue_shift,
+            lut_generation: self.lut_generation,
+            lut_intensity: self.lut_intensity,
+            lut_platform: self.lut_platform,
+            pad_grading_end: 0.0,
         }
     }
 }
@@ -563,6 +658,10 @@ impl Default for PostProcessSettings {
             motion_blur_max: 64.0,
             motion_blur_enabled: false,
 
+            hdr_output_mode: HdrOutputMode::Ldr,
+            hdr_max_nits: 1000.0,
+            hdr_ui_brightness: 200.0,
+
             blend_weight_bloom: 1.0,
             blend_weight_dof: 1.0,
             blend_weight_motion_blur: 1.0,
@@ -581,6 +680,17 @@ impl Default for PostProcessSettings {
             fog_scattering_anisotropy: 0.0,
             fog_color: [0.5, 0.6, 0.7],
             fog_emissive: [0.0, 0.0, 0.0],
+
+            lift_color: [0.0; 3],
+            gamma_color: [0.0; 3],
+            gain_color: [1.0; 3],
+            shadows_max: 0.3,
+            highlights_min: 0.7,
+            shadow_highlight_balance: 0.5,
+            hue_shift: 0.0,
+            lut_generation: 0,
+            lut_intensity: 1.0,
+            lut_platform: 0,
         }
     }
 }
@@ -612,7 +722,8 @@ pub struct GpuPostProcessVolume {
 // WGSL places `settings` at 64 because GpuPostProcessUniforms aligns to 16.
 const _: () = assert!(std::mem::offset_of!(GpuPostProcessVolume, settings) == 64);
 // Storage-buffer array stride must match WGSL's, which rounds to the 16-byte alignment.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 432);
+// 64 (header) + 464 (settings) = 528.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 528);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() % 16 == 0);
 
 // ── PostProcessVolume descriptor (CPU-side) ────────────────────────────────────
@@ -803,6 +914,10 @@ impl PostProcessBlender {
             blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
             blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
 
+            hdr_output_mode: if t > 0.5 { b.hdr_output_mode } else { a.hdr_output_mode },
+            hdr_max_nits: lerp(a.hdr_max_nits, b.hdr_max_nits, t),
+            hdr_ui_brightness: lerp(a.hdr_ui_brightness, b.hdr_ui_brightness, t),
+
             fog_enabled: if t > 0.5 { b.fog_enabled } else { a.fog_enabled },
             fog_mode: if t > 0.5 { b.fog_mode } else { a.fog_mode },
             fog_density: lerp(a.fog_density, b.fog_density, t),
@@ -813,6 +928,17 @@ impl PostProcessBlender {
             fog_scattering_anisotropy: lerp(a.fog_scattering_anisotropy, b.fog_scattering_anisotropy, t),
             fog_color: lerp3(a.fog_color, b.fog_color, t),
             fog_emissive: lerp3(a.fog_emissive, b.fog_emissive, t),
+
+            lift_color: lerp3(a.lift_color, b.lift_color, t),
+            gamma_color: lerp3(a.gamma_color, b.gamma_color, t),
+            gain_color: lerp3(a.gain_color, b.gain_color, t),
+            shadows_max: lerp(a.shadows_max, b.shadows_max, t),
+            highlights_min: lerp(a.highlights_min, b.highlights_min, t),
+            shadow_highlight_balance: lerp(a.shadow_highlight_balance, b.shadow_highlight_balance, t),
+            hue_shift: lerp(a.hue_shift, b.hue_shift, t),
+            lut_generation: if t > 0.5 { b.lut_generation } else { a.lut_generation },
+            lut_intensity: lerp(a.lut_intensity, b.lut_intensity, t),
+            lut_platform: if t > 0.5 { b.lut_platform } else { a.lut_platform },
         }
     }
 }
@@ -824,6 +950,14 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 
 fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
     PostProcessSettings {
+        hdr_output_mode: match gpu.hdr_output_mode {
+            1 => HdrOutputMode::Hdr10,
+            2 => HdrOutputMode::ScRgb,
+            3 => HdrOutputMode::Passthrough,
+            _ => HdrOutputMode::Ldr,
+        },
+        hdr_max_nits: gpu.hdr_max_nits,
+        hdr_ui_brightness: gpu.hdr_ui_brightness,
         exposure_mode: if gpu.exposure_mode == 0 { ExposureMode::Manual } else { ExposureMode::Auto },
         exposure_compensation: gpu.exposure_compensation,
         exposure_min: gpu.exposure_min,
@@ -910,5 +1044,16 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         fog_scattering_anisotropy: gpu.fog_scattering_anisotropy,
         fog_color: gpu.fog_color,
         fog_emissive: gpu.fog_emissive,
+
+        lift_color: gpu.lift_color,
+        gamma_color: gpu.gamma_color,
+        gain_color: gpu.gain_color,
+        shadows_max: gpu.shadows_max,
+        highlights_min: gpu.highlights_min,
+        shadow_highlight_balance: gpu.shadow_highlight_balance,
+        hue_shift: gpu.hue_shift,
+        lut_generation: gpu.lut_generation,
+        lut_intensity: gpu.lut_intensity,
+        lut_platform: gpu.lut_platform,
     }
 }

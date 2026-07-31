@@ -203,9 +203,34 @@ path = "one_million_cubes.rs"
 name = "dof_demo"
 path = "dof_demo.rs"
 
+[[bin]]
+name = "lens_flare_demo"
+path = "lens_flare_demo.rs"
+
+[[bin]]
+name = "hdr_demo"
+path = "hdr_demo.rs"
+
+[[bin]]
+name = "color_grading_demo"
+path = "color_grading_demo.rs"
+
+[[bin]]
+name = "ies_demo"
+path = "ies_demo.rs"
+
+[[bin]]
+name = "forward_demo"
+path = "forward_demo.rs"
+
+[[bin]]
+name = "vr_demo"
+path = "vr/main.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
+helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
@@ -234,3 +259,7 @@ log = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
+
+[[bin]]
+name = "foliage_demo"
+path = "foliage_demo.rs"

@@ -26,6 +26,9 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 mod volume_blend;
 pub use volume_blend::PostProcessVolumeBlendPass;
 
+mod lut_builder;
+pub use lut_builder::LutBuilder;
+
 const BASE_SHADER_SRC: &str = include_str!("../shaders/postprocess.wgsl");
 
 const BLOOM_MIPS: u32 = 5;
@@ -70,7 +73,7 @@ pub struct PostProcessPass {
 
     compute_main_bg: Option<wgpu::BindGroup>,
     render_main_bg: Option<wgpu::BindGroup>,
-    main_bg_key: Option<(usize, usize, usize, usize, usize)>,
+    main_bg_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
 
     // Bloom BGs
     bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
@@ -100,6 +103,10 @@ pub struct PostProcessPass {
     noise_sampler: wgpu::Sampler,
     /// 1x1 (0,0,0,1) stand-in bound at b17 when the graph has no fog pass.
     fallback_fog_view: wgpu::TextureView,
+    /// 1x1 (0,0) stand-in bound at b18 when the graph has no velocity pass.
+    fallback_velocity_view: wgpu::TextureView,
+    /// 1x1x1 identity LUT bound at b19 when no LUT is loaded.
+    fallback_lut_view: wgpu::TextureView,
     custom_params_buf: wgpu::Buffer,
     custom_params: Vec<[f32; 4]>,
 
@@ -252,7 +259,7 @@ impl PostProcessPass {
             label: Some("PostProcess Compute Main BGL"),
             entries: &[
                 uniform_entry(0, cfv),
-                uniform_entry(1, cfv),
+                storage_ro_entry(1, cfv),
                 sampled_tex_entry(2, cfv, false),
                 sampled_tex_entry(3, fv, true),
                 sampler_entry(4, cfv, true),
@@ -269,7 +276,7 @@ impl PostProcessPass {
             label: Some("PostProcess Render Main BGL"),
             entries: &[
                 uniform_entry(0, fv),
-                uniform_entry(1, fv),
+                storage_ro_entry(1, fv),
                 sampled_tex_entry(2, fv, false),
                 sampled_tex_entry(3, fv, true),
                 sampler_entry(4, fv, true),
@@ -286,6 +293,28 @@ impl PostProcessPass {
                 // Fog is a froxel grid, not a screen-space buffer.
                 wgpu::BindGroupLayoutEntry {
                     binding: 17,
+                    visibility: fv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Velocity buffer (Rg16Float) for per-pixel motion blur
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18,
+                    visibility: fv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 3D LUT texture for colour grading
+                wgpu::BindGroupLayoutEntry {
+                    binding: 19,
                     visibility: fv,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -458,6 +487,50 @@ impl PostProcessPass {
             ..Default::default()
         });
 
+        // 1x1 zero-velocity fallback for when the graph has no GBuffer pass.
+        let fallback_velocity_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess Velocity Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_velocity_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[0u8; 4],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_velocity_view = fallback_velocity_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 1x1x1 identity LUT fallback (maps (0,0,0)→black, (1,1,1)→white)
+        let fallback_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess LUT Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // Identity: (0,0,0,1) = black input maps to black, but for LUT we use
+        // the identity where coord (r,g,b) returns (r,g,b). 1x1x1 can't hold
+        // a true identity but it won't be sampled when lut_platform == 0.
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_lut_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_lut_view = fallback_lut_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+
         let custom_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Custom Params"),
             size: 64 * 16,
@@ -495,6 +568,8 @@ impl PostProcessPass {
             noise_view,
             noise_sampler,
             fallback_fog_view,
+            fallback_velocity_view,
+            fallback_lut_view,
             custom_params_buf,
             custom_params: Vec::new(),
             user_shader_snippet: stored_snippet,
@@ -727,6 +802,8 @@ impl PostProcessPass {
         depth_view: &wgpu::TextureView,
         camera_buf: &wgpu::Buffer,
         fog_view: Option<&wgpu::TextureView>,
+        velocity_view: Option<&wgpu::TextureView>,
+        lut_view: Option<&wgpu::TextureView>,
     ) {
         let fog_view = fog_view.unwrap_or(&self.fallback_fog_view);
         self.compute_main_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -745,6 +822,9 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
             ],
         }));
+
+        let velocity_view = velocity_view.unwrap_or(&self.fallback_velocity_view);
+        let lut_view = lut_view.unwrap_or(&self.fallback_lut_view);
 
         self.render_main_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Render Main BG"),
@@ -766,6 +846,8 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.noise_sampler) },
                 wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(fog_view) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(velocity_view) },
+                wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(lut_view) },
             ],
         }));
     }
@@ -782,7 +864,7 @@ impl RenderPass for PostProcessPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "fog_accum"]
+        &["pre_aa", "fog_accum", "color_grading_lut"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -799,6 +881,11 @@ impl RenderPass for PostProcessPass {
         // Optional: graphs without a VolumetricFogPass never publish this, and the
         // uber shader falls back to a 1x1 no-op texture.
         builder.read("fog_accum");
+        // Optional: graphs without a GBuffer pass or velocity pass fall back to
+        // a 1x1 zero-velocity texture (no per-object motion blur).
+        builder.read("gbuffer_velocity");
+        // Optional: 3D LUT for colour grading; falls back to identity LUT.
+        builder.read("color_grading_lut");
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -891,6 +978,8 @@ impl RenderPass for PostProcessPass {
         // added, removed, or resized rebuilds the group instead of leaving b17
         // pointing at a stale view.
         let fog_view = ctx.resources.fog_accum.get();
+        let velocity_view = ctx.resources.gbuffer_velocity.get();
+        let lut_view = ctx.resources.color_grading_lut.get();
 
         let bg_key = (
             pre_aa_view as *const _ as usize,
@@ -898,9 +987,11 @@ impl RenderPass for PostProcessPass {
             camera_buf as *const _ as usize,
             postprocess_buf as *const _ as usize,
             fog_view.map_or(0, |v| v as *const _ as usize),
+            velocity_view.map_or(0, |v| v as *const _ as usize),
+            lut_view.map_or(0, |v| v as *const _ as usize),
         );
         if self.main_bg_key != Some(bg_key) {
-            self.rebuild_bind_groups(ctx.device, postprocess_buf, pre_aa_view, ctx.depth, camera_buf, fog_view);
+            self.rebuild_bind_groups(ctx.device, postprocess_buf, pre_aa_view, ctx.depth, camera_buf, fog_view, velocity_view, lut_view);
             self.main_bg_key = Some(bg_key);
         }
 
