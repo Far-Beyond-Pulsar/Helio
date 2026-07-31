@@ -212,6 +212,14 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
+
+        // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
+        // colour target each frame, so its absence is what made geometry smear over itself.
+        // See `Renderer::rebuild_graph_if_sky_changed`.
+        renderer.scene_mut().insert_actor(helio::SceneActor::sky(
+            helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
+        ));
+
         // ── Ground ───────────────────────────────────────────────────────────
         // Flat for now: `FoliageTerrainPass` (the top-down height/slope capture the
         // placement shader samples) is a later phase, and until it exists placement falls
