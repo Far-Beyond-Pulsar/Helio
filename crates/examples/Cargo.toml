@@ -229,7 +229,9 @@ path = "vr/main.rs"
 
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
+helio-core = { workspace = true }
 libhelio = { workspace = true }
+helio-pass-sprite-batch = { workspace = true }
 helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
@@ -259,6 +261,10 @@ log = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
+
+[[bin]]
+name = "sprite_demo"
+path = "sprite_demo.rs"
 
 [[bin]]
 name = "foliage_demo"
