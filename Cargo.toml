@@ -15,6 +15,7 @@ path = "src/bin/web.rs"
 [workspace]
 members = [
     "crates/*",
+    "crates/passes/2d/*",
     "crates/passes/3d/*",
     "crates_other/*"
 ]
@@ -72,6 +73,7 @@ helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-pass-voxel-mesh = { path = "crates/passes/3d/helio-pass-voxel-mesh" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
+helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }
 
 [dependencies]
 tiny_http = "0.12"

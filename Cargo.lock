@@ -3332,6 +3332,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-sprite-batch"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
+ "helio-core",
+ "libhelio",
+ "log",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-ssao"
 version = "0.1.0"
 dependencies = [
