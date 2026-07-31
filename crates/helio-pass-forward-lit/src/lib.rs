@@ -332,7 +332,7 @@ impl RenderPass for ForwardLitPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: if self.render_all_opaque { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
