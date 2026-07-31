@@ -64,6 +64,22 @@ pub const HIZ_MARKER: &str = "//!use helio_hiz";
 /// diagnostics. Shared rather than per-pass because grass geometry, tree WPO and
 /// impostor cards draw the same plant inside a LOD cross-fade band and have to
 /// evaluate byte-identical wind to stay in phase.
+/// Shared PBR/BRDF evaluation — `fresnel_schlick`, the distribution and geometry terms.
+///
+/// Lives in `libhelio/shaders/` rather than here because it is the GPU half of the
+/// material model `libhelio` already owns on the CPU side.
+///
+/// Registering a module here is the step that is easy to miss and gives no warning when
+/// missed: the `//!use` marker is an ordinary WGSL comment, so an unregistered module
+/// leaves the marker inert, the source passes through untouched, and the shader fails at
+/// `create_shader_module` with "no definition in scope" for a function that plainly
+/// exists. That is exactly how `deferred_lighting.wgsl` and `forward_lit.wgsl` came to be
+/// uncompilable — which on this path takes out lighting entirely.
+pub const PBR: &str = include_str!("../../../libhelio/shaders/pbr_eval.wgsl");
+
+/// Marker opting a shader into [`PBR`]. Must appear in the source.
+pub const PBR_MARKER: &str = "//!use pbr_eval";
+
 pub const WIND: &str = include_str!("foliage_wind.wgsl");
 
 /// Marker opting a shader into the foliage wind model. Must appear in the source.
@@ -84,6 +100,11 @@ pub fn uses_wind(source: &str) -> bool {
     source.contains(WIND_MARKER)
 }
 
+/// Returns `true` if `source` opts into the PBR evaluation module.
+pub fn uses_pbr(source: &str) -> bool {
+    source.contains(PBR_MARKER)
+}
+
 /// Lines prepended ahead of `source`, for offsetting diagnostics back to the
 /// original file. Depends on which markers the source opts into.
 pub fn expanded_lines(source: &str) -> usize {
@@ -93,6 +114,9 @@ pub fn expanded_lines(source: &str) -> usize {
     }
     if uses_hiz(source) {
         lines += HIZ.lines().count() + 1;
+    }
+    if uses_pbr(source) {
+        lines += PBR.lines().count() + 1;
     }
     if uses_wind(source) {
         lines += WIND.lines().count() + 1;
@@ -108,12 +132,47 @@ pub fn expanded_lines(source: &str) -> usize {
 pub fn resolve(source: &str) -> Cow<'_, str> {
     let prelude = uses_prelude(source);
     let hiz = uses_hiz(source);
+    let pbr = uses_pbr(source);
     let wind = uses_wind(source);
-    if !prelude && !hiz && !wind {
+    if !prelude && !hiz && !pbr && !wind {
         return Cow::Borrowed(source);
     }
 
     let mut out = String::new();
+
+    // WGSL global directives (`enable`, `requires`) must precede every declaration in the
+    // module. Prepending an include therefore *invalidates* a shader that opens with one:
+    // the directive lands after the prelude's declarations and the module fails with
+    // "written after first global declaration". This is inherent to concatenation-based
+    // includes, and it is why `forward_lit.wgsl` — which opens `enable
+    // wgpu_binding_array;` — could not compile once it also opted into `pbr_eval`.
+    //
+    // So directives are hoisted out of the source and re-emitted first. Each hoisted line
+    // is replaced by a blank line rather than deleted, which keeps every later line of the
+    // original file at its original index and so keeps `expanded_lines` a correct
+    // diagnostic offset.
+    // Only rewritten when a directive is actually present, so every other shader is
+    // concatenated byte-for-byte as before.
+    let is_directive =
+        |line: &str| line.starts_with("enable ") || line.starts_with("requires ");
+    let body: Cow<'_, str> = if source.lines().any(|line| is_directive(line.trim_start())) {
+        let mut hoisted = String::with_capacity(source.len());
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if is_directive(trimmed) {
+                out.push_str(trimmed);
+                out.push('\n');
+                hoisted.push('\n');
+            } else {
+                hoisted.push_str(line);
+                hoisted.push('\n');
+            }
+        }
+        Cow::Owned(hoisted)
+    } else {
+        Cow::Borrowed(source)
+    };
+
     if prelude {
         out.push_str(PRELUDE);
         out.push('\n');
@@ -121,6 +180,13 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
     // After the prelude, so the traversal may lean on it if it ever needs to.
     if hiz {
         out.push_str(HIZ);
+        out.push('\n');
+    }
+    // After the prelude: the BRDF terms take view/normal vectors the prelude's
+    // conventions define, and a lighting shader opting into both wants them in
+    // that order.
+    if pbr {
+        out.push_str(PBR);
         out.push('\n');
     }
     // Last. Wind depends on neither of the above today, so the only thing the
@@ -133,7 +199,7 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
         out.push_str(WIND);
         out.push('\n');
     }
-    out.push_str(source);
+    out.push_str(&body);
     Cow::Owned(out)
 }
 
