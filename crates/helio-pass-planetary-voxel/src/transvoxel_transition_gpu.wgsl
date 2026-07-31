@@ -429,7 +429,7 @@ fn emit_transition_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
             primary + projected_offset,
             material,
             normal,
-            0u,
+            1u << face,
         );
     }
 

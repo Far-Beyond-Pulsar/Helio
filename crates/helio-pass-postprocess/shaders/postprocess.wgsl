@@ -177,7 +177,7 @@ struct GpuPostProcessVolume {
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
-@group(0) @binding(1)  var<uniform>            camera:       CameraUniforms;
+@group(0) @binding(1)  var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(2)  var                     hdr_input:    texture_2d<f32>;
 @group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
 @group(0) @binding(4)  var                     linear_samp:  sampler;
@@ -330,7 +330,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
 
 @compute @workgroup_size(1, 1, 1)
 fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
     var vol_count: u32 = 0u;
 
     // Phase 1: evaluate all active volumes, store weight + index
@@ -691,7 +691,7 @@ fn apply_grain(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 // ── Depth of Field (Gaussian approximation) ────────────────────────────────────
 
 fn dof_coc(depth: f32) -> f32 {
-    let linear_depth = -camera.proj[3][2] / (depth * 2.0 - 1.0 + camera.proj[2][2]);
+    let linear_depth = -cameras[0].proj[3][2] / (depth * 2.0 - 1.0 + cameras[0].proj[2][2]);
     let focal_dist = postprocess.dof_focal_distance;
     let focal_region = postprocess.dof_focal_region;
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0) / max(postprocess.dof_near_transition, 0.001);
@@ -775,7 +775,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
         let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
         // Slices are planes of constant view depth, so convert the buffer value
         // rather than using radial distance.
-        let view_depth = helio_view_depth(fog_d, camera.position_near.w, camera.forward_far.w);
+        let view_depth = helio_view_depth(fog_d, cameras[0].position_near.w, cameras[0].forward_far.w);
         let slice = clamp(
             helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance),
             0.0,

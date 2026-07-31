@@ -134,7 +134,7 @@ struct ShadowConfig {
     pcf_sample_count:     u32,                      // Standard PCF sample count (4/8/12/16)
 }
 
-@group(0) @binding(0) var <uniform> camera:        Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var <uniform> globals:       Globals;
 @group(0) @binding(7) var <uniform> shadow_config: ShadowConfig;
 
@@ -480,7 +480,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
         layer = light.shadow_index + point_light_face(to_frag);
         return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
     } else if light.light_type == 0u {  // Directional light (type 0)
-        let dist = length(world_pos - camera.position_near.xyz);
+        let dist = length(world_pos - cameras[0].position_near.xyz);
         let splits = globals.csm_splits;
         
         // Determine cascades and blend factor
@@ -1043,7 +1043,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
     let uv_01       = in.clip_pos.xy / screen_size;
     let ndc_xy      = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
-    let world_h     = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_h     = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos   = world_h.xyz / world_h.w;
 
     // ── Debug mode 10: shadow factor heatmap ──────────────────────────────────
@@ -1101,7 +1101,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
-    let V   = normalize(camera.position_near.xyz - world_pos);
+    let V   = normalize(cameras[0].position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
     // ── SSS / Extra surface data ──────────────────────────────────────────────

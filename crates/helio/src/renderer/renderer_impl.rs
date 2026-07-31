@@ -8,7 +8,7 @@ use web_time::Instant;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 
-use super::config::{PerfOverlayMode, RendererConfig};
+use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<
@@ -160,6 +160,56 @@ pub struct Renderer {
     /// Templates registered by the user for the transparent path.
     /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
     pub(crate) transparent_template_registry: RadiantTemplateRegistry,
+    pub(crate) render_mode: RenderMode,
+    /// Whether the render graph was built in OpenXR multiview mode. Mirrors
+    /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
+    /// opt-in is not silently lost.
+    pub(crate) enable_xr: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR instance (owned so the runtime binding is kept alive).
+    pub(crate) xr_instance: Option<helio_xr::instance::XrInstance>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR session (frame waiter/stream, spaces). `None` in desktop
+    /// mirror mode.
+    pub(crate) xr: Option<helio_xr::session::XrSession>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// OpenXR swapchain whose images are wrapped as wgpu textures.
+    pub(crate) xr_swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Two-layer array depth texture for the multiview render pass. Distinct
+    /// from `depth_texture` (single-layer, used by passes that *sample* scene
+    /// depth as a plain `texture_depth_2d`).
+    pub(crate) xr_depth_texture: Option<wgpu::Texture>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_depth_view: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Layer-0 `D2` view of `xr_depth_texture` for depth-sampling passes.
+    pub(crate) xr_depth_view_layer0: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Consecutive frames skipped because the session was not focused/visible or
+    /// the runtime asked us not to render. Used to rate-limit diagnostic logs.
+    pub(crate) xr_idle_skips: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Application-provided camera template for XR frames: supplies
+    /// `postprocess_settings`, near/far and the representative position used
+    /// for RC bounds and the debug state. The per-eye view/proj are overridden
+    /// by the headset each frame.
+    pub(crate) xr_camera: Option<crate::scene::Camera>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// PC mirror blit: samples the acquired XR swapchain image (2-layer array)
+    /// and draws both eyes side-by-side to the mirror window surface.
+    pub(crate) xr_mirror_pipeline: Option<wgpu::RenderPipeline>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bgl: Option<wgpu::BindGroupLayout>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_sampler: Option<wgpu::Sampler>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bind_group: Option<(u32, wgpu::BindGroup)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Colour format of the PC mirror window surface; the blit pipeline's color
+    /// target must match it (usually Bgra8UnormSrgb on Windows), not the XR
+    /// swapchain format. Set via [`Renderer::set_xr_mirror_format`].
+    pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
 }
 
 pub struct DebugBatch<'a> {
@@ -584,7 +634,54 @@ impl Renderer {
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: self.render_mode,
+            enable_xr: self.enable_xr,
         }
+    }
+
+    /// Hand the renderer an OpenXR session and swapchain created by the
+    /// application (via `helio-xr`). All three are optional: `None` fields keep
+    /// the renderer in desktop (window) mode, which is the fallback when no
+    /// headset is connected.
+    ///
+    /// The swapchain must have been created from `session` and both must belong
+    /// to the same `wgpu::Device` the renderer was built with.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_session(
+        &mut self,
+        instance: Option<helio_xr::instance::XrInstance>,
+        session: Option<helio_xr::session::XrSession>,
+        swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    ) {
+        self.xr_instance = instance;
+        self.xr = session;
+        self.xr_swapchain = swapchain;
+    }
+
+    /// Set the camera template used for XR frames (postprocess settings,
+    /// near/far planes, RC bounds position). The per-eye view/projection
+    /// matrices are overridden by the headset pose each frame; only the
+    /// post-processing settings and clip distances are read back.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_camera(&mut self, camera: crate::scene::Camera) {
+        self.xr_camera = Some(camera);
+    }
+
+    /// Set the PC mirror window's colour format (from the mirror surface's
+    /// capabilities) so the XR mirror blit pipeline's color target matches.
+    /// Usually `Bgra8UnormSrgb` on Windows.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
+        if self.xr_mirror_format != Some(format) {
+            self.xr_mirror_format = Some(format);
+            // The pipeline is keyed on the format; drop it so it is rebuilt.
+            self.xr_mirror_pipeline = None;
+        }
+    }
+
+    /// Whether the renderer was built with the OpenXR multiview path enabled.
+    pub fn xr_enabled(&self) -> bool {
+        self.enable_xr
     }
 
     /// Returns a reference to the post-process uniform buffer.

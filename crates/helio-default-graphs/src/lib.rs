@@ -7,6 +7,7 @@ use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_flare::LensFlarePass;
+use helio_pass_forward_lit::ForwardLitPass;
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
@@ -43,16 +44,28 @@ use helio::Scene;
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
+/// Create a new graph, honouring the caller's device ownership.
+///
+/// When `config.enable_xr` the graph is put into OpenXR multiview mode:
+/// every pool texture is allocated as a 2-layer array and the executor forces
+/// `multiview_mask = 0b11` on all render passes. Note that the graph's internal
+/// resolution stays `config.internal_width()/internal_height()` — in XR mode
+/// the application is expected to size `RendererConfig` to the eye resolution
+/// reported by the OpenXR runtime (via `XrSession::width`/`height`), since the
+/// graph does not talk to the runtime itself.
 fn new_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     owns_device: bool,
+    config: &RendererConfig,
 ) -> RenderGraph {
-    if owns_device {
+    let mut graph = if owns_device {
         RenderGraph::new(device, queue)
     } else {
         RenderGraph::new_with_external_device(device, queue)
-    }
+    };
+    graph.with_xr_mode(config.enable_xr);
+    graph
 }
 
 fn add_common_early_passes(
@@ -164,6 +177,26 @@ fn add_geometry_passes(
     let camera_buf = scene.gpu_scene().camera.buffer();
 
     graph.add_pass(Box::new(GBufferPass::new(device)));
+
+    let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
+    vg_pass.debug_mode = config.debug_mode;
+    graph.add_pass(Box::new(vg_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
+}
+
+fn add_forward_geometry_passes(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    scene: &Scene,
+    config: &RendererConfig,
+    perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
+    render_all_opaque: bool,
+) {
+    let camera_buf = scene.gpu_scene().camera.buffer();
+
+    let mut fl_pass = ForwardLitPass::new(device, config.surface_format);
+    fl_pass.render_all_opaque = render_all_opaque;
+    graph.add_pass(Box::new(fl_pass));
 
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
     vg_pass.debug_mode = config.debug_mode;
@@ -380,7 +413,7 @@ fn build_default_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -594,7 +627,7 @@ fn build_fxaa_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -735,7 +768,7 @@ fn build_hlfs_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -916,7 +949,7 @@ fn build_fxaa_hlfs_graph_internal(
     let w = config.width;
     let h = config.height;
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -1019,6 +1052,222 @@ pub fn build_simple_graph(
             let mut g = RenderGraph::new(device, _queue);
             g.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
             g
+        },
+    );
+    graph.set_graph_data(rebuilder);
+
+    graph
+}
+
+// ── Forward-mode graph builders ─────────────────────────────────────────────
+
+pub fn build_forward_opaque_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    build_forward_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
+}
+
+pub fn build_forward_opaque_graph_external(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    build_forward_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
+}
+
+pub fn build_forward_only_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    build_forward_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
+}
+
+pub fn build_forward_only_graph_external(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    build_forward_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
+}
+
+fn build_forward_graph_internal(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    owns_device: bool,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    let iw = config.internal_width();
+    let ih = config.internal_height();
+
+    let mut graph = new_graph(device, queue, owns_device, &config);
+
+    let perf = add_common_early_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        cull_stats_buf,
+        iw,
+        ih,
+    );
+
+    graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
+
+    graph.add_pass(Box::new(RadianceCascadesPass::new(
+        device,
+        scene.gpu_scene().lights.buffer(),
+    )));
+
+    // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
+    add_forward_geometry_passes(&mut graph, device, scene, &config, &perf, true);
+
+    // Voxel mesh pass — real triangles with depth testing, composited over
+    // the forward-lit output.
+    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
+        device,
+        queue,
+        config.surface_format,
+    )));
+
+    add_late_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        &perf,
+        debug_state.clone(),
+        debug_camera_buf,
+        iw,
+        ih,
+    );
+
+    // Before AA, at internal resolution: fog accumulates against internal-res
+    // depth, and the AA pass then resolves it with the rest of the frame.
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
+
+    // Transparent pass — alpha-blended geometry (simple fixed shader).
+    let camera_buf = scene.gpu_scene().camera.buffer();
+    let instances_buf = scene.gpu_scene().instances.buffer();
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
+
+    graph.add_pass(Box::new(LensFlarePass::new(
+        device,
+        queue,
+        scene.gpu_scene().lights.buffer(),
+        iw,
+        ih,
+        config.surface_format,
+    )));
+
+    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+
+    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
+        None,
+    )));
+
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
+
+    graph.lock(iw, ih);
+
+    let overlay_owned = debug_overlay.map(Arc::clone);
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+            build_forward_graph_internal(
+                device,
+                queue,
+                scene,
+                config,
+                debug_state,
+                debug_camera_buf,
+                cull_stats_buf,
+                owns_device,
+                overlay_owned.as_ref(),
+            )
         },
     );
     graph.set_graph_data(rebuilder);

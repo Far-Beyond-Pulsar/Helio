@@ -13,6 +13,42 @@ use super::renderer_impl::{
     CullStatsReadbackState, DebugCameraUniform, Renderer, HALTON_JITTER,
 };
 
+/// Fullscreen-triangle shader for the PC mirror: samples the XR swapchain's
+/// 2-layer array texture and draws eye 0 on the left half, eye 1 on the right.
+#[cfg(not(target_arch = "wasm32"))]
+const XR_MIRROR_WGSL: &str = r#"
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(vi) - 1) * 2.0;
+    let y = f32(i32(vi) & 1) * 2.0 - 1.0;
+    out.pos = vec4<f32>(x, -y, 0.0, 1.0);
+    out.uv = vec2<f32>(x * 0.5 + 0.5, y * 0.5 + 0.5);
+    return out;
+}
+
+@group(0) @binding(0) var eye_texture: texture_2d_array<f32>;
+@group(0) @binding(1) var eye_sampler: sampler;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var layer: u32 = 0u;
+    var u: f32 = in.uv.x;
+    if (in.uv.x >= 0.5) {
+        layer = 1u;
+        u = (in.uv.x - 0.5) * 2.0;
+    } else {
+        u = in.uv.x * 2.0;
+    }
+    return textureSample(eye_texture, eye_sampler, vec2<f32>(u, in.uv.y), layer);
+}
+"#;
+
 impl Renderer {
     fn poll_cull_stats_readback(&mut self) {
         if !self.owns_device {
@@ -159,6 +195,49 @@ impl Renderer {
 
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
+
+        // Target clear + per-frame uploads + graph execution + cull-stats
+        // readback, all shared with the XR path.
+        self.submit_frame(camera, target, false)?;
+        Ok(())
+    }
+
+    /// Upload every per-frame scene buffer (billboards, water, post-process
+    /// volumes, material bindings, baked resources), assemble
+    /// [`libhelio::FrameResources`], clear `target`, execute the graph and kick
+    /// off the cull-stats readback. Shared by the mono and XR render paths.
+    ///
+    /// `camera` supplies the post-process settings and the camera position used
+    /// for the RC volume bounds and debug-state tracking. It must have been
+    /// written to the scene already (`update_camera` / `update_stereo_cameras`)
+    /// and `scene.flush()` called before this runs.
+    ///
+    /// `multiview` selects a `multiview_mask = 0b11` clear pass, required when
+    /// `target` is a two-layer array view (the OpenXR swapchain image). In
+    /// multiview mode the graph's render passes get the renderer's two-layer
+    /// `xr_depth_view` as their depth-stencil attachment; otherwise the
+    /// single-layer `depth_view`. (The depth written into
+    /// `frame_resources.depth_texture` for *sampling* passes stays the
+    /// single-layer texture in both modes — see `render_xr` for why.)
+    fn submit_frame(
+        &mut self,
+        camera: &Camera,
+        target: &wgpu::TextureView,
+        multiview: bool,
+    ) -> HelioResult<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let depth: &wgpu::TextureView = if multiview {
+            self.xr_depth_view.as_ref().ok_or_else(|| {
+                invalid_xr(
+                    "render_xr() called but the renderer has no multiview depth view \
+                     (was RendererConfig built with enable_xr?)",
+                )
+            })?
+        } else {
+            &self.depth_view
+        };
+        #[cfg(target_arch = "wasm32")]
+        let depth: &wgpu::TextureView = &self.depth_view;
 
         let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
         let light_count = self.scene.gpu_scene().lights.len();
@@ -391,6 +470,18 @@ impl Renderer {
             frame_resources.ies_textures.write(ies, "Renderer");
         }
         frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
+        #[cfg(not(target_arch = "wasm32"))]
+        let depth_sampler_view: &wgpu::TextureView = if multiview {
+            self.xr_depth_view_layer0
+                .as_ref()
+                .map(|v| v as &wgpu::TextureView)
+                .unwrap_or(&self.depth_view)
+        } else {
+            &self.depth_view
+        };
+        #[cfg(target_arch = "wasm32")]
+        let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
+        frame_resources.depth_sampler_view.write(depth_sampler_view, "Renderer");
         if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
             frame_resources.full_res_depth.write(v, "Renderer");
         }
@@ -456,7 +547,11 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-                multiview_mask: None,
+                multiview_mask: if multiview {
+                    Some(std::num::NonZeroU32::new(0b11).unwrap())
+                } else {
+                    None
+                },
             });
         }
         clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
@@ -466,7 +561,7 @@ impl Renderer {
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),
             target,
-            &self.depth_view,
+            depth,
             &frame_resources,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
@@ -499,9 +594,389 @@ impl Renderer {
             self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
         }
 
+        // Release the texture/sampler view borrows on the scene before advancing
+        // (which mutates it).
         drop(texture_views);
         drop(samplers);
         self.scene.advance_frame();
         Ok(())
     }
+
+    /// OpenXR frame: poll session events, wait/begin the compositor frame,
+    /// locate the per-eye views, upload the stereo camera into the scene's
+    /// `array<Camera, 2>` buffer, render both eyes in a single multiview pass
+    /// into the acquired swapchain image, then present and end the frame.
+    ///
+    /// # Prerequisites
+    /// - A session/swapchain installed via [`Renderer::set_xr_session`] and a
+    ///   graph built with `config.enable_xr == true` (two-layer array targets,
+    ///   `multiview_mask = 0b11`). Without the former this errors; without the
+    ///   latter the multiview render passes will fail validation.
+    /// - The headset's stage origin is mapped 1:1 onto the engine world origin
+    ///   (`world_from_stage` is identity). Scene content should be authored
+    ///   around the world origin at head height.
+    ///
+    /// When the session is idle/not visible or the compositor says not to
+    /// render, this returns `Ok(())` without doing any GPU work.
+    ///
+    /// Note on per-eye data: shaders currently sample `cameras[0]` (left eye),
+    /// so both layers render the same camera. The two-eye camera buffer and the
+    /// multiview mask infrastructure are in place; wiring `view_index` through
+    /// the shaders is a follow-up (stereo depth requires it).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+        self.poll_cull_stats_readback();
+
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
+        self.last_render_time = now;
+        self.delta_time = dt;
+        self.frame_times[self.frame_times_cursor] = dt;
+        self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
+        self.graph.set_delta_time(dt);
+
+        // ── 1. Pump session events, drive the state machine, and run the frame
+        // ──    lifecycle. Per the OpenXR frame-submission rules, EVERY
+        // ──    xrWaitFrame must be paired with xrBeginFrame, and every frame
+        // ──    (render or not) must be ended with xrEndFrame. Skipping
+        // ──    xrBeginFrame causes the next xrWaitFrame to block forever.
+        let (display_time, should_render) = {
+            let session = self.xr.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            let mut exit = false;
+            while let Some(event) = session.poll_events().map_err(xr_error)? {
+                match event {
+                    helio_xr::SessionEvent::Exit | helio_xr::SessionEvent::LossPending => {
+                        log::warn!("[XR] session requested exit / loss pending");
+                        exit = true;
+                    }
+                    helio_xr::SessionEvent::Ready | helio_xr::SessionEvent::Focused => {
+                        log::debug!("[XR] session state change: {event:?}");
+                    }
+                    helio_xr::SessionEvent::Idle => {}
+                }
+            }
+            if exit {
+                return Ok(());
+            }
+            if !session.session_begun {
+                // xrBeginSession not yet accepted; keep polling events.
+                self.xr_idle_skips = self.xr_idle_skips.wrapping_add(1);
+                if self.xr_idle_skips % 60 == 0 {
+                    log::info!(
+                        "[XR] session not begun yet (state = {:?})",
+                        session.session_state
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                return Ok(());
+            }
+            let frame_state = session.wait_frame().map_err(xr_error)?;
+            session.begin_frame().map_err(xr_error)?;
+            (frame_state.predicted_display_time, frame_state.should_render)
+        };
+
+        // ── 2. Not rendering this frame (runtime in SYNCHRONIZED or similar):
+        // ──    still END the frame with an empty layer list so the compositor
+        // ──    advances and the session can transition to VISIBLE/FOCUSED.
+        if !should_render {
+            {
+                let session = self.xr.as_mut().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+                })?;
+                let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                session
+                    .end_frame(display_time, swapchain, &[])
+                    .map_err(xr_error)?;
+            }
+            self.xr_idle_skips = self.xr_idle_skips.wrapping_add(1);
+            if self.xr_idle_skips % 60 == 0 {
+                log::info!(
+                    "[XR] submitted empty frame (should_render = false, state = {:?})",
+                    self.xr.as_ref().map(|s| s.session_state)
+                );
+            }
+            return Ok(());
+        }
+        self.xr_idle_skips = 0;
+
+        // ── 3. Locate the per-eye views. `world_from_stage` is identity: the
+        // ──    headset's stage origin maps 1:1 onto the engine world origin.
+        let located = {
+            let session = self.xr.as_ref().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            session
+                .locate_views(display_time, &glam::Mat4::IDENTITY)
+                .map_err(xr_error)?
+        };
+        let near_far = self
+            .xr_camera
+            .as_ref()
+            .map(|c| (c.near, c.far))
+            .unwrap_or((0.05, 200.0));
+
+        // ── 4. Acquire one swapchain image; both eyes write to different array
+        // ──    layers of it. Then render each eye separately (dual-pass stereo)
+        // ──    through the exact same forward pipeline as desktop mode — no
+        // ──    multiview, so every existing pass/sampler works unchanged.
+        let image_index = {
+            let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+            })?;
+            swapchain.acquire_image().map_err(xr_error)?
+        };
+
+        let mut representative = self.default_xr_camera(near_far.0, near_far.1);
+        for (eye, pose) in located.view_poses.iter().enumerate() {
+            let eye_uniform =
+                helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0];
+
+            // `cameras[0]` (the slot every shader samples) is this eye's camera.
+            // Writing both slots to the same value keeps the storage buffer
+            // valid even though only index 0 is read in this mode.
+            self.scene.update_stereo_cameras(&eye_uniform, &eye_uniform);
+            self.sync_template_registry_to_scene();
+            self.scene.flush();
+
+            if eye == 0 {
+                representative = match (&self.xr_camera, pose) {
+                    (Some(template), _) => {
+                        let mut cam = template.clone();
+                        cam.view = pose.view_matrix();
+                        cam.proj = pose.projection(near_far.0, near_far.1);
+                        cam.position = pose.eye_position;
+                        cam.near = near_far.0;
+                        cam.far = near_far.1;
+                        cam.jitter = [0.0, 0.0];
+                        cam
+                    }
+                    _ => self.default_xr_camera(near_far.0, near_far.1),
+                };
+                // Debug overlay / editor camera: single (left) eye.
+                let col = eye_uniform.view_proj;
+                let debug_camera_uniform = DebugCameraUniform {
+                    view_proj: [
+                        [col[0],  col[1],  col[2],  col[3]],
+                        [col[4],  col[5],  col[6],  col[7]],
+                        [col[8],  col[9],  col[10], col[11]],
+                        [col[12], col[13], col[14], col[15]],
+                    ],
+                };
+                self.queue.write_buffer(
+                    &self.debug_camera_buffer,
+                    0,
+                    bytemuck::bytes_of(&debug_camera_uniform),
+                );
+            }
+
+            let layer_view = {
+                let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                swapchain.layer_view(image_index, eye as u32).map_err(xr_error)?.clone()
+            };
+            self.submit_frame(&representative, &layer_view, false)?;
+        }
+
+        // ── 5. Optional PC mirror: draw both eye layers side-by-side into the
+        // ──    provided mirror surface view (must happen before the swapchain
+        // ──    image is released back to OpenXR).
+        if let Some(mirror_view) = mirror {
+            self.blit_xr_to_mirror(image_index, mirror_view)?;
+        }
+
+        // ── 6. Present the rendered image and end the OpenXR frame.
+        // ──    `located.views` are the raw stage-space views `end_frame` needs
+        // ──    to anchor the projection layer.
+        {
+            let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+            })?;
+            swapchain.present().map_err(xr_error)?;
+        }
+        {
+            let session = self.xr.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+            })?;
+            session
+                .end_frame(display_time, swapchain, &located.views)
+                .map_err(xr_error)?;
+        }
+        Ok(())
+    }
+
+    /// A fallback camera template used when no `xr_camera` was provided.
+    fn default_xr_camera(&self, near: f32, far: f32) -> Camera {
+        Camera::perspective_look_at(
+            glam::Vec3::new(0.0, 1.6, 0.0),
+            glam::Vec3::new(0.0, 1.6, -1.0),
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1.0,
+            near,
+            far,
+        )
+    }
+
+    /// Blit the last acquired XR swapchain image (a 2-layer array: eye 0 left,
+    /// eye 1 right) into `mirror`, both eyes side by side, each in half the
+    /// width. Used to mirror the headset view into the desktop window.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn blit_xr_to_mirror(
+        &mut self,
+        image_index: u32,
+        mirror: &wgpu::TextureView,
+    ) -> HelioResult<()> {
+        use wgpu::util::DeviceExt as _;
+
+        if self.xr_mirror_sampler.is_none() {
+            self.xr_mirror_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("XR Mirror Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }));
+        }
+        if self.xr_mirror_bgl.is_none() {
+            self.xr_mirror_bgl = Some(self.device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
+                    label: Some("XR Mirror BGL"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2Array,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                },
+            ));
+        }
+        if self.xr_mirror_pipeline.is_none() {
+            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("XR Mirror Shader"),
+                source: wgpu::ShaderSource::Wgsl(XR_MIRROR_WGSL.into()),
+            });
+            self.xr_mirror_pipeline = Some(self.device.create_render_pipeline(
+                &wgpu::RenderPipelineDescriptor {
+                    label: Some("XR Mirror Pipeline"),
+                    layout: Some(
+                        &self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                            label: Some("XR Mirror PL"),
+                            bind_group_layouts: &[
+                                Some(self.xr_mirror_bgl.as_ref().unwrap()),
+                            ],
+                            immediate_size: 0,
+                        }),
+                    ),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: self.xr_mirror_format.unwrap_or(self.surface_format),
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                },
+            ));
+        }
+
+        if self.xr_mirror_bind_group.as_ref().map(|(k, _)| *k) != Some(image_index) {
+            let array_view = {
+                let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                swapchain.view(image_index).map_err(xr_error)?.clone()
+            };
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("XR Mirror BG"),
+                layout: self.xr_mirror_bgl.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&array_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.xr_mirror_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            });
+            self.xr_mirror_bind_group = Some((image_index, bg));
+        }
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("XR Mirror Blit"),
+            });
+        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: mirror,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("XR Mirror Blit Pass"),
+                color_attachments: &color_attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(self.xr_mirror_pipeline.as_ref().unwrap());
+            rp.set_bind_group(0, &self.xr_mirror_bind_group.as_ref().unwrap().1, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn xr_error(e: helio_xr::XrError) -> helio_core::Error {
+    helio_core::Error::InvalidPassConfig(format!("OpenXR: {e}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn invalid_xr(msg: &str) -> helio_core::Error {
+    helio_core::Error::InvalidPassConfig(msg.to_string())
 }

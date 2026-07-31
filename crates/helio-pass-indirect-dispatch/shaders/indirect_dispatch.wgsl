@@ -62,7 +62,7 @@ struct DrawIndexedIndirect {
     first_instance: u32,
 }
 
-@group(0) @binding(0) var<uniform>            camera:     Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>            cull:       CullUniforms;
 @group(0) @binding(2) var<storage, read>      instances:  array<GpuInstance>;
 @group(0) @binding(3) var<storage, read>      draw_calls: array<GpuDrawCall>;
@@ -143,9 +143,9 @@ fn main(
             compacted_indices[dc.first_instance + slot] = slot_idx;
 
             // Sub-pixel test: check if this instance projects to ≥ 1 pixel.
-            let clip_pos = camera.view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
+            let clip_pos = cameras[0].view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
             if clip_pos.w > 0.0 {
-                let r_ndc = abs(inst.bounds.w * camera.proj[1][1] / clip_pos.w);
+                let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
                 if r_ndc >= 0.001 {
                     atomicStore(&wg_nonsubpixel, 1u);
                 }

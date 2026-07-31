@@ -486,7 +486,7 @@ impl CoronaPass {
                 Self::storage_entry(3, storage_visibility, for_render),
                 Self::storage_entry(4, SS::COMPUTE, false),
                 Self::storage_entry(5, SS::COMPUTE, false),
-                Self::uniform_entry(6, uniform_visibility),
+                Self::storage_entry(6, uniform_visibility, true),
                 Self::storage_entry(7, SS::COMPUTE, false),
                 Self::storage_entry(8, SS::COMPUTE, false),
                 Self::storage_entry(9, SS::COMPUTE, false),

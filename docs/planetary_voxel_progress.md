@@ -30,12 +30,13 @@ existing `voxel_demo`, `voxel_demo_raymarch`, their passes, and
 
 ## Active milestones
 
-- [ ] Generation-safe bounded terrain meshlet publication, GPU culling, matched
+- [x] Generation-safe bounded terrain meshlet publication, GPU culling, matched
   page-baseline measurement, and truthful debug views:
-  [issue #119](https://github.com/Far-Beyond-Pulsar/Helio/issues/119)
-- [ ] Production visual and performance validation of the complete
-  Pulsar-to-Helio path, including movement, LOD transitions, residency
-  replacement/eviction, resize, and the debug views from issue #119
+  [Helio#161](https://github.com/Far-Beyond-Pulsar/Helio/pull/161)
+- [ ] Crack-free horizon-scale planetary LOD streaming, including movement,
+  signed page-boundary crossings, altitude changes, teleports, bounded
+  replacement/eviction, resize recovery, and truthful diagnostics:
+  [issue #162](https://github.com/Far-Beyond-Pulsar/Helio/issues/162)
 
 ## Implementation milestones
 
@@ -47,9 +48,8 @@ existing `voxel_demo`, `voxel_demo_raymarch`, their passes, and
   [#343](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/343), and
   [#354](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/354))
 - [x] GPU Transvoxel versus manifold dual-contouring extraction bake-off ([Helio#107](https://github.com/Far-Beyond-Pulsar/Helio/pull/107))
-- [ ] Generation-safe bounded meshlet publication and indirect drawing
-  ([Helio issue #119](https://github.com/Far-Beyond-Pulsar/Helio/issues/119), in
-  implementation and validation)
+- [x] Generation-safe bounded meshlet publication and indirect drawing
+  ([Helio#161](https://github.com/Far-Beyond-Pulsar/Helio/pull/161))
 - [ ] Crack-free LOD selection, transition topology, and horizon-scale coverage
 - [ ] Exact hierarchical destruction, compaction, snapshots, and recovery
 - [ ] Collision, physics, and bounded detached terrain bodies
@@ -84,6 +84,48 @@ acceptance gates, not merely a compiling implementation.
   candidates. This fixture does not justify a meshlet performance promotion,
   so page-indexed rendering remains the default, the meshlet path remains
   directly selectable for validation/debugging, and no GPU-speed claim is made.
+
+### Issue #162 validation evidence
+
+- `planet_voxel_demo` now builds a deterministic camera-driven tangent fixture
+  from canonical page addresses. It keeps a complete previous plan visible
+  until every page and surface in the replacement plan is GPU-published, then
+  performs one generation-checked visibility handoff and evicts old-only pages.
+- The fixture retains 10 cm LOD0 cells near the ground camera, reaches LOD10
+  within an LOD11 (6.5536 km) root, derives coarse-owned transition masks from
+  actual face neighbors, and coarsens the near field to LOD2 and LOD5 at the
+  tested flight altitudes.
+- Plan work is capped at 192 pages. Atomic active/pending residency is capped at
+  384 pages, pending extraction at 192 surfaces, and all surface storage at
+  512 MiB, independent of logical planet size. The higher cap is required by
+  valid signed camera alignments found by the randomized topology oracle.
+- A deterministic 512-case signed-coordinate oracle proves exact root coverage,
+  no volume overlap, 2:1 face balance, deterministic replay, and exactly one
+  coarse owner for every required transition face. Randomized transition-cell
+  neighborhoods on all six faces prove identical lateral seam vertices and no
+  duplicated or degenerate boundary triangles.
+- Page uploads and surface extraction are staged at one page per frame instead
+  of materializing an entire replacement plan at once. Retained pages preserve
+  the union of their old and replacement transition faces; face-tagged
+  transition vertices make the visible-set handoff select the exact mask
+  atomically without exposing replacement topology early.
+- Moving demand can cancel an in-flight replacement. Already-submitted work is
+  drained generation-safely, pending-only pages are evicted, the obsolete
+  visible set is never committed, and planning resumes from the newest camera
+  demand.
+- `planet_voxel_demo --horizon-trace` runs unattended through initial fill,
+  an in-flight cancellation, positive-boundary movement, a negative-coordinate
+  teleport, LOD0/2/5 altitude changes, and two resize handoffs. The 2026-07-30
+  release RTX 3060 Vulkan run passed six handoffs in 416 frames with one
+  cancellation, peak residency 146 pages, no queued-surface accumulation, 302
+  uploads (188,995,608 bytes), 226 evictions, 311 extraction jobs, 161
+  transition jobs, and zero stale, overflow, incomplete, backpressure, or
+  dropped work. Planetary-pass CPU p50/p95 was `0.6939/0.7501 ms`; GPU p50/p95
+  was `1.667072/2.452480 ms`.
+- Interactive validation remains required before issue #162 and its pull
+  request can be completed. Use F3 for all truthful debug views, F5 for the
+  signed-coordinate teleport, F6 for ground/flight/high-altitude LOD demand,
+  and exercise movement plus resize/minimize recovery.
 
 ## Final promotion gates
 

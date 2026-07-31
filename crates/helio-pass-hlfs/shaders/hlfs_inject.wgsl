@@ -37,7 +37,7 @@ struct LightSample {
     radiance:  vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera:    Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
 @group(0) @binding(8) var clip_stack_level0: texture_storage_3d<rgba16float, write>;

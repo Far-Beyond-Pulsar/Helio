@@ -7,7 +7,7 @@
 @group(0) @binding(0) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(1) var<storage, read_write> flare_queries: array<GpuFlareQuery>;
 @group(0) @binding(2) var<storage, read_write> flare_count: array<atomic<u32>>;
-@group(0) @binding(3) var<uniform> camera: Camera;
+@group(0) @binding(3) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(4) var depth_tex: texture_depth_2d;
 @group(0) @binding(5) var<uniform> flare_uniforms: FlareUniforms;
 
@@ -72,7 +72,7 @@ fn cs_flare_query(@builtin(global_invocation_id) gid: vec3<u32>) {
     if light.flare_enabled == 0u { return; }
 
     let world_pos = vec4<f32>(light.position_range.xyz, 1.0);
-    let clip_pos = camera.view_proj * world_pos;
+    let clip_pos = cameras[0].view_proj * world_pos;
     let ndc = clip_pos.xyz / clip_pos.w;
 
     if ndc.z < 0.0 || ndc.z > 1.0 { return; }

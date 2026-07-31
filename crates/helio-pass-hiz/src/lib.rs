@@ -265,7 +265,15 @@ impl HiZBuildPass {
     ///
     /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
     fn build_min_pyramid(&mut self, ctx: &mut PassContext) {
-        let depth_key = ctx.depth as *const _ as usize;
+        // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
+        // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
+        // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
+        let depth_view = ctx
+            .resources
+            .depth_sampler_view
+            .get()
+            .unwrap_or(ctx.depth);
+        let depth_key = depth_view as *const _ as usize;
         if self.min_copy_bind_group_key != Some(depth_key) {
             self.min_copy_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -274,7 +282,7 @@ impl HiZBuildPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                            resource: wgpu::BindingResource::TextureView(depth_view),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,

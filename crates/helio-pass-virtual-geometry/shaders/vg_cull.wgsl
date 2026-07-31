@@ -109,7 +109,7 @@ struct CullUniforms {
     _pad2:                 u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> cull_uni: CullUniforms;
 @group(0) @binding(2) var<storage, read> meshlets: array<MeshletEntry>;
 @group(0) @binding(3) var<storage, read_write> objects: array<VgObjectData>;
@@ -159,7 +159,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     let model = inst.transform;
     let center_ws = (model * vec4<f32>(m.center, 1.0)).xyz;
     let world_radius = max(m.radius * inst_cull.max_scale, 0.0);
-    let cam_to_center = center_ws - camera.position_near.xyz;
+    let cam_to_center = center_ws - cameras[0].position_near.xyz;
 
     if !sphere_visible(center_ws, world_radius) {
         return;
@@ -181,7 +181,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
         );
         let cone_axis_ws = normalize(normal_mat * m.cone_axis);
         let cone_apex_ws = (model * vec4<f32>(m.cone_apex, 1.0)).xyz;
-        let camera_to_apex = cone_apex_ws - camera.position_near.xyz;
+        let camera_to_apex = cone_apex_ws - cameras[0].position_near.xyz;
         let apex_distance_sq = dot(camera_to_apex, camera_to_apex);
         if apex_distance_sq > 1.0e-12
             && dot(camera_to_apex / sqrt(apex_distance_sq), cone_axis_ws) >= m.cone_cutoff
@@ -196,15 +196,15 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     // pyramid isn't valid yet (see CullUniforms.hiz_valid) — otherwise an
     // untouched depth texture reads back as 0.0 and every meshlet looks
     // occluded.
-    let cull_clip = camera.view_proj * vec4<f32>(center_ws, 1.0);
+    let cull_clip = cameras[0].view_proj * vec4<f32>(center_ws, 1.0);
     if cull_uni.hiz_valid != 0u && cull_clip.w > 0.0 {
         let cull_ndc = cull_clip.xyz / cull_clip.w;
         let cull_uv = vec2<f32>(cull_ndc.x * 0.5 + 0.5, cull_ndc.y * -0.5 + 0.5);
         let nearest_view_depth = cull_clip.w - world_radius;
-        if nearest_view_depth > camera.position_near.w {
+        if nearest_view_depth > cameras[0].position_near.w {
             let ndc_r = max(
-                abs(world_radius * camera.proj[0][0] / nearest_view_depth),
-                abs(world_radius * camera.proj[1][1] / nearest_view_depth),
+                abs(world_radius * cameras[0].proj[0][0] / nearest_view_depth),
+                abs(world_radius * cameras[0].proj[1][1] / nearest_view_depth),
             );
             let uv_radius = ndc_r * 0.5;
             let uv_min = cull_uv - vec2<f32>(uv_radius);
@@ -216,7 +216,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
                 if dist_sq > world_radius * world_radius {
                     let direction = cam_to_center / sqrt(dist_sq);
                     let near_ws = center_ws - direction * world_radius;
-                    let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+                    let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
                     if near_clip.w > 0.0 {
                         near_z = clamp(near_clip.z / near_clip.w, 0.0, 1.0);
                     }
@@ -290,7 +290,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
 }
 
 fn publish_frustum_planes() {
-    let vp = camera.view_proj;
+    let vp = cameras[0].view_proj;
     let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
     let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
     let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
@@ -339,12 +339,12 @@ fn cs_select_objects(
             ).xyz;
             let world_radius = max(object.local_bounds.w * derived.max_scale, 0.0);
             if sphere_visible(center_ws, world_radius) {
-                let camera_distance = length(center_ws - camera.position_near.xyz);
+                let camera_distance = length(center_ws - cameras[0].position_near.xyz);
                 let closest_distance = max(
                     camera_distance - world_radius,
-                    max(camera.position_near.w, 1.0e-4),
+                    max(cameras[0].position_near.w, 1.0e-4),
                 );
-                let focal_pixels = abs(camera.proj[1][1])
+                let focal_pixels = abs(cameras[0].proj[1][1])
                     * f32(cull_uni.screen_height) * 0.5;
                 var selected_lod = 0u;
                 var level = 1u;

@@ -252,7 +252,10 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
 
 // ─── Camera buffer ────────────────────────────────────────────────────────────
 
-/// Single-element uniform buffer for the camera.
+/// Storage buffer for up to two cameras (stereo / XR).
+///
+/// The buffer is sized for two `GpuCameraUniforms` elements. In mono mode
+/// only the first element is written; the shader always indexes `cameras[0]`.
 pub struct GpuCameraBuffer {
     buf: wgpu::Buffer,
     data: GpuCameraUniforms,
@@ -262,9 +265,9 @@ pub struct GpuCameraBuffer {
 impl GpuCameraBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Camera Uniform"),
-            size: std::mem::size_of::<GpuCameraUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("Camera Storage"),
+            size: (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         Self {
@@ -298,6 +301,23 @@ impl GpuCameraBuffer {
     pub fn update(&mut self, camera: GpuCameraUniforms) {
         self.data = camera;
         self.dirty = true;
+    }
+
+    /// Write both eye cameras straight to GPU (XR multiview path).
+    ///
+    /// Unlike [`GpuCameraBuffer::update`] this uploads *both* uniforms in one
+    /// `write_buffer` (the shader array is `array<Camera, 2>`); `dirty` is left
+    /// untouched so a later `flush()` cannot clobber the right eye with a
+    /// single-element upload. The left eye is cached as `data` for the
+    /// CPU-side consumers (`position()`, `forward()`, ...).
+    pub fn update_stereo(
+        &mut self,
+        queue: &wgpu::Queue,
+        left: &GpuCameraUniforms,
+        right: &GpuCameraUniforms,
+    ) {
+        self.data = *left;
+        GpuCameraUniforms::upload_stereo(queue, &self.buf, left, right);
     }
 
     pub fn flush(&mut self, queue: &wgpu::Queue) {

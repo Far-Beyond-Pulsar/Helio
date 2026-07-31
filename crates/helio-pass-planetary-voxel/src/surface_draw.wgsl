@@ -34,7 +34,7 @@ struct GpuTerrainDebugUniform {
     _pad1: u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> pages: array<GpuDrawPage>;
 @group(0) @binding(2) var<storage, read> draws: array<GpuTerrainDraw>;
 @group(0) @binding(3) var<uniform> debug: GpuTerrainDebugUniform;
@@ -57,6 +57,7 @@ struct VertexOutput {
     @location(5) @interpolate(flat) meshlet_index: u32,
     @location(6) @interpolate(flat) surface_kind: u32,
     @location(7) @interpolate(flat) transition_mask: u32,
+    @location(8) @interpolate(flat) transition_face_bit: u32,
 }
 
 fn transform_vertex(
@@ -73,7 +74,7 @@ fn transform_vertex(
     var output: VertexOutput;
     // Keep view and projection split. This is the stable D3D12 contract used
     // by the retained page baseline as well as the compact meshlet path.
-    output.clip_position = camera.proj * (camera.view * vec4<f32>(world, 1.0));
+    output.clip_position = cameras[0].proj * (cameras[0].view * vec4<f32>(world, 1.0));
     output.normal = normalize(input.normal);
     output.world_position = world;
     output.material = input.material;
@@ -82,12 +83,18 @@ fn transform_vertex(
     output.meshlet_index = meshlet_index;
     output.surface_kind = surface_kind;
     output.transition_mask = page.transition_mask;
+    output.transition_face_bit = input.flags & 0x3fu;
     return output;
 }
 
 @vertex
 fn vs_page(input: VertexInput) -> VertexOutput {
     return transform_vertex(input, input.draw_index, 0u, 0u);
+}
+
+@vertex
+fn vs_page_transition(input: VertexInput) -> VertexOutput {
+    return transform_vertex(input, input.draw_index, 0u, 1u);
 }
 
 @vertex
@@ -127,6 +134,10 @@ fn hash_color(value: u32) -> vec3<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    if input.surface_kind != 0u &&
+        (input.transition_face_bit & input.transition_mask) == 0u {
+        discard;
+    }
     let normal = normalize(input.normal);
     var color: vec3<f32>;
     switch debug.mode {

@@ -59,7 +59,7 @@ impl PlanarReflectionPass {
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Planar BGL0"),
             entries: &[
-                buffer_uniform_entry(0),
+                buffer_camera_entry(0),
                 buffer_uniform_entry(1),
             ],
         });
@@ -235,6 +235,19 @@ impl RenderPass for PlanarReflectionPass {
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Published by the graph automatically via the resource pool name.
+    }
+}
+
+fn buffer_camera_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
     }
 }
 

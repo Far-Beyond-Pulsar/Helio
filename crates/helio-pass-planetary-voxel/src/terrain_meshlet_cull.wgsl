@@ -77,7 +77,7 @@ struct GpuTerrainDraw {
     lod: u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> cull: GpuTerrainCullUniforms;
 @group(0) @binding(2) var<storage, read> surface_states: array<GpuSurfaceState>;
 @group(0) @binding(3) var<storage, read> draw_pages: array<GpuDrawPage>;
@@ -98,7 +98,7 @@ fn normalized_plane(plane: vec4<f32>) -> vec4<f32> {
 }
 
 fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
-    let vp = camera.view_proj;
+    let vp = cameras[0].view_proj;
     let planes = array<vec4<f32>, 6>(
         normalized_plane(vec4<f32>(
             vp[0][3] + vp[0][0],
@@ -207,11 +207,11 @@ fn cull_meshlets(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let apex_world = page_local_to_world(page, bounds.cone_apex);
-    let camera_to_apex = apex_world - camera.position_near.xyz;
+    let camera_to_apex = apex_world - cameras[0].position_near.xyz;
     let apex_distance_squared = dot(camera_to_apex, camera_to_apex);
     let guard_radius = radius_world * 1.5;
     let center_distance_squared =
-        dot(center_world - camera.position_near.xyz, center_world - camera.position_near.xyz);
+        dot(center_world - cameras[0].position_near.xyz, center_world - cameras[0].position_near.xyz);
     if bounds.cone_cutoff <= 1.0 &&
         center_distance_squared > guard_radius * guard_radius &&
         apex_distance_squared > 1.0e-12 &&

@@ -71,7 +71,7 @@ struct HitResult {
     normal:   vec3<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> params: RayMarchParams;
 @group(0) @binding(2) var<storage, read> volumes: array<GpuVoxelVolume>;
 @group(0) @binding(3) var<storage, read> brick_pool: array<u32>;
@@ -279,11 +279,11 @@ fn main(
     let uv = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5) / vec2<f32>(params.width, params.height);
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0));
 
-    let ro = camera.position_near.xyz;
+    let ro = cameras[0].position_near.xyz;
 
     // Reconstruct ray direction from inverse view-projection
-    let near_p = camera.inv_view_proj * vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
-    let far_p = camera.inv_view_proj * vec4<f32>(ndc.x, ndc.y, 1.0, 1.0);
+    let near_p = cameras[0].inv_view_proj * vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
+    let far_p = cameras[0].inv_view_proj * vec4<f32>(ndc.x, ndc.y, 1.0, 1.0);
     let near_ws = near_p.xyz / near_p.w;
     let far_ws = far_p.xyz / far_p.w;
     let rd = normalize(far_ws - near_ws);

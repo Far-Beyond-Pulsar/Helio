@@ -66,7 +66,7 @@ struct LightSample {
     radiance:  vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera:    Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
@@ -93,7 +93,7 @@ fn reconstruct_world_pos(pixel_pos: vec2<u32>, depth: f32) -> vec3<f32> {
         depth,
         1.0,
     );
-    let world_h = camera.view_proj_inv * ndc;
+    let world_h = cameras[0].view_proj_inv * ndc;
     return world_h.xyz / world_h.w;
 }
 
@@ -121,8 +121,8 @@ fn importance_sample_light(pixel_pos: vec2<u32>, sample_idx: u32) -> LightSample
     var sample: LightSample;
 
     if (globals.light_count == 0u) {
-        sample.position = camera.position_near.xyz;
-        sample.direction = camera.forward_far.xyz;
+        sample.position = cameras[0].position_near.xyz;
+        sample.direction = cameras[0].forward_far.xyz;
         sample.radiance = vec4<f32>(0.0);
         return sample;
     }

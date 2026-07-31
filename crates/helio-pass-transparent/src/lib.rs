@@ -23,6 +23,10 @@ struct TransparentGlobals {
     rc_world_min: [f32; 4],
     rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
+    num_tiles_x: u32,
+    num_tiles_y: u32,
+    screen_width: f32,
+    screen_height: f32,
 }
 
 pub struct TransparentPass {
@@ -31,6 +35,9 @@ pub struct TransparentPass {
     template_registry: RadiantTemplateRegistry,
     pipeline_layout: wgpu::PipelineLayout,
     bind_group: wgpu::BindGroup,
+    bind_group_layout_1: wgpu::BindGroupLayout,
+    bind_group_1: Option<wgpu::BindGroup>,
+    bind_group_1_key: Option<(usize, usize, usize)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
 }
@@ -49,14 +56,14 @@ impl TransparentPass {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Transparent BGL"),
+        let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Transparent BGL 0"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -85,9 +92,45 @@ impl TransparentPass {
             ],
         });
 
+        let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Transparent BGL 1"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Transparent BG"),
-            layout: &bind_group_layout,
+            label: Some("Transparent BG 0"),
+            layout: &bgl_0,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: globals_buf.as_entire_binding() },
@@ -97,7 +140,7 @@ impl TransparentPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Transparent PL"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
 
@@ -106,7 +149,18 @@ impl TransparentPass {
         // with gbuffer templates that have incompatible bind group layouts.
         let mut reg = RadiantTemplateRegistry::new_empty();
         let base_src = include_str!("../../helio/templates/transparent_base.wgsl");
-        reg.override_class(0, "transparent_base", base_src);
+        let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
+            let mut resolved = String::with_capacity(
+                base_src.len() + libhelio::shader::PBR_EVAL.len(),
+            );
+            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push('\n');
+            resolved.push_str(base_src);
+            Box::leak(resolved.into_boxed_str())
+        } else {
+            base_src
+        };
+        reg.override_class(0, "transparent_base", resolved_src);
 
         Self {
             pipelines: HashMap::new(),
@@ -114,6 +168,9 @@ impl TransparentPass {
             template_registry: reg,
             pipeline_layout,
             bind_group,
+            bind_group_layout_1: bgl_1,
+            bind_group_1: None,
+            bind_group_1_key: None,
             globals_buf,
             surface_format,
         }
@@ -134,14 +191,17 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth"]
+        &["main_scene", "depth", "cluster_light_grid"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("depth");
+        builder.read("cluster_light_grid");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let num_tiles_x = ctx.width.div_ceil(16);
+        let num_tiles_y = ctx.height.div_ceil(16);
         ctx.queue.write_buffer(
             &self.globals_buf,
             0,
@@ -154,6 +214,10 @@ impl RenderPass for TransparentPass {
                 rc_world_min: [0.0; 4],
                 rc_world_max: [0.0; 4],
                 csm_splits: [0.0; 4],
+                num_tiles_x,
+                num_tiles_y,
+                screen_width: ctx.width as f32,
+                screen_height: ctx.height as f32,
             }),
         );
         Ok(())
@@ -217,9 +281,33 @@ impl RenderPass for TransparentPass {
         let ms = main_scene.as_ref().ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
         })?;
+
+        // Rebuild bind group 1 (lights + cluster data) when buffer pointers change
+        let cluster = ctx.resources.cluster_light_grid.get();
+        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let tile_lists_ptr = cluster.map(|c| c.tile_light_lists as *const _ as usize).unwrap_or(0);
+        let tile_counts_ptr = cluster.map(|c| c.tile_light_counts as *const _ as usize).unwrap_or(0);
+        let bg1_key = (lights_ptr, tile_lists_ptr, tile_counts_ptr);
+        if self.bind_group_1_key != Some(bg1_key) {
+            let fallback = ctx.scene.instances;
+            let tile_lists = cluster.map(|c| c.tile_light_lists).unwrap_or(fallback);
+            let tile_counts = cluster.map(|c| c.tile_light_counts).unwrap_or(fallback);
+            self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Transparent BG 1"),
+                layout: &self.bind_group_layout_1,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: tile_lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: tile_counts.as_entire_binding() },
+                ],
+            }));
+            self.bind_group_1_key = Some(bg1_key);
+        }
+
         let indirect = ctx.scene.indirect;
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_bind_group(0, &self.bind_group, &[]);
+        rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
         rp.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
 

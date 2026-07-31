@@ -51,7 +51,7 @@ struct SkyUniforms {
 // Bind groups
 // ──────────────────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var<uniform> sky:        SkyUniforms;
 @group(1) @binding(1) var          sky_lut:     texture_2d<f32>;
 @group(1) @binding(2) var          sky_sampler: sampler;
@@ -313,8 +313,8 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Reconstruct world-space ray direction from the inverse VP matrix
     let clip      = vec4<f32>(in.ndc_xy, 1.0, 1.0);
-    let world     = camera.view_proj_inv * clip;
-    let camera_pos = camera.position_near.xyz;
+    let world     = cameras[0].view_proj_inv * clip;
+    let camera_pos = cameras[0].position_near.xyz;
     let ray_dir   = normalize(world.xyz / world.w - camera_pos);
 
     // Atmosphere: sample the pre-baked sky-view LUT immediately.  sampling
@@ -339,7 +339,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Volumetric clouds: still full-res but atmosphere sampling is now free
-    sky_col = trace_clouds(camera.position_near.xyz, ray_dir, sky_col);
+    sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
 
     let final_col = aces_approx(sky_col * sky.exposure);
     return vec4<f32>(final_col, 1.0);

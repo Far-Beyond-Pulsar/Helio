@@ -250,7 +250,7 @@ impl LensFlarePass {
                 Self::storage_entry(0, SS::COMPUTE, true),   // lights
                 Self::storage_entry(1, SS::COMPUTE, false),  // flare_queries
                 Self::storage_entry(2, SS::COMPUTE, false),  // flare_count
-                Self::uniform_entry(3, SS::COMPUTE),          // camera
+                Self::storage_entry(3, SS::COMPUTE, true),   // camera
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: SS::COMPUTE,
@@ -587,10 +587,19 @@ impl RenderPass for LensFlarePass {
             return Ok(());
         }
 
+        // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
+        // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
+        // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
+        let depth_view = ctx
+            .resources
+            .depth_sampler_view
+            .get()
+            .unwrap_or(ctx.depth);
+
         // Rebuild bind groups when buffer/depth pointers change
         let lights_ptr = ctx.scene.lights as *const _ as usize;
         let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let depth_ptr = ctx.depth as *const _ as usize;
+        let depth_ptr = depth_view as *const _ as usize;
         let uniform_ptr = &self.uniform_buf as *const _ as usize;
         let key = (lights_ptr, camera_ptr, depth_ptr, uniform_ptr);
 
@@ -603,7 +612,7 @@ impl RenderPass for LensFlarePass {
             let qbg = Self::build_query_bg(
                 ctx.device, &self.query_bgl,
                 ctx.scene.lights, &self.flare_query_buf, &self.flare_count_buf,
-                ctx.scene.camera, ctx.depth, &self.uniform_buf,
+                ctx.scene.camera, depth_view, &self.uniform_buf,
             );
             let rbg = Self::build_render_bg(
                 ctx.device, &self.render_bgl,

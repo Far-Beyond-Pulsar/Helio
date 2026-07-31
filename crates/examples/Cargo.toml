@@ -207,9 +207,18 @@ path = "color_grading_demo.rs"
 name = "ies_demo"
 path = "ies_demo.rs"
 
+[[bin]]
+name = "forward_demo"
+path = "forward_demo.rs"
+
+[[bin]]
+name = "vr_demo"
+path = "vr/main.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
+helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-taa = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }

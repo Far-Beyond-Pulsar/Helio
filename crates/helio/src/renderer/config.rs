@@ -1,6 +1,19 @@
 use crate::material::MAX_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// G-buffer → deferred lighting (current default)
+    #[default]
+    Deferred,
+    /// Forward-lit pass for all opaque geometry, no G-buffer.
+    /// Transparent pass still runs on top. Suitable for VR stereo.
+    ForwardOpaque,
+    /// Everything forward — both opaque and transparent use forward passes.
+    /// Suitable for WebGPU low-end or simple scenes.
+    ForwardOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum PerfOverlayMode {
     #[default]
@@ -209,6 +222,17 @@ pub struct RendererConfig {
     pub enable_environment_reflections: bool,
     /// HDR display output mode. Default `Ldr`.
     pub hdr_output_mode: libhelio::HdrOutputMode,
+    pub render_mode: RenderMode,
+    /// Enable the OpenXR render path. When `true` the graph is built in
+    /// multiview mode (2-layer array targets, `multiview_mask = 0b11`) and the
+    /// app is expected to drive the headset through
+    /// [`Renderer::render_xr`](crate::Renderer#method.render_xr) instead of
+    /// [`Renderer::render`](crate::Renderer#method.render). Default `false`.
+    ///
+    /// Note: this does *not* create an OpenXR session — the app still has to
+    /// create the `helio-xr` session/swapchain and hand it to the renderer via
+    /// [`Renderer::set_xr_session`](crate::Renderer#method.set_xr_session).
+    pub enable_xr: bool,
 }
 
 impl RendererConfig {
@@ -228,6 +252,8 @@ impl RendererConfig {
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: RenderMode::Deferred,
+            enable_xr: false,
         }
     }
 
@@ -266,6 +292,23 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
+        self
+    }
+
+    /// Enable/disable the OpenXR (multiview) render path.
+    ///
+    /// When `true` the graph allocates its internal targets as 2-layer arrays
+    /// and every render pass uses `multiview_mask = 0b11`, so both eye layers
+    /// are written in a single pass. The demo should pair this with
+    /// [`RenderMode::ForwardOpaque`] and set width/height to the XR eye
+    /// resolution reported by the runtime.
+    pub fn with_xr_mode(mut self, active: bool) -> Self {
+        self.enable_xr = active;
         self
     }
 

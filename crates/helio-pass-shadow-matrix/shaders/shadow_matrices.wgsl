@@ -79,7 +79,7 @@ struct ShadowMatrixParams {
 
 @group(0) @binding(0) var<storage, read>       lights:         array<GpuLight>;
 @group(0) @binding(1) var<storage, read_write> shadow_mats:    array<GpuShadowMatrix>;
-@group(0) @binding(2) var<uniform>             camera:         CameraUniforms;
+@group(0) @binding(2) var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(3) var<uniform>             params:         ShadowMatrixParams;
 @group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per caster slot
 @group(0) @binding(5) var<storage, read_write> shadow_hashes:  array<u32>;  // FNV hashes to detect changes
@@ -184,7 +184,7 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
 
     var world: array<vec3f, 8>;
     for (var i = 0u; i < 8u; i++) {
-        let v = camera.inv_view_proj * ndc[i];
+        let v = cameras[0].inv_view_proj * ndc[i];
         world[i] = v.xyz / v.w;
     }
 
@@ -192,8 +192,8 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
     var near_dist = 0.0;
     var far_dist = 0.0;
     for (var i = 0u; i < 4u; i++) {
-        near_dist += length(world[i] - camera.position_near.xyz);
-        far_dist  += length(world[i + 4u] - camera.position_near.xyz);
+        near_dist += length(world[i] - cameras[0].position_near.xyz);
+        far_dist  += length(world[i + 4u] - cameras[0].position_near.xyz);
     }
     near_dist /= 4.0;
     far_dist  /= 4.0;
