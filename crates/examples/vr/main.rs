@@ -195,6 +195,8 @@ struct AppState {
     /// origin in world space; yaw is snap/smooth turn about it.
     player_position: Vec3,
     player_yaw: f32,
+    animated: scene::Animated,
+    start_time: Instant,
     last_frame: Instant,
     fps: FpsCounter,
 }
@@ -308,7 +310,6 @@ impl ApplicationHandler for App {
                 // mode — render_xr renders each eye separately (dual-pass stereo)
                 // so every existing pass and shader works unchanged.
                 .with_render_scale(1.0);
-                let format = bundle.swapchain.format;
                 // PC mirror surface: the OpenXR-created device presents both eye
                 // buffers side-by-side into this window.
                 let mirror_surface = bundle
@@ -479,7 +480,7 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_active = false;
 
-        scene::build(&mut renderer);
+        let animated = scene::build(&mut renderer);
 
         let state = AppState {
             window,
@@ -495,6 +496,8 @@ impl ApplicationHandler for App {
             xr_input,
             player_position: Vec3::ZERO,
             player_yaw: 0.0,
+            animated,
+            start_time: Instant::now(),
             last_frame: Instant::now(),
             fps: FpsCounter::new(),
         };
