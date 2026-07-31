@@ -6,7 +6,14 @@
 //! proving out the independent 2D render-graph path end to end: its own
 //! device/window setup, its own orthographic camera, no 3D scene graph.
 //!
-//! A ring of spinning, color-cycled sprites; nothing to click or drag.
+//! Exercises every feature of the pass:
+//! - A ring of spinning, color-cycled sprites alternating between two atlas
+//!   layers (a filled disc and a ring), proving the texture-array atlas.
+//! - A stack of overlapping, differently-tinted, semi-transparent sprites at
+//!   the center with different `depth` values, proving the CPU back-to-front
+//!   sort (wrong order would show through-blending in the wrong sequence).
+//! - A field of off-screen decoy sprites outside the camera's view rect,
+//!   proving view-frustum culling (logged once per second: pushed vs. drawn).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -51,6 +58,38 @@ struct AppState {
     scene: GpuScene,
     dummy_depth_view: wgpu::TextureView,
     start_time: Instant,
+    last_stats_log: Instant,
+    disc_layer: u32,
+    ring_layer: u32,
+}
+
+/// A 32×32 RGBA8 filled disc, straight alpha, on a transparent background.
+fn make_disc_atlas() -> Vec<u8> {
+    make_shape_atlas(|dist| if dist <= 0.9 { 1.0 } else { 0.0 })
+}
+
+/// A 32×32 RGBA8 ring (annulus), straight alpha, on a transparent background.
+fn make_ring_atlas() -> Vec<u8> {
+    make_shape_atlas(|dist| if (0.55..=0.9).contains(&dist) { 1.0 } else { 0.0 })
+}
+
+fn make_shape_atlas(alpha_at: impl Fn(f32) -> f32) -> Vec<u8> {
+    const SIZE: usize = 32;
+    let mut pixels = vec![0u8; SIZE * SIZE * 4];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let cx = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+            let cy = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+            let dist = (cx * cx + cy * cy).sqrt();
+            let a = (alpha_at(dist) * 255.0) as u8;
+            let i = (y * SIZE + x) * 4;
+            pixels[i] = 255;
+            pixels[i + 1] = 255;
+            pixels[i + 2] = 255;
+            pixels[i + 3] = a;
+        }
+    }
+    pixels
 }
 
 impl ApplicationHandler for App {
@@ -116,7 +155,10 @@ impl ApplicationHandler for App {
         );
 
         let mut graph = RenderGraph::new(&device, &queue);
-        graph.add_pass(Box::new(SpriteBatchPass::new(&device, &queue, format)));
+        let mut sprite_pass = SpriteBatchPass::new(&device, &queue, format);
+        let disc_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_disc_atlas());
+        let ring_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_ring_atlas());
+        graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
         let scene = GpuScene::new(device.clone(), queue.clone());
@@ -142,6 +184,9 @@ impl ApplicationHandler for App {
             scene,
             dummy_depth_view,
             start_time: Instant::now(),
+            last_stats_log: Instant::now(),
+            disc_layer,
+            ring_layer,
         });
     }
 
@@ -169,11 +214,17 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let time = state.start_time.elapsed().as_secs_f32();
 
+                let disc_layer = state.disc_layer;
+                let ring_layer = state.ring_layer;
                 let sprite = state
                     .graph
                     .find_pass_mut::<SpriteBatchPass>()
                     .expect("sprite batch pass missing from graph");
                 sprite.clear();
+
+                // Ring of spinning sprites, alternating atlas layers — proves
+                // the texture-array atlas (both shapes come from one bind
+                // group / one draw call).
                 const COUNT: usize = 12;
                 for i in 0..COUNT {
                     let t = i as f32 / COUNT as f32;
@@ -181,10 +232,49 @@ impl ApplicationHandler for App {
                     let radius = 160.0;
                     let pos = [angle.cos() * radius, angle.sin() * radius];
                     let hue = (t + time * 0.1).fract();
+                    let layer = if i % 2 == 0 { disc_layer } else { ring_layer };
                     sprite.push_sprite(
                         SpriteInstance::new(pos, [48.0, 48.0])
                             .with_rotation(time * 2.0 + t * std::f32::consts::TAU)
-                            .with_color(hsv_to_rgb(hue, 0.7, 1.0)),
+                            .with_depth(t)
+                            .with_color(hsv_to_rgb(hue, 0.7, 1.0))
+                            .with_atlas_layer(layer),
+                    );
+                }
+
+                // Overlapping, semi-transparent discs at the center with
+                // distinct depths — proves the CPU back-to-front sort: drawn
+                // in the wrong order, the blended colors at the overlap
+                // wouldn't match this depth sequence (red furthest back,
+                // blue nearest).
+                const STACK_TINTS: [[f32; 4]; 3] = [[1.0, 0.2, 0.2, 0.6], [0.2, 1.0, 0.2, 0.6], [0.2, 0.4, 1.0, 0.6]];
+                for (i, tint) in STACK_TINTS.iter().enumerate() {
+                    let offset = i as f32 * 20.0 - 20.0;
+                    sprite.push_sprite(
+                        SpriteInstance::new([offset, 0.0], [64.0, 64.0])
+                            .with_depth(i as f32)
+                            .with_color(*tint)
+                            .with_atlas_layer(disc_layer),
+                    );
+                }
+
+                // Off-screen decoys, well outside the camera's view rect —
+                // proves view-frustum culling (see the periodic stats log
+                // below: visible count should stay well under pushed count).
+                const DECOYS: usize = 200;
+                for i in 0..DECOYS {
+                    let t = i as f32 / DECOYS as f32;
+                    let pos = [5000.0 + t * 100.0, 5000.0 + t * 100.0];
+                    sprite.push_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
+                }
+
+                if state.last_stats_log.elapsed().as_secs_f32() >= 1.0 {
+                    state.last_stats_log = std::time::Instant::now();
+                    log::info!(
+                        "[sprite_demo] pushed={} drawn={} (culling removed {})",
+                        sprite.sprite_count(),
+                        sprite.visible_count(),
+                        sprite.sprite_count() - sprite.visible_count()
                     );
                 }
 

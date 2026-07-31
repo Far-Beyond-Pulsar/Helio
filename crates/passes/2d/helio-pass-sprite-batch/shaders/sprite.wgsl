@@ -4,12 +4,19 @@
 // per-sprite transforms/UVs/tints (binding 1, per-instance). Rotation is
 // applied in local space before translating to world position, so sprites
 // rotate about their own center regardless of size.
+//
+// The atlas is a texture array, not a single texture: each instance carries
+// an `i_atlas_layer` index so one draw call can span many sprite sheets
+// instead of being limited to whatever fits in one texture. `i_depth` is a
+// CPU-side sort key only (the instance buffer is pre-sorted back-to-front by
+// `SpriteBatchPass::prepare` for correct alpha blending) — it is uploaded for
+// layout simplicity but not read here.
 
 struct Camera {
     view_proj: mat4x4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(1) var atlas_tex: texture_2d_array<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
 
 struct VertexIn {
@@ -21,14 +28,17 @@ struct InstanceIn {
     @location(2) i_position: vec2<f32>,
     @location(3) i_size: vec2<f32>,
     @location(4) i_rotation: f32,
-    @location(5) i_uv_rect: vec4<f32>,
-    @location(6) i_color: vec4<f32>,
+    @location(5) i_depth: f32,
+    @location(6) i_uv_rect: vec4<f32>,
+    @location(7) i_color: vec4<f32>,
+    @location(8) i_atlas_layer: u32,
 }
 
 struct VOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) atlas_layer: u32,
 }
 
 @vertex
@@ -43,12 +53,13 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VOut {
     out.clip_pos = camera.view_proj * vec4<f32>(world, 0.0, 1.0);
     out.uv = mix(i.i_uv_rect.xy, i.i_uv_rect.zw, v.quad_uv);
     out.color = i.i_color;
+    out.atlas_layer = i.i_atlas_layer;
     return out;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let sampled = textureSample(atlas_tex, atlas_samp, in.uv);
+    let sampled = textureSample(atlas_tex, atlas_samp, in.uv, i32(in.atlas_layer));
     let c = sampled * in.color;
     if c.a < 0.001 {
         discard;

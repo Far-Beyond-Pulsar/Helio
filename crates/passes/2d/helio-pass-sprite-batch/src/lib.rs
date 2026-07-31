@@ -2,9 +2,17 @@
 //!
 //! One unit quad drawn instanced against a per-frame instance buffer — the
 //! CPU cost of a frame is `instances.len()` pushes into a `Vec`, not one draw
-//! call per sprite. Sprites are not depth-tested; draw order is instance
-//! order, so callers that need back-to-front layering should sort before
-//! calling [`SpriteBatchPass::push_sprite`].
+//! call per sprite. Every frame, [`SpriteBatchPass::prepare`]:
+//!
+//! 1. Culls instances whose bounding circle doesn't intersect the camera's
+//!    view rect (see [`SpriteBatchPass::set_camera`]).
+//! 2. Sorts the survivors back-to-front by [`SpriteInstance::depth`], since
+//!    the sprites are alpha-blended (see the note on [`SpriteInstance::depth`]
+//!    for why this is a CPU sort rather than a hardware depth test).
+//! 3. Uploads the result to the GPU instance buffer.
+//!
+//! The atlas is a texture array (see [`SpriteBatchPass::add_atlas_layer`]),
+//! not a single texture, so one draw call can span many sprite sheets.
 //!
 //! This pass has no dependency on `helio` / `helio-default-graphs` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
@@ -27,11 +35,23 @@ pub struct SpriteInstance {
     pub size: [f32; 2],
     /// Rotation about the sprite's own center, radians.
     pub rotation: f32,
-    _pad0: f32,
-    /// Atlas UV rectangle: `[u0, v0, u1, v1]`, each in `0..1`.
+    /// CPU-side back-to-front sort key (larger draws later, i.e. on top).
+    /// Not a hardware depth value: alpha-blended sprites can't rely on a
+    /// depth test for correct compositing (blending is order-dependent
+    /// regardless of what the depth buffer says), so `prepare()` sorts the
+    /// instance list by this field instead of enabling `DepthStencilState`.
+    /// A common convention is "world Y" for a top-down/2.5D look (larger Y
+    /// = further back = drawn first), but any scalar works.
+    pub depth: f32,
+    /// Atlas UV rectangle: `[u0, v0, u1, v1]`, each in `0..1`, within
+    /// `atlas_layer`.
     pub uv_rect: [f32; 4],
     /// Straight-alpha RGBA tint, multiplied against the sampled atlas texel.
     pub color: [f32; 4],
+    /// Index into the atlas texture array — see
+    /// [`SpriteBatchPass::add_atlas_layer`].
+    pub atlas_layer: u32,
+    _pad1: [u32; 3],
 }
 
 impl SpriteInstance {
@@ -40,14 +60,21 @@ impl SpriteInstance {
             position,
             size,
             rotation: 0.0,
-            _pad0: 0.0,
+            depth: 0.0,
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
+            atlas_layer: 0,
+            _pad1: [0; 3],
         }
     }
 
     pub fn with_rotation(mut self, radians: f32) -> Self {
         self.rotation = radians;
+        self
+    }
+
+    pub fn with_depth(mut self, depth: f32) -> Self {
+        self.depth = depth;
         self
     }
 
@@ -59,6 +86,17 @@ impl SpriteInstance {
     pub fn with_color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
         self
+    }
+
+    pub fn with_atlas_layer(mut self, layer: u32) -> Self {
+        self.atlas_layer = layer;
+        self
+    }
+
+    /// Conservative bounding-circle radius (half the quad's diagonal), used
+    /// for view-frustum culling. Covers the sprite at any rotation.
+    fn cull_radius(&self) -> f32 {
+        0.5 * (self.size[0] * self.size[0] + self.size[1] * self.size[1]).sqrt()
     }
 }
 
@@ -86,20 +124,31 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 /// GPU-instanced 2D sprite batch pass.
 ///
 /// Owns its own orthographic camera (recomputed from the render target size
 /// every frame — call [`SpriteBatchPass::set_camera`] before `prepare()` to
-/// override framing/zoom/pan) and a 1×1 white fallback atlas, so it renders
-/// solid-colored quads out of the box; call [`SpriteBatchPass::set_atlas`] to
-/// point it at a real sprite sheet.
+/// override framing/zoom/pan) and starts with a 1×1 white fallback atlas
+/// layer, so it renders solid-colored quads out of the box; call
+/// [`SpriteBatchPass::add_atlas_layer`] to load real sprite sheets.
 pub struct SpriteBatchPass {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
     sampler: wgpu::Sampler,
+
+    atlas_texture: wgpu::Texture,
     atlas_view: wgpu::TextureView,
-    _fallback_atlas: wgpu::Texture,
+    /// `true` until the first [`SpriteBatchPass::add_atlas_layer`] call — the
+    /// pass is still serving the 1×1 white fallback and hasn't committed to
+    /// a real atlas width/height yet.
+    atlas_using_fallback: bool,
+    atlas_width: u32,
+    atlas_height: u32,
+    atlas_layer_count: u32,
+    atlas_layer_capacity: u32,
 
     camera_buf: wgpu::Buffer,
     quad_vertex_buf: wgpu::Buffer,
@@ -107,7 +156,12 @@ pub struct SpriteBatchPass {
     instance_buf: wgpu::Buffer,
     instance_capacity: usize,
 
+    /// Raw per-frame push list, in caller-supplied order. Cleared by
+    /// [`SpriteBatchPass::clear`], not by `prepare()`.
     instances: Vec<SpriteInstance>,
+    /// Culled + depth-sorted subset of `instances`, rebuilt every `prepare()`
+    /// and reused across frames to avoid a fresh allocation each time.
+    visible_scratch: Vec<SpriteInstance>,
     instance_count: u32,
 
     /// Half-extent of the orthographic view, in world units. `None` means
@@ -142,7 +196,7 @@ impl SpriteBatchPass {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -177,8 +231,10 @@ impl SpriteBatchPass {
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 2 },
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 3 },
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 16, shader_location: 4 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 24, shader_location: 5 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 40, shader_location: 6 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 20, shader_location: 5 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 24, shader_location: 6 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 40, shader_location: 7 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 56, shader_location: 8 },
             ],
         };
 
@@ -251,21 +307,42 @@ impl SpriteBatchPass {
             ..Default::default()
         });
 
-        let (fallback_atlas, atlas_view) = create_white_pixel_texture(device, queue);
+        let atlas_texture = create_atlas_array_texture(device, 1, 1, 1);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8, 255, 255, 255],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
 
         Self {
             pipeline,
             bgl,
             bind_group: None,
             sampler,
+            atlas_texture,
             atlas_view,
-            _fallback_atlas: fallback_atlas,
+            atlas_using_fallback: true,
+            atlas_width: 1,
+            atlas_height: 1,
+            atlas_layer_count: 1,
+            atlas_layer_capacity: 1,
             camera_buf,
             quad_vertex_buf,
             quad_index_buf,
             instance_buf,
             instance_capacity: initial_capacity,
             instances: Vec::new(),
+            visible_scratch: Vec::new(),
             instance_count: 0,
             camera_half_extent: None,
             camera_center: [0.0, 0.0],
@@ -273,9 +350,111 @@ impl SpriteBatchPass {
         }
     }
 
-    /// Points the pass at a real sprite sheet. `view`/`sampler` must outlive
-    /// every subsequent `execute()` call until the next `set_atlas`.
-    pub fn set_atlas(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) {
+    /// Uploads `rgba8` (must be exactly `width * height * 4` bytes, straight
+    /// alpha) as a new layer in the atlas array, growing the array (and
+    /// invalidating the cached bind group, rebuilt lazily on the next
+    /// `execute()`) if it's out of capacity. Returns the new layer's index
+    /// for [`SpriteInstance::with_atlas_layer`].
+    ///
+    /// Every layer in a texture array must share one width/height — the
+    /// first call after construction fixes that size for the pass's
+    /// lifetime; subsequent calls with a different `width`/`height` panic.
+    /// Pack sprites that don't already share a sheet size into same-size
+    /// atlas pages before calling this (a texture-array layer boundary is
+    /// not a UV-rect boundary — `uv_rect` still addresses within one layer).
+    pub fn add_atlas_layer(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba8: &[u8]) -> u32 {
+        assert_eq!(
+            rgba8.len() as u32,
+            width * height * 4,
+            "rgba8 length {} does not match width*height*4 ({width}*{height}*4 = {})",
+            rgba8.len(),
+            width * height * 4
+        );
+
+        if self.atlas_using_fallback {
+            self.atlas_width = width;
+            self.atlas_height = height;
+            self.atlas_layer_capacity = 4;
+            self.atlas_layer_count = 0;
+            self.atlas_texture = create_atlas_array_texture(device, width, height, self.atlas_layer_capacity);
+            self.atlas_view = self.atlas_texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            self.atlas_using_fallback = false;
+            self.bind_group = None;
+        } else {
+            assert_eq!(
+                width, self.atlas_width,
+                "atlas layer width {width} does not match the array's existing width {} \
+                 (all layers in one SpriteBatchPass must share dimensions)",
+                self.atlas_width
+            );
+            assert_eq!(
+                height, self.atlas_height,
+                "atlas layer height {height} does not match the array's existing height {} \
+                 (all layers in one SpriteBatchPass must share dimensions)",
+                self.atlas_height
+            );
+        }
+
+        if self.atlas_layer_count >= self.atlas_layer_capacity {
+            self.grow_atlas_array(device, queue);
+        }
+
+        let layer = self.atlas_layer_count;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba8,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.atlas_layer_count += 1;
+        layer
+    }
+
+    fn grow_atlas_array(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let new_capacity = self.atlas_layer_capacity * 2;
+        let new_texture = create_atlas_array_texture(device, self.atlas_width, self.atlas_height, new_capacity);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Sprite Atlas Array Grow"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &new_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: self.atlas_width, height: self.atlas_height, depth_or_array_layers: self.atlas_layer_count },
+        );
+        queue.submit([encoder.finish()]);
+
+        self.atlas_texture = new_texture;
+        self.atlas_view = self.atlas_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        self.atlas_layer_capacity = new_capacity;
+        self.bind_group = None;
+    }
+
+    /// Escape hatch: replace atlas management entirely with a caller-owned
+    /// `D2Array` view (e.g. loaded via a dedicated atlas-packing tool).
+    /// `view`/`sampler` must outlive every subsequent `execute()` call until
+    /// the next `set_atlas_array`/`add_atlas_layer`.
+    pub fn set_atlas_array(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) {
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Batch BG"),
             layout: &self.bgl,
@@ -309,35 +488,29 @@ impl SpriteBatchPass {
         self.instances.push(instance);
     }
 
+    /// Total sprites pushed this frame, before culling.
     pub fn sprite_count(&self) -> usize {
         self.instances.len()
     }
+
+    /// Sprites that survived view-frustum culling last `prepare()` and were
+    /// actually uploaded/drawn.
+    pub fn visible_count(&self) -> usize {
+        self.visible_scratch.len()
+    }
 }
 
-fn create_white_pixel_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Sprite Fallback Atlas (1x1 white)"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+fn create_atlas_array_texture(device: &wgpu::Device, width: u32, height: u32, layers: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Sprite Atlas Array"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: layers },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        format: ATLAS_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &[255u8, 255, 255, 255],
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-    );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
+    })
 }
 
 impl RenderPass for SpriteBatchPass {
@@ -351,10 +524,11 @@ impl RenderPass for SpriteBatchPass {
         _depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        // 2D sprites are unsorted/unlit — no depth attachment. `Box::leak` here
-        // matches the convention used by every other executor-managed pass:
-        // the descriptor only needs to live for this frame's `execute()` call,
-        // and the executor drops it before the next `render_pass_descriptor()`.
+        // 2D sprites are alpha-blended and CPU-sorted (see `SpriteInstance::depth`)
+        // — no depth attachment. `Box::leak` here matches the convention used by
+        // every other executor-managed pass: the descriptor only needs to live
+        // for this frame's `execute()` call, and the executor drops it before
+        // the next `render_pass_descriptor()`.
         let load = match self.clear_color {
             Some(color) => wgpu::LoadOp::Clear(color),
             None => wgpu::LoadOp::Load,
@@ -380,15 +554,39 @@ impl RenderPass for SpriteBatchPass {
         let half_extent = self.camera_half_extent.unwrap_or([ctx.width as f32 * 0.5, ctx.height as f32 * 0.5]);
         let [cx, cy] = self.camera_center;
         let [hx, hy] = half_extent;
-        // Y-down world space would need `orthographic_rh(l, r, t, b, ...)`; we
-        // keep Y-up (bottom < top) so `SpriteInstance::position` matches the
-        // conventional "up is positive Y" math callers already reach for.
+        // Y-up world space; a Y-down convention would swap `cy - hy`/`cy + hy`.
         let view_proj = glam::Mat4::orthographic_rh(cx - hx, cx + hx, cy - hy, cy + hy, -1.0, 1.0);
         let uniform = CameraUniform { view_proj: view_proj.to_cols_array_2d() };
         ctx.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
 
-        if self.instances.len() > self.instance_capacity {
-            self.instance_capacity = (self.instances.len() * 2).max(self.instance_capacity * 2);
+        // ── Cull ────────────────────────────────────────────────────────────
+        // Circle-vs-AABB: clamp the sprite's center into the view rect, then
+        // compare the distance to that clamped point against the sprite's
+        // bounding radius. Conservative (uses the quad's full diagonal, so a
+        // rotated sprite is never culled early) but cheap — one clamp, one
+        // sqrt, per instance.
+        let view_min = [cx - hx, cy - hy];
+        let view_max = [cx + hx, cy + hy];
+        self.visible_scratch.clear();
+        self.visible_scratch.extend(self.instances.iter().copied().filter(|inst| {
+            let clamped = [
+                inst.position[0].clamp(view_min[0], view_max[0]),
+                inst.position[1].clamp(view_min[1], view_max[1]),
+            ];
+            let dx = inst.position[0] - clamped[0];
+            let dy = inst.position[1] - clamped[1];
+            (dx * dx + dy * dy).sqrt() <= inst.cull_radius()
+        }));
+
+        // ── Sort ────────────────────────────────────────────────────────────
+        // Back-to-front by depth; see `SpriteInstance::depth` for why this is
+        // a CPU sort rather than a hardware depth test.
+        self.visible_scratch
+            .sort_by(|a, b| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal));
+
+        // ── Upload ──────────────────────────────────────────────────────────
+        if self.visible_scratch.len() > self.instance_capacity {
+            self.instance_capacity = (self.visible_scratch.len() * 2).max(self.instance_capacity * 2);
             self.instance_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Sprite Instance Buffer"),
                 size: INSTANCE_STRIDE * self.instance_capacity as u64,
@@ -396,10 +594,10 @@ impl RenderPass for SpriteBatchPass {
                 mapped_at_creation: false,
             });
         }
-        if !self.instances.is_empty() {
-            ctx.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&self.instances));
+        if !self.visible_scratch.is_empty() {
+            ctx.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&self.visible_scratch));
         }
-        self.instance_count = self.instances.len() as u32;
+        self.instance_count = self.visible_scratch.len() as u32;
 
         Ok(())
     }
