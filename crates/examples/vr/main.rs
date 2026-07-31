@@ -252,7 +252,7 @@ impl ApplicationHandler for App {
                 .with_render_mode(render_mode),
         };
 
-        let mut scene = Scene::new(device.clone(), queue.clone());
+        let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
             size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
@@ -319,7 +319,7 @@ impl ApplicationHandler for App {
 
         scene::build(&mut renderer);
 
-        let mut state = AppState {
+        let state = AppState {
             window,
             surface,
             device,

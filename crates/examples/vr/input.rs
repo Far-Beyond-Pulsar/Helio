@@ -43,6 +43,8 @@ impl FreeCam {
         Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
     }
 
+    /// Forward direction of the view orientation.
+    #[allow(dead_code)]
     pub fn forward(&self) -> Vec3 {
         self.orientation() * -Vec3::Z
     }
@@ -99,6 +101,7 @@ impl FreeCam {
     /// Controller aim ray stub. The full controller tracking pipeline (action
     /// sets → spaces → poses) is not wired up yet; returning `None` keeps the
     /// demo rendering while the interface stays ready for real hands.
+    #[allow(dead_code)]
     pub fn controller_aim(&self) -> Option<(Vec3, Quat)> {
         None
     }
