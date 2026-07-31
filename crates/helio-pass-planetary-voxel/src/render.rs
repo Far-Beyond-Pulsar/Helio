@@ -948,7 +948,7 @@ impl PlanetaryVoxelRenderPass {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Planetary Surface Draw Bind Group Layout"),
                 entries: &[
-                    uniform_layout_entry(0, wgpu::ShaderStages::VERTEX),
+                    storage_layout_entry(0, wgpu::ShaderStages::VERTEX, true),
                     storage_layout_entry(1, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
                     storage_layout_entry(2, wgpu::ShaderStages::VERTEX_FRAGMENT, true),
                     uniform_layout_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT),

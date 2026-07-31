@@ -252,7 +252,10 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
 
 // ─── Camera buffer ────────────────────────────────────────────────────────────
 
-/// Single-element uniform buffer for the camera.
+/// Storage buffer for up to two cameras (stereo / XR).
+///
+/// The buffer is sized for two `GpuCameraUniforms` elements. In mono mode
+/// only the first element is written; the shader always indexes `cameras[0]`.
 pub struct GpuCameraBuffer {
     buf: wgpu::Buffer,
     data: GpuCameraUniforms,
@@ -262,9 +265,9 @@ pub struct GpuCameraBuffer {
 impl GpuCameraBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Camera Uniform"),
-            size: std::mem::size_of::<GpuCameraUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("Camera Storage"),
+            size: (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         Self {

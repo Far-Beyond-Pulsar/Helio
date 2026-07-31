@@ -181,7 +181,17 @@ impl VolumetricFogPass {
         let inject_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Volumetric Fog Inject BGL"),
             entries: &[
-                uniform(0),    // camera
+                // camera
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 uniform(1),    // fog
                 uniform(2),    // globals
                 storage_ro(3), // lights
@@ -226,7 +236,7 @@ impl VolumetricFogPass {
         // Only what cs_integrate actually reads — see the field's doc comment.
         let integrate_g0_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Volumetric Fog Integrate Group0 BGL"),
-            entries: &[uniform(0), uniform(1)],
+            entries: &[storage_ro(0), uniform(1)],
         });
 
         let integrate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

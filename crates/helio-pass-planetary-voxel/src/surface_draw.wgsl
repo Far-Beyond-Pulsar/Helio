@@ -34,7 +34,7 @@ struct GpuTerrainDebugUniform {
     _pad1: u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> pages: array<GpuDrawPage>;
 @group(0) @binding(2) var<storage, read> draws: array<GpuTerrainDraw>;
 @group(0) @binding(3) var<uniform> debug: GpuTerrainDebugUniform;
@@ -73,7 +73,7 @@ fn transform_vertex(
     var output: VertexOutput;
     // Keep view and projection split. This is the stable D3D12 contract used
     // by the retained page baseline as well as the compact meshlet path.
-    output.clip_position = camera.proj * (camera.view * vec4<f32>(world, 1.0));
+    output.clip_position = cameras[0].proj * (cameras[0].view * vec4<f32>(world, 1.0));
     output.normal = normalize(input.normal);
     output.world_position = world;
     output.material = input.material;

@@ -18,7 +18,7 @@
 //!use helio_prelude
 //!use helio_hiz
 
-@group(0) @binding(0) var<uniform> camera:      Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var gbuf_normal:          texture_2d<f32>;
 @group(1) @binding(1) var gbuf_orm:             texture_2d<f32>;
 @group(1) @binding(2) var gbuf_depth:           texture_depth_2d;
@@ -36,7 +36,7 @@ const NORMAL_OFFSET: f32 = 0.002;
 const FADE_START:    f32 = 0.6;
 
 fn linearize_depth(d_01: f32) -> f32 {
-    return helio_view_depth(d_01, camera.position_near.w, camera.forward_far.w);
+    return helio_view_depth(d_01, cameras[0].position_near.w, cameras[0].forward_far.w);
 }
 
 @compute @workgroup_size(8, 8)
@@ -62,8 +62,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let world_pos = helio_world_from_depth(camera.view_proj_inv, uv, depth_01);
-    let V = normalize(camera.position_near.xyz - world_pos);
+    let world_pos = helio_world_from_depth(cameras[0].view_proj_inv, uv, depth_01);
+    let V = normalize(cameras[0].position_near.xyz - world_pos);
     let R = reflect(-V, N);
     if dot(R, N) <= 0.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
@@ -71,10 +71,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // ── Build the ray in view space ─────────────────────────────────────────
-    let near = camera.position_near.w;
-    var start_view = (camera.view * vec4<f32>(world_pos, 1.0)).xyz;
-    let dir_view = normalize((camera.view * vec4<f32>(R, 0.0)).xyz);
-    let n_view = (camera.view * vec4<f32>(N, 0.0)).xyz;
+    let near = cameras[0].position_near.w;
+    var start_view = (cameras[0].view * vec4<f32>(world_pos, 1.0)).xyz;
+    let dir_view = normalize((cameras[0].view * vec4<f32>(R, 0.0)).xyz);
+    let n_view = (cameras[0].view * vec4<f32>(N, 0.0)).xyz;
     start_view += n_view * (-start_view.z * NORMAL_OFFSET);
 
     var ray_len = MAX_RAY_DIST;
@@ -87,8 +87,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let end_view = start_view + dir_view * ray_len;
 
-    let clip0 = camera.proj * vec4<f32>(start_view, 1.0);
-    let clip1 = camera.proj * vec4<f32>(end_view, 1.0);
+    let clip0 = cameras[0].proj * vec4<f32>(start_view, 1.0);
+    let clip1 = cameras[0].proj * vec4<f32>(end_view, 1.0);
     let p0 = vec3<f32>(helio_ndc_to_uv(clip0.xy / clip0.w), clip0.z / clip0.w);
     let p1 = vec3<f32>(helio_ndc_to_uv(clip1.xy / clip1.w), clip1.z / clip1.w);
     let d = p1 - p0;

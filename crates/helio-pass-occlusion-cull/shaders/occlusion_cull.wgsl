@@ -24,7 +24,7 @@ struct Camera {
     position_near: vec4<f32>,     // bytes 256 – 271
     direction_far: vec4<f32>,     // bytes 272 – 287
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 struct CullParams {
     screen_width:         u32,
@@ -127,7 +127,7 @@ fn ndc_to_uv(ndc_xy: vec2<f32>) -> vec2<f32> {
 /// proj[1][1] = cot(fovY/2) = 2n/h for a standard perspective matrix.
 fn screen_radius_px(world_radius: f32, clip_w: f32) -> f32 {
     let half_h = f32(params.screen_height) * 0.5;
-    return abs(world_radius / clip_w * camera.proj[1][1] * half_h);
+    return abs(world_radius / clip_w * cameras[0].proj[1][1] * half_h);
 }
 
 /// Select HiZ mip level for a sphere footprint of `r_px` pixels.
@@ -140,7 +140,7 @@ fn pick_mip(r_px: f32) -> u32 {
 /// Conservative sphere near depth in NDC [0,1].
 /// Projects the point on the sphere nearest to the camera into NDC depth.
 fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
     let to_center = center - cam_pos;
     let dist_sq = dot(to_center, to_center);
     if dist_sq <= radius * radius {
@@ -149,7 +149,7 @@ fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
     }
     let dir = to_center * (1.0 / sqrt(dist_sq));
     let near_ws = center - dir * radius;
-    let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+    let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
     // Protect against near_clip.w <= 0 (shouldn't happen since camera is outside)
     if near_clip.w <= 0.0 {
         return 0.0;
@@ -169,14 +169,14 @@ fn instance_hiz_occluded(inst: GpuInstanceData) -> bool {
         return false;
     }
 
-    let clip = camera.view_proj * vec4<f32>(center, 1.0);
+    let clip = cameras[0].view_proj * vec4<f32>(center, 1.0);
     if clip.w <= 0.0 {
         return false;
     }
 
     let ndc_r = max(
-        abs(radius * camera.proj[0][0] / clip.w),
-        abs(radius * camera.proj[1][1] / clip.w),
+        abs(radius * cameras[0].proj[0][0] / clip.w),
+        abs(radius * cameras[0].proj[1][1] / clip.w),
     );
     let ndc = clip.xyz / clip.w;
     let uv = ndc_to_uv(ndc.xy);
@@ -263,7 +263,7 @@ fn main(
     }
 
     let dc = draw_calls[idx];
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
 
     // Cooperatively Hi-Z-test only the instances that already survived
     // frustum culling (`visible_count` of them, packed in `compacted_indices`

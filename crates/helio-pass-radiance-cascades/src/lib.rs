@@ -77,7 +77,7 @@ struct Camera {
 @group(0) @binding(1) var<uniform>  rc_dyn:      RCDynamic;
 @group(0) @binding(2) var depth_tex:    texture_depth_2d;
 @group(0) @binding(3) var scene_color:  texture_2d<f32>;
-@group(0) @binding(4) var<uniform> camera:       Camera;
+@group(0) @binding(4) var<storage, read> cameras: array<Camera, 2>;
 
 const PROBE_DIM:   u32 = 8u;
 const DIR_DIM:     u32 = 4u;
@@ -127,8 +127,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let start_world = probe_pos;
     let end_world   = start_world + dir * MAX_RAY_DIST;
 
-    let clip_start = camera.view_proj * vec4<f32>(start_world, 1.0);
-    let clip_end   = camera.view_proj * vec4<f32>(end_world, 1.0);
+    let clip_start = cameras[0].view_proj * vec4<f32>(start_world, 1.0);
+    let clip_end   = cameras[0].view_proj * vec4<f32>(end_world, 1.0);
 
     if clip_start.w <= 0.0 {
         textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)),
@@ -255,7 +255,7 @@ impl RadianceCascadesPass {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

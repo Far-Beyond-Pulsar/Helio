@@ -28,7 +28,7 @@ struct GpuInstanceData {
     _pad:          u32,
 }
 
-@group(0) @binding(0) var<uniform>       camera:        Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>       globals:       Globals;
 @group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 
@@ -61,7 +61,7 @@ fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
         inst.normal_mat_2.xyz,
     );
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
+    out.clip_position  = cameras[0].view_proj * world_pos;
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat * decode_snorm8x4(vertex.normal));
     out.tex_coords     = vertex.tex_coords;

@@ -54,5 +54,13 @@ impl GpuCameraUniforms {
             prev_view_proj: prev_view_proj.to_cols_array(),
         }
     }
+
+    /// Upload left and right eye camera data into a storage buffer.
+    ///
+    /// The buffer must be sized for at least two `GpuCameraUniforms` elements.
+    pub fn upload_stereo(queue: &wgpu::Queue, buffer: &wgpu::Buffer, left: &Self, right: &Self) {
+        let data = [*left, *right];
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(&data));
+    }
 }
 

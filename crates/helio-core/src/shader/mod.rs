@@ -15,7 +15,7 @@
 //!
 //! ```wgsl
 //! //!use helio_prelude
-//! @group(0) @binding(0) var<uniform> camera: Camera;
+//! @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 //! ```
 //!
 //! and build the module through [`module`] instead of `create_shader_module`:

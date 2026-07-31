@@ -85,7 +85,7 @@ struct LightmapAtlasRegion {
     uv_clamp_max: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform>          camera:                 Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>          globals:               Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:         array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
@@ -126,7 +126,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let normal_mat = mat3x3<f32>(inst.normal_mat_0.xyz, inst.normal_mat_1.xyz, inst.normal_mat_2.xyz);
     let model_mat3 = mat3x3<f32>(inst.transform[0].xyz, inst.transform[1].xyz, inst.transform[2].xyz);
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
+    out.clip_position  = cameras[0].view_proj * world_pos;
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat * decode_snorm8x4(v.normal));
     out.world_tangent  = normalize(model_mat3 * decode_snorm8x4(v.tangent));
@@ -241,7 +241,7 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
-    let V = normalize(camera.position_near.xyz - input.world_position);
+    let V = normalize(cameras[0].position_near.xyz - input.world_position);
     let NdotV = max(dot(N, V), 0.0);
     let film_freq = material.class_params.x;
     let film_intensity = material.class_params.y;

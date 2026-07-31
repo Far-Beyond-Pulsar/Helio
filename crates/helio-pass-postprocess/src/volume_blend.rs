@@ -65,7 +65,17 @@ impl PostProcessVolumeBlendPass {
             label: Some("PostProcess Volume Blend BGL"),
             entries: &[
                 uniform_entry(0),
-                uniform_entry(1),
+                // camera (b1)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 storage_entry(15, true),
                 storage_entry(16, false),
             ],

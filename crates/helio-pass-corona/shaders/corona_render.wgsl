@@ -52,7 +52,7 @@ struct CameraUniforms {
 @group(0) @binding(1)  var<storage, read> particles:        array<Particle>;
 @group(0) @binding(2)  var<storage, read> emitters:         array<EmitterDef>;
 @group(0) @binding(3)  var<storage, read> compact_buf:      array<u32>;
-@group(0) @binding(6)  var<uniform>       camera:           CameraUniforms;
+@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(10) var                particle_tex:     texture_2d<f32>;
 @group(0) @binding(11) var                particle_sampler: sampler;
 
@@ -84,8 +84,8 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let pidx = compact_buf[ii];
     let p = particles[pidx];
 
-    let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
-    let up = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
+    let right = vec3<f32>(cameras[0].view[0].x, cameras[0].view[1].x, cameras[0].view[2].x);
+    let up = vec3<f32>(cameras[0].view[0].y, cameras[0].view[1].y, cameras[0].view[2].y);
     let size = max(p.size_lifetime_age.x, 0.001);
     let corner = quad_corner(vi);
     let world_pos = p.pos_and_alive.xyz
@@ -97,7 +97,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let sprite = select(u32(tex_raw) % 16u, 0u, tex_raw < 0);
 
     var out: VOut;
-    out.pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.pos = cameras[0].view_proj * vec4<f32>(world_pos, 1.0);
     out.uv = quad_uv(vi);
     out.color = p.color;
     out.sprite_index = sprite;

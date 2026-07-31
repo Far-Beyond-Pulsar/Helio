@@ -37,7 +37,7 @@ fn radiant_eval_transparent(material_id: u32,
     let N = wave_normal(uv, t);
 
     // Fresnel
-    let V = normalize(camera.position.xyz - world_pos);
+    let V = normalize(cameras[0].position.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0001);
     let fresnel = pow(1.0 - NdV, 4.0);
 

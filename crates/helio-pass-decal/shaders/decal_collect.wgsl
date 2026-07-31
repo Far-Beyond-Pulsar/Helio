@@ -23,7 +23,7 @@ const NO_TEXTURE: u32 = 0xFFFFFFFFu;
 
 struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: DecalGlobals;
 @group(0) @binding(2) var<storage, read> decals: array<GpuDecal>;
 @group(0) @binding(3) var gbuf_depth: texture_depth_2d;
@@ -94,7 +94,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let uv_scr = vec2<f32>((f32(pxl.x)+0.5)/f32(sz.x), (f32(pxl.y)+0.5)/f32(sz.y));
     let ndc = vec4<f32>(uv_scr.x*2.0-1.0, 1.0-uv_scr.y*2.0, depth, 1.0);
-    let world_pos = (camera.view_proj_inv * ndc).xyz / (camera.view_proj_inv * ndc).w;
+    let world_pos = (cameras[0].view_proj_inv * ndc).xyz / (cameras[0].view_proj_inv * ndc).w;
 
     let ea = textureLoad(gbuf_albedo, pxl, 0);
     let en = textureLoad(gbuf_normal, pxl, 0);

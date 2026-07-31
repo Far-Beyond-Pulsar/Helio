@@ -252,7 +252,7 @@ impl PostProcessPass {
             label: Some("PostProcess Compute Main BGL"),
             entries: &[
                 uniform_entry(0, cfv),
-                uniform_entry(1, cfv),
+                storage_ro_entry(1, cfv),
                 sampled_tex_entry(2, cfv, false),
                 sampled_tex_entry(3, fv, true),
                 sampler_entry(4, cfv, true),
@@ -269,7 +269,7 @@ impl PostProcessPass {
             label: Some("PostProcess Render Main BGL"),
             entries: &[
                 uniform_entry(0, fv),
-                uniform_entry(1, fv),
+                storage_ro_entry(1, fv),
                 sampled_tex_entry(2, fv, false),
                 sampled_tex_entry(3, fv, true),
                 sampler_entry(4, fv, true),

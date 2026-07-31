@@ -98,14 +98,14 @@ impl SkyLutPass {
             mapped_at_creation: false,
         });
 
-        // Group 0: camera uniform
+        // Group 0: camera storage
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("SkyLUT BGL0"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },

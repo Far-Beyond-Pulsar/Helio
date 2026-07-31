@@ -17,7 +17,7 @@
 // use this struct rather than redeclaring it:
 //
 //     //!use helio_prelude
-//     @group(0) @binding(0) var<uniform> camera: Camera;
+//     @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 //
 struct Camera {
     view:           mat4x4<f32>,
@@ -58,7 +58,7 @@ fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
 // is an OpenGL habit that silently skews every reconstructed position.
 
 /// World position from a depth-buffer sample.
-/// `inv_view_proj` is `camera.view_proj_inv`; `depth` is the raw [0,1] buffer value.
+/// `inv_view_proj` is `cameras[0].view_proj_inv`; `depth` is the raw [0,1] buffer value.
 fn helio_world_from_depth(inv_view_proj: mat4x4<f32>, uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let world = inv_view_proj * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
     return world.xyz / world.w;
@@ -66,7 +66,7 @@ fn helio_world_from_depth(inv_view_proj: mat4x4<f32>, uv: vec2<f32>, depth: f32)
 
 /// Raw [0,1] depth to positive view-space distance (near..far).
 ///
-/// `near`/`far` are `camera.position_near.w` / `camera.forward_far.w`.
+/// `near`/`far` are `cameras[0].position_near.w` / `cameras[0].forward_far.w`.
 fn helio_view_depth(depth: f32, near: f32, far: f32) -> f32 {
     return near * far / (far - depth * (far - near));
 }

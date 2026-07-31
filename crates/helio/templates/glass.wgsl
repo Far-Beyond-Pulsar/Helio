@@ -3,7 +3,7 @@ fn radiant_eval_surface(material: GpuMaterial,
                         input: VertexOutput) -> SurfaceData {
     var s = default_pbr_surface(material, material_tex, input);
 
-    let V = normalize(camera.position_near.xyz - input.world_position);
+    let V = normalize(cameras[0].position_near.xyz - input.world_position);
     let NdV = max(dot(s.normal, V), 0.0001);
     let fresnel = pow(1.0 - NdV, 4.0);
 

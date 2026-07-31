@@ -59,7 +59,7 @@ impl DecalPass {
         let bgl_collect = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Decal Collect BGL"),
             entries: &[
-                bgl_entry_buf(0, wgpu::BufferBindingType::Uniform),
+                bgl_entry_buf(0, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry_buf(1, wgpu::BufferBindingType::Uniform),
                 bgl_entry_buf(2, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry_tex(3, wgpu::TextureSampleType::Depth),
@@ -88,7 +88,7 @@ impl DecalPass {
         let bgl_apply = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Decal Apply BGL"),
             entries: &[
-                bgl_entry_buf(0, wgpu::BufferBindingType::Uniform),
+                bgl_entry_buf(0, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry_buf(1, wgpu::BufferBindingType::Uniform),
                 bgl_entry_buf(2, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry_tex(3, wgpu::TextureSampleType::Float { filterable: false }),

@@ -223,6 +223,7 @@ pub struct GraphTexturePool {
     textures: Vec<GraphTexture>,
     name_map: HashMap<String, usize>,
     alias_refs: HashMap<String, u32>,
+    xr_active: bool,
 }
 
 impl GraphTexturePool {
@@ -231,7 +232,12 @@ impl GraphTexturePool {
             textures: Vec::new(),
             name_map: HashMap::new(),
             alias_refs: HashMap::new(),
+            xr_active: false,
         }
+    }
+
+    pub fn set_xr_mode(&mut self, active: bool) {
+        self.xr_active = active;
     }
 
     /// Allocate a texture. If `alias_group` matches a released texture, reuses it.
@@ -240,12 +246,17 @@ impl GraphTexturePool {
         device: &wgpu::Device,
         desc: TextureDescriptor,
     ) -> &GraphTexture {
+        let array_layers = if self.xr_active {
+            desc.depth_or_array_layers.max(1).max(2)
+        } else {
+            desc.depth_or_array_layers.max(1)
+        };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&desc.name),
             size: wgpu::Extent3d {
                 width: desc.width.max(1),
                 height: desc.height.max(1),
-                depth_or_array_layers: desc.depth_or_array_layers.max(1),
+                depth_or_array_layers: array_layers,
             },
             mip_level_count: desc.mip_level_count.max(1),
             sample_count: desc.sample_count.max(1),
@@ -254,10 +265,19 @@ impl GraphTexturePool {
             usage: desc.usage,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some(&desc.name),
-            ..Default::default()
-        });
+        let view = if self.xr_active {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&desc.name),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                array_layer_count: Some(2),
+                ..Default::default()
+            })
+        } else {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&desc.name),
+                ..Default::default()
+            })
+        };
 
         let idx = self.textures.len();
         self.textures.push(GraphTexture { texture, view, desc: desc.clone() });

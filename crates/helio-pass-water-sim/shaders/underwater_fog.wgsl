@@ -15,7 +15,7 @@
 // over water_output.
 //
 // Bindings
-//   0  camera        uniform  Camera (prelude layout)
+//   0  cameras       storage  array<Camera, 2> (prelude layout)
 //   1  volumes       storage  array<WaterVolume>
 //   2  scene_tex     texture  water_output bound as source
 //   3  scene_samp    sampler  linear clamp
@@ -43,7 +43,7 @@ struct WaterVolume {
     _pad:                  vec4f,
 }
 
-@group(0) @binding(0) var<uniform>       camera:     Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> volumes:    array<WaterVolume>;
 @group(0) @binding(2) var scene_tex:     texture_2d<f32>;
 @group(0) @binding(3) var scene_samp:    sampler;
@@ -145,8 +145,8 @@ fn god_rays(uv: vec2f, vol: WaterVolume) -> f32 {
     }
 
     // Project a point far along the sun direction. Behind the camera: no shafts.
-    let sun_world = camera.position_near.xyz + normalize(vol.sun_direction.xyz) * 10000.0;
-    let sun_clip  = camera.view_proj * vec4f(sun_world, 1.0);
+    let sun_world = cameras[0].position_near.xyz + normalize(vol.sun_direction.xyz) * 10000.0;
+    let sun_clip  = cameras[0].view_proj * vec4f(sun_world, 1.0);
     if sun_clip.w <= 0.0 {
         return 0.0;
     }
@@ -175,7 +175,7 @@ fn god_rays(uv: vec2f, vol: WaterVolume) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
 
     // ── Which volume is the camera in, and how far under? ────────────────────
     var vol_idx: i32 = -1;
@@ -210,7 +210,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // Kept, but well below the previous magnitudes: the depth-based extinction
     // below now carries the underwater read, and these become distracting once
     // it does.
-    let t         = camera.jitter_frame.z * 0.016 * max(vol.wave_params.z, 0.1);
+    let t         = cameras[0].jitter_frame.z * 0.016 * max(vol.wave_params.z, 0.1);
     let dist_raw  = water_distortion(in.uv, t) * 0.7
                   + water_distortion(in.uv * 2.1 + vec2f(0.37, 0.71), t * 0.6) * 0.3;
     let dist_str  = clamp(water_wave_amplitude(vol) * (0.05 + cam_depth * 0.01), 0.002, 0.06);
@@ -230,17 +230,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // ── Distance through the medium ──────────────────────────────────────────
     let depth = textureSampleLevel(depth_texture, depth_samp, uv_g, 0);
-    let far   = camera.forward_far.w;
+    let far   = cameras[0].forward_far.w;
 
     var dist: f32;
     var ray_dir: vec3f;
     var lit = scene;
     if depth >= 1.0 {
         // Nothing there: the ray runs until the medium has fully absorbed it.
-        ray_dir = normalize(helio_world_from_depth(camera.view_proj_inv, uv_g, 0.5) - cam_pos);
+        ray_dir = normalize(helio_world_from_depth(cameras[0].view_proj_inv, uv_g, 0.5) - cam_pos);
         dist    = far;
     } else {
-        let world_pos = helio_world_from_depth(camera.view_proj_inv, uv_g, depth);
+        let world_pos = helio_world_from_depth(cameras[0].view_proj_inv, uv_g, depth);
         ray_dir = normalize(world_pos - cam_pos);
         dist    = distance(world_pos, cam_pos);
 

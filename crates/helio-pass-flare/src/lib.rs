@@ -250,7 +250,7 @@ impl LensFlarePass {
                 Self::storage_entry(0, SS::COMPUTE, true),   // lights
                 Self::storage_entry(1, SS::COMPUTE, false),  // flare_queries
                 Self::storage_entry(2, SS::COMPUTE, false),  // flare_count
-                Self::uniform_entry(3, SS::COMPUTE),          // camera
+                Self::storage_entry(3, SS::COMPUTE, true),   // camera
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: SS::COMPUTE,

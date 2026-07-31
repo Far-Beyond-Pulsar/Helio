@@ -14,7 +14,7 @@
 // this pass (see #139).
 //
 // Bindings
-//   0  camera           uniform  Camera (prelude layout)
+//   0  cameras          storage  array<Camera, 2> (prelude layout)
 //   1  water_volumes    storage read
 //   2  water_sim        texture_2d<f32>  (RGBA16F: R=height, G=velocity, B/A=normal.xz)
 //   3  water_samp       sampler          (linear, repeat  — for sim)
@@ -45,7 +45,7 @@ struct WaterVolume {
     _pad:                  vec4f,
 }
 
-@group(0) @binding(0) var<uniform>       camera:         Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> volumes:        array<WaterVolume>;
 @group(0) @binding(2) var water_sim:      texture_2d_array<f32>;
 @group(0) @binding(3) var water_samp:     sampler;
@@ -185,7 +185,7 @@ fn water_path_length(
     var t_scene = max_path;
     let depth = textureSampleLevel(depth_texture, depth_sampler, screen_uv, 0);
     if depth < 1.0 {
-        let scene_pos = helio_world_from_depth(camera.view_proj_inv, screen_uv, depth);
+        let scene_pos = helio_world_from_depth(cameras[0].view_proj_inv, screen_uv, depth);
         t_scene = distance(scene_pos, surface_pos);
     }
 
@@ -300,7 +300,7 @@ fn water_shore_factor(path: f32, vol: WaterVolume) -> f32 {
 /// (`water_color.w`) and scaled by `foam_amount` (`extinction.w`).
 fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f32 {
     let amp = max(water_wave_amplitude(vol), 1e-3);
-    let t   = camera.jitter_frame.z * 0.016;
+    let t   = cameras[0].jitter_frame.z * 0.016;
 
     // Two layers scrolling against each other, so the band churns rather than
     // sitting still as a uniform ring.
@@ -347,14 +347,14 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     result.color      = vec3f(0.0);
     result.confidence = 0.0;
 
-    let near = camera.position_near.w;
-    let far  = camera.forward_far.w;
+    let near = cameras[0].position_near.w;
+    let far  = cameras[0].forward_far.w;
 
     // Build the ray in view space so it can be clipped against the near plane
     // before projection — a ray crossing w = 0 projects to nonsense.
-    var start_view  = (camera.view * vec4f(origin, 1.0)).xyz;
-    let dir_view    = normalize((camera.view * vec4f(dir, 0.0)).xyz);
-    let normal_view = (camera.view * vec4f(normal, 0.0)).xyz;
+    var start_view  = (cameras[0].view * vec4f(origin, 1.0)).xyz;
+    let dir_view    = normalize((cameras[0].view * vec4f(dir, 0.0)).xyz);
+    let normal_view = (cameras[0].view * vec4f(normal, 0.0)).xyz;
     start_view += normal_view * (-start_view.z * SSR_NORMAL_BIAS);
 
     var ray_len = SSR_MAX_DIST;
@@ -366,8 +366,8 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     }
     let end_view = start_view + dir_view * ray_len;
 
-    let clip0 = camera.proj * vec4f(start_view, 1.0);
-    let clip1 = camera.proj * vec4f(end_view, 1.0);
+    let clip0 = cameras[0].proj * vec4f(start_view, 1.0);
+    let clip1 = cameras[0].proj * vec4f(end_view, 1.0);
     if clip0.w <= 0.0 || clip1.w <= 0.0 {
         return result;
     }
@@ -457,7 +457,7 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
         let xz  = water_sim_uv_to_world_xz(uv, vol);
         let h_sum = water_cascade_height_sum(xz, instance_idx);
         let world = vec3f(xz.x, water_surface_height(h_sum, vol), xz.y);
-        out.position  = camera.view_proj * vec4f(world, 1.0);
+        out.position  = cameras[0].view_proj * vec4f(world, 1.0);
         out.world_pos = world;
         out.sim_uv    = uv;
     } else {
@@ -471,7 +471,7 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
         let surface_y = water_surface_height(h_sum, vol);
         let world_y = mix(vol.bounds_min.y, surface_y, uv.y);
         let world = vec3f(xz.x, world_y, xz.y);
-        out.position  = camera.view_proj * vec4f(world, 1.0);
+        out.position  = cameras[0].view_proj * vec4f(world, 1.0);
         out.world_pos = world;
         out.sim_uv    = vec2f(0.0);
     }
@@ -485,7 +485,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let light_dir = normalize(vol.sun_direction.xyz);
 
     let normal    = water_total_normal(in.world_pos.xz, vol, in.vol_index);
-    let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
+    let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
 
     // Path through the medium straight down the view ray, before refraction.
@@ -501,9 +501,9 @@ fn fs_above(in: VertexOutput) -> vec4f {
     // accumulates over the distance it travels — so shallow water barely
     // distorts and deep water distorts a lot, which a constant screen-space
     // offset cannot express.
-    let view_pos = camera.view * vec4f(in.world_pos, 1.0);
-    let view_z   = max(-view_pos.z, camera.position_near.w);
-    let n_view   = (camera.view * vec4f(normal, 0.0)).xyz;
+    let view_pos = cameras[0].view * vec4f(in.world_pos, 1.0);
+    let view_z   = max(-view_pos.z, cameras[0].position_near.w);
+    let n_view   = (cameras[0].view * vec4f(normal, 0.0)).xyz;
 
     let bend = 1.0 - 1.0 / max(vol.sim_params.x, 1.0);
     let world_offset = clamp(
@@ -516,7 +516,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
     // the focal length and aspect, so dividing by view depth makes the
     // distortion perspective-correct: it no longer grows as the camera walks
     // away. View-space Y is up and UV Y is down, hence the flip.
-    let focal  = vec2f(camera.proj[0][0], camera.proj[1][1]);
+    let focal  = vec2f(cameras[0].proj[0][0], cameras[0].proj[1][1]);
     let offset = vec2f(world_offset.x, -world_offset.y) * focal * 0.5 / view_z;
 
     var refract_uv = clamp(screen_uv + offset, vec2f(0.001), vec2f(0.999));
@@ -525,7 +525,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
     // water surface — a rock breaking the waterline, a hull, a character — that
     // object is in front of the water and must not be dragged into it.
     let refr_depth = textureSampleLevel(depth_texture, depth_sampler, refract_uv, 0);
-    let refr_z     = helio_view_depth(refr_depth, camera.position_near.w, camera.forward_far.w);
+    let refr_z     = helio_view_depth(refr_depth, cameras[0].position_near.w, cameras[0].forward_far.w);
     var path        = path_direct;
     var scene_depth = refr_depth;
     if refr_z < view_z {
@@ -540,7 +540,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
     // Caustics land on the submerged surface being looked at through the water,
     // so they are added before absorption attenuates the whole lot.
     if scene_depth < 1.0 {
-        let scene_pos = helio_world_from_depth(camera.view_proj_inv, refract_uv, scene_depth);
+        let scene_pos = helio_world_from_depth(cameras[0].view_proj_inv, refract_uv, scene_depth);
         refracted += water_caustics(scene_pos, vol, refract_uv, vi);
     }
 
@@ -576,7 +576,7 @@ fn fs_under(in: VertexOutput) -> vec4f {
     let ior_water = max(vol.sim_params.x, 1.0);
 
     let normal    = -water_total_normal(in.world_pos.xz, vol, in.vol_index);
-    let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
+    let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
 
     let fresnel = water_fresnel(normal, view_dir, vol);
@@ -602,7 +602,7 @@ fn fs_under(in: VertexOutput) -> vec4f {
     if confidence < 0.999 {
         // Screen-space approximation of the submerged scene. Distortion is in
         // view space for the same reason as the above-water path.
-        let n_view = (camera.view * vec4f(normal, 0.0)).xyz;
+        let n_view = (cameras[0].view * vec4f(normal, 0.0)).xyz;
         let reflect_uv = clamp(
             screen_uv + vec2f(n_view.x, -n_view.y) * vol.reflection_refraction.y,
             vec2f(0.001),
@@ -626,7 +626,7 @@ fn fs_under(in: VertexOutput) -> vec4f {
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let vol       = volumes[in.vol_index];
     let light_dir = normalize(vol.sun_direction.xyz);
-    let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
+    let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
 
     if in.face_type >= 0.5 {
@@ -641,7 +641,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
 
     // Top face: above or underwater based on camera height.
-    let cam_above = camera.position_near.y > in.world_pos.y;
+    let cam_above = cameras[0].position_near.y > in.world_pos.y;
     if cam_above {
         return fs_above(in);
     } else {

@@ -21,7 +21,7 @@ struct PlanarGlobals {
     _pad2: f32,
 }
 
-@group(0) @binding(0) var<uniform> camera:       Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> planar:       PlanarGlobals;
 @group(1) @binding(0) var gbuf_normal:           texture_2d<f32>;
 @group(1) @binding(1) var gbuf_depth:            texture_depth_2d;
@@ -52,7 +52,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(planar_output, px, vec4<f32>(0.0)); return;
     }
 
-    let world_pos = helio_world_from_depth(camera.view_proj_inv, uv, depth_01);
+    let world_pos = helio_world_from_depth(cameras[0].view_proj_inv, uv, depth_01);
 
     // Bounding-box test.
     if planar.half_extents.x > 0.0 && planar.half_extents.y > 0.0 {
@@ -71,16 +71,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Reflect view ray across the plane.
-    let V = normalize(camera.position_near.xyz - world_pos);
+    let V = normalize(cameras[0].position_near.xyz - world_pos);
     let R = reflect(-V, planar.plane_normal.xyz);
     if dot(R, planar.plane_normal.xyz) <= 0.0 {
         textureStore(planar_output, px, vec4<f32>(0.0)); return;
     }
 
     // Project reflected ray into (uv, depth01) space and march.
-    let near = camera.position_near.w;
-    let start_view = (camera.view * vec4<f32>(world_pos, 1.0)).xyz;
-    let dir_view = normalize((camera.view * vec4<f32>(R, 0.0)).xyz);
+    let near = cameras[0].position_near.w;
+    let start_view = (cameras[0].view * vec4<f32>(world_pos, 1.0)).xyz;
+    let dir_view = normalize((cameras[0].view * vec4<f32>(R, 0.0)).xyz);
 
     var t_max = MAX_RAY;
     if start_view.z + dir_view.z * t_max > -near {
@@ -91,8 +91,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let end_view = start_view + dir_view * t_max;
-    let c0 = camera.proj * vec4<f32>(start_view, 1.0);
-    let c1 = camera.proj * vec4<f32>(end_view, 1.0);
+    let c0 = cameras[0].proj * vec4<f32>(start_view, 1.0);
+    let c1 = cameras[0].proj * vec4<f32>(end_view, 1.0);
     let p0 = vec3<f32>(helio_ndc_to_uv(c0.xy / c0.w), c0.z / c0.w);
     let p1 = vec3<f32>(helio_ndc_to_uv(c1.xy / c1.w), c1.z / c1.w);
     let d = p1 - p0;

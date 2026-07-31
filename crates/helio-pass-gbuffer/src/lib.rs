@@ -107,12 +107,12 @@ impl GBufferPass {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("GBuffer BGL 0"),
                 entries: &[
-                    // binding 0: camera (uniform, VERTEX | FRAGMENT)
+                    // binding 0: camera (storage, VERTEX | FRAGMENT)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
