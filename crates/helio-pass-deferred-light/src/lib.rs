@@ -1,6 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use std::borrow::Cow;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -112,11 +113,21 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let raw_src = include_str!("../shaders/deferred_lighting.wgsl");
+        let src = if raw_src.contains("//!use pbr_eval") {
+            let mut resolved = String::with_capacity(
+                raw_src.len() + libhelio::shader::PBR_EVAL.len(),
+            );
+            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push('\n');
+            resolved.push_str(raw_src);
+            Cow::Owned(resolved)
+        } else {
+            Cow::Borrowed(raw_src)
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Deferred Lighting Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/deferred_lighting.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(src),
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {

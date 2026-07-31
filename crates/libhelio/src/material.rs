@@ -23,6 +23,7 @@ pub const FLAG_HAS_SUBSURFACE: u32 = 1 << 5;
 pub const FLAG_HAS_ANISOTROPY: u32 = 1 << 6;
 pub const FLAG_HAS_CUSTOM_SHADER: u32 = 1 << 7;
 pub const FLAG_TRANSPARENT_ONLY: u32 = 1 << 8;
+pub const FLAG_FORWARD_SHADING: u32 = 1 << 9;
 
 /// Material class shader archetypes.
 pub const MATERIAL_CLASS_DEFAULT: u32 = 0;
