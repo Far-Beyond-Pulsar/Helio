@@ -9,7 +9,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneActor,
 };
 use helio_default_graphs::build_forward_opaque_graph;
 use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
@@ -144,7 +144,10 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, surface_format)
             .with_render_mode(RenderMode::ForwardOpaque);
-        let scene = Scene::new(device.clone(), queue.clone());
+        let mut scene = Scene::new(device.clone(), queue.clone());
+        scene.insert_actor(SceneActor::sky(
+            helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
+        ));
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
             size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
