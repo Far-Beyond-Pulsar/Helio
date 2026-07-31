@@ -26,3 +26,4 @@ hlfs.md
 .DS_Store
 *.zip
 *.bin
+*.log
