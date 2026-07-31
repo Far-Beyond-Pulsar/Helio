@@ -2316,6 +2316,7 @@ dependencies = [
  "helio-pass-water-sim",
  "helio-planet-voxel-core",
  "helio-voxel-core",
+ "helio-xr",
  "image",
  "libhelio",
  "log",
