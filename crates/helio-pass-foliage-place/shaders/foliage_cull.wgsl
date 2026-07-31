@@ -22,6 +22,11 @@ const WG_SIZE: u32 = 64u;
 const FOLIAGE_LOD_COUNT: u32 = 4u;
 const FOLIAGE_LOD_NONE: u32 = 4u;
 
+/// The clump-card LOD: one instance per 4x4 cluster rather than per blade. Must agree
+/// with `LOD_WIDTH_SCALE` / `LOD_HEIGHT_SCALE` in `helio-pass-foliage-gbuffer`, which
+/// size that card to cover sixteen blades.
+const FOLIAGE_LOD_CLUMP: u32 = 3u;
+
 // Mirrors helio_foliage_core::TileState. `Placing` is excluded on purpose: its slab
 // contents are undefined until the placement dispatch's final barrier, so drawing it
 // renders whatever the previous tenant left behind.
@@ -445,15 +450,22 @@ fn cs_cluster_cull(
     // that clamp was actually written, which a "reserve then drop the whole cluster"
     // policy would not: it would leave a hole of uninitialised indices inside the drawn
     // range and render blades from wherever those indices happened to point.
+    // L3 is a *clump* card: one card standing in for the whole 4x4 cluster, not one card
+    // per blade. The consumer sizes it accordingly (`CLUMP_CARD_WIDTH_SCALE`, 2.5x a
+    // single blade), so emitting one per blade puts sixteen oversized cards where one
+    // belongs and the far ring reads as denser than the near field — the density falloff
+    // looks inverted. The near LODs stay one instance per blade.
+    let emit = select(count, 1u, lod == FOLIAGE_LOD_CLUMP);
+
     let capacity = cull.per_lod_capacity;
-    let base = atomicAdd(&counters[lod], count);
+    let base = atomicAdd(&counters[lod], emit);
     if base >= capacity {
-        atomicAdd(&counters[COUNTER_VISIBLE_OVERFLOW], count);
+        atomicAdd(&counters[COUNTER_VISIBLE_OVERFLOW], emit);
         return;
     }
-    let writable = min(count, capacity - base);
-    if writable < count {
-        atomicAdd(&counters[COUNTER_VISIBLE_OVERFLOW], count - writable);
+    let writable = min(emit, capacity - base);
+    if writable < emit {
+        atomicAdd(&counters[COUNTER_VISIBLE_OVERFLOW], emit - writable);
     }
 
     let region = lod * capacity;
