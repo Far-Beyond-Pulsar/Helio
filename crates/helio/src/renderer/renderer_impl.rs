@@ -8,7 +8,7 @@ use web_time::Instant;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 
-use super::config::{PerfOverlayMode, RendererConfig};
+use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<
@@ -160,6 +160,7 @@ pub struct Renderer {
     /// Templates registered by the user for the transparent path.
     /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
     pub(crate) transparent_template_registry: RadiantTemplateRegistry,
+    pub(crate) render_mode: RenderMode,
 }
 
 pub struct DebugBatch<'a> {
@@ -584,6 +585,7 @@ impl Renderer {
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: self.render_mode,
         }
     }
 

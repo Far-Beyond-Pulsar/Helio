@@ -1,3 +1,6 @@
+/// Shared PBR evaluation WGSL source (pure BRDF math, no pass-specific types).
+pub const PBR_EVAL: &str = include_str!("../shaders/pbr_eval.wgsl");
+
 /// Replace native material binding arrays with baseline-WebGPU bindings.
 ///
 /// Browser WebGPU does not expose wgpu's `binding_array` WGSL extension. The

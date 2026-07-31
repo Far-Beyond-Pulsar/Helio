@@ -322,6 +322,9 @@ pub struct FrameResources<'a> {
     /// submitting draw calls. Returns `None` when PVS baking was not configured.
     pub baked_pvs: Tracked<BakedPvsRef<'a>>,
 
+    /// Cluster light grid for forward rendering (populated by LightCullPass).
+    pub cluster_light_grid: Tracked<ClusterLightGrid<'a>>,
+
     /// Corona particle emitter definitions (uploaded by the Renderer each frame)
     pub corona_emitters: Tracked<CoronaEmitterFrameData<'a>>,
 
@@ -409,6 +412,17 @@ impl<'a> BakedPvsRef<'a> {
     }
 }
 
+/// Cluster light grid bindings for forward rendering.
+///
+/// Produced by LightCullPass, consumed by forward-lit passes and transparent pass.
+#[derive(Clone, Copy)]
+pub struct ClusterLightGrid<'a> {
+    pub tile_light_lists: &'a wgpu::Buffer,
+    pub tile_light_counts: &'a wgpu::Buffer,
+    pub num_tiles_x: u32,
+    pub num_tiles_y: u32,
+}
+
 // ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
 
 /// Owned CPU-side PVS data stored in [`BakedData`].
@@ -472,6 +486,7 @@ impl<'a> FrameResources<'a> {
             baked_reflection_sampler: Tracked::empty(),
             baked_irradiance_sh: Tracked::empty(),
             baked_pvs: Tracked::empty(),
+            cluster_light_grid: Tracked::empty(),
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
             color_grading_lut: Tracked::empty(),
@@ -542,6 +557,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_reflection_sampler);
             reset_field!(baked_irradiance_sh);
             reset_field!(baked_pvs);
+            reset_field!(cluster_light_grid);
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
             reset_field!(color_grading_lut);

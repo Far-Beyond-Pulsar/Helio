@@ -13,6 +13,7 @@ wgpu = { workspace = true }
 helio-pass-billboard = { path = "../helio-pass-billboard" }
 helio-pass-corona = { path = "../helio-pass-corona" }
 helio-pass-flare = { path = "../helio-pass-flare" }
+helio-pass-forward-lit = { path = "../helio-pass-forward-lit" }
 helio-pass-decal = { path = "../helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }

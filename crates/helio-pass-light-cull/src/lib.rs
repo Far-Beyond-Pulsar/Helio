@@ -241,6 +241,15 @@ impl RenderPass for LightCullPass {
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         frame.tile_light_lists.write(&self.tile_light_lists, "LightCull");
         frame.tile_light_counts.write(&self.tile_light_counts, "LightCull");
+        frame.cluster_light_grid.write(
+            libhelio::ClusterLightGrid {
+                tile_light_lists: &self.tile_light_lists,
+                tile_light_counts: &self.tile_light_counts,
+                num_tiles_x: self.num_tiles_x,
+                num_tiles_y: self.num_tiles_y,
+            },
+            "LightCull",
+        );
     }
 
     fn render_pass_descriptor<'a>(

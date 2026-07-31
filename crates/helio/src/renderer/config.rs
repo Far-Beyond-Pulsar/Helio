@@ -1,6 +1,19 @@
 use crate::material::MAX_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// G-buffer → deferred lighting (current default)
+    #[default]
+    Deferred,
+    /// Forward-lit pass for all opaque geometry, no G-buffer.
+    /// Transparent pass still runs on top. Suitable for VR stereo.
+    ForwardOpaque,
+    /// Everything forward — both opaque and transparent use forward passes.
+    /// Suitable for WebGPU low-end or simple scenes.
+    ForwardOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum PerfOverlayMode {
     #[default]
@@ -209,6 +222,7 @@ pub struct RendererConfig {
     pub enable_environment_reflections: bool,
     /// HDR display output mode. Default `Ldr`.
     pub hdr_output_mode: libhelio::HdrOutputMode,
+    pub render_mode: RenderMode,
 }
 
 impl RendererConfig {
@@ -228,6 +242,7 @@ impl RendererConfig {
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            render_mode: RenderMode::Deferred,
         }
     }
 
@@ -266,6 +281,11 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
         self
     }
 

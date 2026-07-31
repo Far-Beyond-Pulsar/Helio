@@ -193,6 +193,8 @@ pub struct SceneResources<'a> {
     /// Built during scene flush.
     pub material_class_ranges: &'a [(u32, u64, u32, u32)],
     pub transparent_material_class_ranges: &'a [(u32, u64, u32, u32)],
+    /// Forward-shaded material class ranges (excluded from GBuffer pass).
+    pub forward_material_class_ranges: &'a [(u32, u64, u32, u32)],
 
     /// Graph hashes indexed by material slot. Populated during flush.
     pub material_graph_hashes: &'a [u64],

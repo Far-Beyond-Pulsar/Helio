@@ -2934,6 +2934,7 @@ dependencies = [
  "helio-pass-decal",
  "helio-pass-deferred-light",
  "helio-pass-flare",
+ "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hiz",
@@ -3042,6 +3043,18 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-forward-lit"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 
