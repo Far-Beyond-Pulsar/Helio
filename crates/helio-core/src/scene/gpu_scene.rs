@@ -251,6 +251,9 @@ pub struct GpuScene {
     /// Built during `rebuild_instance_buffers_*`.
     pub material_class_ranges: Vec<(u32, u64, u32, u32)>,
     pub transparent_material_class_ranges: Vec<(u32, u64, u32, u32)>,
+    /// Forward-shaded material class ranges (excluded from GBuffer pass).
+    /// Drawn by the forward-lit pass instead.
+    pub forward_material_class_ranges: Vec<(u32, u64, u32, u32)>,
 
     /// Graph hashes for each material slot (indexed by material buffer slot).
     /// Populated by [`Scene`](helio::Scene) during flush.
@@ -394,6 +397,7 @@ impl GpuScene {
             voxel_ring_write_index: 0,
             material_class_ranges: Vec::new(),
             transparent_material_class_ranges: Vec::new(),
+            forward_material_class_ranges: Vec::new(),
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
             template_registry: None,
@@ -469,6 +473,7 @@ impl GpuScene {
             voxel_volumes_generation: self.voxel_volumes_generation,
             material_class_ranges: &self.material_class_ranges,
             transparent_material_class_ranges: &self.transparent_material_class_ranges,
+            forward_material_class_ranges: &self.forward_material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
             template_registry: &self.template_registry,
