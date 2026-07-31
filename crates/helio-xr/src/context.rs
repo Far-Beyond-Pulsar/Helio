@@ -15,7 +15,7 @@
 
 use ash::vk::{self, Handle as _};
 use wgpu::{
-    Device, DeviceDescriptor, ExperimentalFeatures, Features, Instance, InstanceFlags,
+    Adapter, Device, DeviceDescriptor, ExperimentalFeatures, Features, Instance, InstanceFlags,
     MemoryBudgetThresholds, MemoryHints, Queue, Trace,
     hal::{api::Vulkan, Api},
 };
@@ -124,7 +124,7 @@ pub fn create_wgpu_device(
     xr_system: openxr::SystemId,
     instance: &Instance,
     wanted_features: Features,
-) -> Result<(Device, Queue)> {
+) -> Result<(Adapter, Device, Queue)> {
     let hal_instance = unsafe { instance.as_hal::<Vulkan>() }
         .ok_or_else(|| XrError::GraphicsUnavailable("wgpu instance is not Vulkan".to_string()))?;
     let shared = hal_instance.shared_instance();
@@ -253,5 +253,5 @@ pub fn create_wgpu_device(
             XrError::GraphicsUnavailable(format!("wgpu create_device_from_hal: {e:?}"))
         })?;
 
-    Ok((device, queue))
+    Ok((wgpu_adapter, device, queue))
 }

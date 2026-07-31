@@ -289,6 +289,16 @@ impl Renderer {
             xr_idle_skips: 0,
             #[cfg(not(target_arch = "wasm32"))]
             xr_camera: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_pipeline: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_bgl: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_sampler: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_bind_group: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_format: None,
         }
     }
 

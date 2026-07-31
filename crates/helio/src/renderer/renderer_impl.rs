@@ -195,6 +195,21 @@ pub struct Renderer {
     /// for RC bounds and the debug state. The per-eye view/proj are overridden
     /// by the headset each frame.
     pub(crate) xr_camera: Option<crate::scene::Camera>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// PC mirror blit: samples the acquired XR swapchain image (2-layer array)
+    /// and draws both eyes side-by-side to the mirror window surface.
+    pub(crate) xr_mirror_pipeline: Option<wgpu::RenderPipeline>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bgl: Option<wgpu::BindGroupLayout>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_sampler: Option<wgpu::Sampler>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_bind_group: Option<(u32, wgpu::BindGroup)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Colour format of the PC mirror window surface; the blit pipeline's color
+    /// target must match it (usually Bgra8UnormSrgb on Windows), not the XR
+    /// swapchain format. Set via [`Renderer::set_xr_mirror_format`].
+    pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
 }
 
 pub struct DebugBatch<'a> {
@@ -650,6 +665,18 @@ impl Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_xr_camera(&mut self, camera: crate::scene::Camera) {
         self.xr_camera = Some(camera);
+    }
+
+    /// Set the PC mirror window's colour format (from the mirror surface's
+    /// capabilities) so the XR mirror blit pipeline's color target matches.
+    /// Usually `Bgra8UnormSrgb` on Windows.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
+        if self.xr_mirror_format != Some(format) {
+            self.xr_mirror_format = Some(format);
+            // The pipeline is keyed on the format; drop it so it is rebuilt.
+            self.xr_mirror_pipeline = None;
+        }
     }
 
     /// Whether the renderer was built with the OpenXR multiview path enabled.

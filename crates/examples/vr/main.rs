@@ -51,6 +51,8 @@ struct XrBundle {
     instance: helio_xr::XrInstance,
     session: helio_xr::XrSession,
     swapchain: helio_xr::XrSwapchain,
+    wgpu_instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
 }
@@ -80,7 +82,7 @@ fn try_init_xr() -> Option<XrBundle> {
         let instance = helio_xr::XrInstance::create("helio_vr_demo")?;
         let wgpu_instance =
             helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
-        let (device, queue) =
+        let (adapter, device, queue) =
             helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
         let session = helio_xr::XrSession::create(
             &instance.instance,
@@ -107,6 +109,8 @@ fn try_init_xr() -> Option<XrBundle> {
             instance,
             session,
             swapchain,
+            wgpu_instance,
+            adapter,
             device: Arc::new(device),
             queue: Arc::new(queue),
         })
@@ -235,16 +239,48 @@ impl ApplicationHandler for App {
                 )
                 .with_render_mode(RenderMode::ForwardOpaque)
                 // The graph's internal resolution must match the XR eye buffer
-                // exactly (it becomes the swapchain target); no scaling.
-                .with_render_scale(1.0)
-                .with_xr_mode(true);
+                // exactly (it becomes the swapchain target); no scaling. Note:
+                // the graph is intentionally built in single-layer (non-multiview)
+                // mode — render_xr renders each eye separately (dual-pass stereo)
+                // so every existing pass and shader works unchanged.
+                .with_render_scale(1.0);
                 let format = bundle.swapchain.format;
+                // PC mirror surface: the OpenXR-created device presents both eye
+                // buffers side-by-side into this window.
+                let mirror_surface = bundle
+                    .wgpu_instance
+                    .create_surface(window.clone())
+                    .expect("Failed to create mirror surface");
+                let caps = mirror_surface.get_capabilities(&bundle.adapter);
+                let mirror_format = caps
+                    .formats
+                    .iter()
+                    .find(|f| f.is_srgb())
+                    .copied()
+                    .unwrap_or(caps.formats[0]);
+                let mirror_alpha = caps.alpha_modes[0];
+                let mirror_size = window.inner_size();
+                mirror_surface
+                    .configure(
+                        &bundle.device,
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format: mirror_format,
+                            color_space: wgpu::SurfaceColorSpace::Auto,
+                            width: mirror_size.width.max(1),
+                            height: mirror_size.height.max(1),
+                            present_mode: wgpu::PresentMode::Fifo,
+                            alpha_mode: mirror_alpha,
+                            view_formats: vec![],
+                            desired_maximum_frame_latency: 2,
+                        },
+                    );
                 (
                     bundle.device.clone(),
                     bundle.queue.clone(),
-                    None,
-                    format,
-                    wgpu::CompositeAlphaMode::Opaque,
+                    Some(mirror_surface),
+                    mirror_format,
+                    mirror_alpha,
                     config,
                     Some(bundle),
                 )
@@ -360,6 +396,7 @@ impl ApplicationHandler for App {
                 200.0,
             );
             renderer.set_xr_camera(template);
+            renderer.set_xr_mirror_format(surface_format);
             renderer.set_xr_session(
                 Some(bundle.instance),
                 Some(bundle.session),
@@ -475,9 +512,25 @@ impl ApplicationHandler for App {
                 if state.xr_active {
                     // Headset path: render_xr() polls session events, locates the
                     // per-eye poses, uploads the stereo camera and renders both
-                    // eyes in one multiview pass.
-                    if let Err(e) = state.renderer.render_xr() {
+                    // eyes. The mirror surface (if any) receives both eye buffers
+                    // side by side via the renderer's mirror blit.
+                    let mirror = match &state.surface {
+                        Some(surface) => match surface.get_current_texture() {
+                            wgpu::CurrentSurfaceTexture::Success(texture)
+                            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                            _ => None,
+                        },
+                        None => None,
+                    };
+                    let mirror_view = mirror.as_ref().map(|t| {
+                        t.texture
+                            .create_view(&wgpu::TextureViewDescriptor::default())
+                    });
+                    if let Err(e) = state.renderer.render_xr(mirror_view.as_ref()) {
                         log::error!("[XR] render_xr error: {e:?}");
+                    }
+                    if let Some(output) = mirror {
+                        state.queue.present(output);
                     }
                     state.input.mouse_delta = (0.0, 0.0);
                     state.fps.tick();
