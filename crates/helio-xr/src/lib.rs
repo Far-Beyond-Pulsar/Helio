@@ -27,6 +27,7 @@ pub mod camera;
 pub mod context;
 pub mod error;
 pub mod graphics;
+pub mod input;
 pub mod instance;
 pub mod session;
 pub mod swapchain;
@@ -35,9 +36,19 @@ pub use camera::{view_to_world_matrix, xr_view_to_camera, ViewPose};
 pub use context::{create_wgpu_device, create_wgpu_instance};
 pub use error::XrError;
 pub use graphics::WgpuGraphics;
+pub use input::{ControllerState, XrInput};
 pub use instance::XrInstance;
 pub use session::{LocatedViews, SessionEvent, XrSession};
 pub use swapchain::XrSwapchain;
 
 /// Result alias for helio-xr operations.
 pub type Result<T> = std::result::Result<T, XrError>;
+
+/// The concrete OpenXR session handle Helio's graphics binding produces.
+///
+/// Re-exported so applications can hold a session handle (for
+/// [`XrInput::sync`], say) without taking a direct dependency on the `openxr`
+/// crate and having to keep its version in lockstep with this one.
+/// `openxr::Session` is reference-counted, so cloning one is cheap and the
+/// clone stays valid alongside the renderer's copy.
+pub type XrSessionHandle = openxr::Session<WgpuGraphics>;

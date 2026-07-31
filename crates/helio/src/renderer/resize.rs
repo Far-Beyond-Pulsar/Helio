@@ -155,3 +155,23 @@ impl Renderer {
         );
     }
 }
+
+impl Renderer {
+    /// Engine-world transform of the headset's stage origin.
+    ///
+    /// This is the locomotion hook: the headset reports poses relative to its stage
+    /// origin, and this matrix places that origin in the world. Translating it walks the
+    /// player forward; rotating it turns them. Scene content is untouched, so nothing has
+    /// to move to make the player move.
+    ///
+    /// Keep it a rigid transform. Scale here would scale the interpupillary distance
+    /// along with everything else, which is a reliable way to make people motion-sick.
+    pub fn set_xr_stage_transform(&mut self, world_from_stage: glam::Mat4) {
+        self.xr_stage_transform = world_from_stage;
+    }
+
+    /// The current stage transform.
+    pub fn xr_stage_transform(&self) -> glam::Mat4 {
+        self.xr_stage_transform
+    }
+}

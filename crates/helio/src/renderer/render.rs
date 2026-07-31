@@ -736,12 +736,13 @@ impl Renderer {
 
         // ── 3. Locate the per-eye views. `world_from_stage` is identity: the
         // ──    headset's stage origin maps 1:1 onto the engine world origin.
+        let stage_transform = self.xr_stage_transform;
         let located = {
             let session = self.xr.as_ref().ok_or_else(|| {
                 invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
             })?;
             session
-                .locate_views(display_time, &glam::Mat4::IDENTITY)
+                .locate_views(display_time, &stage_transform)
                 .map_err(xr_error)?
         };
         let near_far = self

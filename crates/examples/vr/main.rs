@@ -51,6 +51,7 @@ struct XrBundle {
     instance: helio_xr::XrInstance,
     session: helio_xr::XrSession,
     swapchain: helio_xr::XrSwapchain,
+    input: helio_xr::XrInput,
     wgpu_instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
@@ -84,6 +85,10 @@ fn try_init_xr() -> Option<XrBundle> {
             helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
         let (adapter, device, queue) =
             helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
+        // Actions must be declared and their bindings suggested BEFORE the session is
+        // created; the runtime resolves them at session creation and will not accept new
+        // suggestions afterwards.
+        let input = helio_xr::XrInput::new(&instance.instance)?;
         let session = helio_xr::XrSession::create(
             &instance.instance,
             instance.system,
@@ -91,6 +96,8 @@ fn try_init_xr() -> Option<XrBundle> {
             &device,
             &queue,
         )?;
+        // Attach exactly once, after creation and before the first sync.
+        input.attach(&session.session)?;
         let swapchain = helio_xr::XrSwapchain::create(
             &device,
             &session.session,
@@ -109,6 +116,7 @@ fn try_init_xr() -> Option<XrBundle> {
             instance,
             session,
             swapchain,
+            input,
             wgpu_instance,
             adapter,
             device: Arc::new(device),
@@ -177,11 +185,67 @@ struct AppState {
     input: FreeCam,
     /// True when a live OpenXR session is driving `renderer.render_xr()`.
     xr_active: bool,
+    /// Controller actions, and a handle to the session to sync them against.
+    ///
+    /// The session is cloned rather than borrowed from the renderer: `openxr::Session` is
+    /// reference-counted, and the renderer owns the original.
+    #[cfg(not(target_arch = "wasm32"))]
+    xr_input: Option<(helio_xr::XrInput, helio_xr::XrSessionHandle)>,
+    /// Player locomotion, applied as the XR stage transform. Position is the stage
+    /// origin in world space; yaw is snap/smooth turn about it.
+    player_position: Vec3,
+    player_yaw: f32,
     last_frame: Instant,
     fps: FpsCounter,
 }
 
 impl AppState {
+    /// Read the controllers and walk the player, then publish the result as the XR
+    /// stage transform.
+    ///
+    /// Movement is head-relative on the yaw axis only: pitching your head must not send
+    /// you into the floor or the ceiling, which is both disorienting and the fastest way
+    /// to make someone sick. Turning is smooth here for simplicity; snap turn is the
+    /// gentler default for people prone to motion sickness and is a one-line change.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn update_locomotion(&mut self, dt: f32) {
+        const MOVE_SPEED: f32 = 2.5;
+        const TURN_SPEED: f32 = 1.8;
+        /// Sticks rest slightly off-centre on most hardware; without a deadzone the
+        /// player drifts continuously while standing still.
+        const DEADZONE: f32 = 0.15;
+
+        let Some((input, session)) = &self.xr_input else {
+            return;
+        };
+        let Ok(controls) = input.sync(session) else {
+            return;
+        };
+
+        let deadzone = |v: glam::Vec2| -> glam::Vec2 {
+            if v.length() < DEADZONE {
+                glam::Vec2::ZERO
+            } else {
+                v
+            }
+        };
+        let move_stick = deadzone(controls.left_stick);
+        let turn_stick = deadzone(controls.right_stick);
+
+        self.player_yaw -= turn_stick.x * TURN_SPEED * dt;
+
+        // Yaw-only basis, so "forward" is where you are facing on the floor plane.
+        let (sin, cos) = self.player_yaw.sin_cos();
+        let forward = Vec3::new(-sin, 0.0, -cos);
+        let right = Vec3::new(cos, 0.0, -sin);
+        self.player_position += (forward * move_stick.y + right * move_stick.x) * MOVE_SPEED * dt;
+
+        self.renderer.set_xr_stage_transform(
+            glam::Mat4::from_translation(self.player_position)
+                * glam::Mat4::from_rotation_y(self.player_yaw),
+        );
+    }
+
     fn configure_surface(&self, width: u32, height: u32) {
         let Some(surface) = &self.surface else { return };
         surface.configure(
@@ -385,6 +449,8 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         #[cfg(not(target_arch = "wasm32"))]
+        let mut xr_input = None;
+        #[cfg(not(target_arch = "wasm32"))]
         let xr_active = if let Some(bundle) = xr_owned {
             let template = Camera::perspective_look_at(
                 Vec3::new(0.0, 1.6, 0.0),
@@ -397,6 +463,8 @@ impl ApplicationHandler for App {
             );
             renderer.set_xr_camera(template);
             renderer.set_xr_mirror_format(surface_format);
+            let session_handle = bundle.session.session.clone();
+            xr_input = Some((bundle.input, session_handle));
             renderer.set_xr_session(
                 Some(bundle.instance),
                 Some(bundle.session),
@@ -423,6 +491,10 @@ impl ApplicationHandler for App {
             renderer,
             input: FreeCam::new(),
             xr_active,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_input,
+            player_position: Vec3::ZERO,
+            player_yaw: 0.0,
             last_frame: Instant::now(),
             fps: FpsCounter::new(),
         };
@@ -510,6 +582,7 @@ impl ApplicationHandler for App {
 
                 #[cfg(not(target_arch = "wasm32"))]
                 if state.xr_active {
+                    state.update_locomotion(dt);
                     // Headset path: render_xr() polls session events, locates the
                     // per-eye poses, uploads the stereo camera and renders both
                     // eyes. The mirror surface (if any) receives both eye buffers

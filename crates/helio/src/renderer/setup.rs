@@ -280,6 +280,7 @@ impl Renderer {
             baked_data: None,
             clear_target_next_frame: true,
             graph_has_sky: scene_has_sky,
+            xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
             pending_resize: None,
             gizmo_camera: None,

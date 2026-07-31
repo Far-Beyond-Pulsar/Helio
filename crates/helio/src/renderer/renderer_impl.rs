@@ -169,6 +169,14 @@ pub struct Renderer {
     /// that will never draw it. Tracking what the graph was built with is what lets
     /// `rebuild_graph_if_sky_changed` notice.
     pub(crate) graph_has_sky: bool,
+
+    /// Engine-world transform of the headset's stage origin — the locomotion hook.
+    ///
+    /// Identity means the player stands at the world origin. Translating/rotating this
+    /// moves the player through the world without touching the scene, which is what
+    /// joystick locomotion drives. Applied to the located eye poses, so it moves the
+    /// cameras and nothing else.
+    pub(crate) xr_stage_transform: glam::Mat4,
     /// Templates registered by the user for the gbuffer (opaque) path.
     /// Preserved across graph rebuilds (resize).
     pub(crate) template_registry: RadiantTemplateRegistry,
