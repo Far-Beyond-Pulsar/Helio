@@ -272,5 +272,9 @@ name = "sprite_stress_test"
 path = "sprite_stress_test.rs"
 
 [[bin]]
+name = "sprite_millions"
+path = "sprite_millions.rs"
+
+[[bin]]
 name = "foliage_demo"
 path = "foliage_demo.rs"
