@@ -70,6 +70,15 @@ const FOLIAGE_VISIBLE_TILE_SHIFT: u32 = 16u;
 /// in the producer's `foliage_cull.wgsl`: the one level that draws a single instance per
 /// 4x4 cluster rather than per blade, and therefore the one that must not dither.
 const FOLIAGE_LOD_CLUMP: u32 = 3u;
+const FOLIAGE_LOD_COUNT: u32 = 4u;
+
+/// Fraction of the final LOD band spent fading out to nothing.
+///
+/// The last band ends foliage outright rather than handing over to another LOD, so it
+/// needs a fade proportional to its own length (45-120 m here, so ~34 m) instead of the
+/// few-metre band used between LODs. Until the terrain-shading fallback exists this is
+/// the only thing standing between a receding field and a visible wall of grass.
+const FOLIAGE_FINAL_FADE_FRACTION: f32 = 0.45;
 const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 
 /// Largest finite f32, for the `is_finite` guards transcribed from
@@ -290,7 +299,19 @@ fn foliage_lod_threshold(ty: FoliageType, level: u32, scale: f32) -> f32 {
 /// rather than to a visible thinning or doubling ring.
 fn foliage_cross_fade(ty: FoliageType, level: u32, distance: f32, scale: f32, band: f32) -> f32 {
     let upper = foliage_lod_threshold(ty, level, scale);
-    var alpha = foliage_lod_fade_alpha(distance, upper - band, upper);
+
+    // The outermost LOD's upper edge is not a hand-off to another LOD — it is the end of
+    // foliage entirely, and the plan's terrain-shading fallback beyond it does not exist
+    // yet. Fading it over the same narrow band used between LODs makes the whole far ring
+    // shrink away within a few metres, which reads as a wall of grass ending rather than a
+    // field receding. Give the last band a fade proportional to its own length instead.
+    var outer_band = band;
+    if level + 1u >= FOLIAGE_LOD_COUNT {
+        let lower = foliage_lod_threshold(ty, level - 1u, scale);
+        outer_band = max(band, (upper - lower) * FOLIAGE_FINAL_FADE_FRACTION);
+    }
+
+    var alpha = foliage_lod_fade_alpha(distance, upper - outer_band, upper);
     if level > 0u {
         let lower = foliage_lod_threshold(ty, level - 1u, scale);
         alpha = min(alpha, 1.0 - foliage_lod_fade_alpha(distance, lower - band, lower));

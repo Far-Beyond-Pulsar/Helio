@@ -47,6 +47,9 @@ const COUNTER_PLACED_BLADES: u32 = 6u;
 struct PlaceUniforms {
     tile_size:          f32,
     candidate_grid:     u32,
+    /// Edge length of one cluster block in cells. Candidates are mapped block-linearly
+    /// so a cluster is a square patch, not a 1-cell-tall strip — see `cell_x`/`cell_z`.
+    cluster_edge:       u32,
     slab_capacity:      u32,
     queued_tile_count:  u32,
 
@@ -65,7 +68,6 @@ struct PlaceUniforms {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    _pad3: u32,
 }
 
 /// Mirrors `helio_foliage_core::GpuFoliageType` (Rust, 96 bytes).
@@ -312,8 +314,18 @@ fn cs_place(
             // Stratified: one candidate per grid cell, jittered inside it. Pure rejection
             // sampling over the tile would clump, and clumps read as bald patches next to
             // fat tufts at exactly the density where grass is supposed to look uniform.
-            let cell_x = candidate % grid;
-            let cell_z = candidate / grid;
+            // Block-linear, not row-major. `cluster_size` consecutive candidates form one
+            // cluster, and the L3 clump card is anchored on its cluster, so a row-major
+            // mapping makes each card represent a 1-cell-tall strip and the far field
+            // renders as straight rows. Filling a square block first makes a cluster a
+            // square patch of ground.
+            let edge = max(place.cluster_edge, 1u);
+            let per_block = edge * edge;
+            let blocks_across = max(grid / edge, 1u);
+            let block = candidate / per_block;
+            let within = candidate % per_block;
+            let cell_x = (block % blocks_across) * edge + (within % edge);
+            let cell_z = (block / blocks_across) * edge + (within / edge);
             let u = (f32(cell_x) + hash_to_unit(seed)) * inv_grid;
             let v = (f32(cell_z) + hash_to_unit(rotl(seed, 11u))) * inv_grid;
 

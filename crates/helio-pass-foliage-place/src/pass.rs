@@ -717,7 +717,12 @@ impl FoliagePlacePass {
         // multi-millisecond stall.
         let slab_limit = isqrt(self.blades_per_tile).max(1);
         let loop_limit = isqrt(MAX_CANDIDATES_PER_TILE).max(1);
-        let grid = ideal.min(slab_limit).min(loop_limit);
+        // Round DOWN to a whole number of cluster blocks. The candidate index is mapped
+        // block-linearly so one cluster is a square patch of cells rather than a strip;
+        // a grid that is not a multiple of the block edge would leave a partial block on
+        // two sides whose cells belong to no cluster.
+        let edge = isqrt(self.cluster_size).max(1);
+        let grid = (ideal.min(slab_limit).min(loop_limit) / edge).max(1) * edge;
         let achieved = ((grid as f32 * grid as f32) / desired).clamp(0.0, 1.0);
         (grid, achieved)
     }
@@ -916,6 +921,7 @@ impl RenderPass for FoliagePlacePass {
             bytemuck::bytes_of(&PlaceUniforms {
                 tile_size: FOLIAGE_TILE_SIZE_METERS,
                 candidate_grid,
+                cluster_edge: isqrt(self.cluster_size).max(1),
                 slab_capacity: self.blades_per_tile,
                 queued_tile_count: self.queued_tile_count,
                 density_multiplier: self.quality.density_multiplier(),
@@ -926,7 +932,7 @@ impl RenderPass for FoliagePlacePass {
                 terrain_origin_x: terrain_origin[0],
                 terrain_origin_z: terrain_origin[1],
                 terrain_extent,
-                _pad: [0; 4],
+                _pad: [0; 3],
             }),
         );
 

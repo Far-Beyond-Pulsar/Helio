@@ -30,6 +30,13 @@ pub struct PlaceUniforms {
     /// order vanishing — which would leave a bald corner on every tile rather than
     /// slightly sparser grass everywhere.
     pub candidate_grid: u32,
+    /// Edge length of one cluster block in candidate cells (`sqrt(cluster_size)`).
+    ///
+    /// Candidates are mapped block-linearly so that the `cluster_size` consecutive
+    /// indices forming one cluster occupy a square patch. Row-major mapping made a
+    /// cluster a 1-cell-tall strip, and since the L3 clump card is anchored on its
+    /// cluster, the far field rendered as straight rows of cards.
+    pub cluster_edge: u32,
 
     /// Blades one tile may own. Fixed and equal for every ring slot; see
     /// [`crate::FoliagePlacePass::blades_per_tile`].
@@ -72,7 +79,7 @@ pub struct PlaceUniforms {
 
     /// Reserved. Must be written as zero so a future build can distinguish "left at the
     /// default" from "predates the field".
-    pub _pad: [u32; 4],
+    pub _pad: [u32; 3],
 }
 
 /// Per-frame constants for the tile cull, cluster cull and finalize dispatches.
@@ -172,17 +179,18 @@ mod tests {
 
         assert_eq!(offset_of(&value.tile_size as *const f32 as *const u8), 0);
         assert_eq!(offset_of(&value.candidate_grid as *const u32 as *const u8), 4);
-        assert_eq!(offset_of(&value.slab_capacity as *const u32 as *const u8), 8);
-        assert_eq!(offset_of(&value.queued_tile_count as *const u32 as *const u8), 12);
-        assert_eq!(offset_of(&value.density_multiplier as *const f32 as *const u8), 16);
-        assert_eq!(offset_of(&value.max_density as *const f32 as *const u8), 20);
-        assert_eq!(offset_of(&value.type_count as *const u32 as *const u8), 24);
-        assert_eq!(offset_of(&value.max_foliage_height as *const f32 as *const u8), 28);
-        assert_eq!(offset_of(&value.terrain_valid as *const u32 as *const u8), 32);
-        assert_eq!(offset_of(&value.terrain_origin_x as *const f32 as *const u8), 36);
-        assert_eq!(offset_of(&value.terrain_origin_z as *const f32 as *const u8), 40);
-        assert_eq!(offset_of(&value.terrain_extent as *const f32 as *const u8), 44);
-        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 48);
+        assert_eq!(offset_of(&value.cluster_edge as *const u32 as *const u8), 8);
+        assert_eq!(offset_of(&value.slab_capacity as *const u32 as *const u8), 12);
+        assert_eq!(offset_of(&value.queued_tile_count as *const u32 as *const u8), 16);
+        assert_eq!(offset_of(&value.density_multiplier as *const f32 as *const u8), 20);
+        assert_eq!(offset_of(&value.max_density as *const f32 as *const u8), 24);
+        assert_eq!(offset_of(&value.type_count as *const u32 as *const u8), 28);
+        assert_eq!(offset_of(&value.max_foliage_height as *const f32 as *const u8), 32);
+        assert_eq!(offset_of(&value.terrain_valid as *const u32 as *const u8), 36);
+        assert_eq!(offset_of(&value.terrain_origin_x as *const f32 as *const u8), 40);
+        assert_eq!(offset_of(&value.terrain_origin_z as *const f32 as *const u8), 44);
+        assert_eq!(offset_of(&value.terrain_extent as *const f32 as *const u8), 48);
+        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 52);
     }
 
     #[test]
@@ -211,7 +219,7 @@ mod tests {
 
     #[test]
     fn reserved_padding_defaults_to_zero() {
-        assert_eq!(PlaceUniforms::default()._pad, [0; 4]);
+        assert_eq!(PlaceUniforms::default()._pad, [0; 3]);
         assert_eq!(FoliageCullUniforms::default()._pad, [0; 1]);
     }
 }

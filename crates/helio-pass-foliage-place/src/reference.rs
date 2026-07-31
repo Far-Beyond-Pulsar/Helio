@@ -188,6 +188,10 @@ mod tests {
         PlaceUniforms {
             tile_size: FOLIAGE_TILE_SIZE_METERS,
             candidate_grid: grid,
+            // The CPU reference walks candidates linearly, so a block edge of 1 keeps its
+            // cell mapping identical to the shader's. Block-linear vs row-major only
+            // changes which cells a *cluster* spans, not which cells exist.
+            cluster_edge: 1,
             slab_capacity: slab,
             queued_tile_count: 1,
             density_multiplier: 1.0,
@@ -198,7 +202,7 @@ mod tests {
             terrain_origin_x: 0.0,
             terrain_origin_z: 0.0,
             terrain_extent: 256.0,
-            _pad: [0; 4],
+            _pad: [0; 3],
         }
     }
 
