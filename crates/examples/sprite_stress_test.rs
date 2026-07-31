@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
-use helio_pass_sprite_batch::{SpriteBatchPass, SpriteInstance};
+use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 
 use winit::{
     application::ApplicationHandler,
@@ -116,6 +116,7 @@ struct AppState {
     dot_layer: u32,
 
     sprites: Vec<Sprite>,
+    sprite_handles: Vec<SpriteHandle>,
     last_frame: Instant,
     fps_frames: u32,
     fps_last_print: Instant,
@@ -197,6 +198,21 @@ impl ApplicationHandler for App {
         sprite_pass.set_camera([0.0, 0.0], Some(BOUNDS_HALF));
         sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }));
         let dot_layer = sprite_pass.add_atlas_layer(&device, &queue, 8, 8, &make_dot_atlas());
+        let sprites = spawn_sprites(count);
+        let sprite_handles: Vec<SpriteHandle> = sprites
+            .iter()
+            .map(|s| {
+                sprite_pass.insert_sprite(
+                    SpriteInstance::new(s.pos, SPRITE_SIZE)
+                        // World-Y depth: as sprites cross each other vertically
+                        // the correct draw order actually changes frame to
+                        // frame, so this exercises a real (non-trivial) sort.
+                        .with_depth(s.pos[1])
+                        .with_color(s.color)
+                        .with_atlas_layer(dot_layer),
+                )
+            })
+            .collect();
         graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
@@ -223,7 +239,8 @@ impl ApplicationHandler for App {
             scene,
             dummy_depth_view,
             dot_layer,
-            sprites: spawn_sprites(count),
+            sprites,
+            sprite_handles,
             last_frame: Instant::now(),
             fps_frames: 0,
             fps_last_print: Instant::now(),
@@ -274,9 +291,9 @@ impl ApplicationHandler for App {
                     .graph
                     .find_pass_mut::<SpriteBatchPass>()
                     .expect("sprite batch pass missing from graph");
-                sprite_pass.clear();
-                for s in &state.sprites {
-                    sprite_pass.push_sprite(
+                for (s, &handle) in state.sprites.iter().zip(state.sprite_handles.iter()) {
+                    sprite_pass.update_sprite(
+                        handle,
                         SpriteInstance::new(s.pos, SPRITE_SIZE)
                             // World-Y depth: as sprites cross each other vertically
                             // the correct draw order actually changes frame to
