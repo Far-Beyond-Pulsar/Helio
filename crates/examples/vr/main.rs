@@ -3,6 +3,12 @@
 //! connected, and falls back to a plain desktop mirror (forward opaque) with
 //! WASD + mouse look when OpenXR initialisation fails.
 //!
+//! When a headset is present, the Vulkan instance and device are created
+//! *through* OpenXR (`xrCreateVulkanInstanceKHR` / `xrCreateVulkanDeviceKHR`)
+//! via `helio_xr::create_wgpu_instance` / `create_wgpu_device` so the runtime's
+//! required extensions are enabled and the HMD's GPU is used. The mirror window
+//! stays idle in XR mode.
+//!
 //! Controls:
 //!   WASD / Space / Shift — fly (desktop mirror mode)
 //!   Mouse drag           — look around (click to grab cursor)
@@ -11,9 +17,9 @@
 //! Build / run:
 //!   cargo run -p examples --bin vr_demo
 //!
-//! Without a headset (or without a Vulkan-backed wgpu adapter) the demo logs a
+//! Without a headset (or without OpenXR + a Vulkan-capable GPU) the demo logs a
 //! warning and runs the desktop mirror path; with one, `renderer.render_xr()`
-//! drives the headset each frame and the window stays idle.
+//! drives the headset each frame.
 
 mod input;
 mod scene;
@@ -41,55 +47,75 @@ use winit::{
 // ── OpenXR state (native only) ───────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
-struct XrHmd {
+struct XrBundle {
     instance: helio_xr::XrInstance,
     session: helio_xr::XrSession,
     swapchain: helio_xr::XrSwapchain,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
 
-/// Try to bring up OpenXR. Any failure (no runtime, no headset, non-Vulkan
-/// wgpu adapter, ...) degrades to `None`, which switches the demo to desktop
-/// mirror mode. `session.width/height` are the runtime-recommended per-eye
-/// resolution and become the graph's internal resolution.
+/// The features the XR device is asked for. `create_wgpu_device` masks this
+/// down to what the HMD's Vulkan adapter actually supports.
 #[cfg(not(target_arch = "wasm32"))]
-fn try_init_xr(
-    device: &Arc<wgpu::Device>,
-    queue: &Arc<wgpu::Queue>,
-    surface_format: wgpu::TextureFormat,
-) -> Option<XrHmd> {
-    let result = (|| -> helio_xr::Result<XrHmd> {
+fn xr_features() -> wgpu::Features {
+    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::MULTIVIEW
+        | wgpu::Features::MULTISAMPLE_ARRAY;
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+        | wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+        | wgpu::Features::VERTEX_WRITABLE_STORAGE;
+    required | optional
+}
+
+/// Bring up the full OpenXR stack: OpenXR instance → wgpu Vulkan instance →
+/// wgpu device → session → swapchain. Any failure degrades to `None`, which
+/// switches the demo to desktop mirror mode.
+#[cfg(not(target_arch = "wasm32"))]
+fn try_init_xr() -> Option<XrBundle> {
+    let result = (|| -> helio_xr::Result<XrBundle> {
         let instance = helio_xr::XrInstance::create("helio_vr_demo")?;
-        let session =
-            helio_xr::XrSession::create(&instance.instance, instance.system, device, queue)?;
+        let wgpu_instance =
+            helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
+        let (device, queue) =
+            helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
+        let session = helio_xr::XrSession::create(
+            &instance.instance,
+            instance.system,
+            &wgpu_instance,
+            &device,
+            &queue,
+        )?;
         let swapchain = helio_xr::XrSwapchain::create(
-            device,
+            &device,
             &session.session,
             session.width,
             session.height,
-            surface_format,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
         )?;
-        Ok(XrHmd {
+        log::info!(
+            "[XR] OpenXR ready — {}x{} eye buffer, {} array layer(s), format {:?}",
+            session.width,
+            session.height,
+            swapchain.array_size,
+            swapchain.format,
+        );
+        Ok(XrBundle {
             instance,
             session,
             swapchain,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
         })
     })();
 
     match result {
-        Ok(hmd) => {
-            log::info!(
-                "[XR] OpenXR ready — {}x{} eye buffer, {} array layer(s), format {:?}",
-                hmd.session.width,
-                hmd.session.height,
-                hmd.swapchain.array_size,
-                hmd.swapchain.format,
-            );
-            Some(hmd)
-        }
+        Ok(bundle) => Some(bundle),
         Err(e) => {
-            log::warn!(
-                "[XR] OpenXR init failed ({e}); running in desktop mirror mode instead"
-            );
+            log::warn!("[XR] OpenXR init failed ({e}); running in desktop mirror mode instead");
             None
         }
     }
@@ -137,11 +163,12 @@ impl App {
 
 struct AppState {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
+    /// Present only in desktop mode; idle/absent while the headset is driven.
+    surface: Option<wgpu::Surface<'static>>,
     surface_format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     renderer: Renderer,
     input: FreeCam,
     /// True when a live OpenXR session is driving `renderer.render_xr()`.
@@ -152,7 +179,8 @@ struct AppState {
 
 impl AppState {
     fn configure_surface(&self, width: u32, height: u32) {
-        self.surface.configure(
+        let Some(surface) = &self.surface else { return };
+        surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -185,72 +213,96 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface");
-
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            }))
-            .expect("Failed to find adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Main Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("Failed to create device");
-
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            log::error!("[GPU UNCAPTURED ERROR] {e:?}");
-        }));
-        let info = adapter.get_info();
-        log::info!("[WGPU] Backend: {:?}, Device: {}", info.backend, info.name);
-
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-        let alpha_mode = surface_caps.alpha_modes[0];
-
-        let size = window.inner_size();
-
-        // Try OpenXR before building the renderer so the config's resolution /
-        // surface format can follow the runtime's recommendation.
+        // Try OpenXR before creating wgpu: a headset session requires the
+        // Vulkan instance/device to be created through OpenXR.
         #[cfg(not(target_arch = "wasm32"))]
-        let hmd = try_init_xr(&device, &queue, surface_format);
+        let xr_bundle = try_init_xr();
         #[cfg(target_arch = "wasm32")]
-        let hmd: Option<XrHmd> = None;
+        let xr_bundle: Option<XrBundle> = None;
 
-        let render_mode = RenderMode::ForwardOpaque;
-        let config = match &hmd {
-            #[cfg(not(target_arch = "wasm32"))]
-            Some(hmd) => RendererConfig::new(hmd.session.width, hmd.session.height, hmd.swapchain.format)
-                .with_render_mode(render_mode)
+        // ── Device / queue / surface / config ────────────────────────────────
+        #[cfg(not(target_arch = "wasm32"))]
+        let xr_owned = xr_bundle;
+        #[cfg(target_arch = "wasm32")]
+        let xr_owned: Option<XrBundle> = xr_bundle;
+
+        let (device, queue, surface, surface_format, alpha_mode, config, xr_owned) = match xr_owned {
+            Some(bundle) => {
+                let config = RendererConfig::new(
+                    bundle.session.width,
+                    bundle.session.height,
+                    bundle.swapchain.format,
+                )
+                .with_render_mode(RenderMode::ForwardOpaque)
                 // The graph's internal resolution must match the XR eye buffer
                 // exactly (it becomes the swapchain target); no scaling.
                 .with_render_scale(1.0)
-                .with_xr_mode(true),
-            _ => RendererConfig::new(size.width, size.height, surface_format)
-                .with_render_mode(render_mode),
+                .with_xr_mode(true);
+                let format = bundle.swapchain.format;
+                (
+                    bundle.device.clone(),
+                    bundle.queue.clone(),
+                    None,
+                    format,
+                    wgpu::CompositeAlphaMode::Opaque,
+                    config,
+                    Some(bundle),
+                )
+            }
+            None => {
+                log::warn!("[XR] no headset — running desktop mirror (forward opaque)");
+                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::all(),
+                    flags: wgpu::InstanceFlags::empty(),
+                    ..wgpu::InstanceDescriptor::new_without_display_handle()
+                });
+                let surface = instance
+                    .create_surface(window.clone())
+                    .expect("Failed to create surface");
+                let adapter = pollster::block_on(instance.request_adapter(
+                    &wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: Some(&surface),
+                        force_fallback_adapter: false,
+                        apply_limit_buckets: false,
+                    },
+                ))
+                .expect("Failed to find adapter");
+                let (device, queue) =
+                    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                        label: Some("Main Device"),
+                        required_features: required_wgpu_features(adapter.features()),
+                        required_limits: required_wgpu_limits(adapter.limits()),
+                        experimental_features: required_experimental_features(adapter.features()),
+                        ..Default::default()
+                    }))
+                    .expect("Failed to create device");
+                let caps = surface.get_capabilities(&adapter);
+                let surface_format = caps
+                    .formats
+                    .iter()
+                    .find(|f| f.is_srgb())
+                    .copied()
+                    .unwrap_or(caps.formats[0]);
+                let alpha_mode = caps.alpha_modes[0];
+                let size = window.inner_size();
+                let config = RendererConfig::new(size.width, size.height, surface_format)
+                    .with_render_mode(RenderMode::ForwardOpaque);
+                (
+                    Arc::new(device),
+                    Arc::new(queue),
+                    Some(surface),
+                    surface_format,
+                    alpha_mode,
+                    config,
+                    None,
+                )
+            }
         };
+        let device_arc = Arc::clone(&device);
+        device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            log::error!("[GPU UNCAPTURED ERROR] {e:?}");
+        }));
 
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -296,7 +348,7 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         #[cfg(not(target_arch = "wasm32"))]
-        let xr_active = if let Some(hmd) = hmd {
+        let xr_active = if let Some(bundle) = xr_owned {
             let template = Camera::perspective_look_at(
                 Vec3::new(0.0, 1.6, 0.0),
                 Vec3::new(0.0, 1.6, -1.0),
@@ -307,7 +359,11 @@ impl ApplicationHandler for App {
                 200.0,
             );
             renderer.set_xr_camera(template);
-            renderer.set_xr_session(Some(hmd.instance), Some(hmd.session), Some(hmd.swapchain));
+            renderer.set_xr_session(
+                Some(bundle.instance),
+                Some(bundle.session),
+                Some(bundle.swapchain),
+            );
             // No temporal AA in VR (jitter is disabled in render_xr anyway).
             renderer.set_jitter_enabled(false);
             true
@@ -322,17 +378,17 @@ impl ApplicationHandler for App {
         let state = AppState {
             window,
             surface,
-            device,
-            queue,
             surface_format,
             alpha_mode,
+            device,
+            queue,
             renderer,
             input: FreeCam::new(),
             xr_active,
             last_frame: Instant::now(),
             fps: FpsCounter::new(),
         };
-        state.configure_surface(size.width, size.height);
+        state.configure_surface(state.window.inner_size().width, state.window.inner_size().height);
         self.state = Some(state);
     }
 
@@ -428,7 +484,11 @@ impl ApplicationHandler for App {
                 let aspect = size.width as f32 / size.height.max(1) as f32;
                 let camera = state.input.camera(aspect);
 
-                let output = match state.surface.get_current_texture() {
+                let Some(surface) = &state.surface else {
+                    state.window.request_redraw();
+                    return;
+                };
+                let output = match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(texture)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
                     _ => {

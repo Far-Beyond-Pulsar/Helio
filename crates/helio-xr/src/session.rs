@@ -57,17 +57,16 @@ pub struct XrSession {
 impl XrSession {
     /// Create a session bound to the Vulkan handles owned by `device`.
     ///
-    /// `queue` is accepted for parity with the engine's device/queue pair but
-    /// is not needed to describe the graphics binding: wgpu owns a single
-    /// queue per device, and its family/index is carried by the hal device.
+    /// `device` must have been created through OpenXR (see [`crate::context`]);
+    /// the session keeps a clone of the wgpu `Instance` + `Device` alive for as
+    /// long as it lives so the underlying Vulkan objects outlive the session.
     pub fn create(
         instance: &openxr::Instance,
         system: openxr::SystemId,
+        wgpu_instance: &wgpu::Instance,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
     ) -> Result<Self> {
-        let _ = queue;
-
         let create_info = vulkan_session_create_info(device)?;
 
         let view_config = pick_view_config(instance, system)?;
@@ -84,8 +83,10 @@ impl XrSession {
             .copied()
             .unwrap_or(openxr::EnvironmentBlendMode::OPAQUE);
 
-        let (session, frame_waiter, frame_stream) =
-            unsafe { instance.create_session::<WgpuGraphics>(system, &create_info)? };
+        let guard = Box::new((wgpu_instance.clone(), device.clone()));
+        let (session, frame_waiter, frame_stream) = unsafe {
+            instance.create_session_with_guard::<WgpuGraphics>(system, &create_info, guard)?
+        };
 
         let identity = openxr::Posef {
             orientation: openxr::Quaternionf {
@@ -241,18 +242,16 @@ impl XrSession {
             return Ok(());
         }
 
+        let multiview = swapchain.array_size >= 2;
         let sub_images: Vec<openxr::SwapchainSubImage<WgpuGraphics>> = views
             .iter()
             .enumerate()
             .map(|(i, _)| {
                 openxr::SwapchainSubImage::new()
                     .swapchain(&swapchain.swapchain)
-                    .image_array_index(if swapchain.array_size >= 2 {
-                        i as u32
-                    } else {
-                        0
-                    })
+                    .image_array_index(if multiview { i as u32 } else { 0 })
                     .image_rect(sub_image_rect(
+                        multiview,
                         i,
                         views.len(),
                         swapchain.width,
@@ -360,10 +359,17 @@ fn pick_view_config(
 
 /// Compute the image rectangle for eye `i` of `count`.
 ///
-/// With a multi-layer swapchain each eye uses the full image in its own layer;
-/// with a single-layer swapchain the eyes share the image side-by-side.
-fn sub_image_rect(eye: usize, count: usize, width: u32, height: u32) -> openxr::Rect2Di {
-    if count <= 1 {
+/// With a multi-layer (multiview) swapchain each eye owns its own array layer,
+/// so every eye uses the *full* image rect. With a single-layer swapchain the
+/// eyes share the image side-by-side, each getting `1/count` of the width.
+fn sub_image_rect(
+    multiview: bool,
+    eye: usize,
+    count: usize,
+    width: u32,
+    height: u32,
+) -> openxr::Rect2Di {
+    if multiview || count <= 1 {
         return openxr::Rect2Di {
             offset: openxr::Offset2Di { x: 0, y: 0 },
             extent: openxr::Extent2Di {

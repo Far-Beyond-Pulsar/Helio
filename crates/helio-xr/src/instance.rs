@@ -53,10 +53,7 @@ impl XrInstance {
     /// loader search path). With the crate's `linked` feature the entry points
     /// are resolved at link time instead.
     pub fn create(application_name: &str) -> Result<Self> {
-        #[cfg(feature = "linked")]
-        let entry = openxr::Entry::linked();
-        #[cfg(not(feature = "linked"))]
-        let entry = unsafe { openxr::Entry::load().map_err(XrError::Load)? };
+        let entry = load_entry()?;
 
         let supported = entry.enumerate_extensions()?;
 
@@ -162,4 +159,85 @@ impl Drop for XrInstance {
             }
         }
     }
+}
+
+/// Load the OpenXR loader.
+///
+/// Tries the standard dynamic loader first (`openxr_loader.dll` on the system
+/// search path), then falls back to the `openxr_loader.dll` shipped by common
+/// SteamVR installs. A descriptive error is produced when no loader can be
+/// found, with hints about `XR_RUNTIME_JSON` / installing a runtime.
+#[cfg(not(feature = "linked"))]
+fn load_entry() -> Result<openxr::Entry> {
+    use std::path::PathBuf;
+
+    let mut attempts: Vec<String> = Vec::new();
+
+    match unsafe { openxr::Entry::load() } {
+        Ok(entry) => return Ok(entry),
+        Err(e) => attempts.push(format!("system search path ({e})")),
+    }
+
+    // Common SteamVR `openxr_loader.dll` locations. Recent SteamVR ships it in
+    // `bin\win64`; older versions used `openxr\win64`.
+    const STEAMVR_LOADER_BIN: &str =
+        "steamapps\\common\\SteamVR\\bin\\win64\\openxr_loader.dll";
+    const STEAMVR_LOADER_OPENXR: &str =
+        "steamapps\\common\\SteamVR\\openxr\\win64\\openxr_loader.dll";
+    let mut candidates = Vec::new();
+    for base in [
+        "C:\\Program Files (x86)\\Steam",
+        "C:\\Program Files\\Steam",
+        "D:\\Program Files (x86)\\Steam",
+        "D:\\Program Files\\Steam",
+    ] {
+        candidates.push(PathBuf::from(base).join(STEAMVR_LOADER_BIN));
+        candidates.push(PathBuf::from(base).join(STEAMVR_LOADER_OPENXR));
+    }
+    // Respect a non-standard Steam library via the registry when available.
+    if let Ok(steam) = std::env::var("STEAM_INSTALL") {
+        let steam = PathBuf::from(steam);
+        candidates.push(steam.join(STEAMVR_LOADER_BIN));
+        candidates.push(steam.join(STEAMVR_LOADER_OPENXR));
+    }
+    // Meta / Oculus runtime directories sometimes bundle the loader.
+    for dir in [
+        "C:\\Program Files\\Meta Horizon\\Support\\oculus-runtime",
+        "C:\\Program Files\\Oculus\\Support\\oculus-runtime",
+        "C:\\Program Files\\Meta Horizon\\Support\\openxr",
+    ] {
+        candidates.push(PathBuf::from(dir).join("openxr_loader.dll"));
+    }
+
+    for path in candidates {
+        if path.exists() {
+            match unsafe { openxr::Entry::load_from(&path) } {
+                Ok(entry) => {
+                    log::info!("[XR] loaded OpenXR loader from {}", path.display());
+                    return Ok(entry);
+                }
+                Err(e) => attempts.push(format!("{} ({e})", path.display())),
+            }
+        }
+    }
+
+    Err(XrError::Load(format!(
+        "could not find the OpenXR loader (openxr_loader.dll). Tried: {}.\n\
+         This machine has an OpenXR runtime registered (HKEY_LOCAL_MACHINE\\SOFTWARE\\\
+         Khronos\\OpenXR\\1\\ActiveRuntime) but the Khronos reference loader is not \
+         installed anywhere on the system search path.\n\
+         Hints:\n\
+         \x20  - Install the loader: download openxr_loader.dll from the Khronos \
+         OpenXR-SDK releases (https://github.com/KhronosGroup/OpenXR-SDK/releases) and \
+         place it next to this executable or on PATH, then re-run.\n\
+         \x20  - Installing SteamVR also provides the loader.\n\
+         \x20  - Alternatively set XR_RUNTIME_JSON to your runtime's manifest and ensure \
+         openxr_loader.dll is on PATH.",
+        attempts.join("; ")
+    )))
+}
+
+#[cfg(feature = "linked")]
+fn load_entry() -> Result<openxr::Entry> {
+    Ok(openxr::Entry::linked())
 }

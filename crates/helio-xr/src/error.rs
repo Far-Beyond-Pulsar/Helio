@@ -11,7 +11,7 @@ pub enum XrError {
 
     /// The OpenXR loader could not be found or was invalid.
     #[error("failed to load the OpenXR runtime: {0}")]
-    Load(#[from] openxr::LoadError),
+    Load(String),
 
     /// The platform/runtime does not support what was requested.
     #[error("{0}")]

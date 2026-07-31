@@ -24,6 +24,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod camera;
+pub mod context;
 pub mod error;
 pub mod graphics;
 pub mod instance;
@@ -31,6 +32,7 @@ pub mod session;
 pub mod swapchain;
 
 pub use camera::{view_to_world_matrix, xr_view_to_camera, ViewPose};
+pub use context::{create_wgpu_device, create_wgpu_instance};
 pub use error::XrError;
 pub use graphics::WgpuGraphics;
 pub use instance::XrInstance;
