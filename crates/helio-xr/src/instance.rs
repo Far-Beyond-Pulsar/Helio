@@ -70,15 +70,47 @@ impl XrInstance {
             !supported.khr_vulkan_enable2 && supported.khr_vulkan_enable;
         extensions.ext_debug_utils = supported.ext_debug_utils;
 
-        let app_info = openxr::ApplicationInfo {
+        // ── API version negotiation ──────────────────────────────────────────
+        //
+        // `xrCreateInstance` fails outright if the runtime does not implement the
+        // requested API version, and the loader reports that as the singularly unhelpful
+        // "LoaderInstance::CreateInstance chained CreateInstance call failed" — no mention
+        // of versions at all.
+        //
+        // Requesting `CURRENT_API_VERSION` unconditionally is therefore a compatibility
+        // trap: the openxr crate tracks the newest published spec (1.1.54 as of 0.21), and
+        // SteamVR — probably the most common desktop runtime — still implements only 1.0.
+        // Against SteamVR that request fails 100% of the time, and the app silently falls
+        // back to flat rendering.
+        //
+        // So: ask for the newest, and fall back to 1.0 if the runtime refuses. Nothing
+        // here uses a 1.1-only feature, so 1.0 is a complete fallback rather than a
+        // degraded mode.
+        const OPENXR_1_0: openxr::Version = openxr::Version::new(1, 0, 34);
+
+        let app_info = |api_version| openxr::ApplicationInfo {
             application_name,
             application_version: 0,
             engine_name: "Helio",
             engine_version: 0,
-            api_version: openxr::CURRENT_API_VERSION,
+            api_version,
         };
 
-        let instance = entry.create_instance(&app_info, &extensions, &[])?;
+        let instance = match entry.create_instance(
+            &app_info(openxr::CURRENT_API_VERSION),
+            &extensions,
+            &[],
+        ) {
+            Ok(instance) => instance,
+            Err(newest_error) => {
+                log::info!(
+                    "OpenXR runtime rejected API {} ({newest_error}); retrying at {}",
+                    openxr::CURRENT_API_VERSION,
+                    OPENXR_1_0,
+                );
+                entry.create_instance(&app_info(OPENXR_1_0), &extensions, &[])?
+            }
+        };
 
         let system = instance
             .system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)
