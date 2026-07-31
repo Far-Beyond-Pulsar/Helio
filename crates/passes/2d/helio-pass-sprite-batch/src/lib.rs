@@ -5,22 +5,23 @@
 //! [`remove_sprite`](SpriteBatchPass::remove_sprite)) — not a per-frame push
 //! list. This matters for what gets uploaded to the GPU each frame, matching
 //! the dirty-range convention the rest of the engine uses for its scene
-//! buffers (`helio_core::GrowableBuffer`):
+//! buffers (`helio_core::GrowableBuffer`): instance data (and the parallel
+//! alive-flags buffer) is only re-uploaded for the byte range actually
+//! touched by `insert_sprite`/`update_sprite`/`remove_sprite` since the last
+//! `prepare()` — `O(1)` (no upload at all) if nothing changed.
 //!
-//! - **Instance data** is only re-uploaded for the byte range actually
-//!   touched by `insert_sprite`/`update_sprite` since the last `prepare()` —
-//!   `O(1)` (no upload at all) if nothing changed.
-//! - **Draw order** (which instances are visible, and in what back-to-front
-//!   order) is a separate, small per-frame index list, rebuilt only when
-//!   something visibility-relevant changed (a sprite moved/was
-//!   inserted/removed, or the camera moved) via a 4-pass LSD radix sort —
-//!   `O(n)`, not a comparison sort, and skipped entirely on an unchanged
-//!   frame.
-//!
-//! Decoupling those two lets a mostly-static scene (UI, a paused game, a
-//! tilemap overlay) cost nothing per frame, while a fully-animated one (see
-//! `examples/sprite_stress_test.rs`) still only pays for an `O(n)` sort, not
-//! an `O(n)` buffer rewrite *plus* an `O(n log n)` sort.
+//! Culling and depth-sorting the pool into a draw order is **not** done
+//! here, and not on the CPU at all — pair this pass with
+//! `helio-pass-sprite-cull`'s `SpriteCullPass`, added to the graph *before*
+//! this one, and wire its outputs in via [`SpriteBatchPass::use_gpu_culling`].
+//! That pass culls + radix-sorts the whole pool on the GPU every frame
+//! (regardless of pool size — 10, 10 thousand, or 10 million sprites cost
+//! the CPU the same: zero), and this pass's `execute()` issues one
+//! `draw_indexed_indirect` reading the GPU-computed instance count, never
+//! learning the visible count on the CPU at all. See that crate's module doc
+//! comment for the full design (and why it's a separate crate: no Cargo
+//! dependency either way, just `Arc<wgpu::Buffer>` handles passed between
+//! them, matching how `helio-pass-shadow-cull`/`helio-pass-shadow` are wired).
 //!
 //! The pass renders via vertex-pulling (a `var<storage, read> instances` array
 //! indexed through a separate `draw_order` array), not
@@ -34,6 +35,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result};
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 /// A stable reference to a sprite in a [`SpriteBatchPass`]'s pool. Returned by

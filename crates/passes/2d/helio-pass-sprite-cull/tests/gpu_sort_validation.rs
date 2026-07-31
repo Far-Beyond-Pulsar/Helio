@@ -201,17 +201,7 @@ fn gpu_cull_and_sort_matches_cpu_reference() {
         return;
     };
 
-    let alive_slots: Vec<TestSpriteInstance> = slots
-        .iter()
-        .enumerate()
-        .map(|(i, s)| if alive[i] != 0 { *s } else { TestSpriteInstance { size: [0.0, 0.0], ..*s } })
-        .collect();
-    // Zero-size dead slots can never pass the radius test, which is exactly
-    // how the real cull shader's `if slot_alive[i] == 0u { return; }` early-out
-    // behaves — reusing the same geometric reference function for both keeps
-    // this test honest about what it's checking (alive-flag exclusion), not
-    // just re-deriving a second, possibly-also-wrong exclusion rule.
-    let expected = cpu_reference(&alive_slots, view_min, view_max);
+    let expected = cpu_reference(&slots, &alive, view_min, view_max);
 
     assert_eq!(
         gpu.visible_count as usize,
