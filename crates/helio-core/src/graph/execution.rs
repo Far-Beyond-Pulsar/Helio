@@ -85,6 +85,11 @@ impl RenderGraph {
 
     pub fn with_xr_mode(&mut self, active: bool) -> &mut Self {
         self.xr_active = active;
+        // The pool must know *before* `lock()`/`init_transients()` allocates:
+        // in XR mode every pool texture is created as a 2-layer array so the
+        // passes' D2Array views match the `multiview_mask = 0b11` the executor
+        // forces on them.
+        self.pool.set_xr_mode(active);
         self
     }
 

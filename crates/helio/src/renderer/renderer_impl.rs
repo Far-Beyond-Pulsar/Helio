@@ -161,6 +161,33 @@ pub struct Renderer {
     /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
     pub(crate) transparent_template_registry: RadiantTemplateRegistry,
     pub(crate) render_mode: RenderMode,
+    /// Whether the render graph was built in OpenXR multiview mode. Mirrors
+    /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
+    /// opt-in is not silently lost.
+    pub(crate) enable_xr: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR instance (owned so the runtime binding is kept alive).
+    pub(crate) xr_instance: Option<helio_xr::instance::XrInstance>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Live OpenXR session (frame waiter/stream, spaces). `None` in desktop
+    /// mirror mode.
+    pub(crate) xr: Option<helio_xr::session::XrSession>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// OpenXR swapchain whose images are wrapped as wgpu textures.
+    pub(crate) xr_swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Two-layer array depth texture for the multiview render pass. Distinct
+    /// from `depth_texture` (single-layer, used by passes that *sample* scene
+    /// depth as a plain `texture_depth_2d`).
+    pub(crate) xr_depth_texture: Option<wgpu::Texture>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_depth_view: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Application-provided camera template for XR frames: supplies
+    /// `postprocess_settings`, near/far and the representative position used
+    /// for RC bounds and the debug state. The per-eye view/proj are overridden
+    /// by the headset each frame.
+    pub(crate) xr_camera: Option<crate::scene::Camera>,
 }
 
 pub struct DebugBatch<'a> {
@@ -586,7 +613,41 @@ impl Renderer {
             enable_environment_reflections: self.enable_environment_reflections,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
             render_mode: self.render_mode,
+            enable_xr: self.enable_xr,
         }
+    }
+
+    /// Hand the renderer an OpenXR session and swapchain created by the
+    /// application (via `helio-xr`). All three are optional: `None` fields keep
+    /// the renderer in desktop (window) mode, which is the fallback when no
+    /// headset is connected.
+    ///
+    /// The swapchain must have been created from `session` and both must belong
+    /// to the same `wgpu::Device` the renderer was built with.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_session(
+        &mut self,
+        instance: Option<helio_xr::instance::XrInstance>,
+        session: Option<helio_xr::session::XrSession>,
+        swapchain: Option<helio_xr::swapchain::XrSwapchain>,
+    ) {
+        self.xr_instance = instance;
+        self.xr = session;
+        self.xr_swapchain = swapchain;
+    }
+
+    /// Set the camera template used for XR frames (postprocess settings,
+    /// near/far planes, RC bounds position). The per-eye view/projection
+    /// matrices are overridden by the headset pose each frame; only the
+    /// post-processing settings and clip distances are read back.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_xr_camera(&mut self, camera: crate::scene::Camera) {
+        self.xr_camera = Some(camera);
+    }
+
+    /// Whether the renderer was built with the OpenXR multiview path enabled.
+    pub fn xr_enabled(&self) -> bool {
+        self.enable_xr
     }
 
     /// Returns a reference to the post-process uniform buffer.

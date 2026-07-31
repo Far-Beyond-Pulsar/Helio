@@ -303,6 +303,23 @@ impl GpuCameraBuffer {
         self.dirty = true;
     }
 
+    /// Write both eye cameras straight to GPU (XR multiview path).
+    ///
+    /// Unlike [`GpuCameraBuffer::update`] this uploads *both* uniforms in one
+    /// `write_buffer` (the shader array is `array<Camera, 2>`); `dirty` is left
+    /// untouched so a later `flush()` cannot clobber the right eye with a
+    /// single-element upload. The left eye is cached as `data` for the
+    /// CPU-side consumers (`position()`, `forward()`, ...).
+    pub fn update_stereo(
+        &mut self,
+        queue: &wgpu::Queue,
+        left: &GpuCameraUniforms,
+        right: &GpuCameraUniforms,
+    ) {
+        self.data = *left;
+        GpuCameraUniforms::upload_stereo(queue, &self.buf, left, right);
+    }
+
     pub fn flush(&mut self, queue: &wgpu::Queue) {
         if !self.dirty {
             return;

@@ -49,6 +49,16 @@ impl Renderer {
             self.full_res_depth_view = None;
         }
 
+        // Recreate the multiview depth array when the internal resolution
+        // changes (XR mode keeps it in sync with the window-driven resize so a
+        // headset-less rebuild can't leave it stale).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.enable_xr {
+            let (t, v) = Self::create_xr_depth_resources(&self.device, internal_w, internal_h);
+            self.xr_depth_texture = Some(t);
+            self.xr_depth_view = Some(v);
+        }
+
         self.clear_target_next_frame = true;
 
         if let Some(rebuilder) = &self.graph_rebuilder {
@@ -68,6 +78,7 @@ impl Renderer {
                 enable_environment_reflections: self.enable_environment_reflections,
                 hdr_output_mode: libhelio::HdrOutputMode::Ldr,
                 render_mode: self.render_mode,
+                enable_xr: self.enable_xr,
             };
             self.graph = rebuilder(
                 &self.device,

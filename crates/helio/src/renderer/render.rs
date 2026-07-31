@@ -160,6 +160,49 @@ impl Renderer {
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
 
+        // Target clear + per-frame uploads + graph execution + cull-stats
+        // readback, all shared with the XR path.
+        self.submit_frame(camera, target, false)?;
+        Ok(())
+    }
+
+    /// Upload every per-frame scene buffer (billboards, water, post-process
+    /// volumes, material bindings, baked resources), assemble
+    /// [`libhelio::FrameResources`], clear `target`, execute the graph and kick
+    /// off the cull-stats readback. Shared by the mono and XR render paths.
+    ///
+    /// `camera` supplies the post-process settings and the camera position used
+    /// for the RC volume bounds and debug-state tracking. It must have been
+    /// written to the scene already (`update_camera` / `update_stereo_cameras`)
+    /// and `scene.flush()` called before this runs.
+    ///
+    /// `multiview` selects a `multiview_mask = 0b11` clear pass, required when
+    /// `target` is a two-layer array view (the OpenXR swapchain image). In
+    /// multiview mode the graph's render passes get the renderer's two-layer
+    /// `xr_depth_view` as their depth-stencil attachment; otherwise the
+    /// single-layer `depth_view`. (The depth written into
+    /// `frame_resources.depth_texture` for *sampling* passes stays the
+    /// single-layer texture in both modes — see `render_xr` for why.)
+    fn submit_frame(
+        &mut self,
+        camera: &Camera,
+        target: &wgpu::TextureView,
+        multiview: bool,
+    ) -> HelioResult<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let depth: &wgpu::TextureView = if multiview {
+            self.xr_depth_view.as_ref().ok_or_else(|| {
+                invalid_xr(
+                    "render_xr() called but the renderer has no multiview depth view \
+                     (was RendererConfig built with enable_xr?)",
+                )
+            })?
+        } else {
+            &self.depth_view
+        };
+        #[cfg(target_arch = "wasm32")]
+        let depth: &wgpu::TextureView = &self.depth_view;
+
         let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
         let light_count = self.scene.gpu_scene().lights.len();
         let light_gen = self.scene.gpu_scene().movable_lights_generation;
@@ -456,7 +499,11 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-                multiview_mask: None,
+                multiview_mask: if multiview {
+                    Some(std::num::NonZeroU32::new(0b11).unwrap())
+                } else {
+                    None
+                },
             });
         }
         clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
@@ -466,7 +513,7 @@ impl Renderer {
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),
             target,
-            &self.depth_view,
+            depth,
             &frame_resources,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
@@ -499,9 +546,201 @@ impl Renderer {
             self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
         }
 
+        // Release the texture/sampler view borrows on the scene before advancing
+        // (which mutates it).
         drop(texture_views);
         drop(samplers);
         self.scene.advance_frame();
         Ok(())
     }
+
+    /// OpenXR frame: poll session events, wait/begin the compositor frame,
+    /// locate the per-eye views, upload the stereo camera into the scene's
+    /// `array<Camera, 2>` buffer, render both eyes in a single multiview pass
+    /// into the acquired swapchain image, then present and end the frame.
+    ///
+    /// # Prerequisites
+    /// - A session/swapchain installed via [`Renderer::set_xr_session`] and a
+    ///   graph built with `config.enable_xr == true` (two-layer array targets,
+    ///   `multiview_mask = 0b11`). Without the former this errors; without the
+    ///   latter the multiview render passes will fail validation.
+    /// - The headset's stage origin is mapped 1:1 onto the engine world origin
+    ///   (`world_from_stage` is identity). Scene content should be authored
+    ///   around the world origin at head height.
+    ///
+    /// When the session is idle/not visible or the compositor says not to
+    /// render, this returns `Ok(())` without doing any GPU work.
+    ///
+    /// Note on per-eye data: shaders currently sample `cameras[0]` (left eye),
+    /// so both layers render the same camera. The two-eye camera buffer and the
+    /// multiview mask infrastructure are in place; wiring `view_index` through
+    /// the shaders is a follow-up (stereo depth requires it).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_xr(&mut self) -> HelioResult<()> {
+        self.poll_cull_stats_readback();
+
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
+        self.last_render_time = now;
+        self.delta_time = dt;
+        self.frame_times[self.frame_times_cursor] = dt;
+        self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
+        self.graph.set_delta_time(dt);
+
+        // 1–3. Pump session events, wait for compositor readiness, begin frame.
+        let display_time = {
+            let session = self.xr.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            let mut exit = false;
+            while let Some(event) = session.poll_events().map_err(xr_error)? {
+                match event {
+                    helio_xr::SessionEvent::Exit | helio_xr::SessionEvent::LossPending => {
+                        log::warn!("[XR] session requested exit / loss pending");
+                        exit = true;
+                    }
+                    helio_xr::SessionEvent::Ready | helio_xr::SessionEvent::Focused => {
+                        log::debug!("[XR] session state change: {event:?}");
+                    }
+                    helio_xr::SessionEvent::Idle => {}
+                }
+            }
+            if exit {
+                return Ok(());
+            }
+            // Only render while the runtime asks us to (focused/visible).
+            if !matches!(
+                session.session_state,
+                openxr::SessionState::FOCUSED | openxr::SessionState::VISIBLE
+            ) {
+                return Ok(());
+            }
+            let frame_state = session.wait_frame().map_err(xr_error)?;
+            if !frame_state.should_render {
+                return Ok(());
+            }
+            session.begin_frame().map_err(xr_error)?;
+            frame_state.predicted_display_time
+        };
+
+        // 4. Locate the per-eye views. `world_from_stage` is identity: the
+        // headset's stage origin maps 1:1 onto the engine world origin.
+        let located = {
+            let session = self.xr.as_ref().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            session
+                .locate_views(display_time, &glam::Mat4::IDENTITY)
+                .map_err(xr_error)?
+        };
+        let left_pose = located.view_poses.first().copied();
+        let right_pose = located.view_poses.get(1).copied();
+
+        let (near, far) = self
+            .xr_camera
+            .as_ref()
+            .map(|c| (c.near, c.far))
+            .unwrap_or((0.05, 200.0));
+
+        // Representative camera: supplies post-process settings and the RC
+        // volume / debug position. The view/proj are the left eye's (VR
+        // disables temporal jitter, so there is no per-eye jitter to add).
+        let representative = match (&self.xr_camera, left_pose) {
+            (Some(template), Some(pose)) => {
+                let mut cam = template.clone();
+                cam.view = pose.view_matrix();
+                cam.proj = pose.projection(near, far);
+                cam.position = pose.eye_position;
+                cam.near = near;
+                cam.far = far;
+                cam.jitter = [0.0, 0.0];
+                cam
+            }
+            _ => Camera::perspective_look_at(
+                glam::Vec3::new(0.0, 1.6, 0.0),
+                glam::Vec3::new(0.0, 1.6, -1.0),
+                glam::Vec3::Y,
+                std::f32::consts::FRAC_PI_4,
+                1.0,
+                near,
+                far,
+            ),
+        };
+
+        // 5. Upload the stereo camera + all scene buffers.
+        if let (Some(left), Some(right)) = (left_pose, right_pose) {
+            let [left_uniform, right_uniform] =
+                helio_xr::xr_view_to_camera(&left, &right, near, far);
+
+            // Writes BOTH eyes into the storage buffer; `update_stereo_cameras`
+            // deliberately bypasses the dirty/flush path so `scene.flush()`
+            // below cannot clobber the right eye.
+            self.scene.update_stereo_cameras(&left_uniform, &right_uniform);
+            self.sync_template_registry_to_scene();
+            self.scene.flush();
+
+            // Debug overlay / editor camera: single (left) eye.
+            let col = left_uniform.view_proj;
+            let debug_camera_uniform = DebugCameraUniform {
+                view_proj: [
+                    [col[0],  col[1],  col[2],  col[3]],
+                    [col[4],  col[5],  col[6],  col[7]],
+                    [col[8],  col[9],  col[10], col[11]],
+                    [col[12], col[13], col[14], col[15]],
+                ],
+            };
+            self.queue.write_buffer(
+                &self.debug_camera_buffer,
+                0,
+                bytemuck::bytes_of(&debug_camera_uniform),
+            );
+
+            // 6. Acquire the swapchain image and render both eyes.
+            let image_index = {
+                let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                swapchain.acquire_image().map_err(xr_error)?
+            };
+            let xr_view = {
+                let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                swapchain.view(image_index).map_err(xr_error)?.clone()
+            };
+            self.submit_frame(&representative, &xr_view, true)?;
+        }
+
+        // 7. Present the rendered image and end the OpenXR frame. `located.views`
+        // are the raw stage-space views `end_frame` needs to anchor the
+        // projection layer.
+        {
+            let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+            })?;
+            swapchain.present().map_err(xr_error)?;
+        }
+        {
+            let session = self.xr.as_mut().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+            })?;
+            let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+            })?;
+            session
+                .end_frame(display_time, swapchain, &located.views)
+                .map_err(xr_error)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn xr_error(e: helio_xr::XrError) -> helio_core::Error {
+    helio_core::Error::InvalidPassConfig(format!("OpenXR: {e}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn invalid_xr(msg: &str) -> helio_core::Error {
+    helio_core::Error::InvalidPassConfig(msg.to_string())
 }
