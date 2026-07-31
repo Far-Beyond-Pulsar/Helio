@@ -578,11 +578,13 @@ impl FoliageGBufferPass {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("FoliageGBuffer BGL 0"),
                 entries: &[
+                    // Camera is a read-only storage array; `view_index` selects the
+                    // eye in a future single-pass stereo path (mono reads index 0).
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },

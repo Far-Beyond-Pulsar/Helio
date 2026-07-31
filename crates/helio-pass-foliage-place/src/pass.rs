@@ -323,7 +323,9 @@ impl FoliagePlacePass {
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Foliage Cull BGL"),
             entries: &[
-                uniform_entry(0),
+                // Camera is a read-only storage array (mono uses index 0; a future
+                // single-pass stereo cull can union `cameras[0]` and `cameras[1]`).
+                storage_entry(0, true),
                 uniform_entry(1),
                 storage_entry(2, true),
                 storage_entry(3, true),

@@ -169,7 +169,7 @@ struct FoliageTile {
     generation: u32,
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: FoliageGlobals;
 @group(0) @binding(2) var<uniform> wind: Wind;
 @group(0) @binding(3) var<storage, read> foliage_types: array<FoliageType>;
@@ -407,6 +407,7 @@ struct VertexOutput {
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32,
+    @builtin(view_index) view_index: u32,
 ) -> VertexOutput {
     // ── Resolve the instance ──────────────────────────────────────────────────
     //
@@ -447,7 +448,7 @@ fn vs_main(
     let width_lerp = foliage_unorm8((blade.packed_scale_type >> 8u) & 0xffu);
 
     // ── Ring-entry scale-in and LOD cross-fade ────────────────────────────────
-    let camera_pos = camera.position_near.xyz;
+    let camera_pos = cameras[view_index].position_near.xyz;
     let distance_to_camera = distance(root, camera_pos);
     let scale_in = foliage_scale_in_factor(
         globals.camera_ring.w - distance_to_camera,
@@ -513,8 +514,8 @@ fn vs_main(
     let position_prev = world_base + wind_prev + bend;
 
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(position_now, 1.0);
-    out.prev_clip_position = camera.prev_view_proj * vec4<f32>(position_prev, 1.0);
+    out.clip_position = cameras[view_index].view_proj * vec4<f32>(position_now, 1.0);
+    out.prev_clip_position = cameras[view_index].prev_view_proj * vec4<f32>(position_prev, 1.0);
     out.world_normal = foliage_yaw_rotate(local_normal, yaw);
     out.height_frac = v.height_frac;
     out.tint = vec2<f32>(

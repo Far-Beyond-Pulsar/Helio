@@ -127,7 +127,7 @@ struct DrawIndirect {
     first_instance: u32,
 }
 
-@group(0) @binding(0)  var<uniform> camera: Camera;
+@group(0) @binding(0)  var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1)  var<uniform> cull: FoliageCullUniforms;
 @group(0) @binding(2)  var<storage, read> tiles: array<FoliageTile>;
 @group(0) @binding(3)  var<storage, read> blades: array<BladeInstance>;
@@ -150,7 +150,7 @@ fn is_finite_f32(value: f32) -> bool {
 }
 
 fn publish_frustum_planes() {
-    let vp = camera.view_proj;
+    let vp = cameras[0].view_proj;
     let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
     let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
     let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
@@ -184,20 +184,20 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
     if cull.hiz_valid == 0u {
         return false;
     }
-    let cull_clip = camera.view_proj * vec4<f32>(center_ws, 1.0);
+    let cull_clip = cameras[0].view_proj * vec4<f32>(center_ws, 1.0);
     if cull_clip.w <= 0.0 {
         return false;
     }
     let cull_ndc = cull_clip.xyz / cull_clip.w;
     let cull_uv = vec2<f32>(cull_ndc.x * 0.5 + 0.5, cull_ndc.y * -0.5 + 0.5);
     let nearest_view_depth = cull_clip.w - world_radius;
-    if nearest_view_depth <= camera.position_near.w {
+    if nearest_view_depth <= cameras[0].position_near.w {
         return false;
     }
 
     let ndc_r = max(
-        abs(world_radius * camera.proj[0][0] / nearest_view_depth),
-        abs(world_radius * camera.proj[1][1] / nearest_view_depth),
+        abs(world_radius * cameras[0].proj[0][0] / nearest_view_depth),
+        abs(world_radius * cameras[0].proj[1][1] / nearest_view_depth),
     );
     let uv_radius = ndc_r * 0.5;
     let uv_min = cull_uv - vec2<f32>(uv_radius);
@@ -206,13 +206,13 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
         return false;
     }
 
-    let cam_to_center = center_ws - camera.position_near.xyz;
+    let cam_to_center = center_ws - cameras[0].position_near.xyz;
     let dist_sq = dot(cam_to_center, cam_to_center);
     var near_z = 0.0;
     if dist_sq > world_radius * world_radius {
         let direction = cam_to_center / sqrt(dist_sq);
         let near_ws = center_ws - direction * world_radius;
-        let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+        let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
         if near_clip.w > 0.0 {
             near_z = clamp(near_clip.z / near_clip.w, 0.0, 1.0);
         }
@@ -424,7 +424,7 @@ fn cs_cluster_cull(
         max(min(cull.type_count, arrayLength(&types)), 1u) - 1u,
     );
     let foliage = types[type_id];
-    let distance = length(center - camera.position_near.xyz);
+    let distance = length(center - cameras[0].position_near.xyz);
     let lod = select_blade_lod(
         distance,
         foliage.lod0,
