@@ -124,6 +124,25 @@ impl PlanetaryVoxelRenderConfig {
         }
     }
 
+    /// Atomic active/pending residency for the horizon-scale validation trace.
+    ///
+    /// The deterministic LOD0..LOD10 tangent plan is capped at 192 pages. The
+    /// doubled resident budget keeps the previous complete plan visible while
+    /// a worst-case teleport replacement is uploaded and extracted. The
+    /// allocation remains independent of planet size.
+    pub fn horizon_demo() -> Self {
+        Self {
+            residency: PlanetaryVoxelGpuConfig::new(384, 1_024, 64, 192, 384, 8)
+                .expect("horizon residency configuration is valid"),
+            max_pending_surfaces: 192,
+            regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
+                .expect("horizon regular extraction configuration is valid"),
+            transition: TransvoxelGpuTransitionExtractorConfig::new(2_048, 6_144)
+                .expect("horizon transition extraction configuration is valid"),
+            max_surface_bytes: 512 * 1024 * 1024,
+        }
+    }
+
     pub fn allocation_plan(self) -> Result<PlanetarySurfaceAllocationPlan, PlanetaryRenderError> {
         if self.max_pending_surfaces == 0 {
             return Err(PlanetaryRenderError::ZeroPendingSurfaces);
@@ -609,6 +628,7 @@ pub struct PlanetaryVoxelRenderPass {
     regular_meshlet_cull_bind_group: Option<wgpu::BindGroup>,
     transition_meshlet_cull_bind_group: Option<wgpu::BindGroup>,
     page_render_pipeline: wgpu::RenderPipeline,
+    page_transition_render_pipeline: wgpu::RenderPipeline,
     meshlet_render_pipeline: wgpu::RenderPipeline,
     render_bind_group_layout: wgpu::BindGroupLayout,
     regular_render_bind_group: Option<wgpu::BindGroup>,
@@ -1023,6 +1043,10 @@ impl PlanetaryVoxelRenderPass {
         };
         let page_render_pipeline =
             create_render_pipeline("Planetary Page Surface Draw Pipeline", "vs_page");
+        let page_transition_render_pipeline = create_render_pipeline(
+            "Planetary Page Transition Surface Draw Pipeline",
+            "vs_page_transition",
+        );
         let meshlet_render_pipeline =
             create_render_pipeline("Planetary Meshlet Surface Draw Pipeline", "vs_meshlet");
 
@@ -1074,6 +1098,7 @@ impl PlanetaryVoxelRenderPass {
             regular_meshlet_cull_bind_group: None,
             transition_meshlet_cull_bind_group: None,
             page_render_pipeline,
+            page_transition_render_pipeline,
             meshlet_render_pipeline,
             render_bind_group_layout,
             regular_render_bind_group: None,
@@ -1859,6 +1884,9 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             self.transition_index_arena.slice(..),
             wgpu::IndexFormat::Uint32,
         );
+        if self.draw_path == PlanetaryDrawPath::PageIndexed {
+            render.set_pipeline(&self.page_transition_render_pipeline);
+        }
         match self.draw_path {
             PlanetaryDrawPath::PageIndexed => {
                 draw_indirect_range(
@@ -2142,6 +2170,17 @@ mod tests {
         assert_eq!(config.residency.max_resident_pages, 64);
         assert_eq!(config.max_pending_surfaces, 64);
         assert_eq!(plan.indirect_bytes, 64 * DRAW_ARGS_BYTES);
+    }
+
+    #[test]
+    fn horizon_config_holds_two_complete_bounded_plans() {
+        let config = PlanetaryVoxelRenderConfig::horizon_demo();
+        let plan = config.allocation_plan().unwrap();
+        assert!(plan.total_bytes <= config.max_surface_bytes);
+        assert_eq!(config.residency.max_resident_pages, 384);
+        assert_eq!(config.residency.max_batch_pages, 192);
+        assert_eq!(config.max_pending_surfaces, 192);
+        assert_eq!(plan.indirect_bytes, 384 * DRAW_ARGS_BYTES);
     }
 
     #[test]

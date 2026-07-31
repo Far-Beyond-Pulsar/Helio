@@ -249,7 +249,7 @@ pub fn extract_transvoxel_transition_cell(
                 position,
                 material: u32::from(material),
                 normal,
-                flags: 0,
+                flags: u32::from(face.bit()),
             },
             face_uv,
             depth_fraction,
@@ -698,6 +698,84 @@ mod tests {
     }
 
     #[test]
+    fn randomized_all_face_neighborhoods_have_exact_seams_and_no_duplicate_triangles() {
+        const GRID_EDGE: u8 = 8;
+        for face in TransitionFace::ALL {
+            for seed in 0..8_u64 {
+                let meshes = (0..GRID_EDGE)
+                    .flat_map(|v| {
+                        (0..GRID_EDGE).map(move |u| {
+                            extract_transvoxel_transition_cell(
+                                face,
+                                [u, v],
+                                &randomized_transition_cell(face, [u, v], seed),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert!(meshes.iter().all(|mesh| {
+                    mesh.vertices
+                        .iter()
+                        .all(|vertex| vertex.vertex.flags == u32::from(face.bit()))
+                }));
+                let mesh = |u: u8, v: u8| &meshes[usize::from(v * GRID_EDGE + u)];
+
+                for v in 0..GRID_EDGE {
+                    for u in 0..GRID_EDGE - 1 {
+                        let boundary = f32::from(u + 1);
+                        assert_eq!(
+                            seam_vertex_keys(mesh(u, v), 0, boundary),
+                            seam_vertex_keys(mesh(u + 1, v), 0, boundary),
+                            "{face:?} seed {seed} u seam {boundary} row {v}"
+                        );
+                    }
+                }
+                for v in 0..GRID_EDGE - 1 {
+                    for u in 0..GRID_EDGE {
+                        let boundary = f32::from(v + 1);
+                        assert_eq!(
+                            seam_vertex_keys(mesh(u, v), 1, boundary),
+                            seam_vertex_keys(mesh(u, v + 1), 1, boundary),
+                            "{face:?} seed {seed} v seam {boundary} column {u}"
+                        );
+                    }
+                }
+
+                let mut triangles = std::collections::BTreeSet::new();
+                for cell_mesh in &meshes {
+                    for triangle in cell_mesh.indices.chunks_exact(3) {
+                        let positions = [
+                            cell_mesh.vertices[triangle[0] as usize].vertex.position,
+                            cell_mesh.vertices[triangle[1] as usize].vertex.position,
+                            cell_mesh.vertices[triangle[2] as usize].vertex.position,
+                        ];
+                        let area_vector = cross(
+                            sub3(positions[1], positions[0]),
+                            sub3(positions[2], positions[0]),
+                        );
+                        assert!(
+                            dot(area_vector, area_vector) > 1.0e-12,
+                            "{face:?} seed {seed} degenerate triangle {positions:?}"
+                        );
+                        let mut key = [
+                            positions[0].map(quantize),
+                            positions[1].map(quantize),
+                            positions[2].map(quantize),
+                        ];
+                        key.sort_unstable();
+                        assert_ne!(key[0], key[1], "{face:?} seed {seed}");
+                        assert_ne!(key[1], key[2], "{face:?} seed {seed}");
+                        assert!(
+                            triangles.insert(key),
+                            "{face:?} seed {seed} duplicated triangle {key:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn secondary_offset_is_tangent_projected_and_never_moves_the_fine_face() {
         let basis = transition_face_basis(TransitionFace::PositiveZ);
         let tangent = project_onto_tangent([0.0, 0.0, -0.25], [1.0, 0.0, 0.0]);
@@ -780,6 +858,31 @@ mod tests {
             cell: CellWord::new(density, u8::from(density <= 0), 0),
             gradient,
         }
+    }
+
+    fn randomized_transition_cell(
+        face: TransitionFace,
+        cell_uv: [u8; 2],
+        seed: u64,
+    ) -> TransvoxelTransitionCell {
+        let gradient = transition_face_basis(face).outward;
+        let mut full = [sample(1, gradient); 9];
+        for (index, uv) in TRANSITION_FULL_SAMPLE_UV.into_iter().enumerate() {
+            let global_u = u64::from(cell_uv[0]) * 2 + u64::from(uv[0]);
+            let global_v = u64::from(cell_uv[1]) * 2 + u64::from(uv[1]);
+            let mut hash = seed
+                ^ global_u.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ global_v.wrapping_mul(0xD1B5_4A32_D192_ED03);
+            hash ^= hash >> 30;
+            hash = hash.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            hash ^= hash >> 27;
+            hash = hash.wrapping_mul(0x94D0_49BB_1331_11EB);
+            hash ^= hash >> 31;
+            let magnitude = ((hash >> 17) % 32_767 + 1) as i16;
+            let density = if hash & 1 == 0 { magnitude } else { -magnitude };
+            full[index] = sample(density, gradient);
+        }
+        TransvoxelTransitionCell::from_full_resolution(full)
     }
 
     fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
