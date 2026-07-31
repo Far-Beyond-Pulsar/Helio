@@ -28,6 +28,7 @@ pub mod shader;
 pub mod shadow;
 pub mod sky;
 pub mod water;
+pub mod wind;
 
 pub use camera::*;
 pub use corona::*;
@@ -45,3 +46,4 @@ pub use reflection::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;
+pub use wind::*;

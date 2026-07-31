@@ -267,7 +267,7 @@ impl ApplicationHandler for App {
             shadow_index: 0,
             light_type: LightType::Directional as u32,
             inner_angle: 0.0,
-            _pad: 0,
+            ..Default::default()
         }));
         renderer.set_ambient([0.08, 0.10, 0.18], 0.6);
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);

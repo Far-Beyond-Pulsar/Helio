@@ -104,6 +104,11 @@ pub struct Renderer {
     pub(crate) shadow_face_capacity: u32,
     /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
     pub(crate) enable_ssr: bool,
+    /// Persisted so the resize rebuild reconstructs the same graph. Every flag the
+    /// rebuilder needs has to live here — a literal in `resize.rs` silently produces a
+    /// *different* pipeline after the first resize, which is exactly what happened when
+    /// this field was first added.
+    pub(crate) enable_foliage: bool,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
     pub(crate) debug_mode: u32,
@@ -121,6 +126,7 @@ pub struct Renderer {
     pub(crate) corona_emitter_generation: u64,
     pub(crate) water_volumes_buffer: wgpu::Buffer,
     pub(crate) water_hitboxes_buffer: wgpu::Buffer,
+    pub(crate) foliage_interactors_buffer: wgpu::Buffer,
     pub(crate) pp_volumes_buffer: wgpu::Buffer,
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
@@ -636,6 +642,7 @@ impl Renderer {
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
+            enable_foliage: self.enable_foliage,
         }
     }
 

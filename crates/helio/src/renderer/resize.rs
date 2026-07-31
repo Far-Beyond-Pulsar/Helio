@@ -80,6 +80,7 @@ impl Renderer {
                 hdr_output_mode: libhelio::HdrOutputMode::Ldr,
                 render_mode: self.render_mode,
                 enable_xr: self.enable_xr,
+                enable_foliage: self.enable_foliage,
             };
             self.graph = rebuilder(
                 &self.device,
