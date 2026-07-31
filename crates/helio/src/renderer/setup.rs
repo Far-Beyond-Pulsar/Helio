@@ -213,6 +213,8 @@ impl Renderer {
 
         // Extract the rebuilder that was stored in the graph by the builder function
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
+        // Captured before `scene` is moved into `Self`.
+        let scene_has_sky = scene.sky_context().has_sky;
 
         Self {
             device,
@@ -277,6 +279,7 @@ impl Renderer {
             #[cfg(feature = "bake")]
             baked_data: None,
             clear_target_next_frame: true,
+            graph_has_sky: scene_has_sky,
             owns_device: true,
             pending_resize: None,
             gizmo_camera: None,

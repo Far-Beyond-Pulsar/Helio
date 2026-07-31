@@ -95,6 +95,7 @@ impl Renderer {
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         // Browser WebGPU buffer mapping is asynchronous. Consume the previous
         // frame's completed readback before recording a new copy.
+        self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
 
         if let Some((w, h)) = self.pending_resize.take() {
@@ -654,6 +655,7 @@ impl Renderer {
     /// the shaders is a follow-up (stereo depth requires it).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+        self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
 
         let now = Instant::now();

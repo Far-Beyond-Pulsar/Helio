@@ -96,6 +96,7 @@ impl Renderer {
             self.graph.set_render_size(internal_w, internal_h);
         }
 
+        self.graph_has_sky = self.scene.sky_context().has_sky;
         self.scene.mark_water_volumes_dirty();
 
         log::trace!(
@@ -111,5 +112,46 @@ impl Renderer {
 
     pub fn render_scale(&self) -> f32 {
         self.render_scale
+    }
+}
+
+impl Renderer {
+    /// Rebuild the graph when the scene gains or loses its sky.
+    ///
+    /// `SkyLutPass` and `SkyPass` are added conditionally on
+    /// `Scene::sky_context().has_sky` when the graph is *built*, but the natural
+    /// construction order is to hand `Renderer::new` a graph and an empty scene and then
+    /// populate the scene. A sky added after that point never gets its passes.
+    ///
+    /// The symptom is worse than a missing sky: `SkyPass` is what establishes `pre_aa`
+    /// each frame, and every later colour pass loads that target rather than clearing it.
+    /// With no sky pass nothing initialises it, so the image accumulates frame over frame
+    /// and — in the dual-pass XR path, where both eyes share the graph's internal
+    /// targets — eye over eye. It reads as geometry smearing over itself.
+    ///
+    /// Desktop hid this because the first window resize rebuilds the graph after the
+    /// scene exists. The XR path renders into the runtime's swapchain and never resizes,
+    /// so it kept the empty-scene graph forever.
+    pub(crate) fn rebuild_graph_if_sky_changed(&mut self) {
+        let has_sky = self.scene.sky_context().has_sky;
+        if has_sky == self.graph_has_sky {
+            return;
+        }
+        self.graph_has_sky = has_sky;
+
+        let Some(rebuilder) = self.graph_rebuilder.clone() else {
+            return;
+        };
+        log::info!("[graph] sky presence changed to {has_sky}; rebuilding render graph");
+        let config = self.renderer_config();
+        self.graph = rebuilder(
+            &self.device,
+            &self.queue,
+            &self.scene,
+            config,
+            self.debug_state.clone(),
+            &self.debug_camera_buffer,
+            &self.cull_stats_buffer,
+        );
     }
 }

@@ -160,6 +160,15 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+
+    /// Whether the graph was built with the sky passes present.
+    ///
+    /// `SkyLutPass`/`SkyPass` are added conditionally on `Scene::sky_context().has_sky` at
+    /// graph *build* time, but the natural call order is `Renderer::new(scene, graph)` and
+    /// only then populate the scene — so a scene that gains a sky afterwards has a graph
+    /// that will never draw it. Tracking what the graph was built with is what lets
+    /// `rebuild_graph_if_sky_changed` notice.
+    pub(crate) graph_has_sky: bool,
     /// Templates registered by the user for the gbuffer (opaque) path.
     /// Preserved across graph rebuilds (resize).
     pub(crate) template_registry: RadiantTemplateRegistry,
