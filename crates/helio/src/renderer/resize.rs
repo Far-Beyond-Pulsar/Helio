@@ -77,6 +77,7 @@ impl Renderer {
                 enable_ssr: self.enable_ssr,
                 enable_planar_reflections: self.enable_planar_reflections,
                 enable_environment_reflections: self.enable_environment_reflections,
+                tsr_quality: self.tsr_quality,
                 hdr_output_mode: libhelio::HdrOutputMode::Ldr,
                 render_mode: self.render_mode,
                 enable_xr: self.enable_xr,

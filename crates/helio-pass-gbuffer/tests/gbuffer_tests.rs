@@ -196,7 +196,5 @@ fn ambient_intensity_finite() {
 fn padding_fields_zeroed_by_default() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
     assert_eq!(g._pad0, 0);
-    assert_eq!(g._pad1, 0);
-    assert_eq!(g._pad2, 0);
 }
 

@@ -86,6 +86,12 @@ impl super::super::Scene {
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
 
+        // Keep the world-space bounding sphere center in sync with the new translation.
+        // The bounds radius is preserved — only the center tracks the transform.
+        let translation = transform.w_axis;
+        record.instance.bounds = [translation.x, translation.y, translation.z, record.instance.bounds[3]];
+        record.aabb = sphere_to_aabb(record.instance.bounds);
+
         // Increment generation counter for movable objects (for shadow cache invalidation)
         self.movable_objects_generation += 1;
         self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
@@ -95,6 +101,7 @@ impl super::super::Scene {
         if !self.objects_dirty {
             let slot = record.draw.first_instance as usize;
             self.gpu_scene.instances.update(slot, record.instance);
+            self.gpu_scene.aabbs.update(slot, record.aabb);
         }
         Ok(())
     }

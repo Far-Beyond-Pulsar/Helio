@@ -423,6 +423,16 @@ pub struct FrameResources<'a> {
 
     /// HLFS-specific globals uniform buffer (HlfsGlobals layout).
     pub hlfs_globals: Option<&'a wgpu::Buffer>,
+
+    // ── DOF resources (populated by PostProcessPass / DofPass) ──
+
+    /// Pre-DOF HDR colour — output of the post-process uber-shader before
+    /// depth-of-field is applied. Written by PostProcessPass when DofPass
+    /// follows in the graph; read by DofPass.
+    pub pre_dof: Tracked<&'a wgpu::TextureView>,
+
+    /// Post-DOF final colour — output of DofPass (or identity when not present).
+    pub post_dof: Tracked<&'a wgpu::TextureView>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -562,6 +572,8 @@ impl<'a> FrameResources<'a> {
             planar_reflection_sampler: Tracked::empty(),
             hlfs_clip_stack: None,
             hlfs_globals: None,
+            pre_dof: Tracked::empty(),
+            post_dof: Tracked::empty(),
         }
     }
 

@@ -38,10 +38,11 @@ helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
 helio-pass-ssr = { path = "../helio-pass-ssr" }
 helio-pass-sky = { path = "../helio-pass-sky" }
 helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
-helio-pass-taa = { workspace = true }
+helio-pass-tsr = { workspace = true }
 helio-pass-radiance-cascades = { path = "../helio-pass-radiance-cascades" }
 helio-pass-volumetric-fog = { workspace = true }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }
 helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
+helio-pass-dof = { path = "../helio-pass-dof" }

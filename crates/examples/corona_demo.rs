@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GpuLight, LightType, Renderer,
-    RendererConfig, Scene, SceneActor, SkyActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, GpuLight, LightType, Renderer, RendererConfig, Scene, SceneActor, SkyActor,
 };
 use helio_default_graphs::build_default_graph;
 use winit::{
@@ -116,11 +116,7 @@ impl App {
 
         // ── 3. FireRing: radial burst in XZ plane ──────────────────────────
         let ring_angle = t * 0.6;
-        let ring_pos = [
-            4.0 * ring_angle.cos(),
-            0.5,
-            4.0 * ring_angle.sin(),
-        ];
+        let ring_pos = [4.0 * ring_angle.cos(), 0.5, 4.0 * ring_angle.sin()];
         let fire = libhelio::CoronaEmitterDescriptor {
             max_particles: 65_536,
             emit_rate: 2000.0,
@@ -130,11 +126,7 @@ impl App {
             end_size: [0.0, 0.0],
             start_color: [1.0, 0.6, 0.0, 1.0],
             end_color: [1.0, 0.0, 0.0, 0.0],
-            velocity: [
-                3.0 * ring_angle.cos(),
-                0.0,
-                3.0 * ring_angle.sin(),
-            ],
+            velocity: [3.0 * ring_angle.cos(), 0.0, 3.0 * ring_angle.sin()],
             velocity_variation: [2.0, 1.0, 2.0],
             gravity: -2.0,
             shape: libhelio::CoronaEmitterShape::Sphere { radius: 0.8 },
@@ -200,14 +192,13 @@ impl ApplicationHandler for App {
             apply_limit_buckets: false,
         }))
         .expect("no adapter");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }))
-            .expect("no device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
+        .expect("no device");
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
@@ -245,15 +236,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         // ── Sky + lighting ───────────────────────────────────────────────────
@@ -273,26 +284,35 @@ impl ApplicationHandler for App {
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 
         // ── Floor plane ─────────────────────────────────────────────────────
-        let floor_mesh_id = renderer.scene_mut().insert_actor(SceneActor::mesh(
-            v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 30.0),
-        )).as_mesh().unwrap();
-        let floor_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
-            [0.06, 0.06, 0.08, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        renderer.scene_mut().insert_actor(SceneActor::object(helio::ObjectDescriptor {
-            mesh: floor_mesh_id,
-            material: floor_mat,
-            transform: Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
-            bounds: [0.0, -0.5, 0.0, 43.0],
-            flags: 0,
-            groups: helio::GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+        let floor_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(v3_demo_common::plane_mesh(
+                [0.0, 0.0, 0.0],
+                30.0,
+            )))
+            .as_mesh()
+            .unwrap();
+        let floor_mat = renderer
+            .scene_mut()
+            .insert_material(v3_demo_common::make_material(
+                [0.06, 0.06, 0.08, 1.0],
+                0.8,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        renderer
+            .scene_mut()
+            .insert_actor(SceneActor::object(helio::ObjectDescriptor {
+                mesh: floor_mesh_id,
+                material: floor_mat,
+                transform: Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
+                bounds: [0.0, -0.5, 0.0, 43.0],
+                flags: 0,
+                groups: helio::GroupMask::NONE,
+                movability: None,
+                user_tag: 0,
+            }));
 
         // Build initial emitters
         let emitters = Self::build_emitters(0.0);
@@ -409,13 +429,27 @@ impl ApplicationHandler for App {
                 let right = orientation * Vec3::X;
                 let up = Vec3::Y;
                 let mut accel = Vec3::ZERO;
-                if state.keys.contains(&KeyCode::KeyW) { accel += forward; }
-                if state.keys.contains(&KeyCode::KeyS) { accel -= forward; }
-                if state.keys.contains(&KeyCode::KeyA) { accel -= right; }
-                if state.keys.contains(&KeyCode::KeyD) { accel += right; }
-                if state.keys.contains(&KeyCode::Space) { accel += up; }
-                if state.keys.contains(&KeyCode::ShiftLeft) { accel -= up; }
-                if accel.length_squared() > 0.0 { accel = accel.normalize(); }
+                if state.keys.contains(&KeyCode::KeyW) {
+                    accel += forward;
+                }
+                if state.keys.contains(&KeyCode::KeyS) {
+                    accel -= forward;
+                }
+                if state.keys.contains(&KeyCode::KeyA) {
+                    accel -= right;
+                }
+                if state.keys.contains(&KeyCode::KeyD) {
+                    accel += right;
+                }
+                if state.keys.contains(&KeyCode::Space) {
+                    accel += up;
+                }
+                if state.keys.contains(&KeyCode::ShiftLeft) {
+                    accel -= up;
+                }
+                if accel.length_squared() > 0.0 {
+                    accel = accel.normalize();
+                }
                 state.velocity += accel * FLY_SPEED * dt;
                 state.velocity /= 1.0 + DRAG * dt;
                 state.cam_pos += state.velocity * dt;

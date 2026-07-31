@@ -253,6 +253,20 @@ pub struct RendererConfig {
     /// pure black without it. It is also a poor performance lever — one cubemap
     /// sample per pixel, versus SSR's per-pixel Hi-Z trace.
     pub enable_environment_reflections: bool,
+
+    /// Temporal Super-Resolution quality preset.
+    ///
+    /// When `Some`, the graph builder replaces `FxaaPass` (and the old bilinear
+    /// TAA upscale) with a full [`TsrPass`](helio_pass_tsr::TsrPass).  The preset
+    /// controls the neighbourhood tap count and temporal accumulation rate.
+    ///
+    /// Setting this automatically adjusts the recommended `render_scale`:
+    /// call [`with_tsr_quality`](Self::with_tsr_quality) instead of setting
+    /// this field directly so that `render_scale` is kept consistent.
+    ///
+    /// `None` (default) keeps the existing FXAA-only path.
+    pub tsr_quality: Option<helio_pass_tsr::TsrQuality>,
+
     /// HDR display output mode. Default `Ldr`.
     pub hdr_output_mode: libhelio::HdrOutputMode,
     pub render_mode: RenderMode,
@@ -286,6 +300,7 @@ impl RendererConfig {
             foliage_blades_per_m2: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
+            tsr_quality: None,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
@@ -354,6 +369,32 @@ impl RendererConfig {
 
     pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
         self.shadow_face_capacity = capacity.clamp(1, 256);
+        self
+    }
+
+    /// Enable Temporal Super-Resolution with the given quality preset.
+    ///
+    /// This sets [`tsr_quality`](Self::tsr_quality) and automatically adjusts
+    /// [`render_scale`](Self::render_scale) to the preset's recommended value.
+    ///
+    /// When TSR is enabled the graph builder inserts a [`TsrPass`](helio_pass_tsr::TsrPass)
+    /// in place of the simple bilinear upscale, and FXAA / SMAA are disabled
+    /// (TSR's temporal accumulation provides superior anti-aliasing).
+    ///
+    /// ## Example
+    /// ```rust,ignore
+    /// let config = RendererConfig::new(1920, 1080, surface_format)
+    ///     .with_tsr_quality(TsrQuality::Quality);
+    /// ```
+    pub fn with_tsr_quality(mut self, quality: helio_pass_tsr::TsrQuality) -> Self {
+        self.render_scale = quality.render_scale();
+        self.tsr_quality  = Some(quality);
+        self
+    }
+
+    /// Disable Temporal Super-Resolution, reverting to the TAA-only upscale path.
+    pub fn without_tsr(mut self) -> Self {
+        self.tsr_quality = None;
         self
     }
 

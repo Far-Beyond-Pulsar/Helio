@@ -250,7 +250,10 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         flare_tint_r: 0.0,
         flare_tint_g: 0.0,
         flare_tint_b: 0.0,
-        _pad2: [0; 4],
+        ies_profile_index: -1,
+        light_function_index: -1,
+        ies_angle_scale: 0.0,
+        ies_angle_offset: 0.0,
     }));
     renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
         position_range: [0.0, 0.0, 0.0, f32::MAX],
@@ -272,7 +275,10 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         flare_tint_r: 0.0,
         flare_tint_g: 0.0,
         flare_tint_b: 0.0,
-        _pad2: [0; 4],
+        ies_profile_index: -1,
+        light_function_index: -1,
+        ies_angle_scale: 0.0,
+        ies_angle_offset: 0.0,
     }));
 
     renderer.scene_mut().flush();
@@ -621,7 +627,10 @@ impl SnapshotBatch {
                 flare_tint_r:         0.0,
                 flare_tint_g:         0.0,
                 flare_tint_b:         0.0,
-                _pad2:               [0; 4],
+                ies_profile_index:    -1,
+                light_function_index: -1,
+                ies_angle_scale:      0.0,
+                ies_angle_offset:     0.0,
             }));
         }
 

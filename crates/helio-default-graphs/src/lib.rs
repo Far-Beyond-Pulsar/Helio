@@ -24,6 +24,7 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
+use helio_pass_dof::DofPass;
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
@@ -34,7 +35,7 @@ use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_ssr::SsrPass;
-use helio_pass_taa::TaaPass;
+use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -565,15 +566,39 @@ fn build_default_graph_internal(
         config.surface_format,
     )));
 
-    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    // When TSR is active it provides superior temporal anti-aliasing, so FXAA
+    // would only add blur on top of an already-sharp image.  Gate FXAA behind
+    // the TSR flag so the two don't compete.
+    if let Some(quality) = config.tsr_quality {
+        graph.add_pass(Box::new(TsrPass::new(
+            device,
+            iw,
+            ih,
+            config.width,
+            config.height,
+            config.surface_format,
+            quality,
+        )));
+    } else {
+        graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    }
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+    let mut pp = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
         config.height,
         config.surface_format,
         user_effects,
+    );
+    // Enable pre_dof output so the DofPass can read the post-processed image.
+    pp.set_output_to_pre_dof(true);
+    graph.add_pass(Box::new(pp));
+
+    // Cinematic bokeh DOF — runs after the main uber-shader, reads "pre_dof"
+    // (written by PostProcessPass) and writes the final output to ctx.target.
+    graph.add_pass(Box::new(DofPass::new(
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(
@@ -741,20 +766,24 @@ fn build_fxaa_graph_internal(
         ih,
     );
 
-    // Before TAA, at internal resolution. Fog accumulates in the same space as the
-    // depth it reads, and TAA then resolves it along with everything else — which
-    // is why the pass needs no jitter handling of its own.
+    // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
+    // depth it reads, and the AA/upscale pass then resolves it along with everything else.
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
-    graph.add_pass(Box::new(TaaPass::new(
-        device,
-        iw,
-        ih,
-        config.width,
-        config.height,
-        config.surface_format,
-    )));
+    // TSR provides temporal super-resolution upscaling with its own temporal AA.
+    // When TSR is not configured, skip temporal accumulation (render at native res).
+    if let Some(quality) = config.tsr_quality {
+        graph.add_pass(Box::new(TsrPass::new(
+            device,
+            iw,
+            ih,
+            config.width,
+            config.height,
+            config.surface_format,
+            quality,
+        )));
+    }
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,
@@ -853,20 +882,24 @@ fn build_hlfs_graph_internal(
         ih,
     );
 
-    // Before TAA, at internal resolution. Fog accumulates in the same space as the
-    // depth it reads, and TAA then resolves it along with everything else — which
-    // is why the pass needs no jitter handling of its own.
+    // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
+    // depth it reads, and the AA/upscale pass then resolves it along with everything else.
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
-    graph.add_pass(Box::new(TaaPass::new(
-        device,
-        iw,
-        ih,
-        config.width,
-        config.height,
-        config.surface_format,
-    )));
+    // TSR provides temporal super-resolution upscaling with its own temporal AA.
+    // When TSR is not configured, skip temporal accumulation (render at native res).
+    if let Some(quality) = config.tsr_quality {
+        graph.add_pass(Box::new(TsrPass::new(
+            device,
+            iw,
+            ih,
+            config.width,
+            config.height,
+            config.surface_format,
+            quality,
+        )));
+    }
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,

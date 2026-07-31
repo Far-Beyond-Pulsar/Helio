@@ -36,6 +36,10 @@ name = "indoor_cathedral"
 path = "indoor_cathedral.rs"
 
 [[bin]]
+name = "indoor_cathedral_tsr"
+path = "indoor_cathedral_tsr.rs"
+
+[[bin]]
 name = "indoor_cathedral_fxaa"
 path = "indoor_cathedral_fxaa.rs"
 
@@ -144,6 +148,10 @@ name = "editor_demo_xl"
 path = "editor_demo_xl.rs"
 
 [[bin]]
+name = "editor_demo_tsr"
+path = "editor_demo_tsr.rs"
+
+[[bin]]
 name = "meshlet_cull_benchmark"
 path = "meshlet_cull_benchmark.rs"
 
@@ -192,6 +200,10 @@ name = "one_million_cubes"
 path = "one_million_cubes.rs"
 
 [[bin]]
+name = "dof_demo"
+path = "dof_demo.rs"
+
+[[bin]]
 name = "lens_flare_demo"
 path = "lens_flare_demo.rs"
 
@@ -220,7 +232,7 @@ helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
 helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
-helio-pass-taa = { workspace = true }
+helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
 helio-pass-decal = { path = "../helio-pass-decal" }

@@ -44,6 +44,7 @@ pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, DebugCameraUniform, DebugDrawPass,
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererConfig,
 };
+pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
     Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
     GpuFoliageInteractor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
