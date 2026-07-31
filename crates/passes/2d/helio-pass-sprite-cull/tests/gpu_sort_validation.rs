@@ -154,9 +154,12 @@ async fn run_gpu(
     Some(GpuResult { visible_count, order })
 }
 
-fn cpu_reference(slots: &[TestSpriteInstance], view_min: [f32; 2], view_max: [f32; 2]) -> Vec<u32> {
+fn cpu_reference(slots: &[TestSpriteInstance], alive: &[u32], view_min: [f32; 2], view_max: [f32; 2]) -> Vec<u32> {
     let mut visible: Vec<u32> = (0..slots.len() as u32)
         .filter(|&i| {
+            if alive[i as usize] == 0 {
+                return false;
+            }
             let s = &slots[i as usize];
             let clamped = [s.position[0].clamp(view_min[0], view_max[0]), s.position[1].clamp(view_min[1], view_max[1])];
             let dx = s.position[0] - clamped[0];
