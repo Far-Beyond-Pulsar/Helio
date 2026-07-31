@@ -188,11 +188,26 @@ impl DofPass {
             count: None,
         };
 
+        // The engine-wide camera buffer (`GpuCameraBuffer`, label "Camera Storage")
+        // is a storage buffer sized for 2 cameras (mono/stereo), matching every
+        // other pass's `var<storage, read> cameras: array<CameraUniforms, 2>`.
+        // Bindings that reference it must use this, not `uniform_entry`.
+        let camera_storage_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
         let coc_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DOF CoC BGL"),
             entries: &[
                 uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
-                uniform_entry(1, None),
+                camera_storage_entry(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -223,7 +238,7 @@ impl DofPass {
             label: Some("DOF Gather BGL"),
             entries: &[
                 uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
-                uniform_entry(1, None),
+                camera_storage_entry(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,

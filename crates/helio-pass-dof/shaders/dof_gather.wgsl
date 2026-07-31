@@ -41,7 +41,7 @@ struct DofUniforms {
 }
 
 @group(0) @binding(0) var<uniform> dof: DofUniforms;
-@group(0) @binding(1) var<uniform> camera: CameraUniforms;
+@group(0) @binding(1) var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(2) var src_tex: texture_2d<f32>;
 @group(0) @binding(3) var coc_tex: texture_2d<f32>;
 @group(0) @binding(4) var bokeh_tex: texture_2d_array<f32>;

@@ -36,12 +36,12 @@ struct DofUniforms {
 }
 
 @group(0) @binding(0) var<uniform> dof: DofUniforms;
-@group(0) @binding(1) var<uniform> camera: CameraUniforms;
+@group(0) @binding(1) var<storage, read> cameras: array<CameraUniforms, 2>;
 @group(0) @binding(2) var depth_tex: texture_depth_2d;
 @group(0) @binding(3) var coc_tex: texture_storage_2d<r32float, write>;
 
 fn linearize_depth(raw: f32) -> f32 {
-    return -camera.proj[3][2] / (raw * 2.0 - 1.0 + camera.proj[2][2]);
+    return -cameras[0].proj[3][2] / (raw * 2.0 - 1.0 + cameras[0].proj[2][2]);
 }
 
 fn compute_coc(linear_depth: f32) -> f32 {
