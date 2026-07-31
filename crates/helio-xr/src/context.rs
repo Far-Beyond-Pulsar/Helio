@@ -170,6 +170,20 @@ pub fn create_wgpu_device(
         .max_samplers_per_shader_stage
         .min(MAX_TEXTURES as u32);
     limits.max_multiview_view_count = limits.max_multiview_view_count.max(2);
+    // Same clamp as `helio::required_wgpu_limits`, and it has to be repeated because this
+    // path builds its limits from the HAL adapter directly rather than going through that
+    // function — OpenXR owns the Vulkan instance and device, so the normal
+    // `request_device` path is bypassed entirely.
+    //
+    // wgpu-core asserts `max_buffer_size <= u32::MAX` while building its indirect-draw
+    // validation pipelines, at device creation:
+    //
+    //   wgpu-core/src/indirect_validation/draw.rs:72
+    //
+    // On a GPU reporting more than 4 GiB of addressable buffer this is a hard panic before
+    // the first frame — and because it is on the XR path only, it presents as "VR is
+    // broken" rather than as a limits problem.
+    limits.max_buffer_size = limits.max_buffer_size.min(u32::MAX as u64);
 
     // The device extensions wgpu needs for the requested features.
     let device_extensions = hal_adapter.adapter.required_device_extensions(required_features);

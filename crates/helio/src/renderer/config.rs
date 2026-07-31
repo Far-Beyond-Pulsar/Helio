@@ -137,6 +137,19 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
             .min(adapter_limits.max_sampled_textures_per_shader_stage),
         max_samplers_per_shader_stage: (MAX_TEXTURES as u32)
             .min(adapter_limits.max_samplers_per_shader_stage),
+        // Clamped to 4 GiB - 1 because wgpu-core's indirect-draw validation asserts
+        // `max_buffer_size <= u32::MAX` while building its helper pipelines, and that
+        // assertion runs at *device creation*:
+        //
+        //   wgpu-core/src/indirect_validation/draw.rs:72
+        //   assertion failed: limits.max_buffer_size <= u32::MAX as u64
+        //
+        // Every other limit here is taken straight from the adapter, and on a GPU
+        // reporting more than 4 GiB of addressable buffer that spread is a hard panic
+        // before a single frame is drawn. Helio allocates nothing near this ceiling — the
+        // largest single buffer in the engine is the foliage blade arena at a few hundred
+        // MiB — so lowering it costs nothing real.
+        max_buffer_size: adapter_limits.max_buffer_size.min(u32::MAX as u64),
         ..adapter_limits
     }
 }
