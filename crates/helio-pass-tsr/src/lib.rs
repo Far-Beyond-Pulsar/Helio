@@ -256,7 +256,7 @@ impl TsrPass {
                 tex_entry(2, wgpu::TextureSampleType::Depth),                      // depth_tex
                 sampler_entry(3, wgpu::SamplerBindingType::Filtering),             // linear_sampler
                 sampler_entry(4, wgpu::SamplerBindingType::NonFiltering),          // point_sampler
-                uniform_entry(5),                                                   // camera
+                camera_storage_entry(5),                                            // camera
                 uniform_entry(6),                                                   // tsr
             ],
         });
@@ -444,6 +444,23 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+// The engine-wide camera buffer (`GpuCameraBuffer`, label "Camera Storage") is a
+// storage buffer sized for 2 cameras (mono/stereo), matching every other pass's
+// `var<storage, read> cameras: array<CameraUniforms, 2>`. Bindings that reference
+// it must use this, not `uniform_entry`.
+fn camera_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
             has_dynamic_offset: false,
             min_binding_size: None,
         },

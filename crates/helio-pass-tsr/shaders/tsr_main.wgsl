@@ -50,7 +50,7 @@ struct CameraUniforms {
     jitter_frame:   vec4<f32>,
     prev_view_proj: mat4x4<f32>,
 }
-@group(0) @binding(5) var<uniform> camera: CameraUniforms;
+@group(0) @binding(5) var<storage, read> cameras: array<CameraUniforms, 2>;
 
 struct TsrUniform {
     jitter_offset:  vec2<f32>, // sub-pixel jitter in [-0.5, 0.5)
@@ -331,9 +331,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let depth_val = textureSample(depth_tex, point_sampler, in.uv);
     let ndc_xy    = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let clip      = vec4<f32>(ndc_xy, depth_val, 1.0);
-    let world_h   = camera.inv_view_proj * clip;
+    let world_h   = cameras[0].inv_view_proj * clip;
     let world_pos = world_h.xyz / world_h.w;
-    let prev_clip = camera.prev_view_proj * vec4<f32>(world_pos, 1.0);
+    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_pos, 1.0);
     let prev_ndc  = prev_clip.xy / prev_clip.w;
     let history_uv = vec2<f32>((prev_ndc.x + 1.0) * 0.5, (1.0 - prev_ndc.y) * 0.5);
 
