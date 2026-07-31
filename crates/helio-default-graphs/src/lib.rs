@@ -187,7 +187,11 @@ fn add_geometry_passes(
     // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
     // exactly why this is worth a comment — the cost is a silent tile store/reload.
     let foliage_buffers = config.enable_foliage.then(|| {
-        let place_pass = FoliagePlacePass::new(device, FoliageQuality::default());
+        let place_pass = FoliagePlacePass::new_with_density(
+            device,
+            FoliageQuality::default(),
+            config.foliage_blades_per_m2,
+        );
         let handles = (
             Arc::clone(&place_pass.blade_arena),
             Arc::clone(&place_pass.tile_table),

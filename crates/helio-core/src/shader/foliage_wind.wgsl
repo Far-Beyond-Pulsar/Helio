@@ -85,6 +85,21 @@ const HELIO_WIND_TAU: f32 = 6.28318530718;
 /// *faster*. Without this the model reads as a slow-motion replay at high speeds.
 const HELIO_WIND_REFERENCE_SPEED: f32 = 5.0;
 
+/// Frequency multiplier for a given wind speed, applied to **all three bands**.
+///
+/// Real vegetation swings both further and faster in stronger wind. Applying the ramp to
+/// sway alone — which is what this model used to do — means the leaf and branch bands run
+/// at a fixed tempo no matter the weather, so `speed` reads purely as an amplitude
+/// control and dead-calm grass shimmers at exactly the rate gale-force grass does. It also
+/// makes the wind speed knob feel broken: turning it down makes the motion smaller but no
+/// calmer.
+///
+/// Floors at 0.35 rather than 0 so grass in near-still air drifts instead of freezing
+/// solid, which reads as a paused animation rather than a calm day.
+fn helio_wind_tempo(speed: f32) -> f32 {
+    return 0.35 + 0.65 * clamp(speed / HELIO_WIND_REFERENCE_SPEED, 0.0, 2.0);
+}
+
 /// Spatial frequency of the sway phase field, in 1/m — ~16 m coherence patches.
 ///
 /// This number is the single most important one in the file. Raise it far and
@@ -93,7 +108,7 @@ const HELIO_WIND_REFERENCE_SPEED: f32 = 5.0;
 /// object hinging in unison.
 const HELIO_WIND_SWAY_COHERENCE: f32 = 0.06;
 
-const HELIO_WIND_SWAY_HZ: f32 = 0.45;
+const HELIO_WIND_SWAY_HZ: f32 = 0.26;
 const HELIO_WIND_SWAY_METRES_PER_MPS: f32 = 0.030;
 /// Lateral sway as a fraction of downwind sway. A stem that only moves in the
 /// wind plane reads as a hinge, not a plant.
@@ -106,14 +121,14 @@ const HELIO_WIND_SWAY_LATERAL: f32 = 0.35;
 /// pulsing in place, which looks worse than no turbulence at all.
 const HELIO_WIND_GUST_ADVECTION: f32 = 0.35;
 
-const HELIO_WIND_FLUTTER_HZ: f32 = 2.4;
+const HELIO_WIND_FLUTTER_HZ: f32 = 1.05;
 const HELIO_WIND_FLUTTER_METRES_PER_MPS: f32 = 0.008;
 /// Flutter phase accumulated per metre travelled downwind (rad/m).
 const HELIO_WIND_FLUTTER_DOWNWIND: f32 = 0.9;
 /// Flutter phase accumulated per metre along the stem (rad/m).
 const HELIO_WIND_FLUTTER_ALONG_STEM: f32 = 5.5;
 
-const HELIO_WIND_JITTER_HZ: f32 = 8.5;
+const HELIO_WIND_JITTER_HZ: f32 = 3.2;
 const HELIO_WIND_JITTER_METRES_PER_MPS: f32 = 0.0025;
 
 // ── Deterministic hashing ───────────────────────────────────────────────────
@@ -271,8 +286,7 @@ fn helio_wind_sway(
     }
 
     let phase = helio_wind_noise(instance_origin.xz * HELIO_WIND_SWAY_COHERENCE) * HELIO_WIND_TAU;
-    let freq = HELIO_WIND_SWAY_HZ
-        * (0.6 + 0.4 * clamp(speed / HELIO_WIND_REFERENCE_SPEED, 0.0, 2.0));
+    let freq = HELIO_WIND_SWAY_HZ * helio_wind_tempo(speed);
     let t = HELIO_WIND_TAU * freq * time + phase;
 
     // Fundamental plus an incommensurate second mode. The 2.17 is deliberately
@@ -330,7 +344,7 @@ fn helio_wind_flutter(
     let stem_dist = length(world_pos - instance_origin);
     let phase = dot(instance_origin, dir) * HELIO_WIND_FLUTTER_DOWNWIND
         + stem_dist * HELIO_WIND_FLUTTER_ALONG_STEM;
-    let t = HELIO_WIND_TAU * HELIO_WIND_FLUTTER_HZ * time + phase;
+    let t = HELIO_WIND_TAU * HELIO_WIND_FLUTTER_HZ * helio_wind_tempo(speed) * time + phase;
 
     // Lateral dominates; the vertical component is what stops the flutter from
     // looking like it is confined to a plane.
@@ -376,7 +390,7 @@ fn helio_wind_jitter(
     let py = helio_wind_hash_unorm(seed ^ 0x9e3779b9u) * HELIO_WIND_TAU;
     let pz = helio_wind_hash_unorm(seed ^ 0x85ebca6bu) * HELIO_WIND_TAU;
 
-    let w = HELIO_WIND_TAU * HELIO_WIND_JITTER_HZ * time;
+    let w = HELIO_WIND_TAU * HELIO_WIND_JITTER_HZ * helio_wind_tempo(speed) * time;
     let amplitude = gain * height_frac * speed * HELIO_WIND_JITTER_METRES_PER_MPS;
 
     return vec3<f32>(

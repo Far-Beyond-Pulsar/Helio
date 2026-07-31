@@ -160,8 +160,17 @@ impl ApplicationHandler for App {
             .unwrap_or(true);
         eprintln!("[foliage_demo] foliage passes: {}", if foliage_enabled { "ON" } else { "OFF" });
 
+        // Density is an allocation ceiling, so it is stated up front and the arena is
+        // sized to hold it — 256 blades/m² over a 128 m ring is ~256 MiB of blade arena.
+        // Overridable so the cost/quality trade is visible rather than baked in.
+        let blades_per_m2 = std::env::var("HELIO_FOLIAGE_DENSITY")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(256.0);
+
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_foliage = foliage_enabled;
+        config.foliage_blades_per_m2 = Some(blades_per_m2);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -279,7 +288,7 @@ impl ApplicationHandler for App {
         let grass = renderer
             .scene_mut()
             .add_foliage_type(FoliageTypeDescriptor {
-                density: 40.0,
+                density: blades_per_m2,
                 height_range: [0.18, 0.5],
                 width_range: [0.012, 0.03],
                 // Everything up to 35° of slope. Flat ground here, but this is the knob
@@ -305,7 +314,7 @@ impl ApplicationHandler for App {
             seed: 0x5EED,
         });
 
-        let wind_speed = 4.0;
+        let wind_speed = 2.0;
         renderer.scene_mut().set_wind(Wind {
             direction: glam::Vec3::new(1.0, 0.0, 0.35).normalize(),
             speed: wind_speed,

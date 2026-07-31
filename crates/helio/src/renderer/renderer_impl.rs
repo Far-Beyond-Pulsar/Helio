@@ -109,6 +109,7 @@ pub struct Renderer {
     /// *different* pipeline after the first resize, which is exactly what happened when
     /// this field was first added.
     pub(crate) enable_foliage: bool,
+    pub(crate) foliage_blades_per_m2: Option<f32>,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
     pub(crate) debug_mode: u32,
@@ -643,6 +644,7 @@ impl Renderer {
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
             enable_foliage: self.enable_foliage,
+            foliage_blades_per_m2: self.foliage_blades_per_m2,
         }
     }
 

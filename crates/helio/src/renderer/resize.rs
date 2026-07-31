@@ -81,6 +81,7 @@ impl Renderer {
                 render_mode: self.render_mode,
                 enable_xr: self.enable_xr,
                 enable_foliage: self.enable_foliage,
+                foliage_blades_per_m2: self.foliage_blades_per_m2,
             };
             self.graph = rebuilder(
                 &self.device,

@@ -71,8 +71,12 @@ struct FoliageCullUniforms {
 
     max_foliage_height:     f32,
     wpo_extent:             f32,
+    /// Width of the LOD cross-fade overlap band, in metres. Must match the consumer's
+    /// `lod_fade_band`: this pass decides which clusters get emitted into *two* LODs,
+    /// and the consumer decides their blend weights. A mismatch leaves instances that
+    /// blend to less (gap) or more (double-density ring) than one blade's coverage.
+    lod_fade_band:          f32,
     _pad0:                  u32,
-    _pad1:                  u32,
 }
 
 /// Mirrors `helio_foliage_core::GpuFoliageType` (Rust, 96 bytes). All scalars — see the
@@ -246,6 +250,28 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
 /// cluster, and a poisoned uniform that promoted the whole ring to the 11-vertex strip
 /// would blow the raster budget in a single frame. Dropping to terrain shading is the
 /// bounded failure.
+/// Upper distance bound of `level`, with the same non-decreasing repair
+/// `select_blade_lod` applies. Mirrors `foliage_lod_threshold` in the consumer's shader —
+/// the two must agree or a cluster is emitted into a band the consumer does not blend.
+fn lod_upper_threshold(ty: FoliageType, level: u32, quality_scale: f32) -> f32 {
+    var scale = 1.0;
+    if is_finite_f32(quality_scale) && quality_scale > 0.0 {
+        scale = quality_scale;
+    }
+    var ladder = array<f32, 4>(ty.lod0, ty.lod1, ty.lod2, ty.lod3);
+    var threshold = 0.0;
+    for (var i = 0u; i < FOLIAGE_LOD_COUNT; i = i + 1u) {
+        let scaled = ladder[i] * scale;
+        if scaled > threshold {
+            threshold = scaled;
+        }
+        if i >= level {
+            break;
+        }
+    }
+    return threshold;
+}
+
 fn select_blade_lod(
     distance: f32,
     lod0: f32,
@@ -445,18 +471,42 @@ fn cs_cluster_cull(
         return;
     }
 
+    emit_cluster(lod, count, slot, first);
+
+    // ── Cross-fade needs the cluster in BOTH bands ────────────────────────────
+    //
+    // The consumer's `foliage_cross_fade` gives the near LOD weight `f` and the far LOD
+    // `1 - f` across the overlap band, so the two sum to one blade's coverage. That only
+    // works if both instances actually exist. Classifying each cluster into exactly one
+    // LOD — which is what this pass used to do — means the near LOD fades *out* over the
+    // band and nothing fades *in*: coverage collapses toward the boundary and then jumps
+    // back at it. That is the hard-edged LOD banding, and no amount of tuning the fade
+    // curve fixes it, because the second half of the blend was never submitted.
+    //
+    // So a cluster inside the band is emitted twice, once per adjacent LOD, and the
+    // fragment shader's complementary weights do the rest. The extra instances exist only
+    // within `lod_fade_band` metres of a boundary, so the cost is a thin annulus, not a
+    // doubling.
+    let upper = lod_upper_threshold(foliage, lod, cull.lod_quality_scale);
+    if lod + 1u < FOLIAGE_LOD_COUNT && distance > upper - cull.lod_fade_band {
+        emit_cluster(lod + 1u, count, slot, first);
+    }
+}
+
+/// Append one cluster's blade references into `visible_blades[]` for a single LOD.
+fn emit_cluster(lod: u32, count: u32, slot: u32, first: u32) {
+    // L3 is a *clump* card: one card standing in for the whole 4x4 cluster, not one card
+    // per blade. The consumer sizes it to cover the cluster (`sqrt(cluster_granularity)`
+    // times a blade's width), so emitting one per blade puts sixteen oversized cards
+    // where one belongs and the far ring reads denser than the near field — the density
+    // falloff looks inverted. The near LODs stay one instance per blade.
+    let emit = select(count, 1u, lod == FOLIAGE_LOD_CLUMP);
+
     // Bounded append. The reservation can overshoot the region, so the finalize stage
     // clamps `instance_count` — and the partial write below guarantees every slot below
     // that clamp was actually written, which a "reserve then drop the whole cluster"
     // policy would not: it would leave a hole of uninitialised indices inside the drawn
     // range and render blades from wherever those indices happened to point.
-    // L3 is a *clump* card: one card standing in for the whole 4x4 cluster, not one card
-    // per blade. The consumer sizes it accordingly (`CLUMP_CARD_WIDTH_SCALE`, 2.5x a
-    // single blade), so emitting one per blade puts sixteen oversized cards where one
-    // belongs and the far ring reads as denser than the near field — the density falloff
-    // looks inverted. The near LODs stay one instance per blade.
-    let emit = select(count, 1u, lod == FOLIAGE_LOD_CLUMP);
-
     let capacity = cull.per_lod_capacity;
     let base = atomicAdd(&counters[lod], emit);
     if base >= capacity {

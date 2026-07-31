@@ -74,6 +74,15 @@ pub const LOD_IS_CARD: [bool; LOD_COUNT] = [false, false, true, true];
 /// avoid.
 pub const BLADE_CURVE_FRACTION: f32 = 0.35;
 
+/// The LOD index of the clump card — the one LOD that draws a single instance per
+/// *cluster* rather than per blade.
+///
+/// Must agree with `FOLIAGE_LOD_CLUMP` in `foliage_cull.wgsl`, which is what decides to
+/// emit one index per cluster for this level. If the two ever disagree, one side emits
+/// per-blade while the other sizes per-cluster and the far ring is off by the cluster
+/// size — a density discontinuity, not a crash.
+pub const CLUMP_LOD: usize = 3;
+
 /// Width multiplier applied to the L3 clump card.
 ///
 /// L3 is one card per 4×4 cluster (the plan's §6.3), so it must cover roughly the

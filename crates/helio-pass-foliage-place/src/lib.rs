@@ -295,3 +295,22 @@ mod tests {
         );
     }
 }
+
+/// Width of the LOD cross-fade overlap band, in metres.
+///
+/// Inside this band a cluster is emitted into *both* adjacent LODs, and the consumer
+/// blends them with complementary weights so their coverage sums to one blade's worth.
+/// Must match `FoliageGBufferPass`'s `lod_fade_band`: this pass decides which clusters get
+/// a second instance, the consumer decides the weights, and a mismatch leaves a gap (too
+/// little emitted) or a double-density ring (too much).
+///
+/// Zero is legal and means hard LOD switching — visible banding, but not a crash.
+pub const FOLIAGE_LOD_FADE_BAND_METERS: f32 = 4.0;
+
+/// Representational ceiling on blades in one tile's arena slab.
+///
+/// Not a budget. A `visible_blades[]` entry packs the owning tile slot in its high 16 bits
+/// and the blade's tile-local index in the low 16, so a slab past 65 536 would alias
+/// blades onto each other with no error anywhere. Raising this means widening that
+/// encoding on both sides of the producer/consumer contract.
+pub const MAX_BLADES_PER_TILE: u32 = 65_536;

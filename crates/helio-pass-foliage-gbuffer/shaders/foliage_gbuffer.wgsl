@@ -56,12 +56,20 @@ const FOLIAGE_BLADE_CURVE_FRACTION: f32 = 0.35;
 /// `globals.flags` bit: the interaction field view is real, not the 1×1 placeholder.
 const FOLIAGE_FLAG_INTERACTION_VALID: u32 = 1u;
 
+/// Mirrors `FLAG_DEBUG_LOD` in `src/lib.rs`. Tints blades by LOD instead of shading them.
+const FOLIAGE_FLAG_DEBUG_LOD: u32 = 2u;
+
 /// Mirror of `helio_foliage_core::FOLIAGE_FLAG_RECEIVES_INTERACTION`.
 const FOLIAGE_TYPE_FLAG_RECEIVES_INTERACTION: u32 = 1024u;
 
 /// Shift/mask for the packed `visible_blades[]` entry. See `VISIBLE_TILE_SHIFT` in
 /// `src/lib.rs` — this encoding is half of the contract with `FoliagePlacePass`.
 const FOLIAGE_VISIBLE_TILE_SHIFT: u32 = 16u;
+
+/// The clump-card LOD. Mirrors `CLUMP_LOD` in `src/geometry.rs` and `FOLIAGE_LOD_CLUMP`
+/// in the producer's `foliage_cull.wgsl`: the one level that draws a single instance per
+/// 4x4 cluster rather than per blade, and therefore the one that must not dither.
+const FOLIAGE_LOD_CLUMP: u32 = 3u;
 const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 
 /// Largest finite f32, for the `is_finite` guards transcribed from
@@ -401,11 +409,18 @@ struct VertexOutput {
     /// Stable per-blade hash seed, the temporal anchor of the dither. Flat for the same
     /// reason, and because it is conceptually an integer.
     @location(5) @interpolate(flat) seed: u32,
+    /// LOD this instance was drawn at, for the `FOLIAGE_FLAG_DEBUG_LOD` view.
+    @location(6) @interpolate(flat) lod: u32,
 }
 
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
+    // `cameras[0]`, not `@builtin(view_index)`: that builtin requires the MULTIVIEW
+    // capability, which this engine does not request and most desktop adapters do not
+    // expose, so a shader using it fails to create at all. Every other pass in the graph
+    // (gbuffer, vg_gbuffer) indexes `cameras[0]`; stereo selection is a graph-wide change,
+    // not something this pass gets to opt into unilaterally.
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
     // ── Resolve the instance ──────────────────────────────────────────────────
@@ -464,10 +479,33 @@ fn vs_main(
         globals.lod_fade_band,
     );
 
+    // ── How this LOD cross-fades ──────────────────────────────────────────────
+    //
+    // The stochastic dither removes a whole *instance*. For a blade that is one thin
+    // sliver among thousands and it resolves cleanly under TAA. For an L3 clump card it
+    // does not: that card stands in for sixteen blades and is four times as wide, so
+    // discarding one punches a sixteen-blade hole in the ground. Across the L2→L3 band,
+    // where about half the cards are being discarded at any instant, those holes are the
+    // visible gap at the LOD boundary — the fade itself creates it.
+    //
+    // So the clump LOD fades by *area* instead: the card shrinks toward zero across the
+    // band and is never discarded. Coverage is the quantity that has to stay continuous,
+    // and area goes as the square of the linear dimensions, hence `sqrt(fade)`. Blades
+    // keep the dither, which is cheaper and correct at their size.
+    var size_fade = 1.0;
+    var dither_fade = fade;
+    if lod_info.lod == FOLIAGE_LOD_CLUMP {
+        size_fade = sqrt(clamp(fade, 0.0, 1.0));
+        dither_fade = 1.0;
+    }
+
     let height = mix(ty.height_min, ty.height_max, height_lerp)
         * lod_info.height_scale
-        * scale_in;
-    let width = mix(ty.width_min, ty.width_max, width_lerp) * lod_info.width_scale;
+        * scale_in
+        * size_fade;
+    let width = mix(ty.width_min, ty.width_max, width_lerp)
+        * lod_info.width_scale
+        * size_fade;
 
     // ── Derive the vertex ─────────────────────────────────────────────────────
     let is_card = lod_info.is_card != 0u;
@@ -524,8 +562,9 @@ fn vs_main(
         foliage_unorm8(blade.packed_tint_seed & 0xffu),
         foliage_unorm8((blade.packed_tint_seed >> 8u) & 0xffu),
     );
-    out.fade = fade;
+    out.fade = dither_fade;
     out.seed = seed;
+    out.lod = lod_info.lod;
     return out;
 }
 
@@ -610,6 +649,21 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     let ao = mix(0.35, 1.0, input.height_frac);
 
     var out: FoliageGBufferOutput;
+    // LOD debug view: flat, unlit-looking colour per LOD so band boundaries are obvious.
+    // Written into albedo with the emissive channel below left alone, so the bands stay
+    // legible under any lighting.
+    if (globals.flags & FOLIAGE_FLAG_DEBUG_LOD) != 0u {
+        var lod_colour = vec3<f32>(1.0, 0.0, 0.0);
+        if input.lod == 1u {
+            lod_colour = vec3<f32>(0.0, 1.0, 0.0);
+        } else if input.lod == 2u {
+            lod_colour = vec3<f32>(0.0, 0.4, 1.0);
+        } else if input.lod >= 3u {
+            lod_colour = vec3<f32>(1.0, 0.9, 0.0);
+        }
+        albedo = lod_colour;
+    }
+
     out.albedo = vec4<f32>(albedo, 1.0);
     out.normal = vec4<f32>(normal, FOLIAGE_F0);
     out.orm = vec4<f32>(ao, 0.75, 0.0, FOLIAGE_F0);

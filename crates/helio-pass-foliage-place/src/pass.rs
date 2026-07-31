@@ -13,7 +13,9 @@ use crate::uniforms::{FoliageCullUniforms, PlaceUniforms};
 use crate::{
     foliage_frame_is_present, COUNTER_PLACEMENT_OVERFLOW, COUNTER_PLACED_BLADES,
     COUNTER_VISIBLE_OVERFLOW, DEFAULT_WPO_EXTENT_METERS, FOLIAGE_COUNTER_COUNT,
-    FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY, MAX_CANDIDATES_PER_TILE,
+    FOLIAGE_LOD_FADE_BAND_METERS, FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY,
+    MAX_BLADES_PER_TILE,
+    MAX_CANDIDATES_PER_TILE,
 };
 
 const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
@@ -130,6 +132,33 @@ impl FoliagePlacePass {
     /// `blade_offset` depend on history, which is exactly what the fixed-slab layout
     /// exists to prevent.
     pub fn new(device: &wgpu::Device, quality: FoliageQuality) -> Self {
+        Self::new_with_density(device, quality, None)
+    }
+
+    /// Create the pass sized for a specific blades-per-square-metre budget.
+    ///
+    /// # Why density is a constructor parameter and not a clamp
+    ///
+    /// The arena is one equal fixed slab per resident tile, so blades-per-m² is
+    /// `slab_size / tile_area` and nothing at runtime can exceed it. Deriving the slab
+    /// from a fixed per-preset byte budget therefore makes density a *ceiling* — author
+    /// 200 blades/m² and you silently get whatever the budget affords, which is neither
+    /// what you asked for nor obviously wrong on screen.
+    ///
+    /// Inverting it makes arbitrary density expressible: state the density you want, and
+    /// the arena is sized to hold it. The cost is explicit and linear — 16 bytes per blade
+    /// per tile across the ring — and it is reported below rather than discovered as a
+    /// mysterious allocation. `None` keeps the preset's budget as the default.
+    ///
+    /// Note this is genuinely a *memory* trade, not a rendering one: raising the quality
+    /// preset instead does not help, because a higher preset grows the ring radius and the
+    /// tile count grows as its square, leaving the per-tile slab almost unchanged. Range
+    /// and density are separate axes.
+    pub fn new_with_density(
+        device: &wgpu::Device,
+        quality: FoliageQuality,
+        blades_per_square_metre: Option<f32>,
+    ) -> Self {
         let tiles_across =
             ((2.0 * quality.ring_radius() / FOLIAGE_TILE_SIZE_METERS).ceil() as u32).max(1);
         // The ring is a hard ceiling. If a preset's footprint ever exceeded it the ring
@@ -147,8 +176,34 @@ impl FoliagePlacePass {
             );
         }
 
-        let blades_per_tile = (quality.blade_capacity() / ring_capacity as u64).max(1) as u32;
+        // Density-first when asked for, budget-first otherwise.
+        let tile_area = FOLIAGE_TILE_SIZE_METERS * FOLIAGE_TILE_SIZE_METERS;
+        let blades_per_tile = match blades_per_square_metre {
+            Some(density) if density.is_finite() && density > 0.0 => {
+                // `MAX_BLADES_PER_TILE` is a representational ceiling, not a budget: a
+                // blade's tile-local index travels in the low 16 bits of a
+                // `visible_blades[]` entry, so a slab larger than 65 536 would alias.
+                let wanted = (density * tile_area).ceil();
+                let clamped = wanted.min(MAX_BLADES_PER_TILE as f32).max(1.0) as u32;
+                if wanted > clamped as f32 {
+                    log::warn!(
+                        "foliage density {density} blades/m^2 needs {wanted} blades per \
+                         {tile_area} m^2 tile, above the {MAX_BLADES_PER_TILE} a 16-bit \
+                         tile-local index can address; clamping"
+                    );
+                }
+                clamped
+            }
+            _ => (quality.blade_capacity() / ring_capacity as u64).max(1) as u32,
+        };
         let arena_blades = ring_capacity as u64 * blades_per_tile as u64;
+        log::info!(
+            "foliage arena: {ring_capacity} tiles x {blades_per_tile} blades = {:.1} MiB \
+             ({:.0} blades/m^2 over a {:.0} m ring)",
+            (arena_blades * BLADE_BYTES) as f64 / (1024.0 * 1024.0),
+            blades_per_tile as f32 / tile_area,
+            quality.ring_radius(),
+        );
         let cluster_size = quality.cluster_granularity().max(1);
         let clusters_per_tile = blades_per_tile.div_ceil(cluster_size).max(1);
 
@@ -916,7 +971,8 @@ impl RenderPass for FoliagePlacePass {
                 cluster_dispatch_width: self.cluster_dispatch_width,
                 max_foliage_height,
                 wpo_extent: DEFAULT_WPO_EXTENT_METERS,
-                _pad: [0; 2],
+                lod_fade_band: FOLIAGE_LOD_FADE_BAND_METERS,
+                _pad: [0; 1],
             }),
         );
 

@@ -112,6 +112,40 @@ pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
     blade_index / if blades_per_tile == 0 { 1 } else { blades_per_tile }
 }
 
+// ── Packed `visible_blades[]` entry ─────────────────────────────────────────────
+//
+// The live encoding. A `visible_blades[]` entry is **not** a flat arena index: it is the
+// owning tile's ring slot in the high 16 bits and the blade's tile-local index in the low
+// 16. `foliage_cull.wgsl` writes it, `foliage_gbuffer.wgsl` reads it back with the same
+// shift and mask, and both must change together.
+//
+// Packing rather than a flat index because the consumer needs the *tile* regardless — a
+// blade's stored position is tile-local, so reconstructing a world position requires the
+// tile's origin and `bounds_center_y`. Handing the slot over directly saves a division
+// per vertex in the hottest shader in the foliage path. `tile_slot_of_blade` above is the
+// flat-index alternative, kept only for callers holding a raw arena index.
+//
+// Both halves have room: the ring is 4096 slots and a tile's slab is a few hundred
+// blades, against a 65 536 ceiling each.
+
+/// Bits the owning tile slot is shifted left by in a `visible_blades[]` entry.
+pub const VISIBLE_TILE_SHIFT: u32 = 16;
+
+/// Mask selecting the tile-local blade index from a `visible_blades[]` entry.
+pub const VISIBLE_LOCAL_MASK: u32 = 0xffff;
+
+/// Pack a `(tile_slot, tile_local_index)` pair into a `visible_blades[]` entry.
+#[inline]
+pub const fn pack_visible_blade(tile_slot: u32, local_index: u32) -> u32 {
+    (tile_slot << VISIBLE_TILE_SHIFT) | (local_index & VISIBLE_LOCAL_MASK)
+}
+
+/// Inverse of [`pack_visible_blade`].
+#[inline]
+pub const fn unpack_visible_blade(packed: u32) -> (u32, u32) {
+    (packed >> VISIBLE_TILE_SHIFT, packed & VISIBLE_LOCAL_MASK)
+}
+
 /// Element offset of LOD `lod`'s region in `visible_blades[]`, given the per-region
 /// stride.
 ///
@@ -198,6 +232,30 @@ pub fn color_target_states() -> [Option<wgpu::ColorTargetState>; 8] {
 /// `globals.flags` bit: the bound interaction view is the real field, not the 1×1
 /// placeholder this pass creates in its constructor.
 pub const FLAG_INTERACTION_VALID: u32 = 1;
+
+/// Tint each blade by its LOD instead of shading it, so LOD band boundaries are visible.
+///
+/// Enabled with `HELIO_FOLIAGE_DEBUG=lod`. Density and coverage artefacts in foliage all
+/// look alike from a screenshot — a ring, a step, a gap — and which LOD boundary they sit
+/// on is the single most useful fact for diagnosing them. Guessing that from a
+/// description costs a build/run cycle each time; colouring it costs one.
+///
+/// L0 red, L1 green, L2 blue, L3 yellow.
+pub const FLAG_DEBUG_LOD: u32 = 2;
+
+/// Whether `HELIO_FOLIAGE_DEBUG=lod` is set.
+///
+/// Read once and cached: `execute` runs every frame, and an environment lookup per frame
+/// would be a syscall on the hot path for a value that cannot change.
+fn debug_lod_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HELIO_FOLIAGE_DEBUG")
+            .map(|value| value.eq_ignore_ascii_case("lod"))
+            .unwrap_or(false)
+    })
+}
 
 /// Per-frame foliage globals. Mirrors `FoliageGlobals` in `foliage_gbuffer.wgsl`
 /// (64 bytes).
@@ -782,13 +840,28 @@ impl FoliageGBufferPass {
     ///
     /// Public so the LOD ladder's vertex counts can be asserted against
     /// [`LOD_VERTEX_COUNTS`] without a GPU.
-    pub fn lod_uniforms(region_stride: u32) -> [FoliageLodUniform; LOD_COUNT] {
+    pub fn lod_uniforms(region_stride: u32, cluster_granularity: u32) -> [FoliageLodUniform; LOD_COUNT] {
+        // The clump card's width is a *coverage* quantity, not a style choice, so it is
+        // derived rather than hardcoded. The producer emits one L3 card per cluster, so
+        // that card stands in for `cluster_granularity` blades and must cover their
+        // footprint: area scales with the square of width, hence `sqrt(N)`.
+        //
+        // A fixed constant cannot be right here, because the cluster size is a quality
+        // setting — 16 blades on Medium and above, 64 on Low, needing 4x and 8x
+        // respectively. The previous hardcoded 2.5 covered about six blades' worth in
+        // both cases, which is what produced a hard step down in density at the L2→L3
+        // boundary and a far ring visibly thinner than the band in front of it.
+        let clump_width = (cluster_granularity.max(1) as f32).sqrt();
         std::array::from_fn(|lod| FoliageLodUniform {
             lod: lod as u32,
             segments: LOD_SEGMENTS[lod],
             vertex_count: LOD_VERTEX_COUNTS[lod],
             region_base: visible_region_offset(lod as u32, region_stride),
-            width_scale: LOD_WIDTH_SCALE[lod],
+            width_scale: if lod == CLUMP_LOD {
+                clump_width
+            } else {
+                LOD_WIDTH_SCALE[lod]
+            },
             height_scale: LOD_HEIGHT_SCALE[lod],
             is_card: LOD_IS_CARD[lod] as u32,
             _pad: 0,
@@ -960,7 +1033,7 @@ impl RenderPass for FoliageGBufferPass {
 
         // ── Per-LOD constants (once) ──────────────────────────────────────────
         if !self.lod_uniforms_written {
-            for (lod, uniform) in Self::lod_uniforms(self.region_stride).iter().enumerate() {
+            for (lod, uniform) in Self::lod_uniforms(self.region_stride, self.quality.cluster_granularity()).iter().enumerate() {
                 ctx.write_buffer(
                     &self.lod_buf,
                     lod as u64 * LOD_UNIFORM_STRIDE as u64,
@@ -985,11 +1058,8 @@ impl RenderPass for FoliageGBufferPass {
         let globals = FoliageGlobals {
             screen_size: [ctx.width as f32, ctx.height as f32],
             frame: ctx.frame_num as u32,
-            flags: if interaction_valid {
-                FLAG_INTERACTION_VALID
-            } else {
-                0
-            },
+            flags: if interaction_valid { FLAG_INTERACTION_VALID } else { 0 }
+                | if debug_lod_enabled() { FLAG_DEBUG_LOD } else { 0 },
             camera_ring: [0.0, 0.0, 0.0, self.quality.ring_radius()],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.

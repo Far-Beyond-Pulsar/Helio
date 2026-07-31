@@ -213,6 +213,15 @@ pub struct RendererConfig {
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
     /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
     pub enable_foliage: bool,
+    /// Foliage density budget in blades per square metre, or `None` for the quality
+    /// preset default.
+    ///
+    /// Sizes the blade arena at graph-build time: `blades_per_tile = density * 64`, times
+    /// the ring's tile count, times 16 bytes. Density is a ceiling set by allocation, so
+    /// raising it here is the only way to get denser grass — raising the quality preset
+    /// does not, because a wider ring grows the tile count as its square and the per-tile
+    /// slab barely moves. Range and density are separate axes.
+    pub foliage_blades_per_m2: Option<f32>,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -261,6 +270,7 @@ impl RendererConfig {
             shadow_face_capacity: 32,
             enable_ssr: false,
             enable_foliage: true,
+            foliage_blades_per_m2: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,

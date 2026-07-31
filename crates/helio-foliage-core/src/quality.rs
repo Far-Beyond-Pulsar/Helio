@@ -109,12 +109,33 @@ impl FoliageQuality {
     /// geometry that looks like a culling bug because the *same* blades lose the race
     /// every frame in a static scene. Anything reading this should also be surfacing the
     /// overflow counter.
+    /// # Why this is the density knob, and the trap in raising quality instead
+    ///
+    /// The arena is divided into one equal fixed slab per resident tile, so what actually
+    /// sets blades-per-square-metre is
+    /// `blade_capacity / ring_capacity / FOLIAGE_TILE_SIZE_METERS²`. Raising the *quality
+    /// preset* to get denser grass does not work: a higher preset grows the ring radius
+    /// too, the tile count grows as its square, and the slab per tile barely moves. Ultra
+    /// has four times Medium's arena and almost exactly the same per-tile density. Range
+    /// and density are separate axes, and this is the density one.
+    ///
+    /// Medium's 64 MiB gives 4 M blades over a 128 m ring (1024 tiles of 8 m), i.e. 4096
+    /// blades per 64 m² tile — 64 per m². Authored densities above that are clamped
+    /// uniformly (`FoliagePlacePass::density_scale`), which thins the whole field rather
+    /// than leaving bald patches, and logs once.
+    ///
+    /// The structural inefficiency here is real and unfixed: a tile at the ring's edge
+    /// gets exactly the same slab as one under the camera, even though its blades only
+    /// ever draw as clump cards at 1/16 the instance count. Making slabs vary with
+    /// distance would buy a lot of density back, but it would make `blade_offset` depend
+    /// on a tile's position rather than its slot, which is precisely what the fixed-slab
+    /// layout exists to prevent.
     pub fn blade_arena_bytes(self) -> u64 {
         match self {
-            FoliageQuality::Low => 4 * 1024 * 1024,
-            FoliageQuality::Medium => 24 * 1024 * 1024,
-            FoliageQuality::High => 48 * 1024 * 1024,
-            FoliageQuality::Ultra => 96 * 1024 * 1024,
+            FoliageQuality::Low => 8 * 1024 * 1024,
+            FoliageQuality::Medium => 64 * 1024 * 1024,
+            FoliageQuality::High => 128 * 1024 * 1024,
+            FoliageQuality::Ultra => 256 * 1024 * 1024,
         }
     }
 

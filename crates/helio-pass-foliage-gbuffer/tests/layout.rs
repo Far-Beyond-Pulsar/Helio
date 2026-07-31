@@ -82,14 +82,24 @@ fn the_ladder_has_no_vertex_or_index_buffer_and_the_counts_are_pinned() {
 #[test]
 fn lod_uniforms_carry_the_ladder_verbatim() {
     let stride = 4096;
-    let uniforms = FoliageGBufferPass::lod_uniforms(stride);
+    let uniforms = FoliageGBufferPass::lod_uniforms(stride, 16);
     for (lod, uniform) in uniforms.iter().enumerate() {
         assert_eq!(uniform.lod, lod as u32);
         assert_eq!(uniform.segments, LOD_SEGMENTS[lod]);
         assert_eq!(uniform.vertex_count, LOD_VERTEX_COUNTS[lod]);
         assert_eq!(uniform.region_base, lod as u32 * stride);
         assert_eq!(uniform.is_card, LOD_IS_CARD[lod] as u32);
-        assert_eq!(uniform.width_scale, LOD_WIDTH_SCALE[lod]);
+        if lod == CLUMP_LOD {
+            // The clump card's width is derived, not table-driven: it stands in for a
+            // whole cluster, so it must cover that many blades' footprint. Area goes as
+            // width squared, hence sqrt(cluster). Asserting the property rather than a
+            // literal is the point — a hardcoded width silently mis-covers as soon as
+            // `FoliageQuality::cluster_granularity` differs (16 on Medium, 64 on Low),
+            // and the symptom is a density step at the L2→L3 boundary, not a failure.
+            assert_eq!(uniform.width_scale, 4.0, "sqrt(16) for a 16-blade cluster");
+        } else {
+            assert_eq!(uniform.width_scale, LOD_WIDTH_SCALE[lod]);
+        }
         assert_eq!(uniform.height_scale, LOD_HEIGHT_SCALE[lod]);
         // Reserved words must be zero so a future build can tell "unset" from
         // "predates the field".

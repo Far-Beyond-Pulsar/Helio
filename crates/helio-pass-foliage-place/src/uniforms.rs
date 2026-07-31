@@ -125,7 +125,8 @@ pub struct FoliageCullUniforms {
     pub wpo_extent: f32,
 
     /// Reserved. Must be written as zero.
-    pub _pad: [u32; 2],
+    pub lod_fade_band: f32,
+    pub _pad: [u32; 1],
 }
 
 const _: () = {
@@ -204,12 +205,13 @@ mod tests {
         assert_eq!(offset_of(&value.cluster_dispatch_width as *const u32 as *const u8), 44);
         assert_eq!(offset_of(&value.max_foliage_height as *const f32 as *const u8), 48);
         assert_eq!(offset_of(&value.wpo_extent as *const f32 as *const u8), 52);
-        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 56);
+        assert_eq!(offset_of(&value.lod_fade_band as *const f32 as *const u8), 56);
+        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 60);
     }
 
     #[test]
     fn reserved_padding_defaults_to_zero() {
         assert_eq!(PlaceUniforms::default()._pad, [0; 4]);
-        assert_eq!(FoliageCullUniforms::default()._pad, [0; 2]);
+        assert_eq!(FoliageCullUniforms::default()._pad, [0; 1]);
     }
 }
