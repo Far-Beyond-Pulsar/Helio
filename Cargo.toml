@@ -75,6 +75,7 @@ helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
 helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }
 helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
+helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
 
 [dependencies]
 tiny_http = "0.12"

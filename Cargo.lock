@@ -2301,6 +2301,7 @@ dependencies = [
  "helio-pass-postprocess",
  "helio-pass-sprite-batch",
  "helio-pass-sprite-cull",
+ "helio-pass-sprite-simulate",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",
@@ -3355,6 +3356,17 @@ dependencies = [
  "libhelio",
  "log",
  "pollster 0.4.0",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-sprite-simulate"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 

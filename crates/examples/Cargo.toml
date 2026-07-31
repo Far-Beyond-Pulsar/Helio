@@ -233,6 +233,7 @@ helio-core = { workspace = true }
 libhelio = { workspace = true }
 helio-pass-sprite-batch = { workspace = true }
 helio-pass-sprite-cull = { workspace = true }
+helio-pass-sprite-simulate = { workspace = true }
 helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
@@ -272,8 +273,8 @@ name = "sprite_stress_test"
 path = "sprite_stress_test.rs"
 
 [[bin]]
-name = "sprite_millions"
-path = "sprite_millions.rs"
+name = "sprite_10m_demo"
+path = "sprite_10m_demo.rs"
 
 [[bin]]
 name = "foliage_demo"
