@@ -90,7 +90,7 @@ pub struct RadiantTemplateRegistry {
 fn base_gbuffer_source() -> &'static str {
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../helio-pass-gbuffer/shaders/gbuffer.wgsl"
+        "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
     ))
 }
 
@@ -154,7 +154,7 @@ impl RadiantTemplateRegistry {
                 name: "default_pbr",
                 wgsl_source: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../helio-pass-gbuffer/shaders/gbuffer.wgsl"
+                    "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
                 )),
             },
         );

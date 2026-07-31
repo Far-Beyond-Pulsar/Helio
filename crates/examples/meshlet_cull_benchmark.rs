@@ -19,7 +19,7 @@ use libhelio::{
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 
-const CULL_SHADER: &str = include_str!("../helio-pass-virtual-geometry/shaders/vg_cull.wgsl");
+const CULL_SHADER: &str = include_str!("../passes/3d/helio-pass-virtual-geometry/shaders/vg_cull.wgsl");
 const DRAW_BENCH_SHADER: &str = r#"
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {

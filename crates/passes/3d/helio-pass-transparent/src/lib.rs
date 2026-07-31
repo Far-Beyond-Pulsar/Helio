@@ -148,7 +148,7 @@ impl TransparentPass {
         // NOT using RadiantTemplateRegistry::new() because that populates classes 0-4
         // with gbuffer templates that have incompatible bind group layouts.
         let mut reg = RadiantTemplateRegistry::new_empty();
-        let base_src = include_str!("../../helio/templates/transparent_base.wgsl");
+        let base_src = include_str!("../../../../helio/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
             let mut resolved = String::with_capacity(
                 base_src.len() + libhelio::shader::PBR_EVAL.len(),

@@ -7,6 +7,6 @@ description = "On-screen textual debug overlay (Minecraft F3-style) for Helio re
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
-helio-core = { path = "../helio-core" }
-libhelio = { path = "../libhelio" }
+helio-core = { path = "../../../helio-core" }
+libhelio = { path = "../../../libhelio" }
 wgpu = { workspace = true }
