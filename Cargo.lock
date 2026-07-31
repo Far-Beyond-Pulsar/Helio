@@ -2300,6 +2300,7 @@ dependencies = [
  "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
  "helio-pass-sprite-batch",
+ "helio-pass-sprite-cull",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",

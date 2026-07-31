@@ -1,6 +1,8 @@
 //! Sprite batch stress test — thousands of independently-moving, bouncing
-//! sprites ("bunnymark"-style), to exercise instance-buffer growth, the
-//! per-frame CPU cull/sort cost, and draw throughput at scale.
+//! sprites ("bunnymark"-style), to exercise the GPU cull/sort path
+//! (`SpriteCullPass` → `SpriteBatchPass`) and draw throughput at scale. All
+//! culling and depth sorting happens on the GPU; the CPU only re-uploads the
+//! moved sprites' instance bytes each frame.
 //!
 //! Every sprite gets a random position/velocity/tint and bounces inside a
 //! fixed 1280×720 world-space box (independent of window size, so resizing
@@ -9,14 +11,14 @@
 //! sprites move past each other — not just re-sorting an already-sorted list.
 //!
 //! `HELIO_SPRITE_STRESS_COUNT` overrides the sprite count (default 20000).
-//! Prints a rolling FPS average, plus pushed/drawn counts from the batch
-//! pass, once a second.
+//! Prints a rolling FPS average, plus the pool size, once a second.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
+use helio_pass_sprite_cull::SpriteCullPass;
 
 use winit::{
     application::ApplicationHandler,
@@ -199,6 +201,24 @@ impl ApplicationHandler for App {
         sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }));
         let dot_layer = sprite_pass.add_atlas_layer(&device, &queue, 8, 8, &make_dot_atlas());
         let sprites = spawn_sprites(count);
+
+        // GPU cull/sort pass, wired in *before* the batch pass it feeds. It
+        // binds the pool's instance/alive buffers once at construction, so
+        // `reserve()` must fix the pool size before any sprite is inserted.
+        // `max_visible = count` because every sprite can be on screen at once
+        // (the bounce area is exactly the view area).
+        sprite_pass.reserve(&device, count);
+        let mut sprite_cull = SpriteCullPass::new(
+            &device,
+            &queue,
+            sprite_pass.instances_buffer(),
+            sprite_pass.alive_buffer(),
+            count as u32,
+            count as u32,
+        );
+        sprite_cull.set_view_rect([0.0, 0.0], BOUNDS_HALF);
+        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+
         let sprite_handles: Vec<SpriteHandle> = sprites
             .iter()
             .map(|s| {
@@ -213,6 +233,7 @@ impl ApplicationHandler for App {
                 )
             })
             .collect();
+        graph.add_pass(Box::new(sprite_cull));
         graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
@@ -307,11 +328,12 @@ impl ApplicationHandler for App {
                 state.fps_frames += 1;
                 if state.fps_last_print.elapsed().as_secs_f32() >= 1.0 {
                     let elapsed = state.fps_last_print.elapsed().as_secs_f32();
+                    // The drawn count lives on the GPU now (cull pass) — the
+                    // CPU only knows how many sprites are in the pool.
                     log::info!(
-                        "[sprite_stress_test] {:.0} fps | pushed={} drawn={}",
+                        "[sprite_stress_test] {:.0} fps | pushed={}",
                         state.fps_frames as f32 / elapsed,
                         sprite_pass.sprite_count(),
-                        sprite_pass.visible_count(),
                     );
                     state.fps_frames = 0;
                     state.fps_last_print = Instant::now();

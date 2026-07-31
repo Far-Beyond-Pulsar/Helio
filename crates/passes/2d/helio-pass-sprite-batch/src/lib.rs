@@ -59,14 +59,14 @@ pub struct SpriteInstance {
     pub size: [f32; 2],
     /// Rotation about the sprite's own center, radians.
     pub rotation: f32,
-    /// CPU-side back-to-front sort key (larger draws later, i.e. on top).
-    /// Not a hardware depth value: alpha-blended sprites can't rely on a
-    /// depth test for correct compositing (blending is order-dependent
-    /// regardless of what a depth buffer says), so `prepare()` radix-sorts
-    /// the draw-order index list by this field instead of enabling
-    /// `DepthStencilState`. A common convention is "world Y" for a
-    /// top-down/2.5D look (larger Y = further back = drawn first), but any
-    /// scalar works.
+    /// Back-to-front sort key (larger draws later, i.e. on top). Not a
+    /// hardware depth value: alpha-blended sprites can't rely on a depth test
+    /// for correct compositing (blending is order-dependent regardless of
+    /// what a depth buffer says), so the paired GPU cull pass
+    /// (`helio-pass-sprite-cull`) radix-sorts the draw-order index list by
+    /// this field instead of enabling `DepthStencilState`. A common
+    /// convention is "world Y" for a top-down/2.5D look (larger Y = further
+    /// back = drawn first), but any scalar works.
     pub depth: f32,
     _pad_uv: [f32; 2],
     /// Atlas UV rectangle: `[u0, v0, u1, v1]`, each in `0..1`, within
@@ -119,12 +119,6 @@ impl SpriteInstance {
         self.atlas_layer = layer;
         self
     }
-
-    /// Conservative bounding-circle radius (half the quad's diagonal), used
-    /// for view-frustum culling. Covers the sprite at any rotation.
-    fn cull_radius(&self) -> f32 {
-        0.5 * (self.size[0] * self.size[0] + self.size[1] * self.size[1]).sqrt()
-    }
 }
 
 const INSTANCE_STRIDE: u64 = std::mem::size_of::<SpriteInstance>() as u64;
@@ -152,19 +146,6 @@ struct CameraUniform {
 }
 
 const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-
-/// Monotonic ascending-order-preserving `f32 -> u32` transform, standard for
-/// radix-sorting floats: flip the sign bit for positives, flip every bit for
-/// negatives. NaN depths are not meaningfully orderable and are not handled
-/// specially — don't feed them in.
-fn depth_to_radix_key(depth: f32) -> u32 {
-    let bits = depth.to_bits();
-    if bits & 0x8000_0000 != 0 {
-        !bits
-    } else {
-        bits | 0x8000_0000
-    }
-}
 
 /// GPU-instanced 2D sprite batch pass.
 ///
@@ -195,26 +176,21 @@ pub struct SpriteBatchPass {
 
     // ── Persistent, handle-addressed instance pool (delta-uploaded) ───────
     slots: Vec<SpriteInstance>,
-    slot_alive: Vec<bool>,
+    slot_alive: Vec<u32>,
     free_list: Vec<u32>,
     /// `[start, end)` slot range touched since the last upload, or `None` if
-    /// clean. `prepare()` uploads exactly this byte range and nothing else.
+    /// clean. `prepare()` uploads exactly this byte range (both instance data
+    /// and alive flags) and nothing else.
     dirty_range: Option<(usize, usize)>,
-    instances_buf: wgpu::Buffer,
+    instances_buf: Arc<wgpu::Buffer>,
     instances_capacity: usize,
+    /// Parallel `slot_alive` flags (0/1 per slot) mirrored on the GPU, read
+    /// by the paired cull pass.
+    alive_buf: Arc<wgpu::Buffer>,
+    alive_capacity: usize,
 
-    // ── Per-frame draw order (culled + radix-sorted slot indices) ─────────
-    /// Set whenever visibility-relevant state changes (sprite inserted/
-    /// updated/removed, camera moved, render target resized). Cleared once
-    /// `prepare()` has rebuilt and uploaded `draw_order_buf`.
-    index_dirty: bool,
-    draw_order_buf: wgpu::Buffer,
-    draw_order_capacity: usize,
-    visible_count: u32,
-    // Radix-sort scratch, reused every rebuild — no per-frame allocation.
-    radix_keys: Vec<u32>,
-    radix_a: Vec<u32>,
-    radix_b: Vec<u32>,
+    // ── GPU cull/sort wiring (provided by `helio-pass-sprite-cull`) ───────
+    gpu_culling: Option<GpuCulling>,
 
     camera_buf: wgpu::Buffer,
     camera_dirty: bool,
@@ -225,6 +201,16 @@ pub struct SpriteBatchPass {
     camera_half_extent: Option<[f32; 2]>,
     camera_center: [f32; 2],
     clear_color: Option<wgpu::Color>,
+}
+
+/// Outputs of a paired `helio-pass-sprite-cull` `SpriteCullPass`, wired in
+/// via [`SpriteBatchPass::use_gpu_culling`]. `draw_order_buf` is the GPU-sorted
+/// list of slot indices to draw; `indirect_buf` holds
+/// `DrawIndexedIndirectArgs` whose `instance_count` the cull pass writes every
+/// frame — the CPU never learns the visible count.
+struct GpuCulling {
+    draw_order_buf: Arc<wgpu::Buffer>,
+    indirect_buf: Arc<wgpu::Buffer>,
 }
 
 impl SpriteBatchPass {
@@ -353,18 +339,18 @@ impl SpriteBatchPass {
         });
 
         let initial_capacity = 256usize;
-        let instances_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let instances_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sprite Instance Storage"),
             size: INSTANCE_STRIDE * initial_capacity as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let draw_order_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Sprite Draw Order"),
+        }));
+        let alive_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite Alive Flags"),
             size: 4 * initial_capacity as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Sprite Atlas Sampler"),
@@ -413,13 +399,9 @@ impl SpriteBatchPass {
             dirty_range: None,
             instances_buf,
             instances_capacity: initial_capacity,
-            index_dirty: true,
-            draw_order_buf,
-            draw_order_capacity: initial_capacity,
-            visible_count: 0,
-            radix_keys: Vec::new(),
-            radix_a: Vec::new(),
-            radix_b: Vec::new(),
+            alive_buf,
+            alive_capacity: initial_capacity,
+            gpu_culling: None,
             camera_buf,
             camera_dirty: true,
             last_width: 0,
@@ -443,15 +425,14 @@ impl SpriteBatchPass {
     pub fn insert_sprite(&mut self, instance: SpriteInstance) -> SpriteHandle {
         let slot = if let Some(free) = self.free_list.pop() {
             self.slots[free as usize] = instance;
-            self.slot_alive[free as usize] = true;
+            self.slot_alive[free as usize] = 1;
             free
         } else {
             self.slots.push(instance);
-            self.slot_alive.push(true);
+            self.slot_alive.push(1);
             (self.slots.len() - 1) as u32
         };
         self.mark_data_dirty(slot as usize);
-        self.index_dirty = true;
         SpriteHandle(slot)
     }
 
@@ -461,17 +442,18 @@ impl SpriteBatchPass {
         let slot = handle.0 as usize;
         self.slots[slot] = instance;
         self.mark_data_dirty(slot);
-        self.index_dirty = true;
     }
 
-    /// Frees a sprite's slot for reuse. Its stale GPU bytes are never read
-    /// again (excluded from `draw_order` on the next rebuild), so this does
-    /// not need to touch the instance data buffer — only the draw order.
+    /// Frees a sprite's slot for reuse. Its GPU instance bytes are stale but
+    /// never read again (the cull pass skips slots whose alive flag is 0, and
+    /// the slot is handed out to the next `insert_sprite`), so the only byte
+    /// that must be re-uploaded is the alive flag itself.
     pub fn remove_sprite(&mut self, handle: SpriteHandle) {
         let slot = handle.0 as usize;
-        if std::mem::replace(&mut self.slot_alive[slot], false) {
+        if self.slot_alive[slot] != 0 {
+            self.slot_alive[slot] = 0;
             self.free_list.push(handle.0);
-            self.index_dirty = true;
+            self.mark_data_dirty(slot);
         }
     }
 
@@ -579,7 +561,11 @@ impl SpriteBatchPass {
     /// `D2Array` view (e.g. loaded via a dedicated atlas-packing tool).
     /// `view`/`sampler` must outlive every subsequent `execute()` call until
     /// the next `set_atlas_array`/`add_atlas_layer`.
+    ///
+    /// The bind group is only valid once the pass can draw, so GPU culling
+    /// must be wired via [`use_gpu_culling`](Self::use_gpu_culling) first.
     pub fn set_atlas_array(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) {
+        let gpu = self.gpu_culling.as_ref().expect("set_atlas_array: call use_gpu_culling() first");
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Batch BG"),
             layout: &self.bgl,
@@ -588,7 +574,7 @@ impl SpriteBatchPass {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: self.instances_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.draw_order_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: gpu.draw_order_buf.as_entire_binding() },
             ],
         }));
     }
@@ -600,7 +586,6 @@ impl SpriteBatchPass {
         self.camera_center = center;
         self.camera_half_extent = half_extent;
         self.camera_dirty = true;
-        self.index_dirty = true;
     }
 
     /// `None` disables the clear (loads the existing target contents);
@@ -609,68 +594,63 @@ impl SpriteBatchPass {
         self.clear_color = color;
     }
 
+    /// Pre-sizes the instance pool's GPU buffers (instance data + alive
+    /// flags) to `capacity` slots. The paired cull pass binds these buffers
+    /// once at construction and can't follow reallocations, so call this
+    /// *before* inserting all the sprites the pool will ever hold, and before
+    /// wiring [`use_gpu_culling`](Self::use_gpu_culling). Inserting more
+    /// sprites than a reserved capacity once culling is wired panics in
+    /// `prepare()`.
+    pub fn reserve(&mut self, device: &wgpu::Device, capacity: usize) {
+        if capacity <= self.instances_capacity && capacity <= self.alive_capacity {
+            return;
+        }
+        self.instances_capacity = capacity.max(self.instances_capacity);
+        self.alive_capacity = capacity.max(self.alive_capacity);
+        self.instances_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite Instance Storage"),
+            size: INSTANCE_STRIDE * self.instances_capacity as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.alive_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite Alive Flags"),
+            size: 4 * self.alive_capacity as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.bind_group = None;
+        self.dirty_range = (!self.slots.is_empty()).then_some((0, self.slots.len()));
+    }
+
+    /// The instance-data storage buffer, for handing to
+    /// `helio-pass-sprite-cull`'s `SpriteCullPass::new` before wiring its
+    /// outputs in via [`use_gpu_culling`](Self::use_gpu_culling).
+    pub fn instances_buffer(&self) -> Arc<wgpu::Buffer> {
+        self.instances_buf.clone()
+    }
+
+    /// The parallel alive-flags storage buffer (`u32` per slot, 1 = alive),
+    /// for handing to `helio-pass-sprite-cull`'s `SpriteCullPass::new`.
+    pub fn alive_buffer(&self) -> Arc<wgpu::Buffer> {
+        self.alive_buf.clone()
+    }
+
+    /// Hands the pass the cull/sort pass's outputs: a `draw_order_buf`
+    /// (GPU-written, radix-sorted slot indices) and an `indirect_buf`
+    /// (`DrawIndexedIndirectArgs` whose `instance_count` the cull pass writes
+    /// each frame). After this, `prepare()` no longer does any CPU culling or
+    /// sorting and `execute()` issues a single `draw_indexed_indirect` — the
+    /// CPU never learns the visible count.
+    pub fn use_gpu_culling(&mut self, draw_order_buf: Arc<wgpu::Buffer>, indirect_buf: Arc<wgpu::Buffer>) {
+        self.gpu_culling = Some(GpuCulling { draw_order_buf, indirect_buf });
+        self.bind_group = None;
+    }
+
     /// Sprites currently alive in the pool (inserted, not yet removed).
     pub fn sprite_count(&self) -> usize {
         self.slots.len() - self.free_list.len()
     }
-
-    /// Sprites that survived culling and were actually drawn last `prepare()`.
-    pub fn visible_count(&self) -> usize {
-        self.visible_count as usize
-    }
-
-}
-
-/// 4-pass LSD radix sort (stable, `O(n)`): sorts `a[..count]` ascending by
-/// `keys[a[i]]`, using `b[..count]` as ping-pong scratch. `a`/`b` are meant
-/// to be reused across calls (e.g. `SpriteBatchPass::radix_a`/`radix_b`) —
-/// no allocation here once both are warmed up to `count` capacity.
-fn radix_sort_indices(a: &mut Vec<u32>, b: &mut Vec<u32>, keys: &[u32], count: usize) {
-    if count <= 1 {
-        return;
-    }
-    b.clear();
-    b.resize(count, 0);
-
-    let mut src_is_a = true;
-    for pass in 0..4u32 {
-        let shift = pass * 8;
-        let mut counts = [0u32; 257];
-        if src_is_a {
-            for &idx in &a[..count] {
-                let bucket = ((keys[idx as usize] >> shift) & 0xFF) as usize;
-                counts[bucket + 1] += 1;
-            }
-        } else {
-            for &idx in &b[..count] {
-                let bucket = ((keys[idx as usize] >> shift) & 0xFF) as usize;
-                counts[bucket + 1] += 1;
-            }
-        }
-        for i in 0..256 {
-            counts[i + 1] += counts[i];
-        }
-        if src_is_a {
-            let (src, dst) = (&a[..count], &mut b[..count]);
-            for &idx in src {
-                let bucket = ((keys[idx as usize] >> shift) & 0xFF) as usize;
-                dst[counts[bucket] as usize] = idx;
-                counts[bucket] += 1;
-            }
-        } else {
-            let (src, dst) = (&b[..count], &mut a[..count]);
-            for &idx in src {
-                let bucket = ((keys[idx as usize] >> shift) & 0xFF) as usize;
-                dst[counts[bucket] as usize] = idx;
-                counts[bucket] += 1;
-            }
-        }
-        src_is_a = !src_is_a;
-    }
-    // 4 (even) passes: the final write always lands back in `a` — each pass
-    // writes into whichever buffer is *not* `src`, and `src` alternates
-    // a,b,a,b, so the 4th (last) write targets `a`.
-    debug_assert!(src_is_a);
 }
 
 fn create_atlas_array_texture(device: &wgpu::Device, width: u32, height: u32, layers: u32) -> wgpu::Texture {
@@ -697,7 +677,7 @@ impl RenderPass for SpriteBatchPass {
         _depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        // 2D sprites are alpha-blended and CPU-sorted (see `SpriteInstance::depth`)
+        // 2D sprites are alpha-blended and GPU-sorted (see `SpriteInstance::depth`)
         // — no depth attachment. `Box::leak` here matches the convention used by
         // every other executor-managed pass: the descriptor only needs to live
         // for this frame's `execute()` call, and the executor drops it before
@@ -728,9 +708,6 @@ impl RenderPass for SpriteBatchPass {
             self.last_width = ctx.width;
             self.last_height = ctx.height;
             self.camera_dirty = true;
-            // A `None` half_extent derives the view rect from the render
-            // target size, so a resize can change what's visible.
-            self.index_dirty = true;
         }
 
         if self.camera_dirty {
@@ -744,15 +721,31 @@ impl RenderPass for SpriteBatchPass {
             ctx.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
         }
 
-        // ── Delta-upload instance data ─────────────────────────────────────
+        // ── Delta-upload instance + alive-flag data ────────────────────────
+        // No CPU culling or sorting happens here (or anywhere) — the paired
+        // `SpriteCullPass` does that on the GPU from these two buffers.
         if self.slots.len() > self.instances_capacity {
+            if self.gpu_culling.is_some() {
+                panic!(
+                    "SpriteBatchPass: pool grew to {} sprites but GPU-culling buffers are reserved for {} slots. \
+                     Insert all sprites and call `reserve()` before `use_gpu_culling()` (or reserve more)",
+                    self.slots.len(),
+                    self.instances_capacity
+                );
+            }
             self.instances_capacity = (self.slots.len() * 2).max(self.instances_capacity * 2);
-            self.instances_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            self.instances_buf = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Sprite Instance Storage"),
                 size: INSTANCE_STRIDE * self.instances_capacity as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            });
+            }));
+            self.alive_buf = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Sprite Alive Flags"),
+                size: 4 * self.instances_capacity as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
             self.bind_group = None; // buffer identity changed
             self.dirty_range = (!self.slots.is_empty()).then_some((0, self.slots.len()));
         }
@@ -762,69 +755,20 @@ impl RenderPass for SpriteBatchPass {
                 start as u64 * INSTANCE_STRIDE,
                 bytemuck::cast_slice(&self.slots[start..end]),
             );
-        }
-
-        // ── Rebuild + upload draw order, only if something visibility-
-        //    relevant changed since the last frame ─────────────────────────
-        if self.index_dirty {
-            self.index_dirty = false;
-
-            let half_extent = self.camera_half_extent.unwrap_or([ctx.width as f32 * 0.5, ctx.height as f32 * 0.5]);
-            let [cx, cy] = self.camera_center;
-            let [hx, hy] = half_extent;
-            let view_min = [cx - hx, cy - hy];
-            let view_max = [cx + hx, cy + hy];
-
-            // Circle-vs-AABB: clamp the sprite's center into the view rect,
-            // then compare the distance to that clamped point against the
-            // sprite's bounding radius. Conservative (uses the quad's full
-            // diagonal, so a rotated sprite is never culled early).
-            self.radix_keys.clear();
-            self.radix_keys.resize(self.slots.len(), 0);
-            self.radix_a.clear();
-            for (i, inst) in self.slots.iter().enumerate() {
-                if !self.slot_alive[i] {
-                    continue;
-                }
-                let clamped = [
-                    inst.position[0].clamp(view_min[0], view_max[0]),
-                    inst.position[1].clamp(view_min[1], view_max[1]),
-                ];
-                let dx = inst.position[0] - clamped[0];
-                let dy = inst.position[1] - clamped[1];
-                if (dx * dx + dy * dy).sqrt() > inst.cull_radius() {
-                    continue;
-                }
-                self.radix_keys[i] = depth_to_radix_key(inst.depth);
-                self.radix_a.push(i as u32);
-            }
-
-            let count = self.radix_a.len();
-            radix_sort_indices(&mut self.radix_a, &mut self.radix_b, &self.radix_keys, count);
-            self.visible_count = count as u32;
-
-            if count > self.draw_order_capacity {
-                self.draw_order_capacity = (count * 2).max(self.draw_order_capacity * 2).max(1);
-                self.draw_order_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Sprite Draw Order"),
-                    size: 4 * self.draw_order_capacity as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.bind_group = None;
-            }
-            if count > 0 {
-                ctx.write_buffer(&self.draw_order_buf, 0, bytemuck::cast_slice(&self.radix_a[..count]));
-            }
+            ctx.write_buffer(
+                &self.alive_buf,
+                start as u64 * 4,
+                bytemuck::cast_slice(&self.slot_alive[start..end]),
+            );
         }
 
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        if self.visible_count == 0 {
+        let Some(gpu) = self.gpu_culling.as_ref() else {
             return Ok(());
-        }
+        };
 
         if self.bind_group.is_none() {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -835,7 +779,7 @@ impl RenderPass for SpriteBatchPass {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.atlas_view) },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     wgpu::BindGroupEntry { binding: 3, resource: self.instances_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: self.draw_order_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: gpu.draw_order_buf.as_entire_binding() },
                 ],
             }));
         }
@@ -848,57 +792,8 @@ impl RenderPass for SpriteBatchPass {
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
         rp.set_index_buffer(self.quad_index_buf.slice(..), wgpu::IndexFormat::Uint16);
-        rp.draw_indexed(0..6, 0, 0..self.visible_count);
+        rp.draw_indexed_indirect(&gpu.indirect_buf, 0);
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn radix_key_preserves_float_order() {
-        let mut values = [-100.0f32, -1.0, -0.001, 0.0, 0.001, 1.0, 100.0, f32::MIN, f32::MAX];
-        let sorted_by_key = {
-            let mut v = values;
-            v.sort_by_key(|f| depth_to_radix_key(*f));
-            v
-        };
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(values, sorted_by_key);
-    }
-
-    #[test]
-    fn radix_sort_matches_stable_comparison_sort() {
-        let depths = [3.0f32, -1.0, 0.0, 2.5, -2.5, 0.0, 1.0, -1.0, 5.0, -5.0];
-        let keys: Vec<u32> = depths.iter().map(|d| depth_to_radix_key(*d)).collect();
-        let mut a: Vec<u32> = (0..depths.len() as u32).collect();
-        let mut b: Vec<u32> = Vec::new();
-        radix_sort_indices(&mut a, &mut b, &keys, depths.len());
-
-        let expected: Vec<u32> = {
-            let mut idx: Vec<u32> = (0..depths.len() as u32).collect();
-            // `sort_by` is stable, matching what a correct radix sort must
-            // also do for the tied `0.0` / `-1.0` entries above.
-            idx.sort_by(|&x, &y| depths[x as usize].partial_cmp(&depths[y as usize]).unwrap());
-            idx
-        };
-        assert_eq!(a, expected);
-    }
-
-    #[test]
-    fn radix_sort_handles_empty_and_singleton() {
-        let keys: Vec<u32> = vec![];
-        let mut a: Vec<u32> = vec![];
-        let mut b: Vec<u32> = vec![];
-        radix_sort_indices(&mut a, &mut b, &keys, 0); // must not panic
-
-        let keys = vec![depth_to_radix_key(1.0)];
-        let mut a = vec![0u32];
-        let mut b = vec![];
-        radix_sort_indices(&mut a, &mut b, &keys, 1);
-        assert_eq!(a, vec![0]);
     }
 }

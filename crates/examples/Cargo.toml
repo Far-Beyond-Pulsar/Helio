@@ -232,6 +232,7 @@ helio = { workspace = true, features = ["bake"] }
 helio-core = { workspace = true }
 libhelio = { workspace = true }
 helio-pass-sprite-batch = { workspace = true }
+helio-pass-sprite-cull = { workspace = true }
 helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }

@@ -2,29 +2,31 @@
 //!
 //! Deliberately bypasses `helio::Renderer`/`Scene` — those are 3D-specific
 //! (see `helio-pass-sprite-batch`'s module docs) — and drives
-//! `helio_core::RenderGraph` directly against a single `SpriteBatchPass`,
+//! `helio_core::RenderGraph` directly against a `SpriteCullPass`
+//! (GPU cull + radix sort) feeding a single `SpriteBatchPass`,
 //! proving out the independent 2D render-graph path end to end: its own
 //! device/window setup, its own orthographic camera, no 3D scene graph.
 //!
-//! Exercises every feature of the pass:
+//! Exercises every feature of the passes:
 //! - A ring of spinning, color-cycled sprites alternating between two atlas
 //!   layers (a filled disc and a ring), proving the texture-array atlas.
 //!   Animated every frame via `update_sprite` on stable handles created once
 //!   in `resumed()` — not a per-frame clear-and-rebuild.
 //! - A stack of overlapping, differently-tinted, semi-transparent sprites at
-//!   the center with different `depth` values, proving the radix-sorted
+//!   the center with different `depth` values, proving the GPU radix-sorted
 //!   back-to-front draw order (wrong order would show through-blending in
 //!   the wrong sequence).
 //! - A field of off-screen decoy sprites outside the camera's view rect,
-//!   inserted *once* and never updated again — proving both view-frustum
-//!   culling and delta upload (logged once per second: pushed vs. drawn;
-//!   after the first frame, the decoys' bytes are never re-uploaded).
+//!   inserted *once* and never updated again — proving view-frustum culling
+//!   runs on the GPU (`SpriteCullPass`) and that the decoys' instance bytes
+//!   are never re-uploaded after frame one.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
+use helio_pass_sprite_cull::SpriteCullPass;
 
 use winit::{
     application::ApplicationHandler,
@@ -170,11 +172,31 @@ impl ApplicationHandler for App {
         let disc_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_disc_atlas());
         let ring_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_ring_atlas());
 
+        // GPU cull/sort pass, wired in *before* the batch pass it feeds. It
+        // binds the pool's instance/alive buffers once at construction, so
+        // `reserve()` must fix the pool size before any sprite is inserted.
+        // `max_visible` covers the worst case where every sprite is on screen
+        // at once (a cheap upper bound: the whole pool).
+        let pool_size = RING_COUNT + STACK_TINTS.len() + DECOY_COUNT;
+        sprite_pass.reserve(&device, pool_size);
+        let mut sprite_cull = SpriteCullPass::new(
+            &device,
+            &queue,
+            sprite_pass.instances_buffer(),
+            sprite_pass.alive_buffer(),
+            pool_size as u32,
+            pool_size as u32,
+        );
+        // Default camera (center [0,0], half-extent derived from the render
+        // target size) — so the cull pass's view rect must track the window.
+        sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5, size.height as f32 * 0.5]);
+        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+
         // Ring + stack get stable handles because `RedrawRequested` animates
         // them via `update_sprite` every frame. The 200 decoys are inserted
         // once and never touched again — after frame one their instance
-        // bytes are never re-uploaded, only re-considered by the (cheap,
-        // O(n)) per-frame cull/sort whenever something *else* changes.
+        // bytes are never re-uploaded, only re-considered by the GPU cull
+        // pass's per-frame dispatch.
         let ring_handles: Vec<SpriteHandle> = (0..RING_COUNT)
             .map(|i| {
                 let layer = if i % 2 == 0 { disc_layer } else { ring_layer };
@@ -200,6 +222,7 @@ impl ApplicationHandler for App {
             sprite_pass.insert_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
         }
 
+        graph.add_pass(Box::new(sprite_cull));
         graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
@@ -254,6 +277,13 @@ impl ApplicationHandler for App {
                     },
                 );
                 state.graph.set_render_size(s.width, s.height);
+                // The default camera derives its view from the render target
+                // size, so the cull pass's view rect must track it too.
+                state
+                    .graph
+                    .find_pass_mut::<SpriteCullPass>()
+                    .expect("sprite cull pass missing from graph")
+                    .set_view_rect([0.0, 0.0], [s.width as f32 * 0.5, s.height as f32 * 0.5]);
             }
             WindowEvent::RedrawRequested => {
                 let time = state.start_time.elapsed().as_secs_f32();
@@ -311,12 +341,9 @@ impl ApplicationHandler for App {
 
                 if state.last_stats_log.elapsed().as_secs_f32() >= 1.0 {
                     state.last_stats_log = std::time::Instant::now();
-                    log::info!(
-                        "[sprite_demo] pushed={} drawn={} (culling removed {})",
-                        sprite.sprite_count(),
-                        sprite.visible_count(),
-                        sprite.sprite_count() - sprite.visible_count()
-                    );
+                    // The visible/drawn count lives on the GPU now — the CPU
+                    // only knows how many sprites are in the pool.
+                    log::info!("[sprite_demo] pushed={}", sprite.sprite_count());
                 }
 
                 let output = match state.surface.get_current_texture() {
