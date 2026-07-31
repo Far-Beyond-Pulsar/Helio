@@ -208,6 +208,7 @@ impl Renderer {
             graph_rebuilder,
             template_registry: RadiantTemplateRegistry::new(),
             transparent_template_registry: RadiantTemplateRegistry::new(),
+            render_mode: config.render_mode,
         }
     }
 

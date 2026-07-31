@@ -42,6 +42,9 @@ pub struct ForwardLitPass {
     bind_group_1_version: Option<u64>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
+    /// When true, renders from `material_class_ranges` (all opaque draws)
+    /// instead of `forward_material_class_ranges` (only FLAG_FORWARD_SHADING).
+    pub render_all_opaque: bool,
 }
 
 impl ForwardLitPass {
@@ -155,6 +158,7 @@ impl ForwardLitPass {
             bind_group_1_version: None,
             globals_buf,
             surface_format,
+            render_all_opaque: false,
         }
     }
 
@@ -498,7 +502,11 @@ impl RenderPass for ForwardLitPass {
             }
         }
 
-        let ranges = ctx.scene.forward_material_class_ranges;
+        let ranges = if self.render_all_opaque {
+            ctx.scene.material_class_ranges
+        } else {
+            ctx.scene.forward_material_class_ranges
+        };
         if ranges.is_empty() {
             let key = RadiantShaderKey {
                 template_id: 0,
