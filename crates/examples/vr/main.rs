@@ -301,6 +301,7 @@ impl ApplicationHandler for App {
         };
         let device_arc = Arc::clone(&device);
         device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            let _ = &device_arc;
             log::error!("[GPU UNCAPTURED ERROR] {e:?}");
         }));
 
@@ -403,7 +404,13 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 state.configure_surface(size.width, size.height);
-                state.renderer.set_render_size(size.width, size.height);
+                // In XR mode the graph resolution is fixed by the headset's eye
+                // buffer; resizing the mirror window must not rebuild the graph
+                // at the window's resolution (that destroys resources cached in
+                // pass bind groups and breaks the XR composite).
+                if !state.xr_active {
+                    state.renderer.set_render_size(size.width, size.height);
+                }
             }
 
             WindowEvent::KeyboardInput {

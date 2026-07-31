@@ -59,7 +59,7 @@ impl Renderer {
         device: &wgpu::Device,
         width: u32,
         height: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Helio XR Depth Texture"),
             size: wgpu::Extent3d {
@@ -75,6 +75,8 @@ impl Renderer {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        // Array view: the depth-stencil attachment for the multiview render
+        // passes (multiview_mask = 0b11 writes both eye layers).
         let view = texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("Helio XR Depth View"),
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -82,7 +84,17 @@ impl Renderer {
             array_layer_count: Some(2),
             ..Default::default()
         });
-        (texture, view)
+        // Layer-0 D2 view: for passes that *sample* the rendered depth as a
+        // plain `texture_depth_2d` (HiZ, lens flare, ...). A D2Array view
+        // cannot be bound to a D2 bind-group entry.
+        let layer0_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Helio XR Depth Layer0 View"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        (texture, view, layer0_view)
     }
 
     pub fn new(
@@ -132,14 +144,14 @@ impl Renderer {
         // single-layer because passes that *sample* scene depth (e.g.
         // VolumetricFogPass) bind it as a plain `texture_depth_2d`.
         #[cfg(not(target_arch = "wasm32"))]
-        let (xr_depth_texture, xr_depth_view) = if config.enable_xr {
-            let (t, v) = Self::create_xr_depth_resources(&device, internal_w, internal_h);
-            (Some(t), Some(v))
+        let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = if config.enable_xr {
+            let (t, v, l0) = Self::create_xr_depth_resources(&device, internal_w, internal_h);
+            (Some(t), Some(v), Some(l0))
         } else {
-            (None, None)
+            (None, None, None)
         };
         #[cfg(target_arch = "wasm32")]
-        let (xr_depth_texture, xr_depth_view) = (None, None);
+        let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
         let water_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water Volumes Buffer"),
@@ -271,6 +283,10 @@ impl Renderer {
             xr_depth_texture,
             #[cfg(not(target_arch = "wasm32"))]
             xr_depth_view,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_depth_view_layer0,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_idle_skips: 0,
             #[cfg(not(target_arch = "wasm32"))]
             xr_camera: None,
         }

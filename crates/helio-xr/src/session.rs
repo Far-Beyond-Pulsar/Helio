@@ -52,6 +52,11 @@ pub struct XrSession {
     pub session_state: openxr::SessionState,
     /// Whether the last `wait_frame` said to render.
     pub should_render: bool,
+    /// True once `xrBeginSession` has been accepted. The runtime transitions
+    /// through SYNCHRONIZED/VISIBLE/FOCUSED in response to the app running its
+    /// frame loop, so the renderer must start calling `wait_frame` as soon as
+    /// this is set rather than waiting for FOCUSED.
+    pub session_begun: bool,
 }
 
 impl XrSession {
@@ -117,6 +122,7 @@ impl XrSession {
             height,
             session_state: openxr::SessionState::UNKNOWN,
             should_render: false,
+            session_begun: false,
         })
     }
 
@@ -139,7 +145,16 @@ impl XrSession {
                     self.session_state = state;
                     match state {
                         openxr::SessionState::READY => {
-                            let _ = self.session.begin(self.view_config);
+                            log::info!("[XR] session READY — beginning session");
+                            match self.session.begin(self.view_config) {
+                                Ok(_) => {
+                                    self.session_begun = true;
+                                    log::info!("[XR] session begun (waiting for SYNCHRONIZED/VISIBLE/FOCUSED)");
+                                }
+                                Err(e) => {
+                                    log::error!("[XR] session begin failed: {e}");
+                                }
+                            }
                             return Ok(Some(SessionEvent::Ready));
                         }
                         openxr::SessionState::FOCUSED => {

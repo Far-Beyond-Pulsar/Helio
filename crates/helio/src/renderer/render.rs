@@ -434,6 +434,18 @@ impl Renderer {
             frame_resources.ies_textures.write(ies, "Renderer");
         }
         frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
+        #[cfg(not(target_arch = "wasm32"))]
+        let depth_sampler_view: &wgpu::TextureView = if multiview {
+            self.xr_depth_view_layer0
+                .as_ref()
+                .map(|v| v as &wgpu::TextureView)
+                .unwrap_or(&self.depth_view)
+        } else {
+            &self.depth_view
+        };
+        #[cfg(target_arch = "wasm32")]
+        let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
+        frame_resources.depth_sampler_view.write(depth_sampler_view, "Renderer");
         if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
             frame_resources.full_res_depth.write(v, "Renderer");
         }
@@ -587,8 +599,12 @@ impl Renderer {
         self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
         self.graph.set_delta_time(dt);
 
-        // 1–3. Pump session events, wait for compositor readiness, begin frame.
-        let display_time = {
+        // ── 1. Pump session events, drive the state machine, and run the frame
+        // ──    lifecycle. Per the OpenXR frame-submission rules, EVERY
+        // ──    xrWaitFrame must be paired with xrBeginFrame, and every frame
+        // ──    (render or not) must be ended with xrEndFrame. Skipping
+        // ──    xrBeginFrame causes the next xrWaitFrame to block forever.
+        let (display_time, should_render) = {
             let session = self.xr.as_mut().ok_or_else(|| {
                 invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
             })?;
@@ -608,23 +624,51 @@ impl Renderer {
             if exit {
                 return Ok(());
             }
-            // Only render while the runtime asks us to (focused/visible).
-            if !matches!(
-                session.session_state,
-                openxr::SessionState::FOCUSED | openxr::SessionState::VISIBLE
-            ) {
+            if !session.session_begun {
+                // xrBeginSession not yet accepted; keep polling events.
+                self.xr_idle_skips = self.xr_idle_skips.wrapping_add(1);
+                if self.xr_idle_skips % 60 == 0 {
+                    log::info!(
+                        "[XR] session not begun yet (state = {:?})",
+                        session.session_state
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
                 return Ok(());
             }
             let frame_state = session.wait_frame().map_err(xr_error)?;
-            if !frame_state.should_render {
-                return Ok(());
-            }
             session.begin_frame().map_err(xr_error)?;
-            frame_state.predicted_display_time
+            (frame_state.predicted_display_time, frame_state.should_render)
         };
 
-        // 4. Locate the per-eye views. `world_from_stage` is identity: the
-        // headset's stage origin maps 1:1 onto the engine world origin.
+        // ── 2. Not rendering this frame (runtime in SYNCHRONIZED or similar):
+        // ──    still END the frame with an empty layer list so the compositor
+        // ──    advances and the session can transition to VISIBLE/FOCUSED.
+        if !should_render {
+            {
+                let session = self.xr.as_mut().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+                })?;
+                let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                })?;
+                session
+                    .end_frame(display_time, swapchain, &[])
+                    .map_err(xr_error)?;
+            }
+            self.xr_idle_skips = self.xr_idle_skips.wrapping_add(1);
+            if self.xr_idle_skips % 60 == 0 {
+                log::info!(
+                    "[XR] submitted empty frame (should_render = false, state = {:?})",
+                    self.xr.as_ref().map(|s| s.session_state)
+                );
+            }
+            return Ok(());
+        }
+        self.xr_idle_skips = 0;
+
+        // ── 3. Locate the per-eye views. `world_from_stage` is identity: the
+        // ──    headset's stage origin maps 1:1 onto the engine world origin.
         let located = {
             let session = self.xr.as_ref().ok_or_else(|| {
                 invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
@@ -667,7 +711,7 @@ impl Renderer {
             ),
         };
 
-        // 5. Upload the stereo camera + all scene buffers.
+        // ── 4. Upload the stereo camera + all scene buffers.
         if let (Some(left), Some(right)) = (left_pose, right_pose) {
             let [left_uniform, right_uniform] =
                 helio_xr::xr_view_to_camera(&left, &right, near, far);
@@ -695,7 +739,7 @@ impl Renderer {
                 bytemuck::bytes_of(&debug_camera_uniform),
             );
 
-            // 6. Acquire the swapchain image and render both eyes.
+            // ── 5. Acquire the swapchain image and render both eyes.
             let image_index = {
                 let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
                     invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
@@ -711,9 +755,9 @@ impl Renderer {
             self.submit_frame(&representative, &xr_view, true)?;
         }
 
-        // 7. Present the rendered image and end the OpenXR frame. `located.views`
-        // are the raw stage-space views `end_frame` needs to anchor the
-        // projection layer.
+        // ── 6. Present the rendered image and end the OpenXR frame.
+        // ──    `located.views` are the raw stage-space views `end_frame` needs
+        // ──    to anchor the projection layer.
         {
             let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
                 invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")

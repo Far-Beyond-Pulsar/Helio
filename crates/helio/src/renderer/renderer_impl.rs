@@ -183,6 +183,13 @@ pub struct Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) xr_depth_view: Option<wgpu::TextureView>,
     #[cfg(not(target_arch = "wasm32"))]
+    /// Layer-0 `D2` view of `xr_depth_texture` for depth-sampling passes.
+    pub(crate) xr_depth_view_layer0: Option<wgpu::TextureView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Consecutive frames skipped because the session was not focused/visible or
+    /// the runtime asked us not to render. Used to rate-limit diagnostic logs.
+    pub(crate) xr_idle_skips: u64,
+    #[cfg(not(target_arch = "wasm32"))]
     /// Application-provided camera template for XR frames: supplies
     /// `postprocess_settings`, near/far and the representative position used
     /// for RC bounds and the debug state. The per-eye view/proj are overridden

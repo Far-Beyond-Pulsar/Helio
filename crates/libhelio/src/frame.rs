@@ -282,6 +282,15 @@ pub struct FrameResources<'a> {
 
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Tracked<&'a wgpu::Texture>,
+    /// Single-layer `D2` view of the *render-target* depth for sampling passes.
+    ///
+    /// In multiview (XR) mode the render passes write depth into a 2-layer
+    /// array and the depth-stencil attachment (`ctx.depth`) is a `D2Array`
+    /// view, which cannot be bound to `texture_depth_2d` / `D2` bind group
+    /// entries. This field carries a layer-0 `D2` view of the same texture so
+    /// HiZ, lens flare etc. can sample the depth that was actually rendered.
+    /// On desktop it is simply the plain depth view.
+    pub depth_sampler_view: Tracked<&'a wgpu::TextureView>,
 
     // ── Pre-baked data (populated by BakeInjectPass when baking is enabled) ──
 
@@ -477,6 +486,7 @@ impl<'a> FrameResources<'a> {
             water_hitboxes: Tracked::empty(),
             water_hitbox_count: 0,
             depth_texture: Tracked::empty(),
+            depth_sampler_view: Tracked::empty(),
             rc_view: Tracked::empty(),
             baked_ao: Tracked::empty(),
             baked_ao_sampler: Tracked::empty(),
@@ -548,6 +558,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(water_sim_sampler);
             reset_field!(water_hitboxes);
             reset_field!(depth_texture);
+            reset_field!(depth_sampler_view);
             reset_field!(rc_view);
             reset_field!(baked_ao);
             reset_field!(baked_ao_sampler);

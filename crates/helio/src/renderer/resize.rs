@@ -54,9 +54,10 @@ impl Renderer {
         // headset-less rebuild can't leave it stale).
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_xr {
-            let (t, v) = Self::create_xr_depth_resources(&self.device, internal_w, internal_h);
+            let (t, v, l0) = Self::create_xr_depth_resources(&self.device, internal_w, internal_h);
             self.xr_depth_texture = Some(t);
             self.xr_depth_view = Some(v);
+            self.xr_depth_view_layer0 = Some(l0);
         }
 
         self.clear_target_next_frame = true;
