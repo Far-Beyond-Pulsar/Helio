@@ -299,6 +299,61 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     return s;
 }
 
+fn pbr_direct_light(
+    light:     GpuLight,
+    world_pos: vec3<f32>,
+    N:         vec3<f32>,
+    V:         vec3<f32>,
+    F0:        vec3<f32>,
+    albedo:    vec3<f32>,
+    roughness: f32,
+    metallic:  f32,
+    sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
+) -> vec3<f32> {
+    var L:        vec3<f32>;
+    var radiance: vec3<f32>;
+
+    if light.light_type == 0u {
+        L        = normalize(-light.direction_outer.xyz);
+        radiance = light.color_intensity.xyz * light.color_intensity.w;
+    } else {
+        let to_light = light.position_range.xyz - world_pos;
+        let dist     = length(to_light);
+        if dist > light.position_range.w { return vec3<f32>(0.0); }
+        L = to_light / dist;
+        var atten = 1.0 / (dist * dist + 0.0001);
+        let normalized_dist = dist / light.position_range.w;
+        atten *= max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
+        if light.light_type == 2u {
+            let cos_a = dot(-L, light.direction_outer.xyz);
+            atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
+        }
+        radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
+    }
+
+    let NdL = max(dot(N, L), 0.0);
+    if NdL == 0.0 { return vec3<f32>(0.0); }
+
+    let H = normalize(V + L);
+    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let kD = (1.0 - F) * (1.0 - metallic);
+    let NdV = max(dot(N, V), 0.0);
+
+    var D = distribution_ggx(N, H, roughness);
+    var G = geometry_smith(N, V, L, roughness);
+
+    let specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    let diffuse_term = kD * albedo / PI;
+
+    return (diffuse_term + specular) * radiance * NdL;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let material = materials[input.material_id];

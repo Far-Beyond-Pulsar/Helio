@@ -142,8 +142,25 @@ impl ForwardLitPass {
         });
 
         let mut reg = RadiantTemplateRegistry::new_empty();
-        let base_src = include_str!("../shaders/forward_lit.wgsl");
-        reg.override_class(0, "forward_lit", base_src);
+        let base_src_raw = include_str!("../shaders/forward_lit.wgsl");
+        if base_src_raw.contains("//!use pbr_eval") {
+            // Insert PBR_EVAL after the `enable` directive (must come before
+            // any declarations in WGSL but after the enable line).
+            let insert_pos = base_src_raw.find("enable ").and_then(|i| {
+                base_src_raw[i..].find(';').map(|j| i + j + 1)
+            }).unwrap_or(0);
+            let mut resolved = String::with_capacity(
+                base_src_raw.len() + libhelio::shader::PBR_EVAL.len(),
+            );
+            resolved.push_str(&base_src_raw[..insert_pos]);
+            resolved.push('\n');
+            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push_str(&base_src_raw[insert_pos..]);
+            let leaked: &'static str = Box::leak(resolved.into_boxed_str());
+            reg.override_class(0, "forward_lit", leaked);
+        } else {
+            reg.override_class(0, "forward_lit", base_src_raw);
+        };
 
         Self {
             pipelines: HashMap::new(),
@@ -294,13 +311,14 @@ impl RenderPass for ForwardLitPass {
 
     fn render_pass_descriptor<'a>(
         &'a self,
-        target: &'a wgpu::TextureView,
+        _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("ForwardLit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
