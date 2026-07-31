@@ -234,7 +234,15 @@ fn instance_pvs_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
 
 /// Returns true when an instance is occluded by either Hi-Z or static PVS.
 /// Matches original logic: occluded if (HiZ occluded) OR (PVS occluded when available).
+/// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
+const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+
 fn instance_is_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
+    // Per-object cull opt-out — must be honoured here as well as in the frustum stage,
+    // or an object marked always-visible still vanishes behind the Hi-Z test.
+    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+        return false;
+    }
     if instance_hiz_occluded(inst) {
         return true;
     }
