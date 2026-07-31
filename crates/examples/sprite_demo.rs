@@ -9,17 +9,22 @@
 //! Exercises every feature of the pass:
 //! - A ring of spinning, color-cycled sprites alternating between two atlas
 //!   layers (a filled disc and a ring), proving the texture-array atlas.
+//!   Animated every frame via `update_sprite` on stable handles created once
+//!   in `resumed()` — not a per-frame clear-and-rebuild.
 //! - A stack of overlapping, differently-tinted, semi-transparent sprites at
-//!   the center with different `depth` values, proving the CPU back-to-front
-//!   sort (wrong order would show through-blending in the wrong sequence).
+//!   the center with different `depth` values, proving the radix-sorted
+//!   back-to-front draw order (wrong order would show through-blending in
+//!   the wrong sequence).
 //! - A field of off-screen decoy sprites outside the camera's view rect,
-//!   proving view-frustum culling (logged once per second: pushed vs. drawn).
+//!   inserted *once* and never updated again — proving both view-frustum
+//!   culling and delta upload (logged once per second: pushed vs. drawn;
+//!   after the first frame, the decoys' bytes are never re-uploaded).
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
-use helio_pass_sprite_batch::{SpriteBatchPass, SpriteInstance};
+use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 
 use winit::{
     application::ApplicationHandler,
@@ -61,7 +66,13 @@ struct AppState {
     last_stats_log: Instant,
     disc_layer: u32,
     ring_layer: u32,
+    ring_handles: Vec<SpriteHandle>,
+    stack_handles: Vec<SpriteHandle>,
 }
+
+const RING_COUNT: usize = 12;
+const STACK_TINTS: [[f32; 4]; 3] = [[1.0, 0.2, 0.2, 0.6], [0.2, 1.0, 0.2, 0.6], [0.2, 0.4, 1.0, 0.6]];
+const DECOY_COUNT: usize = 200;
 
 /// A 32×32 RGBA8 filled disc, straight alpha, on a transparent background.
 fn make_disc_atlas() -> Vec<u8> {
@@ -158,6 +169,37 @@ impl ApplicationHandler for App {
         let mut sprite_pass = SpriteBatchPass::new(&device, &queue, format);
         let disc_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_disc_atlas());
         let ring_layer = sprite_pass.add_atlas_layer(&device, &queue, 32, 32, &make_ring_atlas());
+
+        // Ring + stack get stable handles because `RedrawRequested` animates
+        // them via `update_sprite` every frame. The 200 decoys are inserted
+        // once and never touched again — after frame one their instance
+        // bytes are never re-uploaded, only re-considered by the (cheap,
+        // O(n)) per-frame cull/sort whenever something *else* changes.
+        let ring_handles: Vec<SpriteHandle> = (0..RING_COUNT)
+            .map(|i| {
+                let layer = if i % 2 == 0 { disc_layer } else { ring_layer };
+                sprite_pass.insert_sprite(SpriteInstance::new([0.0, 0.0], [48.0, 48.0]).with_atlas_layer(layer))
+            })
+            .collect();
+        let stack_handles: Vec<SpriteHandle> = STACK_TINTS
+            .iter()
+            .enumerate()
+            .map(|(i, tint)| {
+                let offset = i as f32 * 20.0 - 20.0;
+                sprite_pass.insert_sprite(
+                    SpriteInstance::new([offset, 0.0], [64.0, 64.0])
+                        .with_depth(i as f32)
+                        .with_color(*tint)
+                        .with_atlas_layer(disc_layer),
+                )
+            })
+            .collect();
+        for i in 0..DECOY_COUNT {
+            let t = i as f32 / DECOY_COUNT as f32;
+            let pos = [5000.0 + t * 100.0, 5000.0 + t * 100.0];
+            sprite_pass.insert_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
+        }
+
         graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
@@ -187,6 +229,8 @@ impl ApplicationHandler for App {
             last_stats_log: Instant::now(),
             disc_layer,
             ring_layer,
+            ring_handles,
+            stack_handles,
         });
     }
 
@@ -220,20 +264,22 @@ impl ApplicationHandler for App {
                     .graph
                     .find_pass_mut::<SpriteBatchPass>()
                     .expect("sprite batch pass missing from graph");
-                sprite.clear();
 
                 // Ring of spinning sprites, alternating atlas layers — proves
                 // the texture-array atlas (both shapes come from one bind
-                // group / one draw call).
-                const COUNT: usize = 12;
-                for i in 0..COUNT {
-                    let t = i as f32 / COUNT as f32;
+                // group / one draw call). Every handle's data genuinely
+                // changes every frame here (that's the point of a spinning
+                // ring), so this still uploads ~all of it — the decoys below
+                // are what show the delta-upload win.
+                for (i, &handle) in state.ring_handles.iter().enumerate() {
+                    let t = i as f32 / RING_COUNT as f32;
                     let angle = t * std::f32::consts::TAU + time * 0.5;
                     let radius = 160.0;
                     let pos = [angle.cos() * radius, angle.sin() * radius];
                     let hue = (t + time * 0.1).fract();
                     let layer = if i % 2 == 0 { disc_layer } else { ring_layer };
-                    sprite.push_sprite(
+                    sprite.update_sprite(
+                        handle,
                         SpriteInstance::new(pos, [48.0, 48.0])
                             .with_rotation(time * 2.0 + t * std::f32::consts::TAU)
                             .with_depth(t)
@@ -243,29 +289,24 @@ impl ApplicationHandler for App {
                 }
 
                 // Overlapping, semi-transparent discs at the center with
-                // distinct depths — proves the CPU back-to-front sort: drawn
-                // in the wrong order, the blended colors at the overlap
-                // wouldn't match this depth sequence (red furthest back,
-                // blue nearest).
-                const STACK_TINTS: [[f32; 4]; 3] = [[1.0, 0.2, 0.2, 0.6], [0.2, 1.0, 0.2, 0.6], [0.2, 0.4, 1.0, 0.6]];
-                for (i, tint) in STACK_TINTS.iter().enumerate() {
+                // distinct depths — proves the radix-sorted back-to-front
+                // draw order: drawn in the wrong order, the blended colors
+                // at the overlap wouldn't match this depth sequence (red
+                // furthest back, blue nearest). Static, but still re-set
+                // every frame here just to exercise `update_sprite`'s dirty
+                // tracking on a value that *doesn't* actually change (the
+                // byte range still gets marked dirty and re-uploaded — dirty
+                // tracking is a "don't upload if nothing calls update", not
+                // a value-equality diff).
+                for (i, (&handle, tint)) in state.stack_handles.iter().zip(STACK_TINTS.iter()).enumerate() {
                     let offset = i as f32 * 20.0 - 20.0;
-                    sprite.push_sprite(
+                    sprite.update_sprite(
+                        handle,
                         SpriteInstance::new([offset, 0.0], [64.0, 64.0])
                             .with_depth(i as f32)
                             .with_color(*tint)
                             .with_atlas_layer(disc_layer),
                     );
-                }
-
-                // Off-screen decoys, well outside the camera's view rect —
-                // proves view-frustum culling (see the periodic stats log
-                // below: visible count should stay well under pushed count).
-                const DECOYS: usize = 200;
-                for i in 0..DECOYS {
-                    let t = i as f32 / DECOYS as f32;
-                    let pos = [5000.0 + t * 100.0, 5000.0 + t * 100.0];
-                    sprite.push_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
                 }
 
                 if state.last_stats_log.elapsed().as_secs_f32() >= 1.0 {

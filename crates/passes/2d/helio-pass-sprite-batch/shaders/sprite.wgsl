@@ -1,16 +1,24 @@
 // ── Sprite Batch ─────────────────────────────────────────────────────────────
 //
-// One unit quad (binding 0, per-vertex), drawn instanced against a storage of
-// per-sprite transforms/UVs/tints (binding 1, per-instance). Rotation is
-// applied in local space before translating to world position, so sprites
-// rotate about their own center regardless of size.
+// Vertex-pulling, not vertex-buffer instancing: the unit quad (binding 0,
+// per-vertex) is drawn `visible_count` times, and each invocation looks up
+// its own sprite via `draw_order[instance_index]` into the persistent
+// `instances` storage array. This decouples the two things that change on
+// very different schedules:
 //
-// The atlas is a texture array, not a single texture: each instance carries
-// an `i_atlas_layer` index so one draw call can span many sprite sheets
-// instead of being limited to whatever fits in one texture. `i_depth` is a
-// CPU-side sort key only (the instance buffer is pre-sorted back-to-front by
-// `SpriteBatchPass::prepare` for correct alpha blending) — it is uploaded for
-// layout simplicity but not read here.
+//   - `instances` is a stable, handle-addressed pool the CPU side only
+//     touches (and re-uploads) the slots that actually changed this frame
+//     (see `SpriteBatchPass::update_sprite`) — most frames in a real scene
+//     touch a small fraction of it.
+//   - `draw_order` is a small per-frame index list (culled, then radix-sorted
+//     back-to-front by depth for correct alpha blending) that's rebuilt
+//     whenever visibility-relevant state changes, independent of whether the
+//     underlying sprite data changed.
+//
+// A `VertexStepMode::Instance` buffer couldn't do this: it always reads
+// instance N's data from slot N, so reordering draw order would require
+// physically reordering the data buffer — which is exactly the per-frame
+// full-rewrite this design avoids.
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -19,19 +27,21 @@ struct Camera {
 @group(0) @binding(1) var atlas_tex: texture_2d_array<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
 
+struct SpriteInstance {
+    position: vec2<f32>,
+    size: vec2<f32>,
+    rotation: f32,
+    depth: f32,
+    uv_rect: vec4<f32>,
+    color: vec4<f32>,
+    atlas_layer: u32,
+}
+@group(0) @binding(3) var<storage, read> instances: array<SpriteInstance>;
+@group(0) @binding(4) var<storage, read> draw_order: array<u32>;
+
 struct VertexIn {
     @location(0) quad_pos: vec2<f32>,
     @location(1) quad_uv: vec2<f32>,
-}
-
-struct InstanceIn {
-    @location(2) i_position: vec2<f32>,
-    @location(3) i_size: vec2<f32>,
-    @location(4) i_rotation: f32,
-    @location(5) i_depth: f32,
-    @location(6) i_uv_rect: vec4<f32>,
-    @location(7) i_color: vec4<f32>,
-    @location(8) i_atlas_layer: u32,
 }
 
 struct VOut {
@@ -42,18 +52,20 @@ struct VOut {
 }
 
 @vertex
-fn vs_main(v: VertexIn, i: InstanceIn) -> VOut {
-    let c = cos(i.i_rotation);
-    let s = sin(i.i_rotation);
-    let local = v.quad_pos * i.i_size;
+fn vs_main(v: VertexIn, @builtin(instance_index) instance_index: u32) -> VOut {
+    let inst = instances[draw_order[instance_index]];
+
+    let c = cos(inst.rotation);
+    let s = sin(inst.rotation);
+    let local = v.quad_pos * inst.size;
     let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
-    let world = rotated + i.i_position;
+    let world = rotated + inst.position;
 
     var out: VOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world, 0.0, 1.0);
-    out.uv = mix(i.i_uv_rect.xy, i.i_uv_rect.zw, v.quad_uv);
-    out.color = i.i_color;
-    out.atlas_layer = i.i_atlas_layer;
+    out.uv = mix(inst.uv_rect.xy, inst.uv_rect.zw, v.quad_uv);
+    out.color = inst.color;
+    out.atlas_layer = inst.atlas_layer;
     return out;
 }
 
