@@ -1279,7 +1279,17 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         {
-            let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            // Standalone execution with no fused render pass (e.g. a forward
+            // graph without a G-buffer): VirtualGeometry has no target to write
+            // to. Skip rather than panic so a forward graph containing VG
+            // objects degrades to "not rendered" instead of crashing the frame.
+            let Some(active) = ctx.active_render_pass_ptr() else {
+                log::warn!(
+                    "VirtualGeometryPass: no active render pass (forward graph without G-buffer); skipping VG draw"
+                );
+                return Ok(());
+            };
+            let rpass = unsafe { &mut *active };
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);

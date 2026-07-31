@@ -57,6 +57,11 @@ pub struct XrSession {
     /// frame loop, so the renderer must start calling `wait_frame` as soon as
     /// this is set rather than waiting for FOCUSED.
     pub session_begun: bool,
+    /// Predicted display time of the most recent `wait_frame`. Exposed so the
+    /// application can locate controller poses (`XrInput::grip_pose_matrices`)
+    /// at the same time the eye views were located, keeping hand-attached
+    /// objects glued to the controllers.
+    pub last_display_time: openxr::Time,
 }
 
 impl XrSession {
@@ -123,6 +128,7 @@ impl XrSession {
             session_state: openxr::SessionState::UNKNOWN,
             should_render: false,
             session_begun: false,
+            last_display_time: openxr::Time::from_nanos(0),
         })
     }
 
@@ -196,6 +202,7 @@ impl XrSession {
     pub fn wait_frame(&mut self) -> Result<openxr::FrameState> {
         let state = self.frame_waiter.wait()?;
         self.should_render = state.should_render;
+        self.last_display_time = state.predicted_display_time;
         Ok(state)
     }
 

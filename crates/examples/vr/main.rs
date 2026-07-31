@@ -1,7 +1,10 @@
-//! VR demo: a folder-based demo that renders a small scene (3 cubes + ground +
-//! 3 lights + sky) through the OpenXR multiview render path when a headset is
-//! connected, and falls back to a plain desktop mirror (forward opaque) with
-//! WASD + mouse look when OpenXR initialisation fails.
+//! VR demo: a long showcase hallway (one renderer feature per bay) rendered
+//! through the OpenXR render path when a headset is connected, and a plain
+//! desktop mirror (forward opaque) with WASD + mouse look when OpenXR
+//! initialisation fails.
+//!
+//! In XR mode, two small emissive cubes are parented to the controller grip
+//! poses every frame, so they follow the player's hands exactly.
 //!
 //! When a headset is present, the Vulkan instance and device are created
 //! *through* OpenXR (`xrCreateVulkanInstanceKHR` / `xrCreateVulkanDeviceKHR`)
@@ -13,6 +16,8 @@
 //!   WASD / Space / Shift — fly (desktop mirror mode)
 //!   Mouse drag           — look around (click to grab cursor)
 //!   Escape               — release cursor / exit
+//!   Left stick           — move (XR)
+//!   Right stick          — turn (XR)
 //!
 //! Build / run:
 //!   cargo run -p examples --bin vr_demo
@@ -29,7 +34,7 @@ mod v3_demo_common;
 use std::sync::Arc;
 use std::time::Instant;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     DebugDrawState, RenderMode, Renderer, RendererConfig, Scene,
@@ -246,6 +251,37 @@ impl AppState {
             glam::Mat4::from_translation(self.player_position)
                 * glam::Mat4::from_rotation_y(self.player_yaw),
         );
+    }
+
+    /// Reparent the controller cubes to the current grip poses. Located at the
+    /// renderer's most recent XR display time, so the cubes stay glued to the
+    /// controllers. Hands that are not tracked keep their last transform.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn update_hands(&mut self) {
+        // Offset each cube a little forward and up in grip space so it floats just
+        // past the palm instead of being hidden inside the physical controller.
+        const HAND_OFFSET: Vec3 = Vec3::new(0.0, 0.03, -0.12);
+
+        let Some(time) = self.renderer.xr_last_display_time() else {
+            return;
+        };
+        let world_from_stage = Mat4::from_translation(self.player_position)
+            * Mat4::from_rotation_y(self.player_yaw);
+        let Some((input, session)) = &mut self.xr_input else {
+            return;
+        };
+        let Ok(poses) = input.grip_pose_matrices(session, time, &world_from_stage) else {
+            return;
+        };
+        for (i, pose) in poses.into_iter().enumerate() {
+            if let Some(world) = pose {
+                let transform = world * Mat4::from_translation(HAND_OFFSET);
+                let _ = self
+                    .renderer
+                    .scene_mut()
+                    .update_object_transform(self.animated.hand_cubes[i], transform);
+            }
+        }
     }
 
     fn configure_surface(&self, width: u32, height: u32) {
@@ -586,6 +622,9 @@ impl ApplicationHandler for App {
                 #[cfg(not(target_arch = "wasm32"))]
                 if state.xr_active {
                     state.update_locomotion(dt);
+                    let scene_time = state.start_time.elapsed().as_secs_f32();
+                    scene::animate(&mut state.renderer, &mut state.animated, scene_time);
+                    state.update_hands();
                     // Headset path: render_xr() polls session events, locates the
                     // per-eye poses, uploads the stereo camera and renders both
                     // eyes. The mirror surface (if any) receives both eye buffers
@@ -616,6 +655,8 @@ impl ApplicationHandler for App {
 
                 // Desktop mirror path: WASD + mouse free camera.
                 state.input.update(dt);
+                let scene_time = state.start_time.elapsed().as_secs_f32();
+                scene::animate(&mut state.renderer, &mut state.animated, scene_time);
                 let size = state.window.inner_size();
                 let aspect = size.width as f32 / size.height.max(1) as f32;
                 let camera = state.input.camera(aspect);

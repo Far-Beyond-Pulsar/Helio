@@ -684,6 +684,15 @@ impl Renderer {
         self.xr_swapchain = swapchain;
     }
 
+    /// Predicted display time of the most recent XR frame, used to locate
+    /// controller poses (see `helio_xr::XrInput::grip_pose_matrices`) at the
+    /// same instant the eye views were located. `None` in desktop mode or
+    /// before the first XR frame has been waited on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_last_display_time(&self) -> Option<helio_xr::Time> {
+        self.xr.as_ref().map(|session| session.last_display_time)
+    }
+
     /// Set the camera template used for XR frames (postprocess settings,
     /// near/far planes, RC bounds position). The per-eye view/projection
     /// matrices are overridden by the headset pose each frame; only the
