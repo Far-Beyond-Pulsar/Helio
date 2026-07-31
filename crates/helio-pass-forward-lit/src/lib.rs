@@ -171,6 +171,7 @@ impl ForwardLitPass {
         device: &wgpu::Device,
         key: RadiantShaderKey,
         graph_wgsl: &str,
+        write_depth: bool,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
             let template = match self.template_registry.get(key.template_id) {
@@ -233,14 +234,18 @@ impl ForwardLitPass {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.surface_format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent::OVER,
-                        }),
+                        blend: if write_depth {
+                            None
+                        } else {
+                            Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::Zero,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent::OVER,
+                            })
+                        },
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -251,7 +256,7 @@ impl ForwardLitPass {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
+                    depth_write_enabled: Some(write_depth),
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
@@ -511,9 +516,9 @@ impl RenderPass for ForwardLitPass {
             let key = RadiantShaderKey {
                 template_id: 0,
                 graph_hash: 0,
-                feature_flags: 0,
+                feature_flags: if self.render_all_opaque { 1 } else { 0 },
             };
-            let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
+            let pipeline = self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
             pass.set_pipeline(pipeline);
             #[cfg(not(target_arch = "wasm32"))]
             pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
@@ -526,18 +531,21 @@ impl RenderPass for ForwardLitPass {
                 if count == 0 {
                     continue;
                 }
-                let key = RadiantShaderKey {
+                let mut key = RadiantShaderKey {
                     template_id: class,
                     graph_hash,
                     feature_flags: 0,
                 };
+                if self.render_all_opaque {
+                    key.feature_flags |= 1;
+                }
                 let graph_wgsl = ctx
                     .scene
                     .graph_wgsl_snippets
                     .get(&graph_hash)
                     .map(|s| s.as_str())
                     .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl, self.render_all_opaque);
                 pass.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 pass.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
