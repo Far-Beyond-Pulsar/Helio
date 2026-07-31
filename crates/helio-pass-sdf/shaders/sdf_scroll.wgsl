@@ -58,7 +58,7 @@ struct ScrollState {
 
 // ── Bindings ─────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0) var<uniform>            camera:       CameraUniform;
+@group(0) @binding(0) var<storage, read> cameras: array<CameraUniform, 2>;
 @group(0) @binding(1) var<uniform>            clip_config:  ClipConfig;
 @group(0) @binding(2) var<storage, read_write> scroll_state: ScrollState;
 @group(0) @binding(3) var<storage, read_write> dirty_flags:  array<u32>;
@@ -89,7 +89,7 @@ fn cs_scroll(@builtin(local_invocation_id) lid: vec3<u32>) {
     // Every invocation must reach the barrier below. Guard per-level work
     // instead of returning from non-uniform control flow.
     if level < clip_config.level_count {
-        let cam_pos    = camera.position_near.xyz;
+        let cam_pos    = cameras[0].position_near.xyz;
         let vs         = level_voxel_size(level);
         let brick_step = vs * f32(clip_config.brick_size);
 

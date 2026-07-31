@@ -29,7 +29,7 @@ struct Camera {
     position_near: vec4<f32>,
     direction_far: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 struct LightCullParams {
     num_tiles_x:   u32,
@@ -85,13 +85,13 @@ struct GpuLight {
 fn make_plane_from_ndc_edge(p0: vec2<f32>, p1: vec2<f32>) -> vec4<f32> {
     // Unproject the two edge points to view-space rays (z = -1 in view space).
     let r0 = normalize(vec3<f32>(
-        p0.x / camera.proj[0][0],
-        p0.y / camera.proj[1][1],
+        p0.x / cameras[0].proj[0][0],
+        p0.y / cameras[0].proj[1][1],
         -1.0,
     ));
     let r1 = normalize(vec3<f32>(
-        p1.x / camera.proj[0][0],
-        p1.y / camera.proj[1][1],
+        p1.x / cameras[0].proj[0][0],
+        p1.y / cameras[0].proj[1][1],
         -1.0,
     ));
     // Plane normal = cross of the two rays (points toward inside of frustum).
@@ -165,7 +165,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         // Transform light position to view space.
-        let pos_vs = (camera.view * vec4<f32>(light.position_range.xyz, 1.0)).xyz;
+        let pos_vs = (cameras[0].view * vec4<f32>(light.position_range.xyz, 1.0)).xyz;
         let range  = light.position_range.w;
 
         if sphere_inside_tile_frustum(pos_vs, range, planes) {

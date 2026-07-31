@@ -129,7 +129,7 @@ fn gpu_cull_is_generation_safe_conservative_and_capacity_bounded() {
             ..visible
         };
 
-        let camera_buffer = initialized(&device, "Cull Camera", bytemuck::bytes_of(&camera), true);
+        let camera_buffer = initialized(&device, "Cull Camera", bytemuck::bytes_of(&camera), false);
         let uniform_buffer =
             initialized(&device, "Cull Uniform", bytemuck::bytes_of(&uniforms), true);
         let state_buffer = initialized(&device, "Cull State", bytemuck::bytes_of(&state), false);

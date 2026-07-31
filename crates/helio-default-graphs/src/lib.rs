@@ -44,16 +44,28 @@ use helio::Scene;
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
+/// Create a new graph, honouring the caller's device ownership.
+///
+/// When `config.enable_xr` the graph is put into OpenXR multiview mode:
+/// every pool texture is allocated as a 2-layer array and the executor forces
+/// `multiview_mask = 0b11` on all render passes. Note that the graph's internal
+/// resolution stays `config.internal_width()/internal_height()` — in XR mode
+/// the application is expected to size `RendererConfig` to the eye resolution
+/// reported by the OpenXR runtime (via `XrSession::width`/`height`), since the
+/// graph does not talk to the runtime itself.
 fn new_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     owns_device: bool,
+    config: &RendererConfig,
 ) -> RenderGraph {
-    if owns_device {
+    let mut graph = if owns_device {
         RenderGraph::new(device, queue)
     } else {
         RenderGraph::new_with_external_device(device, queue)
-    }
+    };
+    graph.with_xr_mode(config.enable_xr);
+    graph
 }
 
 fn add_common_early_passes(
@@ -401,7 +413,7 @@ fn build_default_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -615,7 +627,7 @@ fn build_fxaa_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -756,7 +768,7 @@ fn build_hlfs_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -937,7 +949,7 @@ fn build_fxaa_hlfs_graph_internal(
     let w = config.width;
     let h = config.height;
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -1155,7 +1167,7 @@ fn build_forward_graph_internal(
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = new_graph(device, queue, owns_device);
+    let mut graph = new_graph(device, queue, owns_device, &config);
 
     let perf = add_common_early_passes(
         &mut graph,

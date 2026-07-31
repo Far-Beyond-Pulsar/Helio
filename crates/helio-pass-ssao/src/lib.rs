@@ -6,22 +6,10 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::graph::ResourceSize;
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{GpuCameraUniforms, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
-
-/// Camera uniform matching ssao.wgsl CameraUniform (272 bytes, 4 × mat4 + vec3 + pad).
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SsaoCameraUniform {
-    view: [[f32; 4]; 4],
-    proj: [[f32; 4]; 4],
-    view_proj: [[f32; 4]; 4],
-    inv_view_proj: [[f32; 4]; 4],
-    position: [f32; 3],
-    _pad0: f32,
-}
 
 /// Globals matching ssao.wgsl Globals (80 bytes).
 #[repr(C)]
@@ -90,8 +78,8 @@ impl SsaoPass {
 
         let ssao_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SSAO Camera"),
-            size: std::mem::size_of::<SsaoCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            size: (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -179,7 +167,7 @@ impl SsaoPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -446,7 +434,7 @@ impl RenderPass for SsaoPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // TODO: Derive view, proj, inv_view_proj from scene camera for accurate SSAO.
         // Currently zeroed — GPU will return 1.0 (no occlusion) for sky pixels.
-        let camera = SsaoCameraUniform::zeroed();
+        let camera = GpuCameraUniforms::zeroed();
         ctx.write_buffer(&self.ssao_camera_buf, 0, bytemuck::bytes_of(&camera));
 
         let ssao = SsaoUniform {

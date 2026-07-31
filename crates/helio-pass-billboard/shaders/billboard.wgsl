@@ -22,7 +22,7 @@ struct Globals {
     ambient_intensity: f32,
     _padding: f32,
 }
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
 // Group 1: sprite texture
@@ -62,7 +62,7 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     let screen_scale = inst.scale_flags.z > 0.5;
 
     // Build camera-facing (billboard) basis vectors
-    let cam_pos = camera.position_near.xyz;
+    let cam_pos = cameras[0].position_near.xyz;
     let to_cam  = normalize(cam_pos - world_pos);
 
     // Right and up vectors perpendicular to the view direction
@@ -81,14 +81,14 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     // Using Euclidean distance instead causes off-axis billboards to appear larger.
     // TODO: Can we use a branchless multiplication here somehow?
     if screen_scale {
-        let view_depth = max(dot(camera.forward_far.xyz, world_pos - cam_pos), 0.001);
+        let view_depth = max(dot(cameras[0].forward_far.xyz, world_pos - cam_pos), 0.001);
         offset        *= view_depth;
     }
 
     let final_pos = world_pos + offset;
 
     var out: VertexOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(final_pos, 1.0); // view_proj at offset 128
+    out.clip_pos = cameras[0].view_proj * vec4<f32>(final_pos, 1.0); // view_proj at offset 128
     out.uv       = quad.uv;
     out.color    = inst.color;
     return out;

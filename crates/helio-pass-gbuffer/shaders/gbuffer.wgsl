@@ -111,7 +111,7 @@ struct LightmapAtlasRegion {
     uv_clamp_max: vec2<f32>,  // uv_offset + uv_scale - 0.5/atlas_size
 }
 
-@group(0) @binding(0) var<uniform>          camera:                 Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>          globals:                Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
@@ -175,10 +175,10 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
 
     // Previous-frame clip position for velocity buffer
     let prev_world  = inst.prev_model * vec4<f32>(v.position, 1.0);
-    let prev_clip   = camera.prev_view_proj * prev_world;
+    let prev_clip   = cameras[0].prev_view_proj * prev_world;
 
     var out: VertexOutput;
-    out.clip_position      = camera.view_proj * world_pos;
+    out.clip_position      = cameras[0].view_proj * world_pos;
     out.world_position     = world_pos.xyz;
     out.world_normal       = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent      = normalize(model_mat3  * decode_snorm8x4(v.tangent));

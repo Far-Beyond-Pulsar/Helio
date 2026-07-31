@@ -34,6 +34,7 @@ pub struct RenderGraph {
     chain_generation: u64,
     last_bundle_chain_gen: Vec<u64>,
     locked: bool,
+    pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
     /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
@@ -65,6 +66,7 @@ impl RenderGraph {
             chain_generation: 0,
             last_bundle_chain_gen: Vec::new(),
             locked: false,
+            xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
             graph_data: None,
@@ -79,6 +81,16 @@ impl RenderGraph {
 
     pub fn set_delta_time(&mut self, dt: f32) {
         self.delta_time = dt;
+    }
+
+    pub fn with_xr_mode(&mut self, active: bool) -> &mut Self {
+        self.xr_active = active;
+        // The pool must know *before* `lock()`/`init_transients()` allocates:
+        // in XR mode every pool texture is created as a 2-layer array so the
+        // passes' D2Array views match the `multiview_mask = 0b11` the executor
+        // forces on them.
+        self.pool.set_xr_mode(active);
+        self
     }
 
     /// Returns true when at least one pass reconstructs the renderer's
@@ -475,7 +487,11 @@ impl RenderGraph {
                             depth_stencil_attachment: desc.depth_stencil_attachment,
                             timestamp_writes: desc.timestamp_writes,
                             occlusion_query_set: desc.occlusion_query_set,
-                            multiview_mask: desc.multiview_mask,
+                            multiview_mask: if self.xr_active {
+                                Some(std::num::NonZeroU32::new(0b11).unwrap())
+                            } else {
+                                desc.multiview_mask
+                            },
                         };
                         let rp = unsafe {
                             let enc = &mut *std::ptr::addr_of_mut!(encoder);
@@ -535,7 +551,11 @@ impl RenderGraph {
                         depth_stencil_attachment: desc.depth_stencil_attachment,
                         timestamp_writes: desc.timestamp_writes,
                         occlusion_query_set: desc.occlusion_query_set,
-                        multiview_mask: desc.multiview_mask,
+                        multiview_mask: if self.xr_active {
+                            Some(std::num::NonZeroU32::new(0b11).unwrap())
+                        } else {
+                            desc.multiview_mask
+                        },
                     };
 
                     let mut rp = unsafe {

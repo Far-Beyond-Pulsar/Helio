@@ -51,6 +51,52 @@ impl Renderer {
         (texture, view)
     }
 
+    /// Create a two-layer array depth texture for the OpenXR multiview render
+    /// path. Both eye layers are cleared/written in a single pass via
+    /// `multiview_mask = 0b11`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn create_xr_depth_resources(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Helio XR Depth Texture"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // Array view: the depth-stencil attachment for the multiview render
+        // passes (multiview_mask = 0b11 writes both eye layers).
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Helio XR Depth View"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            ..Default::default()
+        });
+        // Layer-0 D2 view: for passes that *sample* the rendered depth as a
+        // plain `texture_depth_2d` (HiZ, lens flare, ...). A D2Array view
+        // cannot be bound to a D2 bind-group entry.
+        let layer0_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Helio XR Depth Layer0 View"),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        (texture, view, layer0_view)
+    }
+
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -89,6 +135,23 @@ impl Renderer {
         } else {
             (None, None)
         };
+
+        // In XR (multiview) mode the depth-stencil attachment of the render
+        // passes must be a 2-layer array view (the executor forces
+        // `multiview_mask = 0b11` on every pass). The OpenXR swapchain image is
+        // `width × height × 2`, so the array depth is allocated at the internal
+        // resolution. It is kept separate from `depth_texture`, which stays
+        // single-layer because passes that *sample* scene depth (e.g.
+        // VolumetricFogPass) bind it as a plain `texture_depth_2d`.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = if config.enable_xr {
+            let (t, v, l0) = Self::create_xr_depth_resources(&device, internal_w, internal_h);
+            (Some(t), Some(v), Some(l0))
+        } else {
+            (None, None, None)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
         let water_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water Volumes Buffer"),
@@ -209,6 +272,33 @@ impl Renderer {
             template_registry: RadiantTemplateRegistry::new(),
             transparent_template_registry: RadiantTemplateRegistry::new(),
             render_mode: config.render_mode,
+            enable_xr: config.enable_xr,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_instance: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_swapchain: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_depth_texture,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_depth_view,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_depth_view_layer0,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_idle_skips: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_camera: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_pipeline: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_bgl: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_sampler: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_bind_group: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_format: None,
         }
     }
 

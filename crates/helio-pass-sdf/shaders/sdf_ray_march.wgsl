@@ -5,12 +5,12 @@
 // colour and depth so the SDF integrates with the deferred pipeline.
 //
 // Bind group 0:
-//   b0:  uniform  camera (CameraUniform)
+//   b0:  storage read  cameras array<CameraUniform, 2>
 //   b1:  uniform  clip map params (SdfClipMapParams)
 //   b2-b9:  storage read  atlas buffer per level (8 levels)
 //   b10: storage read  all_brick_indices (concatenated per-level)
 
-// ── Camera uniform ──────────────────────────────────────────────────────────
+// ── Camera storage ─────────────────────────────────────────────────────────
 
 // Must match libhelio::camera::GpuCameraUniforms exactly.
 struct CameraUniform {
@@ -59,7 +59,7 @@ struct ScrollState {
 
 // ── Bindings ────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0)  var<uniform>         camera:           CameraUniform;
+@group(0) @binding(0)  var<storage, read> cameras: array<CameraUniform, 2>;
 @group(0) @binding(1)  var<uniform>         clip_config:      ClipConfig;
 @group(0) @binding(2)  var<storage, read>   scroll_state:     ScrollState;
 
@@ -383,12 +383,12 @@ fn fs_main(in: VsOutput) -> FsOutput {
 
     // Reconstruct ray from camera
     let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    let near_h = camera.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
-    let far_h = camera.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    let near_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let far_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
     let near_w = near_h.xyz / near_h.w;
     let far_w = far_h.xyz / far_h.w;
     let ray_dir = normalize(far_w - near_w);
-    let ray_origin = camera.position_near.xyz;
+    let ray_origin = cameras[0].position_near.xyz;
 
     // ── Ray–AABB clip against the coarsest clip level ─────────────────────
     //
@@ -438,7 +438,7 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // on the frame counter (jitter_frame.z) gives near-optimal temporal
     // convergence when TAA is active.
     let dither = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))
-                       + camera.jitter_frame.z * 0.61803398875));
+                       + cameras[0].jitter_frame.z * 0.61803398875));
 
     // Start at the volume entry face (clamp to 0 if camera is already inside),
     // backed off by one fine voxel to avoid missing the entry surface, then
@@ -584,7 +584,7 @@ fn fs_main(in: VsOutput) -> FsOutput {
     }
 
     // ── Depth output ─────────────────────────────────────────────────────
-    let clip_pos = camera.view_proj * vec4<f32>(hit_pos, 1.0);
+    let clip_pos = cameras[0].view_proj * vec4<f32>(hit_pos, 1.0);
     out.depth = clip_pos.z / clip_pos.w;
 
     return out;

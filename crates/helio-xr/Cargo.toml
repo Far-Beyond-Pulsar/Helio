@@ -1,0 +1,26 @@
+[package]
+name = "helio-xr"
+version = "0.1.0"
+edition = "2021"
+description = "OpenXR (Vulkan) integration for the Helio engine"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Statically link an OpenXR loader instead of loading `openxr_loader` at run
+# time. Requires a linker-visible OpenXR loader library (e.g. on Windows you
+# must link against an openxr_loader.lib that provides the core entry points).
+linked = ["openxr/linked"]
+static = ["openxr/static"]
+
+[dependencies]
+openxr = { version = "0.21", features = [] }
+libloading = "0.9"
+# Matches the ash version wgpu-hal 30.0.0 is built against. Only the handle
+# types / `vk::Handle` trait are used to convert raw u64 handles.
+ash = { version = "0.38", default-features = false }
+wgpu = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+libhelio = { workspace = true }

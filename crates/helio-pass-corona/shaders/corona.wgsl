@@ -85,7 +85,7 @@ struct CameraUniforms {
 // Non-atomic now; written by cs_scan_blocks, read by cs_build_multi.
 @group(0) @binding(4)  var<storage, read_write>  emitter_alive:     array<u32>;
 @group(0) @binding(5)  var<storage, read_write>  draw_args_staging: array<DrawArgs>;
-@group(0) @binding(6)  var<uniform>              camera:            CameraUniforms;
+@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, 2>;
 // exclusive prefix within each 256-block (written by cs_scan_local, read by cs_scatter)
 @group(0) @binding(7)  var<storage, read_write>  prefix_buf:        array<u32>;
 // per-block alive totals (cs_scan_local) → per-block cumulative offsets (cs_scan_blocks)
@@ -327,9 +327,9 @@ fn cs_scatter(
 
             compact_buf[compact_pos] = idx;
 
-            // Negated view-space z: positive = far from camera.
+            // Negated view-space z: positive = far from the camera.
             // Bitonic descending sort puts max (furthest) at position 0.
-            let view_pos = camera.view * vec4<f32>(p.pos_and_alive.xyz, 1.0);
+            let view_pos = cameras[0].view * vec4<f32>(p.pos_and_alive.xyz, 1.0);
             sort_key_buf[compact_pos] = -view_pos.z;
             return;
         }

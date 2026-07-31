@@ -107,7 +107,7 @@ const NO_TEXTURE: u32 = 0xffffffffu;
 const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
 const MATERIAL_WORKFLOW_SPECULAR: u32 = 1u;
 
-@group(0) @binding(0) var<uniform>          camera:            Camera;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>          globals:           Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:     array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    compacted_indices: array<u32>;
@@ -160,7 +160,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
+    out.clip_position  = cameras[0].view_proj * world_pos;
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
@@ -363,7 +363,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     if surface.alpha <= 0.001 { discard; }
 
-    let V = normalize(camera.position_near.xyz - input.world_position);
+    let V = normalize(cameras[0].position_near.xyz - input.world_position);
     let N = surface.normal;
     let NdV = max(dot(N, V), 0.0);
     let albedo = surface.albedo.rgb;
