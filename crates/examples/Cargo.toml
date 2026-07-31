@@ -267,5 +267,9 @@ name = "sprite_demo"
 path = "sprite_demo.rs"
 
 [[bin]]
+name = "sprite_stress_test"
+path = "sprite_stress_test.rs"
+
+[[bin]]
 name = "foliage_demo"
 path = "foliage_demo.rs"
