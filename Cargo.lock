@@ -3046,6 +3046,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-forward-lit"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio",
+ "helio-core",
+ "libhelio",
+ "log",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-fxaa"
 version = "0.1.0"
 dependencies = [
