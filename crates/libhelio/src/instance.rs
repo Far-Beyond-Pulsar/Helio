@@ -6,6 +6,42 @@
 
 use bytemuck::{Pod, Zeroable};
 
+// ── Instance flags (`GpuInstanceData::flags`) ───────────────────────────────
+//
+// Distinct from the `FLAG_*` constants in `material`, which live in
+// `GpuMaterial::flags`. Same names, different field — check which one you are setting.
+
+/// This instance contributes to the shadow atlas.
+pub const INSTANCE_FLAG_CASTS_SHADOW: u32 = 1 << 0;
+
+/// This instance receives shadows.
+pub const INSTANCE_FLAG_RECEIVES_SHADOW: u32 = 1 << 1;
+
+/// Skip GPU culling for this instance: it is always considered visible.
+///
+/// Both the frustum test in `indirect_dispatch.wgsl` and the Hi-Z occlusion test in
+/// `occlusion_cull.wgsl` pass unconditionally when this bit is set.
+///
+/// # When this is the right answer
+///
+/// Culling in this engine is driven by a single world-space bounding **sphere** per
+/// instance ([`GpuInstanceData::bounds`]). That representation degrades badly for very
+/// large or very flat geometry: a ground plane's sphere has a radius set by its diagonal,
+/// so it is enormous relative to the geometry actually inside it, and it both fails to
+/// cull anything useful *and* is easy to get wrong in the direction that deletes visible
+/// geometry. For a handful of such objects — ground planes, skyboxes, an interior shell
+/// the camera lives inside — testing them at all is worth less than the risk of testing
+/// them wrongly.
+///
+/// # When it is not
+///
+/// This is an escape hatch, not a fix. An instance carrying this flag is submitted every
+/// frame no matter where the camera looks, so setting it broadly gives back exactly the
+/// GPU-driven culling this engine exists to do. If you find yourself setting it on many
+/// objects, the real answer is almost always to split the geometry into pieces whose
+/// bounding spheres are tight.
+pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
+
 /// Per-instance data for GPU-driven rendering. 208 bytes.
 ///
 /// Uploaded once when instances change (dirty tracking), then read-only on GPU.

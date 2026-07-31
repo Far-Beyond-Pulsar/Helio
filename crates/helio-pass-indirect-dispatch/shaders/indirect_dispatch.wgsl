@@ -113,7 +113,17 @@ fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
     return true;
 }
 
+/// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
+const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+
 fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> bool {
+    // Per-object cull opt-out. Culling here is driven by one world-space bounding sphere,
+    // which is a poor fit for very large or very flat geometry (a ground plane's sphere
+    // is set by its diagonal): such objects cull almost nothing and are easy to bound
+    // wrongly in the direction that deletes visible geometry.
+    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+        return true;
+    }
     let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
     let aabb_degenerate = all(aabb.min == aabb.max);
     let sphere_visible = sphere_in_frustum(inst.bounds.xyz, inst.bounds.w);
@@ -143,11 +153,28 @@ fn main(
             compacted_indices[dc.first_instance + slot] = slot_idx;
 
             // Sub-pixel test: check if this instance projects to ≥ 1 pixel.
-            let clip_pos = cameras[0].view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
-            if clip_pos.w > 0.0 {
-                let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
-                if r_ndc >= 0.001 {
-                    atomicStore(&wg_nonsubpixel, 1u);
+            //
+            // This is a third rejection path, independent of the frustum and Hi-Z tests:
+            // a batch where no instance is marked non-subpixel is dropped wholesale
+            // below, so an instance that passes `test_instance` still disappears if it
+            // fails to set this flag.
+            //
+            // It is evaluated at the bounding sphere's *centre*, which is why a large
+            // object needs the opt-out: the ground plane's centre is the world origin, so
+            // as soon as the camera looks away from the origin `clip_pos.w <= 0.0`, the
+            // test is skipped, nothing sets `wg_nonsubpixel`, and the whole ground is
+            // culled as "subpixel only" — while covering the screen. Direction-dependent
+            // disappearance of large geometry is the signature of this path, not of
+            // frustum culling.
+            if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+                atomicStore(&wg_nonsubpixel, 1u);
+            } else {
+                let clip_pos = cameras[0].view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
+                if clip_pos.w > 0.0 {
+                    let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
+                    if r_ndc >= 0.001 {
+                        atomicStore(&wg_nonsubpixel, 1u);
+                    }
                 }
             }
             if (inst.flags & 1u) != 0u {
