@@ -50,7 +50,11 @@ use crate::packing::{
 /// 12..16  packed_tint_seed:   u32  tint.x u8 | tint.y u8 | seed u16 (bits 16..32)
 /// ```
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+// `PartialEq`/`Eq` are part of the determinism contract, not a convenience: the placement
+// tests assert that re-placing a tile yields a byte-identical blade list, and comparing
+// packed records directly is what makes that assertion mean "identical", rather than
+// "identical after whatever tolerance a float comparison would introduce".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuBladeInstance {
     /// Tile-local XZ as two 16-bit unorms over the tile extent
     /// ([`crate::FOLIAGE_TILE_SIZE_METERS`]).

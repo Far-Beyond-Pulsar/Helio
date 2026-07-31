@@ -87,53 +87,29 @@ use helio_foliage_core::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
 /// The four LOD commands live at byte offsets 0, 16, 32 and 48.
 pub const DRAW_INDIRECT_STRIDE: u64 = 16;
 
-/// Bit shift separating the tile slot from the tile-local blade index in a
-/// `visible_blades[]` entry.
+/// Recover the tile slot that owns a blade, from its flat arena index.
 ///
-/// # The encoding, and why it is not a flat arena index
+/// # Why the consumer has to do this at all
 ///
-/// A blade's packed position is **tile-local** — that is what makes placement a pure
-/// function of `(tile_coord, lane, generation)` and therefore reproducible across GPUs.
-/// Reconstructing a world position consequently needs the blade's *tile*, and a flat
-/// arena index does not carry one: recovering it would mean searching a 4096-entry tile
-/// table per vertex, which is not a thing a vertex shader can do.
+/// A `visible_blades[]` entry is a flat index into `blade_arena`. A blade's packed
+/// position, though, is **tile-local** — that is what makes placement a pure function of
+/// `(tile_coord, lane, generation)` and therefore reproducible across GPUs — so
+/// reconstructing a world position needs the blade's *tile*, which the index alone does
+/// not name.
 ///
-/// So a `visible_blades[]` entry is two 16-bit halves:
+/// `FoliagePlacePass` makes that recoverable by partitioning the arena into equal
+/// fixed-size slabs, one per tile ring slot, and publishing the slab size as
+/// `FoliagePlacePass::blades_per_tile`. The division is then exact and O(1) — the
+/// alternative, searching a 4096-entry tile table for the slab containing an index, is
+/// not something a vertex shader can do once per vertex.
 ///
-/// ```text
-///   bits 16..32   tile slot     — index into `tile_table`
-///   bits  0..16   local index   — blade index within that tile's arena slab
-/// ```
-///
-/// and the arena index is `tile_table[slot].blade_offset + local`. Sixteen bits each is
-/// comfortable in both directions: the default ring is 4096 tiles against a 65 536 ceiling,
-/// and an 8 m tile at the reference 40 blades/m² holds ~2 560 blades against the same
-/// ceiling.
-///
-/// Use [`pack_visible_blade`] / [`unpack_visible_blade`] rather than open-coding the
-/// shift — the producer and this pass must agree bit-for-bit, and a silent disagreement
-/// draws grass from the wrong tiles at plausible-looking positions.
-pub const VISIBLE_TILE_SHIFT: u32 = 16;
-
-/// Mask selecting the tile-local blade index out of a `visible_blades[]` entry.
-/// See [`VISIBLE_TILE_SHIFT`].
-pub const VISIBLE_LOCAL_MASK: u32 = 0xffff;
-
-/// Build a `visible_blades[]` entry. See [`VISIBLE_TILE_SHIFT`].
-///
-/// Both halves are masked rather than asserted: this runs on the producer's hot path (or
-/// its CPU reference), and an out-of-range tile slot must not be allowed to corrupt the
-/// local index of the entry next to it.
+/// The `max(1)` is not decoration: a zero slab size would be a division by zero in the
+/// vertex stage, whose result is implementation-defined, and the symptom would be every
+/// blade in the world reading tile slot garbage. One blade drawn at the wrong tile is
+/// recoverable; an undefined index into the tile table is not.
 #[inline]
-pub const fn pack_visible_blade(tile_slot: u32, local_index: u32) -> u32 {
-    ((tile_slot & VISIBLE_LOCAL_MASK) << VISIBLE_TILE_SHIFT) | (local_index & VISIBLE_LOCAL_MASK)
-}
-
-/// Split a `visible_blades[]` entry into `(tile_slot, local_index)`.
-/// Inverse of [`pack_visible_blade`].
-#[inline]
-pub const fn unpack_visible_blade(packed: u32) -> (u32, u32) {
-    (packed >> VISIBLE_TILE_SHIFT, packed & VISIBLE_LOCAL_MASK)
+pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
+    blade_index / if blades_per_tile == 0 { 1 } else { blades_per_tile }
 }
 
 /// Element offset of LOD `lod`'s region in `visible_blades[]`, given the per-region
@@ -145,13 +121,15 @@ pub const fn unpack_visible_blade(packed: u32) -> (u32, u32) {
 /// LOD order, and region `n` begins at element `n * stride`. The stride is derived from
 /// the buffer's own size in [`FoliageGBufferPass::new`] as
 /// `buffer.size() / 4 / size_of::<u32>()`, so the producer sizes the buffer and the
-/// consumer follows — there is no third place for the two to disagree.
+/// consumer follows — there is no third place for the two to disagree. For
+/// `FoliagePlacePass`'s 16 MiB buffer that comes out at `1 << 20` elements per region,
+/// which is what its `FOLIAGE_VISIBLE_PER_LOD_CAPACITY` states.
 ///
-/// Equal-size regions waste a little space (the L2/L3 buckets carry most of the blades
-/// in a typical frame), and that is deliberate: worst-case per-LOD occupancy is
-/// camera-dependent — a camera looking straight down puts nearly everything in L0 — so
-/// any unequal split has a camera angle that overflows it. A single stride also means
-/// the region base is one multiply in the shader instead of a table lookup.
+/// Equal-size regions waste a lot of space, and that is deliberate: per-LOD occupancy is
+/// bimodal and camera-dependent — a camera looking straight down puts nearly everything
+/// in L0, one on the horizon puts nearly everything in L3 — so any unequal split has an
+/// ordinary camera angle that overflows it. A single stride also means the region base is
+/// one multiply in the shader instead of a table lookup.
 ///
 /// The producer must additionally write `first_instance = 0` and `first_vertex = 0` into
 /// every `DrawIndirectArgs`: the region base is applied by this pass from its per-LOD
@@ -234,8 +212,17 @@ pub struct FoliageGlobals {
     pub frame: u32,
     /// `FLAG_*` bits.
     pub flags: u32,
-    /// xyz reserved (the camera position comes from the camera uniform), w = resident
-    /// ring radius in metres.
+    /// xyz unused (the camera position comes from the camera uniform), **w = resident
+    /// ring radius in metres** — the input to the scale-in factor.
+    ///
+    /// A `vec4` rather than a bare `f32`, because that is what the WGSL side declares and
+    /// WGSL gives a `vec4<f32>` 16-byte alignment. This field is where an earlier version
+    /// of this struct went wrong: it had four consecutive scalars here
+    /// (`ring_radius`, `blades_per_tile`, `lod_quality_scale`, `scale_in_band`) against
+    /// the shader's single `vec4`, so `camera_ring.w` read back whatever was in
+    /// `scale_in_band` — a couple of metres — and every blade's `scale_in` evaluated to
+    /// zero. Zero scale-in means zero height, so all 236 000 blades rendered as
+    /// degenerate strips: no error, no warning, just bare ground.
     pub camera_ring: [f32; 4],
     /// xy = interaction field world-XZ origin, z = extent in metres, w = `1/extent`.
     pub interaction_field: [f32; 4],
@@ -249,6 +236,15 @@ pub struct FoliageGlobals {
     /// Global multiplier on the interaction bend.
     pub interaction_strength: f32,
 }
+
+const _: () = {
+    assert!(
+        std::mem::size_of::<FoliageGlobals>() == 64,
+        "FoliageGlobals must be 64 bytes and match `struct FoliageGlobals` in \
+         foliage_gbuffer.wgsl field for field; a mismatch here does not fail to compile, \
+         it silently feeds the vertex shader the wrong numbers"
+    );
+};
 
 /// Per-LOD constants, bound with a dynamic offset so all four draws share one pipeline
 /// and one buffer. Mirrors `FoliageLod` in `foliage_gbuffer.wgsl` (32 bytes).
@@ -447,6 +443,9 @@ pub struct FoliageGBufferPass {
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
     region_stride: u32,
+    /// `FoliagePlacePass::blades_per_tile` — the fixed arena slab size that makes
+    /// [`tile_slot_of_blade`] an exact division.
+    blades_per_tile: u32,
 
     decision: FoliageFrameDecision,
     uploaded_generation: Option<u64>,
@@ -475,18 +474,23 @@ pub struct FoliageGBufferPass {
 impl FoliageGBufferPass {
     /// Create the pass against the four buffers `FoliagePlacePass` publishes.
     ///
-    /// * `blade_arena` — `GpuBladeInstance[]`, the slab-allocated blade store.
+    /// * `blade_arena` — `GpuBladeInstance[]`, partitioned into equal fixed slabs, one
+    ///   per tile ring slot.
     /// * `tile_table` — `GpuFoliageTile[]`, the resident tile ring.
-    /// * `visible_blades` — packed blade references in four equal contiguous regions;
-    ///   see [`VISIBLE_TILE_SHIFT`] for the entry encoding and
-    ///   [`visible_region_offset`] for the region layout.
+    /// * `visible_blades` — flat `blade_arena` indices in four equal contiguous regions;
+    ///   see [`visible_region_offset`] for the region layout.
     /// * `foliage_indirect` — four `DrawIndirectArgs` at byte offsets 0/16/32/48.
+    /// * `blades_per_tile` — `FoliagePlacePass::blades_per_tile`, the arena slab size.
+    ///   Not derivable from the buffers: it is the one piece of the producer's layout a
+    ///   consumer cannot see, and without it a blade index cannot be resolved to the
+    ///   tile whose origin its position is relative to. See [`tile_slot_of_blade`].
     pub fn new(
         device: &wgpu::Device,
         blade_arena: Arc<wgpu::Buffer>,
         tile_table: Arc<wgpu::Buffer>,
         visible_blades: Arc<wgpu::Buffer>,
         foliage_indirect: Arc<wgpu::Buffer>,
+        blades_per_tile: u32,
     ) -> Self {
         // ── Region stride ─────────────────────────────────────────────────────
         // Derived from the buffer the producer sized, so there is no third place for
@@ -735,6 +739,10 @@ impl FoliageGBufferPass {
             bind_group_0_key: None,
             bind_group_1,
             region_stride,
+            // Clamped once here rather than defended at every use: a zero slab size is a
+            // wiring mistake, and one blade per tile is a bounded, visible failure —
+            // whereas a division by zero in the vertex stage is implementation-defined.
+            blades_per_tile: blades_per_tile.max(1),
             decision: decide_frame(None, None),
             uploaded_generation: None,
             quality: FoliageQuality::default(),
@@ -981,12 +989,6 @@ impl RenderPass for FoliageGBufferPass {
                 0
             },
             camera_ring: [0.0, 0.0, 0.0, self.quality.ring_radius()],
-            interaction_field: [
-                self.interaction_field[0],
-                self.interaction_field[1],
-                extent,
-                1.0 / extent,
-            ],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.
             lod_quality_scale: {
@@ -1000,12 +1002,26 @@ impl RenderPass for FoliageGBufferPass {
             scale_in_band: DEFAULT_SCALE_IN_BAND,
             lod_fade_band: self.lod_fade_band.max(0.0),
             interaction_strength: self.interaction_strength,
+            interaction_field: [
+                self.interaction_field[0],
+                self.interaction_field[1],
+                extent,
+                1.0 / extent,
+            ],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
+            eprintln!(
+                "[foliage][raster] frame={} enabled={} render_pass_open={}",
+                ctx.frame_num,
+                self.decision.enabled,
+                ctx.active_render_pass_ptr().is_some(),
+            );
+        }
         if !self.decision.enabled {
             // Zero recorded commands. Not four empty draws — nothing.
             return Ok(());

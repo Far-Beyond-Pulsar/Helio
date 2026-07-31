@@ -460,7 +460,17 @@ fn cs_cluster_cull(
     for (var i = 0u; i < writable; i = i + 1u) {
         let out_index = region + base + i;
         if out_index < arrayLength(&visible_blades) {
-            visible_blades[out_index] = tile.blade_offset + first + i;
+            // Packed reference, NOT a flat arena index: tile slot in the high 16 bits,
+            // tile-local blade index in the low 16. `FoliageGBufferPass` needs the tile
+            // anyway (for `tile_coord` and `bounds_center_y`, which is how a blade's
+            // world position is reconstructed), so handing it the slot directly saves a
+            // division per *vertex* in the hottest shader in the foliage path. The
+            // consumer mirrors this as `VISIBLE_TILE_SHIFT` / `VISIBLE_LOCAL_MASK`; the
+            // two must change together or blades render from the wrong tile's origin.
+            //
+            // Both halves are comfortably in range: the ring is 4096 slots and a tile's
+            // arena slab is a few hundred blades, against a 65 536 ceiling each.
+            visible_blades[out_index] = (slot << 16u) | ((first + i) & 0xffffu);
         }
     }
 }

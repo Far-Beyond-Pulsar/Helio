@@ -77,7 +77,14 @@ pub struct FoliageTypeDescriptor {
     pub height_range: [f32; 2],
     /// Minimum and maximum width in metres.
     pub width_range: [f32; 2],
-    /// Acceptance band on terrain slope, in radians from vertical.
+    /// Acceptance band on terrain slope, as `[min_angle, max_angle]` in **radians from
+    /// horizontal** — `[0.0, 35f32.to_radians()]` means "flat ground up to a 35° incline".
+    ///
+    /// The GPU field this becomes is a *cosine* band, and `to_gpu` does the conversion.
+    /// Do not pass cosines here. Getting this backwards does not warn or render oddly: a
+    /// flat plane has `cos(slope) == 1.0`, so a band that looks like `[0.0, 0.61]` in
+    /// radians rejects every candidate on level ground and places exactly zero blades,
+    /// which is indistinguishable from foliage being disabled.
     pub slope_range: [f32; 2],
     /// Acceptance band on world altitude in metres.
     pub altitude_range: [f32; 2],
@@ -157,7 +164,15 @@ impl FoliageTypeDescriptor {
             density: finite(self.density, 0.0).max(0.0),
             height_range: finite_pair(self.height_range, [0.15, 0.45]),
             width_range: finite_pair(self.width_range, [0.01, 0.03]),
-            slope_range: finite_pair(self.slope_range, [0.0, std::f32::consts::FRAC_PI_4]),
+            // Angles in, cosines out. `cos` is decreasing over [0, π], so the band
+            // inverts: the *max* angle produces the *min* accepted cosine.
+            slope_range: {
+                let angles =
+                    finite_pair(self.slope_range, [0.0, std::f32::consts::FRAC_PI_4]);
+                let low = angles[0].clamp(0.0, std::f32::consts::PI);
+                let high = angles[1].clamp(0.0, std::f32::consts::PI);
+                [high.cos(), low.cos()]
+            },
             altitude_range: finite_pair(self.altitude_range, [f32::MIN, f32::MAX]),
             lod_distances: helio_foliage_core::DEFAULT_LOD_DISTANCES,
             wind_response: [
@@ -511,6 +526,45 @@ mod tests {
         assert!(gpu.height_range.iter().all(|v| v.is_finite()));
         assert!(gpu.interaction_stiffness.is_finite());
         assert!(gpu.wind_response.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn flat_ground_is_inside_the_default_slope_band() {
+        // The regression this pins: the GPU field is a cosine band, the descriptor takes
+        // angles. Passing angles straight through rejects every candidate on level ground
+        // and places zero blades — which looks exactly like foliage being switched off,
+        // with nothing in the log.
+        let gpu = FoliageTypeDescriptor {
+            slope_range: [0.0, 35f32.to_radians()],
+            ..Default::default()
+        }
+        .to_gpu();
+
+        let flat_ground_cos = 1.0_f32;
+        assert!(
+            flat_ground_cos >= gpu.slope_range[0] && flat_ground_cos <= gpu.slope_range[1],
+            "flat ground (cos = 1.0) must be inside {:?}",
+            gpu.slope_range
+        );
+
+        // And a 60° face must be outside a 35° band.
+        let steep_cos = 60f32.to_radians().cos();
+        assert!(steep_cos < gpu.slope_range[0]);
+    }
+
+    #[test]
+    fn steeper_max_angle_widens_the_accepted_band() {
+        let gentle = FoliageTypeDescriptor {
+            slope_range: [0.0, 10f32.to_radians()],
+            ..Default::default()
+        }
+        .to_gpu();
+        let steep = FoliageTypeDescriptor {
+            slope_range: [0.0, 70f32.to_radians()],
+            ..Default::default()
+        }
+        .to_gpu();
+        assert!(steep.slope_range[0] < gentle.slope_range[0]);
     }
 
     #[test]

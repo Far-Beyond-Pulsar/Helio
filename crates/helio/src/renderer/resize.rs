@@ -67,6 +67,7 @@ impl Renderer {
                 enable_planar_reflections: self.enable_planar_reflections,
                 enable_environment_reflections: self.enable_environment_reflections,
                 hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+                enable_foliage: self.enable_foliage,
             };
             self.graph = rebuilder(
                 &self.device,

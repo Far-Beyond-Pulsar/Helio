@@ -300,14 +300,11 @@ impl ApplicationHandler for App {
             });
 
         // ── Lighting ─────────────────────────────────────────────────────────
-        let sun_light_id = renderer
-            .scene_mut()
-            .insert_light(directional_light(
-                [-0.35, -0.8, -0.5],
-                [1.0, 0.96, 0.88],
-                3.0,
-            ))
-            .expect("sun");
+        let sun_light_id = renderer.scene_mut().insert_light(directional_light(
+            [-0.35, -0.8, -0.5],
+            [1.0, 0.96, 0.88],
+            3.0,
+        ));
 
         renderer.scene_mut().flush();
 

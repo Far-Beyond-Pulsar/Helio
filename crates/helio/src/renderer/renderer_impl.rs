@@ -104,6 +104,11 @@ pub struct Renderer {
     pub(crate) shadow_face_capacity: u32,
     /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
     pub(crate) enable_ssr: bool,
+    /// Persisted so the resize rebuild reconstructs the same graph. Every flag the
+    /// rebuilder needs has to live here — a literal in `resize.rs` silently produces a
+    /// *different* pipeline after the first resize, which is exactly what happened when
+    /// this field was first added.
+    pub(crate) enable_foliage: bool,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
     pub(crate) debug_mode: u32,
@@ -585,6 +590,7 @@ impl Renderer {
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            enable_foliage: false
         }
     }
 

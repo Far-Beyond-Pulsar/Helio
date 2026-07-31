@@ -17,7 +17,10 @@ helio-pass-decal = { path = "../helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
+helio-foliage-core = { workspace = true }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-foliage-place = { path = "../helio-pass-foliage-place" }
+helio-pass-foliage-gbuffer = { path = "../helio-pass-foliage-gbuffer" }
 helio-pass-hiz = { path = "../helio-pass-hiz" }
 helio-pass-hlfs = { path = "../helio-pass-hlfs" }
 helio-pass-indirect-dispatch = { path = "../helio-pass-indirect-dispatch" }

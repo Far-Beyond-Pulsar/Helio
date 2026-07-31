@@ -189,6 +189,17 @@ pub struct RendererConfig {
     /// 1×1 black fallback when the pass is absent, so disabling it costs only
     /// the reflection contribution.
     pub enable_ssr: bool,
+    /// Enable the foliage passes. Default `true`.
+    ///
+    /// This is the outermost of three independent zero-cost guarantees, and the only one
+    /// that removes the passes from the graph entirely. The other two are runtime: with
+    /// the passes present but no foliage types registered, `Scene` leaves the `foliage`
+    /// frame slot unwritten and both passes early-out; with types registered but the ring
+    /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
+    ///
+    /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
+    /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
+    pub enable_foliage: bool,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -225,6 +236,7 @@ impl RendererConfig {
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
             enable_ssr: false,
+            enable_foliage: true,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,

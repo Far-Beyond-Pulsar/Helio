@@ -6,7 +6,10 @@ use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
+use helio_foliage_core::FoliageQuality;
 use helio_pass_flare::LensFlarePass;
+use helio_pass_foliage_gbuffer::FoliageGBufferPass;
+use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
@@ -163,7 +166,45 @@ fn add_geometry_passes(
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
 
+    // Foliage placement is a compute pass and must be added *before* GBufferPass, not
+    // between it and FoliageGBufferPass. It is deliberately not `chain_transparent` (it
+    // records on the main encoder so it reads this frame's Hi-Z rather than last
+    // frame's — plan §6.2), which means the chain scan cannot skip over it: sitting
+    // between the two raster passes it would break the very subpass fusion
+    // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
+    // exactly why this is worth a comment — the cost is a silent tile store/reload.
+    let foliage_buffers = config.enable_foliage.then(|| {
+        let place_pass = FoliagePlacePass::new(device, FoliageQuality::default());
+        let handles = (
+            Arc::clone(&place_pass.blade_arena),
+            Arc::clone(&place_pass.tile_table),
+            Arc::clone(&place_pass.visible_blades),
+            Arc::clone(&place_pass.foliage_indirect),
+            place_pass.blades_per_tile(),
+        );
+        graph.add_pass(Box::new(place_pass));
+        handles
+    });
+
     graph.add_pass(Box::new(GBufferPass::new(device)));
+
+    // Foliage rasterisation goes immediately after GBufferPass and before
+    // VirtualGeometry. After GBuffer because it composites into the same eight targets
+    // with LoadOp::Load; before VirtualGeometry because chain formation requires an exact
+    // attachment-view match and VG binds only seven attachments — it omits
+    // gbuffer_velocity — so anything downstream of VG can never fuse with the G-buffer.
+    if let Some((blade_arena, tile_table, visible_blades, foliage_indirect, blades_per_tile)) =
+        foliage_buffers
+    {
+        graph.add_pass(Box::new(FoliageGBufferPass::new(
+            device,
+            blade_arena,
+            tile_table,
+            visible_blades,
+            foliage_indirect,
+            blades_per_tile,
+        )));
+    }
 
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
     vg_pass.debug_mode = config.debug_mode;

@@ -258,7 +258,7 @@ mod tests {
             COUNTER_PLACED_BLADES,
             COUNTER_RESERVED,
         ];
-        let mut seen = slots;
+        let mut seen = slots.to_vec();
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), slots.len(), "two counters share a slot");
