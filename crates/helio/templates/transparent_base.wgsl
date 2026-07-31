@@ -215,6 +215,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
     }
 
-    surface.rgb += Lo;
+    surface = vec4<f32>(surface.rgb + Lo, surface.a);
     return surface;
 }
