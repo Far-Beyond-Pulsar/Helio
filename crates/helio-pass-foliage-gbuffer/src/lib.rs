@@ -1015,7 +1015,7 @@ impl RenderPass for FoliageGBufferPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
-            eprintln!(
+            log::debug!(
                 "[foliage][raster] frame={} enabled={} render_pass_open={}",
                 ctx.frame_num,
                 self.decision.enabled,

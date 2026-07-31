@@ -752,7 +752,7 @@ impl RenderPass for FoliagePlacePass {
         // the same flag and records nothing.
         self.active = false;
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
-            eprintln!(
+            log::debug!(
                 "[foliage][gate] frame={} slot_written={} type_count={:?}",
                 ctx.frame_num,
                 ctx.frame_resources.foliage.is_some(),

@@ -212,12 +212,28 @@ impl ApplicationHandler for App {
             )))
             .as_mesh()
             .unwrap();
+        // `ObjectDescriptor::bounds` is a world-space bounding *sphere radius*, not a
+        // half-extent, and there is no per-object cull opt-out — so the only lever is to
+        // make the sphere genuinely enclose the mesh.
+        //
+        // A square plane's true circumradius is `half_extent * sqrt(2)`; passing the
+        // half-extent leaves the four corners outside the sphere and the whole ground
+        // blinks out as you turn. This uses 2x rather than the exact sqrt(2) on purpose:
+        // an over-large bound is conservative — it can only cause an object to be drawn
+        // when it did not strictly need to be — whereas an under-large one silently
+        // deletes geometry that is plainly on screen. For a single ground plane the cost
+        // of being generous is nothing.
+        //
+        // The structurally better fix, if this demo ever grows real terrain, is to tile
+        // the ground into a grid of small quads each with its own tight bounds. One
+        // 240 m object with a single bounding sphere is a poor citizen for occlusion
+        // culling no matter how the radius is set.
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             ground_mesh,
             ground_mat,
             glam::Mat4::IDENTITY,
-            FIELD_HALF_EXTENT,
+            FIELD_HALF_EXTENT * 2.0,
         );
 
         // A visible marker for the roaming interactor, so the grass displacement has
