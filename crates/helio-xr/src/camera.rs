@@ -70,7 +70,10 @@ pub fn xr_view_to_camera(
     near: f32,
     far: f32,
 ) -> [GpuCameraUniforms; 2] {
-    [pose_to_camera(left, near, far), pose_to_camera(right, near, far)]
+    [
+        pose_to_camera(left, near, far),
+        pose_to_camera(right, near, far),
+    ]
 }
 
 fn pose_to_camera(pose: &ViewPose, near: f32, far: f32) -> GpuCameraUniforms {
@@ -185,8 +188,16 @@ mod projection_tests {
         let at_near = ndc(m, glam::Vec3::new(0.0, 0.0, -near));
         let at_far = ndc(m, glam::Vec3::new(0.0, 0.0, -far));
 
-        assert!(at_near.z.abs() < 1.0e-4, "near plane should map to 0, got {}", at_near.z);
-        assert!((at_far.z - 1.0).abs() < 1.0e-3, "far plane should map to 1, got {}", at_far.z);
+        assert!(
+            at_near.z.abs() < 1.0e-4,
+            "near plane should map to 0, got {}",
+            at_near.z
+        );
+        assert!(
+            (at_far.z - 1.0).abs() < 1.0e-3,
+            "far plane should map to 1, got {}",
+            at_far.z
+        );
 
         // And the midpoint must be inside the volume, which the OpenGL form fails.
         let mid = ndc(m, glam::Vec3::new(0.0, 0.0, -1.0));
@@ -207,7 +218,11 @@ mod projection_tests {
         let aspect = half_h.tan() / half_v.tan();
         let reference = glam::Mat4::perspective_rh(half_v * 2.0, aspect, near, far);
 
-        for (a, b) in m.to_cols_array().iter().zip(reference.to_cols_array().iter()) {
+        for (a, b) in m
+            .to_cols_array()
+            .iter()
+            .zip(reference.to_cols_array().iter())
+        {
             assert!((a - b).abs() < 1.0e-4, "{m:?} != {reference:?}");
         }
     }
@@ -225,7 +240,11 @@ mod projection_tests {
         // to the wrong depth rather than failing visibly.
         let m = projection_from_fov(fov(-1.0, 0.6, 0.8, -0.8), 0.05, 100.0);
         let centre = ndc(m, glam::Vec3::new(0.0, 0.0, -1.0));
-        assert!(centre.x > 0.0, "view axis should sit right of centre, got {}", centre.x);
+        assert!(
+            centre.x > 0.0,
+            "view axis should sit right of centre, got {}",
+            centre.x
+        );
 
         // And the mirrored frustum must be mirrored in NDC, by the same magnitude.
         let mirrored = projection_from_fov(fov(-0.6, 1.0, 0.8, -0.8), 0.05, 100.0);
