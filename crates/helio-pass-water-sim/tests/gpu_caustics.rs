@@ -419,10 +419,10 @@ async fn project_caustics(wave_amplitude: f32, caustics_intensity: f32) -> Optio
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    let _ = device.poll(wgpu::PollType::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().expect("map callback").expect("map succeeded");
 
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().expect("get_mapped_range");
     let halves: &[u16] = bytemuck::cast_slice(&data);
 
     let mut min = f32::INFINITY;
