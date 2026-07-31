@@ -3346,6 +3346,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-sprite-cull"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
+ "pollster 0.4.0",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-ssao"
 version = "0.1.0"
 dependencies = [
