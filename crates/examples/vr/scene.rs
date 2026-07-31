@@ -27,14 +27,16 @@
 //! **It is a forward-opaque graph.** `main.rs` builds `build_forward_opaque_graph`, so the
 //! hallway only shows features that graph actually renders. Decals, foliage and virtual
 //! geometry are deferred-graph passes — VG in particular crashes the pass (it expects a
-//! G-buffer to write into), so it is deliberately absent; instancing (bay 5) stands in for
-//! the same "lots of objects" idea on the path that works.
+//! G-buffer to write into), so it is deliberately absent; the shipping container from
+//! `editor_demo` is loaded as a classic mesh instead (bay 5), parked beside an instanced
+//! crate stack.
 
 use glam::{Mat4, Quat, Vec3};
 use helio::{
-    GpuLight, LightId, LightType, MaterialId, MeshId, ObjectId, Renderer, VoxelMode,
+    GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer, VoxelMode,
     VoxelTerrain, VoxelVolumeDescriptor, VOXEL_TERRAIN_GRID_DIM,
 };
+use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 use helio_voxel_core::GpuVoxelMaterial;
@@ -396,17 +398,18 @@ fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, ani
 
 /// Bay 5 — instancing: a crate stack and tile floor of identical objects that
 /// the renderer auto-batches into a handful of instanced draws, a condensed
-/// one_million_cubes.
+/// one_million_cubes. The left side is kept clear for the shipping container
+/// parked there by `build`.
 fn bay_instancing(renderer: &mut Renderer, z: f32, mats: &Mats) {
     let crate_half = Vec3::new(0.3, 0.3, 0.3);
     let crate_mesh = insert_box_mesh(renderer, crate_half);
-    for x in 0..4 {
-        for d in 0..3 {
+    for x in 0..3 {
+        for d in 0..2 {
             for y in 0..4 {
                 let pos = Vec3::new(
-                    -1.8 + x as f32 * 0.62,
+                    1.35 + x as f32 * 0.62,
                     0.3 + y as f32 * 0.62,
-                    z + 2.2 + d as f32 * 0.62,
+                    z + d as f32 * 0.62,
                 );
                 let material = if (x + d + y) % 2 == 0 {
                     mats.gold
@@ -419,17 +422,90 @@ fn bay_instancing(renderer: &mut Renderer, z: f32, mats: &Mats) {
     }
 
     let tile_mesh = insert_box_mesh(renderer, Vec3::new(0.12, 0.05, 0.12));
-    for x in 0..6 {
+    for x in 0..5 {
         for d in 0..4 {
             place(
                 renderer,
                 tile_mesh,
                 mats.steel,
-                Vec3::new(0.6 + x as f32 * 0.5, 0.05, z - 3.0 + d as f32 * 0.5),
+                Vec3::new(0.5 + x as f32 * 0.5, 0.05, z - 3.0 + d as f32 * 0.5),
                 0.17,
             );
         }
     }
+}
+
+/// Load the shipping-container FBX (the same asset `editor_demo` uses) as a
+/// *classic* mesh so it renders through the forward-opaque graph — the meshlet
+/// path VirtualGeometry uses is deferred-only and would not draw here.
+///
+/// Returns `(mesh, material, local_centre, local_size)` so the caller can place
+/// the container on the floor regardless of the FBX's origin. `None` if the
+/// asset cannot be loaded, so a missing model never crashes the demo.
+fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, Vec3)> {
+    const CONTAINER_FBX: &[u8] =
+        include_bytes!("../../../models/source/container with textures.fbx");
+    let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("models/source");
+
+    let scene = match load_scene_bytes_with_config(
+        CONTAINER_FBX,
+        "fbx",
+        Some(base_dir.as_path()),
+        LoadConfig::default()
+            .with_uv_flip(false)
+            .with_merge_meshes(true)
+            .with_import_scale(glam::Vec3::splat(1.0 / 200.0)),
+    ) {
+        Ok(scene) => scene,
+        Err(e) => {
+            log::warn!("[hallway] shipping container FBX failed to load: {e}");
+            return None;
+        }
+    };
+
+    let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
+    let sm = match scene.sectioned_mesh {
+        Some(sm) => sm,
+        None => {
+            log::warn!("[hallway] shipping container FBX produced no sectioned mesh");
+            return None;
+        }
+    };
+    let Some(section) = sm.sections.iter().find(|s| !s.indices.is_empty()) else {
+        log::warn!("[hallway] shipping container FBX has no index data");
+        return None;
+    };
+
+    let mut bb_min = Vec3::splat(f32::INFINITY);
+    let mut bb_max = Vec3::splat(f32::NEG_INFINITY);
+    for v in &sm.vertices {
+        let p = Vec3::from(v.position);
+        bb_min = bb_min.min(p);
+        bb_max = bb_max.max(p);
+    }
+    let local_centre = (bb_min + bb_max) * 0.5;
+
+    let fallback = renderer
+        .scene_mut()
+        .insert_material(make_material([0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
+    let material = section
+        .material_index
+        .and_then(|i| mat_ids.get(i))
+        .copied()
+        .unwrap_or(fallback);
+
+    let mesh = renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::mesh(MeshUpload {
+            vertices: sm.vertices.clone(),
+            indices: section.indices.clone(),
+        }))
+        .as_mesh()
+        .unwrap();
+
+    Some((mesh, material, local_centre, bb_max - bb_min))
 }
 
 /// Bay 6 — emissive/HDR colour targets plus a grid of hue-cycling lights, a
@@ -667,6 +743,27 @@ pub fn build(renderer: &mut Renderer) -> Animated {
             8 => bay_colour_grade(renderer, z, &meshes),
             _ => unreachable!(),
         }
+    }
+
+    // ── Shipping container ──────────────────────────────────────────────────
+    // Parked along the left wall of the instancing bay, long axis down the
+    // corridor. Rotating about Y maps the FBX's long (X) axis onto the
+    // corridor's Z axis; the height axis is unchanged so the bottom sits on
+    // the floor.
+    if let Some((container_mesh, container_mat, local_centre, local_size)) =
+        load_container(renderer)
+    {
+        let z = bay_centre_z(5);
+        let centre = Vec3::new(
+            -HALL_HALF_WIDTH + local_size.z * 0.5 + 0.03,
+            local_size.y * 0.5,
+            z,
+        );
+        let transform = Mat4::from_translation(centre)
+            * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
+            * Mat4::from_translation(-local_centre);
+        let radius = (local_size * 0.5).length().max(0.5);
+        let _ = insert_object(renderer, container_mesh, container_mat, transform, radius);
     }
 
     // Cool fill at the entrance, so the first bay is not lit solely by its own accent —
