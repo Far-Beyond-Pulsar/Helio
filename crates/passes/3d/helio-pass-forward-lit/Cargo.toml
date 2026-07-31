@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 helio-core = { workspace = true }
-helio = { path = "../helio" }
+helio = { path = "../../../helio" }
 libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }

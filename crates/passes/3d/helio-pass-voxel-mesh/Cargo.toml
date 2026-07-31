@@ -7,7 +7,7 @@ description = "GPU-driven voxel meshlet rendering pass for Helio"
 [dependencies]
 wgpu = { workspace = true }
 helio-core = { workspace = true }
-helio-voxel-core = { path = "../helio-voxel-core" }
+helio-voxel-core = { path = "../../../helio-voxel-core" }
 libhelio = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }

@@ -233,21 +233,21 @@ libhelio = { workspace = true }
 helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
-helio-pass-fxaa = { path = "../helio-pass-fxaa" }
+helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
-helio-pass-decal = { path = "../helio-pass-decal" }
-helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
-helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
-helio-pass-postprocess = { path = "../helio-pass-postprocess" }
-helio-pass-voxel-raymarch = { path = "../helio-pass-voxel-raymarch" }
-helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
+helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
+helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
+helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
+helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
+helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-planetary-voxel = { workspace = true }
-helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
-helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 helio-voxel-core = { path = "../helio-voxel-core" }
 helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
-helio-pass-water-sim = { path = "../helio-pass-water-sim" }
+helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"
 image = { workspace = true, features = ["png"] }

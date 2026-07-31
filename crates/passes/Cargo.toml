@@ -1,0 +1,9 @@
+[package]
+name = "helio-passes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Container for crates/passes/{2d,3d,iso} - not a real crate, exists so the crates/* workspace glob has a manifest to read here."
+
+[lib]
+path = "lib.rs"
