@@ -323,7 +323,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
-    r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
+    r._pad13 = 0.0; r._pad14 = 0.0;
     r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0; r._pad_hdr_end = 0.0;
     r._pad_lift = 0.0; r._pad_gamma = 0.0; r._pad_gain = 0.0; r._pad_grading_end = 0.0;
     return r;
