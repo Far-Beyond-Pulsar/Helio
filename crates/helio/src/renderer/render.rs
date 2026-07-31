@@ -773,36 +773,46 @@ impl Renderer {
             self.sync_template_registry_to_scene();
             self.scene.flush();
 
-            if eye == 0 {
-                representative = match (&self.xr_camera, pose) {
-                    (Some(template), _) => {
-                        let mut cam = template.clone();
-                        cam.view = pose.view_matrix();
-                        cam.proj = pose.projection(near_far.0, near_far.1);
-                        cam.position = pose.eye_position;
-                        cam.near = near_far.0;
-                        cam.far = near_far.1;
-                        cam.jitter = [0.0, 0.0];
-                        cam
-                    }
-                    _ => self.default_xr_camera(near_far.0, near_far.1),
-                };
-                // Debug overlay / editor camera: single (left) eye.
-                let col = eye_uniform.view_proj;
-                let debug_camera_uniform = DebugCameraUniform {
-                    view_proj: [
-                        [col[0],  col[1],  col[2],  col[3]],
-                        [col[4],  col[5],  col[6],  col[7]],
-                        [col[8],  col[9],  col[10], col[11]],
-                        [col[12], col[13], col[14], col[15]],
-                    ],
-                };
-                self.queue.write_buffer(
-                    &self.debug_camera_buffer,
-                    0,
-                    bytemuck::bytes_of(&debug_camera_uniform),
-                );
-            }
+            // Both of these are per-eye. They used to be computed only for eye 0, which
+            // left the right eye drawing with the left eye's camera:
+            //
+            // - `representative` is the CPU-side camera handed to `submit_frame`, so a
+            //   left-only value culls the right eye against the wrong frustum.
+            // - `debug_camera_buffer` is what `DebugDrawPass` projects with. It is a
+            //   *separate* uniform from the scene camera, so updating the stereo cameras
+            //   above does not update it, and every debug line in the right eye was
+            //   projected through the left eye's view-projection. Because the error is a
+            //   fixed inter-eye offset applied to a moving camera, it presents as debug
+            //   geometry sliding and shearing against the world as you move — while the
+            //   left eye looks perfect.
+            representative = match (&self.xr_camera, pose) {
+                (Some(template), _) => {
+                    let mut cam = template.clone();
+                    cam.view = pose.view_matrix();
+                    cam.proj = pose.projection(near_far.0, near_far.1);
+                    cam.position = pose.eye_position;
+                    cam.near = near_far.0;
+                    cam.far = near_far.1;
+                    cam.jitter = [0.0, 0.0];
+                    cam
+                }
+                _ => self.default_xr_camera(near_far.0, near_far.1),
+            };
+
+            let col = eye_uniform.view_proj;
+            let debug_camera_uniform = DebugCameraUniform {
+                view_proj: [
+                    [col[0],  col[1],  col[2],  col[3]],
+                    [col[4],  col[5],  col[6],  col[7]],
+                    [col[8],  col[9],  col[10], col[11]],
+                    [col[12], col[13], col[14], col[15]],
+                ],
+            };
+            self.queue.write_buffer(
+                &self.debug_camera_buffer,
+                0,
+                bytemuck::bytes_of(&debug_camera_uniform),
+            );
 
             let layer_view = {
                 let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
