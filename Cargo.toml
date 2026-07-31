@@ -56,6 +56,7 @@ helio-pass-postprocess = { path = "crates/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "crates/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }
 libhelio = { path = "crates/libhelio" }
+helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
