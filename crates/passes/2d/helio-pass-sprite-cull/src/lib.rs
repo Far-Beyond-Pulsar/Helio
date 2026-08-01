@@ -17,18 +17,29 @@
 //!    Alive + in-view slots are atomically compacted into `indices_a`/`keys_a`,
 //!    and the surviving count is atomically accumulated directly into
 //!    [`SpriteCullPass::indirect_buf`]'s `instance_count` field.
-//! 2. 32 single-bit passes of a GPU LSD radix sort (`shaders/sprite_sort.wgsl`)
+//! 2. `cs_prepare` (`shaders/sprite_sort.wgsl`) — a single thread. Turns that
+//!    GPU-written visible count into `num_blocks` and an indirect dispatch
+//!    arg buffer for step 3, so the sort's dispatch size tracks the actual
+//!    per-frame visible count instead of the pool's worst-case capacity.
+//! 3. 32 single-bit passes of a GPU LSD radix sort (`shaders/sprite_sort.wgsl`)
 //!    over the compacted list — see that shader's module doc comment for the
 //!    three-kernel (histogram / scan / scatter) design, and for why it's 32
 //!    one-bit passes rather than 4 eight-bit-digit passes (a real stability
 //!    bug in an earlier 8-bit version, caught by
 //!    `tests/gpu_sort_validation.rs`).
 //!
-//! The CPU touches none of this per frame beyond ~96 tiny fixed-size
-//! dispatches and one 4-byte buffer-to-buffer copy (propagating the cull
-//! pass's GPU-computed visible count into the sort kernels' bounds check) —
-//! there is no per-instance CPU work in `prepare()`/`execute()` regardless
-//! of pool size.
+//! The CPU touches none of this per frame beyond ~97 tiny dispatches, none of
+//! them sized from CPU-known data: the cull dispatch alone is fixed
+//! (`slot_capacity`, known up front), but the 32 sort passes' `cs_histogram`/
+//! `cs_scatter` dispatches are *indirect* (`dispatch_workgroups_indirect`),
+//! sized by `cs_prepare` from the cull pass's GPU-written visible count —
+//! not from `max_visible` (the pool-sized worst case). Without that,
+//! zooming a camera in to where only a few thousand sprites are visible
+//! would still dispatch enough workgroups to cover `max_visible` sprites on
+//! every one of the 32 sort passes, every frame — the fixed ceiling has to
+//! size the *buffers* (a real GPU allocation can't grow mid-frame), but the
+//! *dispatch* should track what's actually there. There is no per-instance
+//! CPU work in `prepare()`/`execute()` regardless of pool size either way.
 //!
 //! The instance byte layout this reads (`position`/`size`/`depth` at
 //! specific offsets in `shaders/sprite_cull.wgsl`) is a *protocol*, not a
@@ -70,9 +81,9 @@ const SORT_BITS: usize = 32;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SortUniforms {
     bit: u32,
-    num_blocks: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 /// GPU-side compute pass: culls a growable sprite pool against a view rect
@@ -81,7 +92,11 @@ struct SortUniforms {
 pub struct SpriteCullPass {
     slot_capacity: u32,
     max_visible: u32,
-    num_blocks: u32,
+    /// Worst-case block count (`max_visible` sized) — only used to size the
+    /// `block_hist_buf` allocation. The *actual* per-frame block count used
+    /// for dispatch sizing lives in `frame_uniform_buf`, GPU-written fresh
+    /// every frame by `cs_prepare`.
+    max_blocks: u32,
 
     cull_pipeline: wgpu::ComputePipeline,
     cull_uniform_buf: wgpu::Buffer,
@@ -90,12 +105,23 @@ pub struct SpriteCullPass {
     view_max: [f32; 2],
     view_dirty: bool,
 
+    prepare_pipeline: wgpu::ComputePipeline,
+    prepare_bind_group: wgpu::BindGroup,
+
     hist_pipeline: wgpu::ComputePipeline,
     scan_pipeline: wgpu::ComputePipeline,
     scatter_pipeline: wgpu::ComputePipeline,
 
-    /// Holds the GPU-copied visible count each frame — see `execute()`.
-    count_buf: wgpu::Buffer,
+    /// `FrameUniform{count,num_blocks}`, GPU-written once per frame by
+    /// `cs_prepare` and read by every one of this frame's `SORT_BITS` sort
+    /// passes (bound as both storage, for `cs_prepare`'s write, and uniform,
+    /// for the histogram/scan/scatter kernels' reads).
+    frame_uniform_buf: wgpu::Buffer,
+    /// `[num_blocks, 1, 1]`, GPU-written once per frame by `cs_prepare` — the
+    /// indirect dispatch args `cs_histogram`/`cs_scatter` dispatch against,
+    /// so their dispatch size tracks the real per-frame visible count.
+    dispatch_args_buf: wgpu::Buffer,
+
     /// One bind group per bit pass — `bit` is baked in at construction, and
     /// every buffer reference is fixed for the pass's lifetime, so nothing
     /// here needs rebuilding per frame.
@@ -128,7 +154,7 @@ impl SpriteCullPass {
         slot_capacity: u32,
         max_visible: u32,
     ) -> Self {
-        let num_blocks = max_visible.div_ceil(WG_SIZE).max(1);
+        let max_blocks = max_visible.div_ceil(WG_SIZE).max(1);
 
         // ── Cull ────────────────────────────────────────────────────────────
         let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -198,10 +224,60 @@ impl SpriteCullPass {
             ],
         });
 
+        // ── Prepare (drives indirect dispatch sizing for the sort passes) ────
+        let frame_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite Sort Frame Uniform"),
+            // FrameUniform{count,num_blocks} is 8 bytes in WGSL; pad the
+            // allocation for backend safety margin, mirroring the old
+            // CountUniform buffer this replaces.
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let dispatch_args_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sprite Sort Dispatch Args"),
+            size: 12, // [num_blocks, 1, 1] as u32s
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // y/z workgroup counts are always 1 — only `cs_prepare` ever updates
+        // [0] again, once per frame.
+        queue.write_buffer(&dispatch_args_buf, 0, bytemuck::cast_slice(&[max_blocks, 1u32, 1u32]));
+
+        let prepare_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Sprite Sort Prepare BGL"),
+            entries: &[storage_entry(0, true), storage_entry(1, false), storage_entry(2, false)],
+        });
+        let prepare_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sprite Sort Prepare PL"),
+            bind_group_layouts: &[Some(&prepare_bgl)],
+            immediate_size: 0,
+        });
+
         // ── Sort ────────────────────────────────────────────────────────────
         let sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sprite Sort Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite_sort.wgsl").into()),
+        });
+
+        let prepare_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Sprite Sort Prepare Pipeline"),
+            layout: Some(&prepare_pl),
+            module: &sort_shader,
+            entry_point: Some("cs_prepare"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let prepare_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Sprite Sort Prepare BG"),
+            layout: &prepare_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: dispatch_args_buf.as_entire_binding() },
+            ],
         });
 
         let hist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -267,14 +343,17 @@ impl SpriteCullPass {
         });
 
         // 2 buckets (0/1) per block per bit pass, not 256 — see the module
-        // doc comment on why this is a 1-bit-per-pass sort.
-        let block_hist_buf = create_u32_buffer(device, "Sprite Sort Block Histogram", num_blocks * 2);
+        // doc comment on why this is a 1-bit-per-pass sort. Sized for the
+        // worst case (`max_blocks`); actual per-frame usage is bounded by
+        // `frame_uniform_buf.num_blocks` at dispatch time, not by reallocating
+        // this buffer.
+        let block_hist_buf = create_u32_buffer(device, "Sprite Sort Block Histogram", max_blocks * 2);
 
-        // Bit-pass `bit`/`num_blocks` are compile-time-fixed given
-        // `max_visible`, so their uniform buffers are written once here and
-        // never touched again. `count` (the GPU-computed visible count) is
-        // dynamic — see `count_buf` below, refreshed once per frame in
-        // `execute()`, shared by all `SORT_BITS` passes.
+        // `bit` is compile-time-fixed given the pass index, so its uniform
+        // buffer is written once here and never touched again. `count`/
+        // `num_blocks` (GPU-computed, per-frame) live in `frame_uniform_buf`
+        // instead, refreshed once per frame by `cs_prepare`, shared by all
+        // `SORT_BITS` passes.
         let pass_uniforms: [wgpu::Buffer; SORT_BITS] = std::array::from_fn(|i| {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Sprite Sort Pass Uniforms"),
@@ -282,16 +361,9 @@ impl SpriteCullPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let u = SortUniforms { bit: i as u32, num_blocks, _pad0: 0, _pad1: 0 };
+            let u = SortUniforms { bit: i as u32, _pad0: 0, _pad1: 0, _pad2: 0 };
             queue.write_buffer(&buf, 0, bytemuck::bytes_of(&u));
             buf
-        });
-
-        let count_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Sprite Sort Visible Count"),
-            size: 16, // CountUniform{count:u32} is 4 bytes in WGSL; pad the allocation for backend safety margin.
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
         });
 
         // Ping-pong role per pass, mirroring the CPU radix sort's parity:
@@ -304,7 +376,7 @@ impl SpriteCullPass {
                 layout: &hist_bgl,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: pass_uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: count_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: src_keys.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: block_hist_buf.as_entire_binding() },
                 ],
@@ -313,10 +385,8 @@ impl SpriteCullPass {
         let scan_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Sort Scan BG"),
             layout: &scan_bgl,
-            // `bit` is unused by `cs_scan`; any pass_uniforms entry works —
-            // `num_blocks` (the only field it reads) is identical across all of them.
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: pass_uniforms[0].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: frame_uniform_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: block_hist_buf.as_entire_binding() },
             ],
         });
@@ -331,7 +401,7 @@ impl SpriteCullPass {
                 layout: &scatter_bgl,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: pass_uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: count_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: src_keys.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: src_indices.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 4, resource: dst_keys.as_entire_binding() },
@@ -344,17 +414,20 @@ impl SpriteCullPass {
         Self {
             slot_capacity,
             max_visible,
-            num_blocks,
+            max_blocks,
             cull_pipeline,
             cull_uniform_buf,
             cull_bind_group,
             view_min: [0.0, 0.0],
             view_max: [0.0, 0.0],
             view_dirty: true,
+            prepare_pipeline,
+            prepare_bind_group,
             hist_pipeline,
             scan_pipeline,
             scatter_pipeline,
-            count_buf,
+            frame_uniform_buf,
+            dispatch_args_buf,
             hist_bind_groups,
             scatter_bind_groups,
             scan_bind_group,
@@ -452,8 +525,8 @@ impl RenderPass for SpriteCullPass {
 }
 
 impl SpriteCullPass {
-    /// Records the cull + 4-pass sort dispatch sequence. Shared by the
-    /// `RenderPass::execute()` trait impl and
+    /// Records the cull + prepare + 32-pass sort dispatch sequence. Shared
+    /// by the `RenderPass::execute()` trait impl and
     /// [`SpriteCullPass::run_once_for_testing`] — the graph-integrated path
     /// and the standalone test path must record identically, or a test pass
     /// proves nothing about the real one.
@@ -473,12 +546,20 @@ impl SpriteCullPass {
             pass.dispatch_workgroups(self.slot_capacity.div_ceil(WG_SIZE), 1, 1);
         }
 
-        // Propagate the GPU-computed visible count into the sort kernels'
-        // bounds check. This is the only thing that varies per digit pass'
-        // *count* — dispatch size is always the fixed worst-case
-        // `num_blocks` (out-of-range threads no-op via `gid.x < count`), so
-        // no indirect dispatch is needed, only this one 4-byte copy.
-        encoder.copy_buffer_to_buffer(&self.indirect_buf, INDIRECT_INSTANCE_COUNT_OFFSET, &self.count_buf, 0, 4);
+        // Turns the GPU-computed visible count into `frame_uniform_buf`
+        // (read by every sort kernel below) and `dispatch_args_buf` (the
+        // indirect dispatch size for histogram/scatter) — this is what lets
+        // those dispatches shrink when fewer sprites are visible instead of
+        // always covering `max_visible`.
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("SpriteSort Prepare"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.prepare_pipeline);
+            pass.set_bind_group(0, &self.prepare_bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
 
         for i in 0..SORT_BITS {
             {
@@ -488,7 +569,7 @@ impl SpriteCullPass {
                 });
                 pass.set_pipeline(&self.hist_pipeline);
                 pass.set_bind_group(0, &self.hist_bind_groups[i], &[]);
-                pass.dispatch_workgroups(self.num_blocks, 1, 1);
+                pass.dispatch_workgroups_indirect(&self.dispatch_args_buf, 0);
             }
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -506,7 +587,7 @@ impl SpriteCullPass {
                 });
                 pass.set_pipeline(&self.scatter_pipeline);
                 pass.set_bind_group(0, &self.scatter_bind_groups[i], &[]);
-                pass.dispatch_workgroups(self.num_blocks, 1, 1);
+                pass.dispatch_workgroups_indirect(&self.dispatch_args_buf, 0);
             }
         }
     }

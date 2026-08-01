@@ -13,21 +13,27 @@
 //!   3. `SpriteBatchPass` (`helio-pass-sprite-batch`) — one
 //!      `draw_indexed_indirect` reading the GPU-computed visible count.
 //!
-//! The reason this is smooth at 10M and the naive version wouldn't be: the
-//! world is ~27x the camera's area, so at any moment only a few hundred
-//! thousand of the 10M sprites are actually visible (see `CAMERA_HALF`'s doc
-//! comment for the exact ratio and why it isn't zoomed in tighter) — culling
-//! isn't optional set-dressing here, it's what keeps the draw call and the
-//! sort's `O(n)` cost bounded by *visible* count, not pool size. Simulating
-//! and culling the full 10M every frame is still real GPU work, but it's GPU
-//! work: thousands of parallel threads doing a few flops each, not 10
-//! million sequential CPU iterations.
+//! The reason this is smooth at 10M and the naive version wouldn't be:
+//! culling means the draw call and the sort's `O(n)` cost are bounded by
+//! *visible* count, not pool size — simulating and culling the full 10M
+//! every frame is still real GPU work, but it's GPU work: thousands of
+//! parallel threads doing a few flops each, not 10 million sequential CPU
+//! iterations. `SpriteCullPass`'s `max_visible` is sized to the *whole* pool
+//! (not some fixed guess) specifically so panning/zooming can never silently
+//! drop sprites, right up to zooming out far enough to see all 10M at once —
+//! at which point culling is doing nothing and you're seeing the actual
+//! per-frame cost of *not* culling, which is the point of being able to.
+//!
+//! Controls:
+//!   WASD / arrows — pan (speed scales with current zoom)
+//!   Mouse wheel    — zoom in/out
 //!
 //! `HELIO_SPRITE_10M_COUNT` overrides the sprite count (default 10,000,000).
 //! Startup inserts the whole pool before the first frame, which takes a
 //! visible pause (a few seconds) — that's one-time CPU cost building the
 //! initial `Vec<SpriteInstance>` and its one big upload, not a per-frame cost.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,28 +46,26 @@ use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
-/// Half-extent of the simulated world sprites bounce around in — much larger
-/// than the camera's view (see the module doc comment on why).
+/// Half-extent of the simulated world sprites bounce around in.
 const WORLD_HALF: [f32; 2] = [10_000.0, 10_000.0];
-/// Half-extent of the fixed, static camera view. A 1:1 world-unit-to-pixel
-/// camera (e.g. `[640, 360]` for a 1280×720 window) only shows ~23,000 of
-/// the 10M sprites at once — visually underwhelming for a "look at all these
-/// sprites" demo even though it's culling correctly. Zoomed out 4x per axis
-/// (16x the visible area) so there's an actual field of sprites on screen,
-/// while still only showing a small fraction of the world (~3.7% of its
-/// area) — culling is still doing real work, just not *maximally aggressive*
-/// work.
+/// Starting camera half-extent (16:9, matching the window). A 1:1
+/// world-unit-to-pixel camera (`[640, 360]`) only shows ~23,000 of the 10M
+/// sprites at once — an unremarkable fraction to look at even though it's
+/// culling correctly — so this starts zoomed out 4x per axis (16x the area,
+/// ~369,000 visible) and lets the user zoom further from there.
 const CAMERA_HALF: [f32; 2] = [2560.0, 1440.0];
-/// Safety cap on how many sprites the cull pass will compact + sort in one
-/// frame. Expected visible count is roughly
-/// `count * (camera area / world area)` — for the defaults that's
-/// `10e6 * (5120*2880)/(20000*20000) ≈ 369,000`; this leaves headroom for
-/// clustering without the cull shader's `slot < max_visible` cap silently
-/// dropping the overflow.
-const MAX_VISIBLE: u32 = 600_000;
+/// Zoom multiplier on `CAMERA_HALF`, clamped to this range. `MAX_ZOOM` is
+/// set so the top of the range shows the entire simulated world.
+const MIN_ZOOM: f32 = 0.05;
+const ZOOM_STEP: f32 = 0.1;
+/// World units of pan per second, per world unit of current camera
+/// half-extent — i.e. "cross roughly one screen width per second" at any
+/// zoom level, not a fixed speed that feels wrong once zoomed way in or out.
+const PAN_SPEED: f32 = 1.2;
 const SPRITE_SIZE: [f32; 2] = [8.0, 8.0];
 
 struct Rng(u64);
@@ -144,9 +148,19 @@ struct AppState {
     scene: GpuScene,
     dummy_depth_view: wgpu::TextureView,
     sprite_count: usize,
+    max_zoom: f32,
+    camera_center: [f32; 2],
+    zoom: f32,
+    keys: HashSet<KeyCode>,
     last_frame: Instant,
     fps_frames: u32,
     fps_last_print: Instant,
+}
+
+impl AppState {
+    fn camera_half(&self) -> [f32; 2] {
+        [CAMERA_HALF[0] * self.zoom, CAMERA_HALF[1] * self.zoom]
+    }
 }
 
 impl ApplicationHandler for App {
@@ -236,8 +250,18 @@ impl ApplicationHandler for App {
         // don't follow reallocation.
         sprite_pass.reserve(&device, count);
 
-        let mut sprite_cull =
-            SpriteCullPass::new(&device, &queue, sprite_pass.instances_buffer(), sprite_pass.alive_buffer(), count as u32, MAX_VISIBLE);
+        // `max_visible == count`: see the module doc comment on why this
+        // isn't a tighter guess — zooming out must never silently drop
+        // sprites the cull shader's `slot < max_visible` cap would otherwise
+        // clip.
+        let mut sprite_cull = SpriteCullPass::new(
+            &device,
+            &queue,
+            sprite_pass.instances_buffer(),
+            sprite_pass.alive_buffer(),
+            count as u32,
+            count as u32,
+        );
         sprite_cull.set_view_rect([0.0, 0.0], CAMERA_HALF);
 
         // Spawn the whole pool once. Positions/velocities scatter across
@@ -291,7 +315,7 @@ impl ApplicationHandler for App {
         });
         let dummy_depth_view = dummy_depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-        eprintln!("[sprite_10m_demo] ready");
+        eprintln!("[sprite_10m_demo] ready — WASD/arrows to pan, mouse wheel to zoom");
         self.state = Some(AppState {
             window,
             surface,
@@ -302,6 +326,11 @@ impl ApplicationHandler for App {
             scene,
             dummy_depth_view,
             sprite_count: count,
+            // At max zoom, `camera_half()` exactly covers `WORLD_HALF`.
+            max_zoom: WORLD_HALF[0] / CAMERA_HALF[0],
+            camera_center: [0.0, 0.0],
+            zoom: 1.0,
+            keys: HashSet::new(),
             last_frame: Instant::now(),
             fps_frames: 0,
             fps_last_print: Instant::now(),
@@ -327,28 +356,84 @@ impl ApplicationHandler for App {
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
-                // Mirror is resized but the render graph's *internal*
-                // resolution deliberately isn't tied to it here — the camera
-                // is fixed (`Some(CAMERA_HALF)`), so there's nothing for a
-                // resize to invalidate about what's visible.
+                // The graph's *internal* render resolution isn't tied to the
+                // window size — the camera's world-space extent is
+                // independent of pixel count (see `AppState::camera_half`) —
+                // but the mirror surface still needs reconfiguring.
                 state.graph.set_render_size(s.width, s.height);
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let notches = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as f32,
+                };
+                let max_zoom = state.max_zoom;
+                state.zoom = (state.zoom * (1.0 - notches * ZOOM_STEP)).clamp(MIN_ZOOM, max_zoom);
+            }
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(code), .. },
+                ..
+            } => match ks {
+                ElementState::Pressed => {
+                    state.keys.insert(code);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&code);
+                }
+            },
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
-                // The one thing the CPU still does every frame: tell the
-                // graph how much time passed, so `SpriteSimulatePass::prepare`
-                // can integrate by the real `dt` instead of a fixed step.
+                // The one thing the CPU still does every frame for the
+                // sprites themselves: tell the graph how much time passed,
+                // so `SpriteSimulatePass::prepare` can integrate by the real
+                // `dt` instead of a fixed step. Everything below this is
+                // camera/UI bookkeeping, not sprite data.
                 state.graph.set_delta_time(dt);
+
+                let half = state.camera_half();
+                let mut pan = [0.0f32, 0.0];
+                let left = state.keys.contains(&KeyCode::KeyA) || state.keys.contains(&KeyCode::ArrowLeft);
+                let right = state.keys.contains(&KeyCode::KeyD) || state.keys.contains(&KeyCode::ArrowRight);
+                let up = state.keys.contains(&KeyCode::KeyW) || state.keys.contains(&KeyCode::ArrowUp);
+                let down = state.keys.contains(&KeyCode::KeyS) || state.keys.contains(&KeyCode::ArrowDown);
+                if left {
+                    pan[0] -= 1.0;
+                }
+                if right {
+                    pan[0] += 1.0;
+                }
+                if up {
+                    pan[1] += 1.0;
+                }
+                if down {
+                    pan[1] -= 1.0;
+                }
+                state.camera_center[0] =
+                    (state.camera_center[0] + pan[0] * half[0] * PAN_SPEED * dt).clamp(-WORLD_HALF[0], WORLD_HALF[0]);
+                state.camera_center[1] =
+                    (state.camera_center[1] + pan[1] * half[1] * PAN_SPEED * dt).clamp(-WORLD_HALF[1], WORLD_HALF[1]);
+
+                let camera_center = state.camera_center;
+                let camera_half = state.camera_half();
+                if let Some(sprite_pass) = state.graph.find_pass_mut::<SpriteBatchPass>() {
+                    sprite_pass.set_camera(camera_center, Some(camera_half));
+                }
+                if let Some(sprite_cull) = state.graph.find_pass_mut::<SpriteCullPass>() {
+                    sprite_cull.set_view_rect(camera_center, camera_half);
+                }
 
                 state.fps_frames += 1;
                 if state.fps_last_print.elapsed().as_secs_f32() >= 1.0 {
                     let elapsed = state.fps_last_print.elapsed().as_secs_f32();
                     log::info!(
-                        "[sprite_10m_demo] {:.1} fps | pool={}",
+                        "[sprite_10m_demo] {:.1} fps | pool={} | zoom={:.2}x | view≈{:.0}x{:.0}",
                         state.fps_frames as f32 / elapsed,
                         state.sprite_count,
+                        state.zoom,
+                        camera_half[0] * 2.0,
+                        camera_half[1] * 2.0,
                     );
                     state.fps_frames = 0;
                     state.fps_last_print = Instant::now();

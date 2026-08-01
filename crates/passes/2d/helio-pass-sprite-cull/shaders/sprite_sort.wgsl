@@ -1,6 +1,19 @@
 // ── GPU LSD Radix Sort (32 single-bit passes) ──────────────────────────────
 //
-// Three kernels per bit, dispatched in this order:
+// A `cs_prepare` step, then three kernels per bit, dispatched in this order:
+//
+//   0. cs_prepare — a single thread, run once per frame (not once per bit
+//      pass). Reads the cull pass's GPU-written visible count out of its
+//      `indirect_buf`, and turns it into two things every other kernel this
+//      frame depends on: `frame_uniform.num_blocks` (so `cs_scan`'s
+//      cross-block loop only walks blocks that can actually contain data)
+//      and `dispatch_args` (a `[u32;3]` `cs_histogram`/`cs_scatter` dispatch
+//      indirectly against, instead of a fixed worst-case
+//      `max_visible`-sized dispatch). This is what makes zooming in to a
+//      handful of visible sprites actually *fast* — without it, every sort
+//      pass would dispatch enough workgroups to cover the pass's
+//      `max_visible` ceiling regardless of how few sprites survived culling
+//      this particular frame.
 //
 //   1. cs_histogram — one thread per element. Each workgroup (WG_SIZE=256)
 //      counts how many of its elements have bit=0 vs bit=1, writing
@@ -36,20 +49,40 @@
 //      and small enough (8 barrier-synced steps for 256 threads) to not be
 //      the bottleneck even at 32 passes instead of 4.
 
+const WG: u32 = 256u;
+
+// Per-pass-static (baked in at construction, one buffer per bit 0..32).
 struct SortUniforms {
     bit: u32,
+}
+// Per-*frame*-dynamic (written once by `cs_prepare`, read by every kernel
+// below across all 32 passes this frame).
+struct FrameUniform {
+    count: u32,
     num_blocks: u32,
 }
-struct CountUniform {
-    count: u32,
-}
 
-const WG: u32 = 256u;
+// ── cs_prepare ──────────────────────────────────────────────────────────────
+
+@group(0) @binding(0) var<storage, read> indirect_in: array<u32>;
+@group(0) @binding(1) var<storage, read_write> frame_uniform_rw: FrameUniform;
+@group(0) @binding(2) var<storage, read_write> dispatch_args: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs_prepare() {
+    let count = indirect_in[1]; // DrawIndexedIndirectArgs.instance_count
+    let num_blocks = max((count + WG - 1u) / WG, 1u);
+    frame_uniform_rw.count = count;
+    frame_uniform_rw.num_blocks = num_blocks;
+    dispatch_args[0] = num_blocks;
+    // dispatch_args[1]/[2] (y/z workgroup counts) are always 1, written once
+    // at buffer creation — this kernel only ever updates the x count.
+}
 
 // ── cs_histogram ────────────────────────────────────────────────────────────
 
 @group(0) @binding(0) var<uniform> su_h: SortUniforms;
-@group(0) @binding(1) var<uniform> cu_h: CountUniform;
+@group(0) @binding(1) var<uniform> fu_h: FrameUniform;
 @group(0) @binding(2) var<storage, read> src_keys_h: array<u32>;
 @group(0) @binding(3) var<storage, read_write> block_hist_h: array<u32>;
 
@@ -68,7 +101,7 @@ fn cs_histogram(
     }
     workgroupBarrier();
 
-    if gid.x < cu_h.count {
+    if gid.x < fu_h.count {
         atomicAdd(&hist_total, 1u);
         let bit = (src_keys_h[gid.x] >> su_h.bit) & 1u;
         if bit == 1u {
@@ -87,14 +120,14 @@ fn cs_histogram(
 
 // ── cs_scan ─────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0) var<uniform> su_s: SortUniforms;
+@group(0) @binding(0) var<uniform> fu_s: FrameUniform;
 @group(0) @binding(1) var<storage, read_write> block_hist_s: array<u32>;
 
 @compute @workgroup_size(1)
 fn cs_scan() {
     var total_zeros = 0u;
     var total_ones = 0u;
-    for (var blk = 0u; blk < su_s.num_blocks; blk++) {
+    for (var blk = 0u; blk < fu_s.num_blocks; blk++) {
         total_zeros += block_hist_s[blk * 2u + 0u];
         total_ones += block_hist_s[blk * 2u + 1u];
     }
@@ -103,7 +136,7 @@ fn cs_scan() {
 
     var running_zero = base_zero;
     var running_one = base_one;
-    for (var blk = 0u; blk < su_s.num_blocks; blk++) {
+    for (var blk = 0u; blk < fu_s.num_blocks; blk++) {
         let cz = block_hist_s[blk * 2u + 0u];
         let co = block_hist_s[blk * 2u + 1u];
         block_hist_s[blk * 2u + 0u] = running_zero;
@@ -116,7 +149,7 @@ fn cs_scan() {
 // ── cs_scatter ──────────────────────────────────────────────────────────────
 
 @group(0) @binding(0) var<uniform> su_c: SortUniforms;
-@group(0) @binding(1) var<uniform> cu_c: CountUniform;
+@group(0) @binding(1) var<uniform> fu_c: FrameUniform;
 @group(0) @binding(2) var<storage, read> src_keys_c: array<u32>;
 @group(0) @binding(3) var<storage, read> src_indices_c: array<u32>;
 @group(0) @binding(4) var<storage, read_write> dst_keys_c: array<u32>;
@@ -135,7 +168,7 @@ fn cs_scatter(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wgid: vec3<u32>,
 ) {
-    let has_elem = gid.x < cu_c.count;
+    let has_elem = gid.x < fu_c.count;
     let key = select(0u, src_keys_c[gid.x], has_elem);
     let bit = select(0u, (key >> su_c.bit) & 1u, has_elem);
 
