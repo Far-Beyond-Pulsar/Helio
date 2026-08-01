@@ -23,7 +23,8 @@
 //! that pretended to sample a texture would be testing nothing.
 
 use helio_foliage_core::{
-    blade_seed, hash_to_unit, pack_blade, BladeParams, GpuBladeInstance, GpuFoliageType,
+    blade_seed, hash_to_unit, pack_blade, BladeParams, GpuBladeInstance, GpuFoliageLayer,
+    GpuFoliageType,
 };
 
 use crate::uniforms::PlaceUniforms;
@@ -64,6 +65,34 @@ pub struct ReferencePlacement {
     pub dropped: u32,
 }
 
+/// Whether a world position lies inside at least one authored layer.
+///
+/// Mirrors `within_any_layer` in the placement shader exactly: an empty table means
+/// "carpet everything" (the legacy behaviour), an infinite-extent layer accepts
+/// everything, and otherwise the point must sit inside some layer's AABB. The two
+/// implementations are tested against each other indirectly through the determinism
+/// tests — a divergence here means a blade that the shader drops but the reference keeps.
+pub fn within_any_layer(world: [f32; 3], layers: &[GpuFoliageLayer]) -> bool {
+    if layers.is_empty() {
+        return true;
+    }
+    for layer in layers {
+        if layer.bounds_max[3] > 0.5 {
+            return true;
+        }
+        if world[0] >= layer.bounds_min[0]
+            && world[0] <= layer.bounds_max[0]
+            && world[1] >= layer.bounds_min[1]
+            && world[1] <= layer.bounds_max[1]
+            && world[2] >= layer.bounds_min[2]
+            && world[2] <= layer.bounds_max[2]
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Evaluate a single stratified candidate.
 ///
 /// Every hash rotation here is load-bearing and must match the shader exactly: the
@@ -73,6 +102,7 @@ pub struct ReferencePlacement {
 pub fn reference_candidate(
     uniforms: &PlaceUniforms,
     types: &[GpuFoliageType],
+    layers: &[GpuFoliageLayer],
     tile_coord: [i32; 2],
     generation: u32,
     index: u32,
@@ -100,8 +130,15 @@ pub fn reference_candidate(
         .copied()
         .unwrap_or_else(GpuFoliageType::default);
 
+    let world = [
+        tile_coord[0] as f32 * uniforms.tile_size + u * uniforms.tile_size,
+        height,
+        tile_coord[1] as f32 * uniforms.tile_size + v * uniforms.tile_size,
+    ];
+
     let mut weight = 0.0f32;
-    if slope_cos >= foliage.slope_range[0]
+    if within_any_layer(world, layers)
+        && slope_cos >= foliage.slope_range[0]
         && slope_cos <= foliage.slope_range[1]
         && height >= foliage.altitude_range[0]
         && height <= foliage.altitude_range[1]
@@ -132,6 +169,7 @@ pub fn reference_candidate(
 pub fn place_tile_reference(
     uniforms: &PlaceUniforms,
     types: &[GpuFoliageType],
+    layers: &[GpuFoliageLayer],
     tile_coord: [i32; 2],
     generation: u32,
 ) -> ReferencePlacement {
@@ -146,7 +184,8 @@ pub fn place_tile_reference(
     };
 
     for index in 0..candidates {
-        let candidate = reference_candidate(uniforms, types, tile_coord, generation, index);
+        let candidate =
+            reference_candidate(uniforms, types, layers, tile_coord, generation, index);
         if !candidate.accepted {
             continue;
         }
@@ -202,7 +241,8 @@ mod tests {
             terrain_origin_x: 0.0,
             terrain_origin_z: 0.0,
             terrain_extent: 256.0,
-            _pad: [0; 3],
+            layer_count: 0,
+            _pad: [0; 2],
         }
     }
 
@@ -213,8 +253,8 @@ mod tests {
         // re-placed without its grass moving.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let first = place_tile_reference(&uni, &types, [12, -7], 3);
-        let second = place_tile_reference(&uni, &types, [12, -7], 3);
+        let first = place_tile_reference(&uni, &types, &[], [12, -7], 3);
+        let second = place_tile_reference(&uni, &types, &[], [12, -7], 3);
         assert!(!first.blades.is_empty(), "the reference placed nothing to compare");
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(&first.blades),
@@ -230,9 +270,9 @@ mod tests {
         // grows a frame argument, this call stops compiling.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(16, 1024, &types);
-        let baseline = place_tile_reference(&uni, &types, [0, 0], 0);
+        let baseline = place_tile_reference(&uni, &types, &[], [0, 0], 0);
         for _ in 0..8 {
-            assert_eq!(place_tile_reference(&uni, &types, [0, 0], 0), baseline);
+            assert_eq!(place_tile_reference(&uni, &types, &[], [0, 0], 0), baseline);
         }
     }
 
@@ -243,8 +283,8 @@ mod tests {
         // stayed dense.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let first = place_tile_reference(&uni, &types, [4, 4], 0);
-        let bumped = place_tile_reference(&uni, &types, [4, 4], 1);
+        let first = place_tile_reference(&uni, &types, &[], [4, 4], 0);
+        let bumped = place_tile_reference(&uni, &types, &[], [4, 4], 1);
         let shared = first
             .blades
             .iter()
@@ -262,9 +302,9 @@ mod tests {
     fn neighbouring_tiles_are_independent_draws() {
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let here = place_tile_reference(&uni, &types, [0, 0], 0);
-        let east = place_tile_reference(&uni, &types, [1, 0], 0);
-        let west = place_tile_reference(&uni, &types, [-1, 0], 0);
+        let here = place_tile_reference(&uni, &types, &[], [0, 0], 0);
+        let east = place_tile_reference(&uni, &types, &[], [1, 0], 0);
+        let west = place_tile_reference(&uni, &types, &[], [-1, 0], 0);
         // The i32-as-u32 reinterpretation in `blade_seed` is what keeps the negative half
         // of the world from mirroring the positive half.
         assert_ne!(here.blades, east.blades);
@@ -276,7 +316,7 @@ mod tests {
     fn every_blade_lands_inside_its_own_tile() {
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, [-3, 5], 2);
+        let placement = place_tile_reference(&uni, &types, &[], [-3, 5], 2);
         for blade in &placement.blades {
             let params = unpack_blade(blade);
             assert!((0.0..=1.0).contains(&params.tile_uv[0]));
@@ -292,7 +332,7 @@ mod tests {
         // every bucket to be populated.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, [7, -2], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [7, -2], 0);
         let mut buckets = [0u32; 16];
         for blade in &placement.blades {
             let params = unpack_blade(blade);
@@ -318,7 +358,7 @@ mod tests {
 
         let mut counts = [0u32; 2];
         for tile in 0..8i32 {
-            let placement = place_tile_reference(&uni, &types, [tile, 0], 0);
+            let placement = place_tile_reference(&uni, &types, &[], [tile, 0], 0);
             for blade in &placement.blades {
                 counts[blade.type_id() as usize] += 1;
             }
@@ -340,7 +380,7 @@ mod tests {
         cliff_only.slope_range = [-1.0, 0.5];
         let types = [cliff_only];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, [0, 0], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0);
         assert!(placement.blades.is_empty());
         assert_eq!(placement.candidates, 32 * 32);
     }
@@ -351,8 +391,54 @@ mod tests {
         // reported rather than silently swallowed.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 16, &types);
-        let placement = place_tile_reference(&uni, &types, [0, 0], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0);
         assert_eq!(placement.blades.len(), 16);
         assert!(placement.dropped > 0, "over-budget blades must be counted");
+    }
+
+    #[test]
+    fn a_tile_outside_every_layer_places_nothing() {
+        // The new bound: a candidate is accepted only inside some layer's AABB. Tile
+        // [-1, -1] spans world x,z in [-8, 0); the layer covers [2, 6]², so nothing
+        // overlaps and every candidate must be rejected.
+        let types = [GpuFoliageType::default()];
+        let layers = [GpuFoliageLayer {
+            bounds_min: [2.0, -1.0, 2.0, 0.0],
+            bounds_max: [6.0, 4.0, 6.0, 0.0],
+        }];
+        let mut uni = uniforms(32, 4096, &types);
+        uni.layer_count = layers.len() as u32;
+        let placement = place_tile_reference(&uni, &types, &layers, [-1, -1], 0);
+        assert!(placement.blades.is_empty(), "grass must not grow outside a layer");
+    }
+
+    #[test]
+    fn a_candidate_inside_a_layer_is_placed() {
+        // The complementary bound: a tile fully inside the layer still gets its grass.
+        let types = [GpuFoliageType::default()];
+        let layers = [GpuFoliageLayer {
+            bounds_min: [-1.0, -1.0, -1.0, 0.0],
+            bounds_max: [9.0, 4.0, 9.0, 0.0],
+        }];
+        let mut uni = uniforms(24, 1024, &types);
+        uni.layer_count = layers.len() as u32;
+        let placement = place_tile_reference(&uni, &types, &layers, [0, 0], 0);
+        assert!(!placement.blades.is_empty(), "grass inside a layer must be placed");
+    }
+
+    #[test]
+    fn an_infinite_extent_layer_restores_the_carpet() {
+        // `has_infinite_extent` is the escape hatch: whatever the (ignored) bounds, the
+        // layer covers everything, which is what the behaviour looked like before the
+        // layer table was consulted at all.
+        let types = [GpuFoliageType::default()];
+        let layers = [GpuFoliageLayer {
+            bounds_min: [0.0, 0.0, 0.0, 0.0],
+            bounds_max: [0.0, 0.0, 0.0, 1.0], // w = 1.0 ⇔ infinite extent
+        }];
+        let mut uni = uniforms(24, 1024, &types);
+        uni.layer_count = layers.len() as u32;
+        let placement = place_tile_reference(&uni, &types, &layers, [5, -3], 0);
+        assert!(!placement.blades.is_empty(), "an infinite layer must not cull");
     }
 }

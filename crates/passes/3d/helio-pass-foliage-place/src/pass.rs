@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_foliage_core::{
-    FoliageQuality, GpuBladeInstance, GpuFoliageTile, GpuFoliageType, TileState,
+    FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, TileState,
     DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS,
 };
 
@@ -21,6 +21,7 @@ use crate::{
 const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
 const BLADE_BYTES: u64 = std::mem::size_of::<GpuBladeInstance>() as u64;
 const TYPE_BYTES: u64 = std::mem::size_of::<GpuFoliageType>() as u64;
+const LAYER_BYTES: u64 = std::mem::size_of::<GpuFoliageLayer>() as u64;
 
 /// Hard ceiling on the foliage type table.
 ///
@@ -28,6 +29,14 @@ const TYPE_BYTES: u64 = std::mem::size_of::<GpuFoliageType>() as u64;
 /// the representable maximum. Publishing more types than this cannot work, and clamping
 /// with a warning is better than blades silently rendering as type `id % 256`.
 const MAX_FOLIAGE_TYPES: u32 = 256;
+
+/// Hard ceiling on the foliage layer table.
+///
+/// The layer id is not packed into any blade record, so this is purely a budget choice —
+/// a scene that authorially grows past it should raise this and reallocate the (fixed)
+/// layer buffer. The placement shader loops over the table once per candidate, so a large
+/// ceiling costs per-candidate loop iterations even when few entries are used.
+const MAX_FOLIAGE_LAYERS: u32 = 64;
 
 /// Compute workgroup size shared by `cs_place`, `cs_tile_cull` and `cs_cluster_cull`.
 const WORKGROUP_SIZE: u32 = 64;
@@ -68,6 +77,7 @@ pub struct FoliagePlacePass {
 
     // ── Internal ────────────────────────────────────────────────────────────────
     type_table: wgpu::Buffer,
+    layer_table: wgpu::Buffer,
     place_queue: wgpu::Buffer,
     tile_visibility: wgpu::Buffer,
     place_uniforms: wgpu::Buffer,
@@ -251,6 +261,12 @@ impl FoliagePlacePass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let layer_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Foliage Layer Table"),
+            size: MAX_FOLIAGE_LAYERS as u64 * LAYER_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let place_queue = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Place Queue"),
             size: (DEFAULT_MAX_TILES_PER_FRAME.max(1) as u64) * 4,
@@ -372,6 +388,7 @@ impl FoliagePlacePass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                storage_entry(8, true),
             ],
         });
 
@@ -491,6 +508,10 @@ impl FoliagePlacePass {
                     binding: 7,
                     resource: wgpu::BindingResource::Sampler(&terrain_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: layer_table.as_entire_binding(),
+                },
             ],
         });
 
@@ -501,6 +522,7 @@ impl FoliagePlacePass {
             foliage_indirect,
             counters,
             type_table,
+            layer_table,
             place_queue,
             tile_visibility,
             place_uniforms,
@@ -858,10 +880,42 @@ impl RenderPass for FoliagePlacePass {
         }
         let types = &all_types[..type_count as usize];
 
+        // The layer table may legitimately be empty — a scene that predates it keeps the
+        // legacy "carpet the whole ring" behaviour, so an empty table must upload as empty
+        // rather than faulting the slice. `layer_count` is clamped to the fixed buffer's
+        // capacity; the shader loops `arrayLength` entries per candidate, so a mis-authored
+        // count must not silently read past the end.
+        let mut layer_count = foliage.layer_count;
+        if layer_count > MAX_FOLIAGE_LAYERS {
+            log::warn!(
+                "{layer_count} foliage layers published but the layer table holds \
+                 {MAX_FOLIAGE_LAYERS}; clamping"
+            );
+            layer_count = MAX_FOLIAGE_LAYERS;
+        }
+        let Ok(all_layers) = bytemuck::try_cast_slice::<u8, GpuFoliageLayer>(foliage.layers) else {
+            log::warn!(
+                "foliage layer table is {} bytes, not a whole number of {LAYER_BYTES}-byte \
+                 GpuFoliageLayer records; ignoring layers this frame",
+                foliage.layers.len()
+            );
+            return Ok(());
+        };
+        if (layer_count as usize) > all_layers.len() {
+            log::warn!(
+                "foliage published layer_count {layer_count} against a table of {} entries; \
+                 ignoring layers this frame",
+                all_layers.len()
+            );
+            return Ok(());
+        }
+        let layers = &all_layers[..layer_count as usize];
+
         // Tables change on authoring edits only — wind must not advance the generation,
         // or this re-uploads every frame and the residency cache stops being free.
         if self.last_type_generation != Some(foliage.generation) {
             ctx.write_buffer(&self.type_table, 0, bytemuck::cast_slice(types));
+            ctx.write_buffer(&self.layer_table, 0, bytemuck::cast_slice(layers));
             self.last_type_generation = Some(foliage.generation);
         }
 
@@ -932,7 +986,8 @@ impl RenderPass for FoliagePlacePass {
                 terrain_origin_x: terrain_origin[0],
                 terrain_origin_z: terrain_origin[1],
                 terrain_extent,
-                _pad: [0; 3],
+                layer_count,
+                _pad: [0; 2],
             }),
         );
 
@@ -1277,6 +1332,8 @@ mod tests {
         assert_eq!(TILE_BYTES, 32);
         assert_eq!(BLADE_BYTES, 16);
         assert_eq!(TYPE_BYTES, 96);
+        assert_eq!(LAYER_BYTES, 32);
         assert_eq!(MAX_FOLIAGE_TYPES, 256, "the 8-bit type id caps this");
+        assert_eq!(MAX_FOLIAGE_LAYERS, 64, "the fixed layer buffer is sized to this");
     }
 }

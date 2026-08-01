@@ -577,6 +577,7 @@ impl ApplicationHandler for App {
                 glam::Vec3::new(FIELD_HALF_EXTENT, 4.0, FIELD_HALF_EXTENT),
             ],
             seed: 0x5EED,
+            has_infinite_extent: true,
         });
 
         let wind_speed = 2.0;

@@ -750,6 +750,36 @@ impl Default for GpuFoliageType {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Layer
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// GPU mirror of one authored foliage layer — the world-space box a layer's types grow in.
+///
+/// The placement shader accepts a candidate only if it lies inside at least one layer's
+/// AABB, or inside a layer marked infinite. Empty tables are the legacy "carpet the whole
+/// ring" behaviour, so a publisher that predates this table is not silently culled.
+///
+/// # Layout (32 bytes, 4-byte aligned)
+///
+/// Two `vec4<f32>`, chosen deliberately: WGSL gives `vec4` 16-byte alignment, so any
+/// field added after these two would start on its own 16-byte cell and only widen the
+/// struct without buying density. The `w` channels that would be padding anyway carry the
+/// two spare scalars — `_pad` on the min, and the infinite-extent flag on the max.
+/// ```text
+///  0..16  bounds_min: vec4<f32>  xyz = world-space AABB minimum, w unused
+/// 16..32  bounds_max: vec4<f32>  xyz = world-space AABB maximum, w = 1.0 ⇔ has_infinite_extent
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuFoliageLayer {
+    /// World-space AABB minimum, `[min_x, min_y, min_z, _pad]`.
+    pub bounds_min: [f32; 4],
+    /// World-space AABB maximum; the `w` channel is `1.0` when the layer has infinite
+    /// extent and every candidate counts as inside it, `0.0` otherwise.
+    pub bounds_max: [f32; 4],
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Layout contract
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -766,6 +796,10 @@ const _: () = {
         std::mem::size_of::<GpuFoliageType>() == 96,
         "GpuFoliageType must be exactly 96 bytes"
     );
+    assert!(
+        std::mem::size_of::<GpuFoliageLayer>() == 32,
+        "GpuFoliageLayer must be exactly 32 bytes"
+    );
 };
 
 #[cfg(test)]
@@ -777,9 +811,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuBladeInstance>(), 16);
         assert_eq!(std::mem::size_of::<GpuFoliageTile>(), 32);
         assert_eq!(std::mem::size_of::<GpuFoliageType>(), 96);
+        assert_eq!(std::mem::size_of::<GpuFoliageLayer>(), 32);
         assert_eq!(std::mem::align_of::<GpuBladeInstance>(), 4);
         assert_eq!(std::mem::align_of::<GpuFoliageTile>(), 4);
         assert_eq!(std::mem::align_of::<GpuFoliageType>(), 4);
+        assert_eq!(std::mem::align_of::<GpuFoliageLayer>(), 4);
         assert_eq!(std::mem::size_of::<TileState>(), 4);
         assert_eq!(std::mem::size_of::<FoliageKind>(), 4);
     }
@@ -816,6 +852,17 @@ mod tests {
         // 12 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
         // to 128 rather than reintroducing packing.
         assert_eq!(std::mem::size_of::<GpuFoliageType>() - 84, 12);
+    }
+
+    #[test]
+    fn foliage_layer_field_offsets_match_the_documented_layout() {
+        let value = GpuFoliageLayer::zeroed();
+        let base = &value as *const _ as usize;
+        let offset_of = |field: *const u8| field as usize - base;
+
+        assert_eq!(offset_of(value.bounds_min.as_ptr() as *const u8), 0);
+        assert_eq!(offset_of(value.bounds_max.as_ptr() as *const u8), 16);
+        assert_eq!(std::mem::size_of::<GpuFoliageLayer>(), 32);
     }
 
     #[test]

@@ -194,6 +194,12 @@ pub struct Scene {
     pub(in crate::scene) foliage_layers:
         DenseArena<super::foliage::FoliageLayerRecord, crate::handles::FoliageLayerId>,
 
+    /// Set when the foliage layer table changes (bounds or infinite extent).
+    pub(in crate::scene) foliage_layers_dirty: bool,
+
+    /// CPU mirror of the foliage layer table, published as raw bytes each frame.
+    pub(in crate::scene) foliage_cpu_layers: Vec<helio_foliage_core::GpuFoliageLayer>,
+
     /// Bodies that displace foliage.
     pub(in crate::scene) foliage_interactors:
         DenseArena<super::foliage::FoliageInteractorRecord, crate::handles::FoliageInteractorId>,
@@ -354,6 +360,8 @@ impl Scene {
             foliage_cpu_types: Vec::new(),
             foliage_generation: 0,
             foliage_layers: DenseArena::new(),
+            foliage_layers_dirty: false,
+            foliage_cpu_layers: Vec::new(),
             foliage_interactors: DenseArena::new(),
             foliage_interactors_dirty: false,
             foliage_interactors_dirty_range: None,

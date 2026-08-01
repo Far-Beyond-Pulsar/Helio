@@ -65,9 +65,11 @@ struct PlaceUniforms {
     terrain_origin_z:   f32,
     terrain_extent:     f32,
 
+    // Number of valid entries in the layer table. Zero = legacy carpet-everything.
+    layer_count:        u32,
+
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 /// Mirrors `helio_foliage_core::GpuFoliageType` (Rust, 96 bytes).
@@ -116,6 +118,16 @@ struct FoliageTile {
     generation:      u32,
 }
 
+/// Mirrors `helio_foliage_core::GpuFoliageLayer` (Rust, 32 bytes).
+///
+/// Both members are `vec4<f32>` at offsets 0 and 16, which are vec4-aligned, so unlike
+/// `FoliageType` the vector declarations are the layout-safe choice here. `w` of
+/// `bounds_max` carries the infinite-extent flag.
+struct FoliageLayer {
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+}
+
 /// Mirrors `helio_foliage_core::GpuBladeInstance` (Rust, 16 bytes).
 struct BladeInstance {
     packed_pos:        u32,
@@ -132,6 +144,7 @@ struct BladeInstance {
 @group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6) var terrain_height_slope: texture_2d<f32>;
 @group(0) @binding(7) var terrain_samp: sampler;
+@group(0) @binding(8) var<storage, read> layers: array<FoliageLayer>;
 
 var<workgroup> wg_scan: array<u32, WG_SIZE>;
 var<workgroup> wg_base: u32;
@@ -231,6 +244,33 @@ fn sample_terrain(world_xz: vec2<f32>) -> vec2<f32> {
         0.0,
     );
     return vec2<f32>(texel.r, texel.g);
+}
+
+/// Whether a world position lies inside at least one authored layer.
+///
+/// A candidate is accepted only when some layer covers it: either an infinite-extent
+/// layer, or a bounded one whose AABB contains `(x, y, z)`. An empty layer table keeps the
+/// legacy behaviour of carpeting the whole ring, so publishers that predate the layer
+/// table are not silently culled. The buffer is fixed-capacity, so the loop is bounded by
+/// `place.layer_count`, not `arrayLength` — stale entries beyond the count would gate
+/// candidates against last generation's bounds.
+fn within_any_layer(x: f32, y: f32, z: f32) -> bool {
+    let layer_limit = min(place.layer_count, arrayLength(&layers));
+    if layer_limit == 0u {
+        return true;
+    }
+    for (var i = 0u; i < layer_limit; i = i + 1u) {
+        let layer = layers[i];
+        if layer.bounds_max.w > 0.5 {
+            return true;
+        }
+        if x >= layer.bounds_min.x && x <= layer.bounds_max.x
+            && y >= layer.bounds_min.y && y <= layer.bounds_max.y
+            && z >= layer.bounds_min.z && z <= layer.bounds_max.z {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ── Placement ───────────────────────────────────────────────────────────────────
@@ -346,7 +386,8 @@ fn cs_place(
             let foliage = types[type_id];
 
             var weight = 0.0;
-            if slope_cos >= foliage.slope_min
+            if within_any_layer(world_xz.x, height, world_xz.y)
+                && slope_cos >= foliage.slope_min
                 && slope_cos <= foliage.slope_max
                 && height >= foliage.altitude_min
                 && height <= foliage.altitude_max
