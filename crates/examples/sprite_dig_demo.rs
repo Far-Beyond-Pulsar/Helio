@@ -101,13 +101,18 @@ struct GpuEmitter {
     _pad: f32,
 }
 
-const LIGHT_EMITTER_NAMES: &[&str] = &["torch", "torch_post", "torch_small", "torch_staff", "lantern_hanging", "lantern_wall", "campfire", "furnace_lit"];
+const LIGHT_EMITTER_NAMES: &[&str] = &[
+    "torch", "torch_post", "torch_small", "torch_staff",
+    "lantern_hanging", "lantern_wall", "campfire", "furnace_lit",
+    "cabin", "hut",
+];
 
 fn emitter_style(name: &str) -> ([f32; 3], f32) {
     match name {
-        "campfire" | "furnace_lit" => ([1.0, 0.42, 0.10], 260.0),
-        "lantern_hanging" | "lantern_wall" => ([1.0, 0.75, 0.42], 200.0),
-        _ => ([1.0, 0.58, 0.22], 240.0), // torches
+        "campfire" | "furnace_lit" => ([1.0, 0.42, 0.10], 150.0),
+        "lantern_hanging" | "lantern_wall" => ([1.0, 0.75, 0.42], 85.0),
+        "cabin" | "hut" => ([1.0, 0.65, 0.35], 160.0),
+        _ => ([1.0, 0.58, 0.22], 110.0), // torches
     }
 }
 
@@ -782,8 +787,9 @@ impl ApplicationHandler for App {
         }
 
         // ── Lighting: 2D radiance cascades reading the occupancy grid built
-        // above (occluders) plus every placed torch/lantern/campfire (the
-        // only actually-placed light emitters — see `LIGHT_EMITTER_NAMES`).
+        // above (occluders) plus every placed torch/lantern/campfire/cabin
+        // (the only actually-placed light emitters — see `LIGHT_EMITTER_NAMES`),
+        // each keeping a tight pool of light around itself.
         let mut gpu_emitters: Vec<GpuEmitter> = objects
             .values()
             .filter(|b| LIGHT_EMITTER_NAMES.contains(&b.name))
