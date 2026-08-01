@@ -1,9 +1,8 @@
 //! Bounded GPU residency for the production planetary voxel path.
 //!
-//! This crate is opt-in and is not registered in Helio's default graph. The
-//! current milestone owns only shared page buffers, lookup tables, update
-//! ordering, lifecycle rebuilds, and validation. Surface extraction and draws
-//! are deliberately separate promotion gates.
+//! This crate is opt-in and is never registered by Helio's existing default
+//! graph builders. The dedicated planetary external-graph builder may attach
+//! one composited pass when a caller explicitly supplies a bounded config.
 
 mod config;
 mod extraction;

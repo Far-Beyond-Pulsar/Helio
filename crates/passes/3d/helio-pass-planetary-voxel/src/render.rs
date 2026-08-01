@@ -676,6 +676,10 @@ fn drain_invalidated_surface_requests(
 }
 
 impl PlanetaryVoxelRenderPass {
+    pub const fn config(&self) -> PlanetaryVoxelRenderConfig {
+        self.config
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

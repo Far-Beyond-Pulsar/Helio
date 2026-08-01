@@ -25,6 +25,9 @@ use helio_pass_perf_overlay::{
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_dof::DofPass;
+use helio_pass_planetary_voxel::{
+    PlanetaryRenderError, PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass,
+};
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
@@ -392,7 +395,9 @@ pub fn build_default_graph(
         true,
         debug_overlay,
         None,
+        None,
     )
+    .expect("the default graph has no fallible optional pass")
 }
 
 pub fn build_default_graph_with_user_effects(
@@ -417,7 +422,9 @@ pub fn build_default_graph_with_user_effects(
         true,
         debug_overlay,
         Some(user_effects),
+        None,
     )
+    .expect("the default graph has no fallible optional pass")
 }
 
 pub fn build_default_graph_external(
@@ -441,6 +448,42 @@ pub fn build_default_graph_external(
         false,
         debug_overlay,
         None,
+        None,
+    )
+    .expect("the default graph has no fallible optional pass")
+}
+
+/// Build the externally-owned default graph with one graph-owned planetary
+/// voxel pass composited after deferred lighting.
+///
+/// This is additive: existing default-graph builders never allocate the
+/// planetary cache. The bounded configuration is retained by the graph
+/// rebuilder, so a renderer resize recreates the same pass and callers can
+/// rediscover it through [`helio::Renderer::find_pass_mut`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_default_graph_external_with_planetary_voxels(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    planetary_config: PlanetaryVoxelRenderConfig,
+) -> Result<RenderGraph, PlanetaryRenderError> {
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+        None,
+        Some(planetary_config),
     )
 }
 
@@ -455,7 +498,8 @@ fn build_default_graph_internal(
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
-) -> RenderGraph {
+    planetary_config: Option<PlanetaryVoxelRenderConfig>,
+) -> Result<RenderGraph, PlanetaryRenderError> {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
@@ -524,6 +568,18 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
+
+    // Planetary terrain owns an independent bounded cache but composes into
+    // the same pre-AA color/depth targets as other post-lighting geometry.
+    // Keep it opt-in so existing applications pay no allocation or pass cost.
+    if let Some(planetary_config) = planetary_config {
+        graph.add_pass(Box::new(PlanetaryVoxelRenderPass::new_composited(
+            device,
+            queue,
+            config.surface_format,
+            planetary_config,
+        )?));
+    }
 
     // Voxel mesh pass — real triangles with depth testing, composited over
     // deferred lighting. When no voxel volumes are present the pass is a no-op
@@ -629,12 +685,14 @@ fn build_default_graph_internal(
                 owns_device,
                 overlay_owned.as_ref(),
                 effect_snippet,
+                planetary_config,
             )
+            .expect("a previously validated planetary graph configuration must rebuild")
         },
     );
     graph.set_graph_data(rebuilder);
 
-    graph
+    Ok(graph)
 }
 
 pub fn build_fxaa_graph(

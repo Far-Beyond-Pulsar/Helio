@@ -29,6 +29,7 @@ helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
+helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-shadow = { path = "../passes/3d/helio-pass-shadow" }
 helio-pass-shadow-cull = { path = "../passes/3d/helio-pass-shadow-cull" }
@@ -46,3 +47,6 @@ helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
+
+[dev-dependencies]
+pollster = { workspace = true }
