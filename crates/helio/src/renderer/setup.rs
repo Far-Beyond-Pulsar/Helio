@@ -272,8 +272,8 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             tsr_quality: config.tsr_quality,
-            template_registry: RadiantTemplateRegistry::new(),
-            transparent_template_registry: RadiantTemplateRegistry::new(),
+            template_registry: std::sync::Arc::new(std::sync::RwLock::new(RadiantTemplateRegistry::new())),
+            transparent_template_registry: std::sync::Arc::new(std::sync::RwLock::new(RadiantTemplateRegistry::new())),
             render_mode: config.render_mode,
             enable_xr: config.enable_xr,
             #[cfg(not(target_arch = "wasm32"))]

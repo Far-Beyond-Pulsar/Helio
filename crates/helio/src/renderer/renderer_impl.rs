@@ -27,7 +27,7 @@ pub type GraphRebuilder = Arc<
 
 use crate::groups::GroupId;
 use crate::mesh::MeshBuffers;
-use crate::radiant::RadiantTemplateRegistry;
+use crate::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 use crate::scene::Scene;
 
 use super::config::GiConfig;
@@ -156,12 +156,14 @@ pub struct Renderer {
     /// cameras and nothing else.
     pub(crate) xr_stage_transform: glam::Mat4,
     /// Templates registered by the user for the gbuffer (opaque) path.
-    /// Preserved across graph rebuilds (resize).
-    pub(crate) template_registry: RadiantTemplateRegistry,
+    /// Preserved across graph rebuilds (resize). Shared (not cloned) with
+    /// passes and the GPU scene via `Arc<RwLock<_>>` — see
+    /// `SharedTemplateRegistry` for why cloning this must be avoided.
+    pub(crate) template_registry: SharedTemplateRegistry,
 
     /// Templates registered by the user for the transparent path.
     /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
-    pub(crate) transparent_template_registry: RadiantTemplateRegistry,
+    pub(crate) transparent_template_registry: SharedTemplateRegistry,
     pub(crate) render_mode: RenderMode,
     /// Whether the render graph was built in OpenXR multiview mode. Mirrors
     /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
@@ -498,24 +500,32 @@ impl Renderer {
     /// Access the gbuffer template registry (preserved across graph rebuilds).
     /// Register custom surface templates here instead of through the pass
     /// directly to ensure they survive window resize.
-    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
-        &mut self.template_registry
+    pub fn template_registry_mut(&mut self) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
+        self.template_registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Access the transparent template registry for alpha-blended materials.
-    pub fn transparent_template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
-        &mut self.transparent_template_registry
+    pub fn transparent_template_registry_mut(&mut self) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
+        self.transparent_template_registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Sync the renderer's template registries into the GpuScene so passes
     /// can find them across graph rebuilds.
+    ///
+    /// This hands out `Arc` clones (cheap refcount bumps) of the SAME shared
+    /// registries every frame — never a deep clone. Deep-cloning
+    /// `RadiantTemplateRegistry` leaks: `RadiantTemplate::clone()`
+    /// intentionally `Box::leak`s its WGSL source to satisfy its
+    /// `&'static str` fields, so doing that every frame (as this used to,
+    /// plus again in every pass that merged its own copy) leaked
+    /// continuously for as long as any templates were registered.
     pub(crate) fn sync_template_registry_to_scene(&mut self) {
-        // Gbuffer templates
-        let reg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.template_registry.clone());
+        let reg: Box<dyn std::any::Any + Send + Sync> =
+            Box::new(std::sync::Arc::clone(&self.template_registry));
         self.scene.set_template_registry(reg);
 
-        // Transparent templates (separate registry to avoid binding layout conflicts)
-        let treg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.transparent_template_registry.clone());
+        let treg: Box<dyn std::any::Any + Send + Sync> =
+            Box::new(std::sync::Arc::clone(&self.transparent_template_registry));
         self.scene.set_transparent_template_registry(treg);
     }
 
