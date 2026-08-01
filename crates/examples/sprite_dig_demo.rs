@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
+use helio_pass_radiance_cascades_2d::{RadianceCascades2DPass, RadianceCascadesCompositePass, RadianceCascadesConfig};
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 use helio_pass_sprite_cull::SpriteCullPass;
 use image::RgbaImage;
@@ -60,6 +61,56 @@ const HOTBAR_SLOT_SPACING: f32 = 56.0;
 const HOTBAR_ICON_SIZE: f32 = 40.0;
 const HOTBAR_MARGIN_TOP: f32 = 46.0;
 
+// ── Lighting (2D radiance cascades) ─────────────────────────────────────
+//
+// The occupancy grid the lighting pass reads is a flat world-space grid
+// (unlike terrain's own per-column-relative storage), sized generously to
+// cover every tile the undulating heightfield can ever place: surface_row's
+// three summed sines bound it to roughly ±11 tiles, and terrain goes
+// `DIRT_ROWS + STONE_ROWS` (22) tiles deep from there.
+const OCC_COLS: u32 = WORLD_COLS as u32;
+const OCC_ROWS: u32 = 52;
+const OCC_ORIGIN: [f32; 2] = [-TILE * 0.5, -38.0 * TILE];
+
+fn occ_cell(pos: [f32; 2]) -> Option<(u32, u32)> {
+    let cf = (pos[0] - OCC_ORIGIN[0]) / TILE;
+    let rf = (pos[1] - OCC_ORIGIN[1]) / TILE;
+    if cf < 0.0 || rf < 0.0 {
+        return None;
+    }
+    let (c, r) = (cf.floor() as u32, rf.floor() as u32);
+    if c < OCC_COLS && r < OCC_ROWS { Some((c, r)) } else { None }
+}
+
+fn occ_index(c: u32, r: u32) -> u32 {
+    r * OCC_COLS + c
+}
+
+/// Mirrors `helio-pass-radiance-cascades-2d`'s `Emitter` WGSL struct layout
+/// exactly (32 bytes) — no Cargo-level type dependency, matching how every
+/// other pass pair in this codebase shares a byte layout as a protocol
+/// rather than a shared Rust type.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuEmitter {
+    pos: [f32; 2],
+    radius: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    _pad: f32,
+}
+
+const LIGHT_EMITTER_NAMES: &[&str] = &["torch", "torch_post", "torch_small", "torch_staff", "lantern_hanging", "lantern_wall", "campfire", "furnace_lit"];
+
+fn emitter_style(name: &str) -> ([f32; 3], f32) {
+    match name {
+        "campfire" | "furnace_lit" => ([1.0, 0.42, 0.10], 260.0),
+        "lantern_hanging" | "lantern_wall" => ([1.0, 0.75, 0.42], 200.0),
+        _ => ([1.0, 0.58, 0.22], 240.0), // torches
+    }
+}
+
 // Every one of the 77 sprites in `assets/sprites/` is placed exactly once
 // below, grouped into themed zones along the world (a forest, a village, a
 // mining camp, a monster den guarding treasure, a second forest, a market
@@ -77,11 +128,7 @@ const DEN_WEAPONS: &[&str] = &["sword_1", "sword_2", "dagger"];
 // Village furniture isn't scattered loose in the open anymore — the cabin
 // and a couple of `hut`s (plus two villager-posed NPCs standing by the
 // cabin door) carry the village's presence instead.
-const VILLAGE_PROPS: &[&str] = &[
-    "wood_bench", "wood_table_1", "workbench_1", "bed_white", "bed_red", "wood_fence_1", "wood_fence_2", "wood_door",
-    "wood_ladder_rack", "hammock_swing", "chain_post_1", "chain_post_2", "torch_post", "lantern_hanging",
-    "lantern_wall", "campfire", "furnace_lit", "furnace_unlit", "torch_small", "torch_staff",
-];
+const VILLAGE_LIGHTS: &[&str] = &["torch_post", "lantern_hanging", "campfire"];
 const MARKET_STALL: &[&str] = &["wood_table_2", "wood_wall_bracket", "stone_wall_segment"];
 const MARKET_WARES: &[&str] =
     &["heart_red", "star_blue", "potion_red", "potion_blue", "coin_gold", "coin_silver", "coin_copper", "bomb"];
@@ -504,6 +551,9 @@ struct AppState {
     hotbar: Vec<HotbarSlot>,
     hotbar_selected: usize,
 
+    occupancy_buf: Arc<wgpu::Buffer>,
+    occupancy_words: Vec<u32>,
+
     start_time: Instant,
     last_frame: Instant,
     fps_frames: u32,
@@ -599,11 +649,20 @@ impl ApplicationHandler for App {
         let grass_uv = atlas["grass_b"].uv;
         let stone_uv = atlas["stone_block"].uv;
         let mut objects: HashMap<SpriteHandle, Breakable> = HashMap::new();
+        let mut occupancy_words = vec![0u32; ((OCC_COLS * OCC_ROWS + 31) / 32) as usize];
+        let mark_occupied = |pos: [f32; 2], words: &mut [u32]| {
+            if let Some((c, r)) = occ_cell(pos) {
+                let idx = occ_index(c, r);
+                words[(idx / 32) as usize] |= 1 << (idx % 32);
+            }
+        };
 
         // ── Terrain: a heightfield of tiled sprite art (grass_b on the
         // surface row, stone_block for every row underneath), inserted once.
         // Every tile is breakable and tagged with its (col, row) cell so
-        // mining it out actually opens a hole in the collision heightfield.
+        // mining it out actually opens a hole in the collision heightfield
+        // *and* the radiance-cascades occupancy grid (real digging, real
+        // light bouncing into the hole).
         for col in 0..WORLD_COLS {
             let top = surface_top_world_y(col);
             let jitter = 0.92 + hash01(col as u32 * 7 + 1) * 0.16;
@@ -615,6 +674,7 @@ impl ApplicationHandler for App {
                     .with_atlas_layer(atlas_layer),
             );
             objects.insert(handle, Breakable { pos, size: [TILE, TILE], depth: 0.0, name: "grass_b", terrain_cell: Some((col, 0)) });
+            mark_occupied(pos, &mut occupancy_words);
             for r in 1..=(DIRT_ROWS + STONE_ROWS) {
                 let jitter = 0.9 + hash01(col as u32 * 17 + r as u32 * 53) * 0.2;
                 let pos = [col as f32 * TILE, top - TILE * 0.5 - r as f32 * TILE];
@@ -625,6 +685,7 @@ impl ApplicationHandler for App {
                         .with_atlas_layer(atlas_layer),
                 );
                 objects.insert(handle, Breakable { pos, size: [TILE, TILE], depth: 0.0, name: "stone_block", terrain_cell: Some((col, r)) });
+                mark_occupied(pos, &mut occupancy_words);
             }
         }
 
@@ -669,7 +730,11 @@ impl ApplicationHandler for App {
         // NPCs standing by the door — no furniture scattered in the open.
         let cabin_x = CABIN_COL as f32 * TILE;
         let cabin = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", cabin_x, 0.15, false);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "hut", cabin_x + cabin.w * 0.5 + 90.0, 0.2, false);
+        let hut = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "hut", cabin_x + cabin.w * 0.5 + 90.0, 0.2, false);
+        lay_row(
+            &mut sprite_pass, &atlas, atlas_layer, &mut objects, VILLAGE_LIGHTS,
+            cabin_x + cabin.w * 0.5 + 90.0 + hut.w * 0.5 + 30.0, 0.2, 24.0,
+        );
         let mut npc_cursor = cabin_x - cabin.w * 0.5 - 30.0;
         for &name in &["player_pickaxe", "player_pickaxe_hood"] {
             let s = atlas[name];
@@ -716,6 +781,57 @@ impl ApplicationHandler for App {
             torch_col += 22;
         }
 
+        // ── Lighting: 2D radiance cascades reading the occupancy grid built
+        // above (occluders) plus every placed torch/lantern/campfire (the
+        // only actually-placed light emitters — see `LIGHT_EMITTER_NAMES`).
+        let mut gpu_emitters: Vec<GpuEmitter> = objects
+            .values()
+            .filter(|b| LIGHT_EMITTER_NAMES.contains(&b.name))
+            .map(|b| {
+                let (color, radius) = emitter_style(b.name);
+                GpuEmitter { pos: b.pos, radius, r: color[0], g: color[1], b: color[2], _pad: 0.0 }
+            })
+            .collect();
+        let real_emitter_count = gpu_emitters.len() as u32;
+        let max_emitters = real_emitter_count.max(1);
+        gpu_emitters.resize(max_emitters as usize, GpuEmitter { pos: [0.0, 0.0], radius: 0.0, r: 0.0, g: 0.0, b: 0.0, _pad: 0.0 });
+        log::info!("[sprite_dig_demo] {real_emitter_count} light emitters");
+
+        let occupancy_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Occupancy Grid"),
+            size: (occupancy_words.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        queue.write_buffer(&occupancy_buf, 0, bytemuck::cast_slice(&occupancy_words));
+        let emitters_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Light Emitters"),
+            size: (gpu_emitters.len() * std::mem::size_of::<GpuEmitter>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        queue.write_buffer(&emitters_buf, 0, bytemuck::cast_slice(&gpu_emitters));
+
+        let mut radiance_pass = RadianceCascades2DPass::new(
+            &device,
+            &queue,
+            RadianceCascadesConfig { max_emitters, ..Default::default() },
+            occupancy_buf.clone(),
+            (OCC_COLS, OCC_ROWS),
+            TILE,
+            OCC_ORIGIN,
+            emitters_buf,
+        );
+        radiance_pass.set_emitter_count(real_emitter_count);
+        let radiance_composite = RadianceCascadesCompositePass::new(
+            &device,
+            &queue,
+            format,
+            radiance_pass.radiance_view(),
+            [0.12, 0.11, 0.16],
+            1.6,
+        );
+
         // ── Player, spawned standing on the surface near the sign. ────────
         let player_spr = atlas["player"];
         let spawn_col = 4;
@@ -729,6 +845,8 @@ impl ApplicationHandler for App {
 
         graph.add_pass(Box::new(sprite_cull));
         graph.add_pass(Box::new(sprite_pass));
+        graph.add_pass(Box::new(radiance_pass));
+        graph.add_pass(Box::new(radiance_composite));
         graph.lock(size.width.max(1), size.height.max(1));
 
         let scene = GpuScene::new(device.clone(), queue.clone());
@@ -772,6 +890,8 @@ impl ApplicationHandler for App {
             breaking: None,
             hotbar: Vec::new(),
             hotbar_selected: 0,
+            occupancy_buf,
+            occupancy_words,
             start_time: Instant::now(),
             last_frame: Instant::now(),
             fps_frames: 0,
@@ -921,6 +1041,16 @@ impl ApplicationHandler for App {
                     state.items.retain(|it| it.handle != breaking.handle);
                     if let Some(cell) = breaking.target.terrain_cell {
                         state.broken_terrain.insert(cell);
+                        // Clear the same tile in the lighting occupancy grid
+                        // (a flat world-space grid, not `terrain_cell`'s
+                        // column-relative one — see `occ_cell`) so light can
+                        // actually pour into the hole just dug.
+                        if let Some((c, r)) = occ_cell(breaking.target.pos) {
+                            let idx = occ_index(c, r);
+                            let word = (idx / 32) as usize;
+                            state.occupancy_words[word] &= !(1 << (idx % 32));
+                            state.queue.write_buffer(&state.occupancy_buf, (word * 4) as u64, bytemuck::bytes_of(&state.occupancy_words[word]));
+                        }
                     }
                     if let Some(slot) = state.hotbar.iter_mut().find(|s| s.name == breaking.target.name) {
                         slot.count += 1;
@@ -1036,6 +1166,11 @@ impl ApplicationHandler for App {
                     .find_pass_mut::<SpriteCullPass>()
                     .expect("sprite cull pass missing from graph")
                     .set_view_rect(state.camera_center, [win_w as f32 * 0.5, win_h as f32 * 0.5]);
+                state
+                    .graph
+                    .find_pass_mut::<RadianceCascades2DPass>()
+                    .expect("radiance cascades pass missing from graph")
+                    .set_view(state.camera_center, [win_w as f32 * 0.5, win_h as f32 * 0.5]);
 
                 state.fps_frames += 1;
                 if state.fps_last_print.elapsed().as_secs_f32() >= 1.0 {

@@ -2299,6 +2299,7 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
+ "helio-pass-radiance-cascades-2d",
  "helio-pass-sprite-batch",
  "helio-pass-sprite-cull",
  "helio-pass-sprite-simulate",
@@ -3238,6 +3239,17 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-radiance-cascades-2d"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 
