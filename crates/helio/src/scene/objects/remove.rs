@@ -47,17 +47,23 @@ impl super::super::Scene {
     /// ```
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
         // Capture handles and movability before removal.
-        let (mesh_id, material_id, is_static) = {
+        let (mesh_id, material_id, is_static, user_tag) = {
             let (_, r) = self
                 .objects
                 .get_with_index(id)
                 .ok_or_else(|| invalid("object"))?;
-            (r.mesh, r.material, !r.movability.can_move())
+            (r.mesh, r.material, !r.movability.can_move(), r.user_tag)
         };
 
         // Remove from CPU-side arena only.
         // GPU buffers will be rebuilt with automatic instancing on next flush.
         self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+
+        // Drop the tag index entry, but only if it still points at *this*
+        // object — a newer object may have since claimed the same tag.
+        if user_tag != 0 && self.objects_by_tag.get(&user_tag) == Some(&id) {
+            self.objects_by_tag.remove(&user_tag);
+        }
 
         // Decrement ref counts
         if let Some(material) = self

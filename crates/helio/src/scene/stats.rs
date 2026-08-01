@@ -32,6 +32,23 @@ impl Scene {
         self.lights.get_with_index(id).map(|(_, record)| record.gpu)
     }
 
+    /// Look up an object by the application-defined `user_tag` it was
+    /// inserted with.
+    ///
+    /// This is what lets an application drive the scene from its own entity
+    /// ids without maintaining a parallel `entity -> ObjectId` map: tag each
+    /// actor on insert, then find it again here. Returns `None` for tag `0`
+    /// (the untagged default) or if no live object carries the tag.
+    pub fn object_by_tag(&self, user_tag: u64) -> Option<crate::handles::ObjectId> {
+        self.objects_by_tag.get(&user_tag).copied()
+    }
+
+    /// Look up a light by the application-defined `user_tag` it was inserted
+    /// with. See [`Scene::object_by_tag`].
+    pub fn light_by_tag(&self, user_tag: u64) -> Option<LightId> {
+        self.lights_by_tag.get(&user_tag).copied()
+    }
+
     /// Returns true if static geometry or lights have been added since the last bake.
     ///
     /// When this returns true after a bake has been configured, the baked lighting
