@@ -118,22 +118,20 @@ fn emitter_style(name: &str) -> ([f32; 3], f32) {
 // animation group's normalized frames ("boar/walk" → the boar's walk sheet),
 // plain names reference hand-sliced tiles or single sprites.
 //
-// Trees — 3 tall + 2 medium variants per color for natural height variation.
-// Tall = row 0 (y 0-367), medium = row 1 (y 391-703); same column structure.
-const TREES: &[&str] = &[
-    "tree_green_1", "tree_green_2", "tree_green_3",
-    "tree_green_m1", "tree_green_m2",
-];
+// Trees — one composite foliage-cluster rect per size tier per color.
+// Each rect captures all 3 depth-layer columns together (x 0-330) so the
+// full overlapping pine group renders as intended by the artist.
+const TREES: &[&str] = &["tree_green_tall", "tree_green_med"];
 // Forest A and B ground cover: four bush variants from Tree-Assets.
 const FOREST_CLUTTER: &[&str] = &["bush_a", "bush_b", "bush_c", "bush_d"];
 const FOREST_CRITTERS: &[&str] = &["snail/walk", "bee/fly"];
 // Monster den: dark silhouette trees + mobs.
-const DEN_TREES: &[&str] = &["tree_dark_1", "tree_dark_2", "tree_red_1"];
+const DEN_TREES: &[&str] = &["tree_dark_tall", "tree_dark_med", "tree_red_tall"];
 const DEN_MONSTERS: &[&str] = &["boar/walk", "bee/fly", "boar/idle"];
 // Village: bushes around the cabin.
 const VILLAGE_PROPS: &[&str] = &["bush_a", "bush_b", "bush_c"];
 // Market/tail: golden and yellow autumn trees + bushes.
-const MARKET_TREES: &[&str] = &["tree_golden_1", "tree_golden_m1", "tree_yellow_1", "tree_yellow_m1"];
+const MARKET_TREES: &[&str] = &["tree_golden_tall", "tree_golden_med", "tree_yellow_tall", "tree_yellow_med"];
 const MARKET_CLUTTER: &[&str] = &["bush_c", "bush_d"];
 
 enum Animated {
@@ -461,35 +459,28 @@ fn slice_spec(path: &str) -> SliceSpec {
         // Full content fills the sheet — no transparent margins.
         "cabin" => Single("cabin"),
         // Large pine-tree canvases (1344×1200):
-        //   Column gaps at x=107-111 and x=219-223 separate three individual
-        //   trees in the lit left half (x 0-463).
-        //   Row 0 (y 0-367) = tallest tier; row 1 (y 391-703) = medium tier.
+//   The three foliage columns (x 0-330) are depth layers of one composite
+        //   tree group — crop all three together as one rect per size tier.
+        //   Row 0 (y 0-367) = tallest; row 1 (y 391-703) = medium.
         "Trees/Green-Tree"  => Rects(&[
-            ("tree_green_1",  (  0,   0, 107, 368)),
-            ("tree_green_2",  (112,   0, 107, 368)),
-            ("tree_green_3",  (224,   0, 107, 368)),
-            ("tree_green_m1", (  0, 391, 107, 313)),
-            ("tree_green_m2", (112, 391, 107, 313)),
+            ("tree_green_tall", (0,   0, 331, 368)),
+            ("tree_green_med",  (0, 391, 331, 313)),
         ]),
         "Trees/Red-Tree"    => Rects(&[
-            ("tree_red_1",    (  0,   0, 107, 368)),
-            ("tree_red_2",    (112,   0, 107, 368)),
-            ("tree_red_m1",   (  0, 391, 107, 313)),
+            ("tree_red_tall",   (0,   0, 331, 368)),
+            ("tree_red_med",    (0, 391, 331, 313)),
         ]),
         "Trees/Dark-Tree"   => Rects(&[
-            ("tree_dark_1",   (  0,   0, 107, 368)),
-            ("tree_dark_2",   (112,   0, 107, 368)),
-            ("tree_dark_m1",  (  0, 391, 107, 313)),
+            ("tree_dark_tall",  (0,   0, 331, 368)),
+            ("tree_dark_med",   (0, 391, 331, 313)),
         ]),
         "Trees/Golden-Tree" => Rects(&[
-            ("tree_golden_1", (  0,   0, 107, 368)),
-            ("tree_golden_2", (112,   0, 107, 368)),
-            ("tree_golden_m1",(  0, 391, 107, 313)),
+            ("tree_golden_tall",(0,   0, 331, 368)),
+            ("tree_golden_med", (0, 391, 331, 313)),
         ]),
         "Trees/Yellow-Tree" => Rects(&[
-            ("tree_yellow_1", (  0,   0, 107, 368)),
-            ("tree_yellow_2", (112,   0, 107, 368)),
-            ("tree_yellow_m1",(  0, 391, 107, 313)),
+            ("tree_yellow_tall",(0,   0, 331, 368)),
+            ("tree_yellow_med", (0, 391, 331, 313)),
         ]),
         // 896×256 parallax forest silhouette strip — tiled behind the terrain.
         "Trees/Background"  => Single("background_trees"),
@@ -650,12 +641,13 @@ fn place_prop(
     x: f32,
     depth: f32,
     flip: bool,
+    y_offset: f32,
 ) -> PackedSprite {
     let s = atlas[name];
     let col = (x / TILE).round() as i32;
     let top = surface_top_world_y(col);
     let uv = if flip { flip_u(s.uv) } else { s.uv };
-    let pos = [x, top + s.h * 0.5];
+    let pos = [x, top + s.h * 0.5 + y_offset];
     let handle = sprite_pass.insert_sprite(
         SpriteInstance::new(pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
     );
@@ -681,7 +673,7 @@ fn lay_row(
     for &name in names {
         let s = atlas[name];
         cursor += s.w * 0.5;
-        place_prop(sprite_pass, atlas, atlas_layer, objects, name, cursor, depth, false);
+        place_prop(sprite_pass, atlas, atlas_layer, objects, name, cursor, depth, false, 0.0);
         cursor += s.w * 0.5 + gap;
     }
     cursor
@@ -976,7 +968,9 @@ impl ApplicationHandler for App {
         // Terrain tiles from `Assets/Tiles.png` by direct cell mapping (16×16 grid):
         // tile_1_1 = rgb(70,83,5)  fully-opaque solid green ground = surface/grass fill
         // tile_3_1 = rgb(28,31,10) fully-opaque dark olive           = dirt layer
-        // tile_6_1 = rgb(63,54,34) fully-opaque warm brown            = stone/cave (tile_4_1 had transparent holes)
+        // tile_6_1 = rgb(63,54,34) fully-opaque warm brown — used as base for stone.
+        // Multiplied per-tile to produce neutral gray with subtle hue variation,
+        // matching the visual style of dirt but in cool stone tones.
         // tile_17_3 = rgb(49,138,175) water — confirmed by pixel scan
         let grass_uv = atlas["tile_1_1"].uv;
         let dirt_uv  = atlas["tile_3_1"].uv;
@@ -1025,13 +1019,31 @@ impl ApplicationHandler for App {
             );
             mark_occupied(pos, &mut occupancy_words);
             for r in 1..=(DIRT_ROWS + STONE_ROWS) {
-                let (uv, name) = if r <= DIRT_LAYERS { (dirt_uv, "tile_3_1") } else { (stone_uv, "tile_6_1") };
-                let jitter = 0.9 + hash01(col as u32 * 17 + r as u32 * 53) * 0.2;
+                let is_stone = r > DIRT_LAYERS;
+                let uv = if is_stone { stone_uv } else { dirt_uv };
+                let name = if is_stone { "tile_6_1" } else { "tile_3_1" };
                 let pos = [col as f32 * TILE, top - TILE * 0.5 - r as f32 * TILE];
+                // Dirt: same jitter-brightness as before (dark olive).
+                // Stone: tile_6_1 base rgb(63,54,34) = normalized (0.247, 0.212, 0.133).
+                //   Multiply per-channel to hit target gray ≈ 0.35-0.46 with slight
+                //   warm/cool hue shifts per tile — no two stone tiles look identical.
+                let color = if is_stone {
+                    let base = 0.38 + (hash01(col as u32 * 17 + r as u32 * 53) - 0.5) * 0.10;
+                    let hue  = (hash01(col as u32 * 41 + r as u32 * 71) - 0.5) * 0.04;
+                    [
+                        (base + hue)         / 0.247_f32,
+                        base                 / 0.212_f32,
+                        (base - hue * 0.5)   / 0.133_f32,
+                        1.0_f32,
+                    ]
+                } else {
+                    let j = 0.9 + hash01(col as u32 * 17 + r as u32 * 53) * 0.2;
+                    [j, j, j, 1.0]
+                };
                 let handle = sprite_pass.insert_sprite(
                     SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
                         .with_uv_rect(uv)
-                        .with_color([jitter, jitter, jitter, 1.0])
+                        .with_color(color)
                         .with_atlas_layer(atlas_layer),
                 );
                 objects.insert(
@@ -1088,7 +1100,7 @@ impl ApplicationHandler for App {
         // ── Village: cabin as the centrepiece, bushes either side.
         let village_x = VILLAGE_COL as f32 * TILE;
         let cabin_spr = atlas["cabin"];
-        let building = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", village_x + cabin_spr.w * 1.5, 0.15, false);
+        let building = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", village_x + cabin_spr.w * 1.5, 0.15, false, -TILE);
         lay_row(
             &mut sprite_pass, &atlas, atlas_layer, &mut objects, VILLAGE_PROPS,
             village_x - building.w * 0.5 - 30.0, 0.2, 14.0,
@@ -1107,7 +1119,7 @@ impl ApplicationHandler for App {
         scatter!(DEN_END, FOREST_B_END, (4, 8), TREES, Animated::None, 0.15);
         scatter!(DEN_END, FOREST_B_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
         scatter!(DEN_END, FOREST_B_END, (12, 18), FOREST_CRITTERS, Animated::Critter, 0.3);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_1", HUT_COL as f32 * TILE, 0.12, false);
+        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_tall", HUT_COL as f32 * TILE, 0.12, false, 0.0);
 
         // ── Market / tail: golden and yellow autumn trees + bushes.
         scatter!(MARKET_START, MARKET_START + 20, (3, 6), MARKET_TREES, Animated::None, 0.15);
