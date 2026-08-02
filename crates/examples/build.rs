@@ -3,6 +3,12 @@
 //! `sprite_dig_demo.rs` so the sprite set ships inside the binary instead of
 //! being read from disk at runtime (no dependency on the working directory
 //! the exe happens to be launched from).
+//!
+//! Names are the PNG's path *relative to `assets/sprites/`* with the
+//! extension stripped (e.g. `Character/Idle/Idle-Sheet`, `Assets/Tiles`) —
+//! the pack stores sheets in nested folders where plain file stems collide
+//! (`Idle-Sheet`, `Run-Sheet`, `Background`, … each appear twice), so a
+//! bare-stem key would silently drop sprites in `pack_atlas`'s HashMap.
 
 use std::env;
 use std::fs;
@@ -14,16 +20,22 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sprites_dir.display());
 
     let mut entries: Vec<(String, String)> = Vec::new();
-    if let Ok(rd) = fs::read_dir(&sprites_dir) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                let abs = path.canonicalize().unwrap().to_string_lossy().replace('\\', "/");
-                entries.push((name, abs));
+    fn walk(dir: &Path, sprites_dir: &Path, entries: &mut Vec<(String, String)>) {
+        if let Ok(rd) = fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, sprites_dir, entries);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("png") {
+                    let rel = path.strip_prefix(sprites_dir).unwrap();
+                    let name = rel.with_extension("").to_string_lossy().replace('\\', "/");
+                    let abs = path.canonicalize().unwrap().to_string_lossy().replace('\\', "/");
+                    entries.push((name, abs));
+                }
             }
         }
     }
+    walk(&sprites_dir, &sprites_dir, &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut code = String::new();
