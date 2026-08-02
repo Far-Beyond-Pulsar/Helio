@@ -49,7 +49,8 @@ use winit::{
 // ── World layout ─────────────────────────────────────────────────────────
 
 const TILE: f32 = 48.0;
-const ZOOM: f32 = 2.0; // camera zoom (1.0 = 1 px per world unit, 2.0 = 2× magnification)
+const ZOOM: f32 = 1.5; // camera zoom (1.0 = 1 px per world unit, 2.0 = 2× magnification)
+const PLAYER_SCALE: f32 = 2.0; // hero frames drawn at 200% native size
 const WORLD_COLS: i32 = 240;
 const DIRT_ROWS: i32 = 8;
 const STONE_ROWS: i32 = 14;
@@ -1575,7 +1576,7 @@ impl ApplicationHandler for App {
                 let player_pos = state.player_pos;
                 sprite_pass.update_sprite(
                     state.player_handle,
-                    SpriteInstance::new(player_pos, [spr.w, spr.h])
+                    SpriteInstance::new(player_pos, [spr.w * PLAYER_SCALE, spr.h * PLAYER_SCALE])
                         .with_uv_rect(uv)
                         .with_depth(0.5)
                         .with_atlas_layer(atlas_layer),
