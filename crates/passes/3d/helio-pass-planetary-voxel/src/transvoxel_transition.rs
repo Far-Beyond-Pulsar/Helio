@@ -453,14 +453,14 @@ pub enum TransvoxelTransitionError {
 }
 
 #[derive(Clone, Copy)]
-struct IntegerFaceBasis {
-    origin: [i8; 3],
-    u_axis: [i8; 3],
-    v_axis: [i8; 3],
-    outward: [i8; 3],
+pub(crate) struct IntegerFaceBasis {
+    pub(crate) origin: [i8; 3],
+    pub(crate) u_axis: [i8; 3],
+    pub(crate) v_axis: [i8; 3],
+    pub(crate) outward: [i8; 3],
 }
 
-const fn transition_face_integer_basis(face: TransitionFace) -> IntegerFaceBasis {
+pub(crate) const fn transition_face_integer_basis(face: TransitionFace) -> IntegerFaceBasis {
     match face {
         TransitionFace::NegativeX => IntegerFaceBasis {
             origin: [0, 0, 1],

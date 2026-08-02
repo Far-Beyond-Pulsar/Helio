@@ -36,7 +36,11 @@ impl ExtractionFixtureKind {
         }
     }
 
-    pub(crate) fn sample_canonical(self, position: [i64; 3]) -> CellWord {
+    /// Samples this deterministic validation field at a canonical LOD0 cell.
+    ///
+    /// Demos use this to produce canonical 32^3 resident pages directly;
+    /// extraction halos are reconstructed from residency by the GPU.
+    pub fn sample_canonical(self, position: [i64; 3]) -> CellWord {
         let [x, y, z] = position;
         let density = match self {
             Self::Plane | Self::MaterialSeam => y.saturating_add(1),

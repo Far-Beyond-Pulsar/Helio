@@ -23,16 +23,29 @@ pub struct GpuTransvoxelDispatch {
     pub max_vertices: u32,
     pub max_indices: u32,
     pub scan_block_count: u32,
+    /// Faces whose regular boundary vertices use their Transvoxel secondary
+    /// positions. Bits follow [`crate::TransitionFace`].
+    pub transition_mask: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 impl GpuTransvoxelDispatch {
-    pub const fn new(generation: u64, dirty_microbricks: u64) -> Self {
-        Self::with_limits(generation, dirty_microbricks, u32::MAX, u32::MAX)
+    pub const fn new(generation: u64, dirty_microbricks: u64, transition_mask: u8) -> Self {
+        Self::with_limits(
+            generation,
+            dirty_microbricks,
+            transition_mask,
+            u32::MAX,
+            u32::MAX,
+        )
     }
 
     pub const fn with_limits(
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
         max_vertices: u32,
         max_indices: u32,
     ) -> Self {
@@ -45,6 +58,10 @@ impl GpuTransvoxelDispatch {
             max_vertices,
             max_indices,
             scan_block_count: TRANSVOXEL_SCAN_BLOCKS,
+            transition_mask: transition_mask as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         }
     }
 
@@ -259,7 +276,7 @@ impl TransvoxelGpuClassifier {
         self.prepare(
             queue,
             samples,
-            GpuTransvoxelDispatch::new(generation, dirty_microbricks),
+            GpuTransvoxelDispatch::new(generation, dirty_microbricks, 0),
         )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Planetary Transvoxel Classify Encoder"),
@@ -296,6 +313,22 @@ impl TransvoxelGpuClassifier {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.dispatch_workgroups(TRANSVOXEL_CLASSIFY_WORKGROUPS, 1, 1);
         }
+    }
+
+    pub(crate) fn encode_indirect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        indirect: &wgpu::Buffer,
+        offset: u64,
+    ) {
+        encoder.clear_buffer(&self.counters_buffer, 0, None);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Planetary Transvoxel Classify Indirect Dispatch"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups_indirect(indirect, offset);
     }
 
     pub(crate) fn dispatch_buffer(&self) -> &wgpu::Buffer {
@@ -431,7 +464,7 @@ mod tests {
 
     #[test]
     fn allocation_is_fixed_and_exact() {
-        assert_eq!(dispatch_buffer_bytes(), 32);
+        assert_eq!(dispatch_buffer_bytes(), 48);
         assert_eq!(sample_buffer_bytes(), 157_216);
         assert_eq!(class_buffer_bytes(), 1_024);
         assert_eq!(geometry_buffer_bytes(), 64);

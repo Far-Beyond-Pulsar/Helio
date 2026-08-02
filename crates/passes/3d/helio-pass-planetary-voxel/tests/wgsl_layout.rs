@@ -1,11 +1,12 @@
 use helio_pass_planetary_voxel::{
     GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
-    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform, GpuTerrainDraw,
-    GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTerrainVertex, GpuTransvoxelCell,
-    GpuTransvoxelCellOffset, GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch,
-    GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell,
-    GpuTransvoxelTransitionCounters, GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL,
-    RESIDENCY_WGSL, SURFACE_DRAW_WGSL, SURFACE_PUBLISH_WGSL, TERRAIN_MESHLET_BUILD_WGSL,
+    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
+    GpuSurfaceGatherCounters, GpuSurfaceGatherJob, GpuTerrainDraw, GpuTerrainMeshlet,
+    GpuTerrainMeshletBounds, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
+    GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
+    GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
+    GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL, SURFACE_DRAW_WGSL,
+    SURFACE_GATHER_WGSL, SURFACE_PUBLISH_WGSL, TERRAIN_MESHLET_BUILD_WGSL,
     TERRAIN_MESHLET_CULL_WGSL, TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL,
     TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
@@ -290,11 +291,11 @@ fn page_table_entry_matches_wgsl_exactly() {
 #[test]
 fn uniform_query_and_result_match_wgsl_exactly() {
     assert_eq!(align_of::<GpuResidencyUniform>(), 16);
-    assert_eq!(size_of::<GpuResidencyUniform>(), 16);
+    assert_eq!(size_of::<GpuResidencyUniform>(), 32);
     assert_eq!(
         wgsl_struct("GpuResidencyUniform"),
         (
-            16,
+            32,
             vec![
                 (
                     "table_mask".into(),
@@ -308,7 +309,26 @@ fn uniform_query_and_result_match_wgsl_exactly() {
                     "resident_pages".into(),
                     offset_of!(GpuResidencyUniform, resident_pages) as u32,
                 ),
-                ("_pad".into(), offset_of!(GpuResidencyUniform, _pad) as u32),
+                (
+                    "atlas_tiles_x".into(),
+                    offset_of!(GpuResidencyUniform, atlas_tiles_x) as u32,
+                ),
+                (
+                    "atlas_tiles_y".into(),
+                    offset_of!(GpuResidencyUniform, atlas_tiles_y) as u32,
+                ),
+                (
+                    "atlas_tiles_z".into(),
+                    offset_of!(GpuResidencyUniform, atlas_tiles_z) as u32,
+                ),
+                (
+                    "publication_epoch_low".into(),
+                    offset_of!(GpuResidencyUniform, publication_epoch_low) as u32,
+                ),
+                (
+                    "publication_epoch_high".into(),
+                    offset_of!(GpuResidencyUniform, publication_epoch_high) as u32,
+                ),
             ],
         )
     );
@@ -387,9 +407,53 @@ fn counters_are_explicitly_padded_and_pod_sized() {
                 ("allocated_gpu_bytes_low".into(), 68),
                 ("allocated_gpu_bytes_high".into(), 72),
                 ("resource_buffers".into(), 76),
-                ("atlas_shards".into(), 80),
-                ("device_rebuilds".into(), 84),
-                ("_pad".into(), 88),
+                ("resource_textures".into(), 80),
+                ("atlas_capacity_pages".into(), 84),
+                ("device_rebuilds".into(), 88),
+                ("_pad".into(), 92),
+            ],
+        )
+    );
+}
+
+#[test]
+fn surface_gather_layouts_match_wgsl_exactly() {
+    assert_eq!(align_of::<GpuSurfaceGatherJob>(), 16);
+    assert_eq!(size_of::<GpuSurfaceGatherJob>(), 64);
+    assert_eq!(
+        wgsl_struct_in(SURFACE_GATHER_WGSL, "GpuSurfaceGatherJob"),
+        (
+            64,
+            vec![
+                ("planet_id".into(), 0),
+                ("relative_lod0_cell_min".into(), 16),
+                ("lod".into(), 28),
+                ("generation_low".into(), 32),
+                ("generation_high".into(), 36),
+                ("transition_mask".into(), 40),
+                ("target_slot".into(), 44),
+                ("residency_epoch_low".into(), 48),
+                ("residency_epoch_high".into(), 52),
+                ("_pad".into(), 56),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuSurfaceGatherCounters>(), 16);
+    assert_eq!(size_of::<GpuSurfaceGatherCounters>(), 32);
+    assert_eq!(
+        wgsl_struct_in(SURFACE_GATHER_WGSL, "GpuSurfaceGatherCounters"),
+        (
+            32,
+            vec![
+                ("regular_samples".into(), 0),
+                ("transition_samples".into(), 4),
+                ("table_probes".into(), 8),
+                ("page_misses".into(), 12),
+                ("stale_targets".into(), 16),
+                ("completed".into(), 20),
+                ("_pad0".into(), 24),
+                ("_pad1".into(), 28),
             ],
         )
     );
@@ -404,11 +468,11 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
         .expect("Transvoxel classify WGSL validates");
 
     assert_eq!(align_of::<GpuTransvoxelDispatch>(), 16);
-    assert_eq!(size_of::<GpuTransvoxelDispatch>(), 32);
+    assert_eq!(size_of::<GpuTransvoxelDispatch>(), 48);
     assert_eq!(
         wgsl_struct_in(TRANSVOXEL_CLASSIFY_WGSL, "GpuTransvoxelDispatch"),
         (
-            32,
+            48,
             vec![
                 ("dirty_microbricks_low".into(), 0),
                 ("dirty_microbricks_high".into(), 4),
@@ -418,6 +482,10 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
                 ("max_vertices".into(), 20),
                 ("max_indices".into(), 24),
                 ("scan_block_count".into(), 28),
+                ("transition_mask".into(), 32),
+                ("_pad0".into(), 36),
+                ("_pad1".into(), 40),
+                ("_pad2".into(), 44),
             ],
         )
     );

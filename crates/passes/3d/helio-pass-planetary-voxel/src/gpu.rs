@@ -3,10 +3,9 @@ use crate::{
     GpuResidencyUniform, PageTable, PageTableError, PlanetaryVoxelGpuConfig,
 };
 use helio_planet_voxel_core::{
-    AddressError, CellWord, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError,
-    PAGE_CELL_BYTES, PAGE_CELL_COUNT, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, ResidentPageCache, SourceGeneration, UploadOutcome, VisibilityOutcome,
-    VisiblePageSet,
+    AddressError, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError, PageEvict,
+    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, ResidentPageCache, SourceGeneration,
+    UploadOutcome, VisibilityOutcome, VisiblePageSet, PAGE_CELL_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +26,7 @@ pub enum GpuUploadOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuResourceStats {
     pub buffers: u32,
-    pub atlas_shards: u32,
+    pub textures: u32,
     pub allocated_bytes: u64,
 }
 
@@ -43,6 +42,7 @@ pub struct PlanetaryVoxelResidency {
     resources: GpuResidencyResources,
     counters: GpuResidencyCounters,
     cell_bytes_uploaded: u64,
+    publication_epoch: u64,
 }
 
 impl PlanetaryVoxelResidency {
@@ -67,6 +67,7 @@ impl PlanetaryVoxelResidency {
             resources,
             counters: GpuResidencyCounters::default(),
             cell_bytes_uploaded: 0,
+            publication_epoch: 1,
         };
         residency.publish_state(queue, true)?;
         Ok(residency)
@@ -88,6 +89,10 @@ impl PlanetaryVoxelResidency {
         self.counters
     }
 
+    pub const fn publication_epoch(&self) -> u64 {
+        self.publication_epoch
+    }
+
     pub fn page_table(&self) -> &PageTable {
         &self.table
     }
@@ -102,14 +107,18 @@ impl PlanetaryVoxelResidency {
 
     pub fn resource_stats(&self) -> GpuResourceStats {
         GpuResourceStats {
-            buffers: self.resources.atlas_shards.len() as u32 + 5,
-            atlas_shards: self.resources.atlas_shards.len() as u32,
+            buffers: 4,
+            textures: 1,
             allocated_bytes: self.plan.total_bytes,
         }
     }
 
-    pub fn atlas_buffers(&self) -> impl ExactSizeIterator<Item = &wgpu::Buffer> {
-        self.resources.atlas_shards.iter()
+    pub fn atlas_texture(&self) -> &wgpu::Texture {
+        &self.resources.atlas
+    }
+
+    pub fn atlas_view(&self) -> &wgpu::TextureView {
+        &self.resources.atlas_view
     }
 
     pub fn metadata_buffer(&self) -> &wgpu::Buffer {
@@ -169,6 +178,7 @@ impl PlanetaryVoxelResidency {
         let candidate_metadata = self.build_metadata(&candidate_frames)?;
         self.frames = candidate_frames;
         self.table = candidate_table;
+        self.advance_publication_epoch();
         self.publish_metadata(queue, &candidate_metadata, false);
         self.publish_table(queue, false);
         self.refresh_and_publish_counters(queue);
@@ -192,7 +202,7 @@ impl PlanetaryVoxelResidency {
 
     pub fn apply_upload_batch(
         &mut self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         uploads: Vec<PageUpload>,
     ) -> Result<Vec<GpuUploadOutcome>, GpuResidencyError> {
@@ -276,11 +286,13 @@ impl PlanetaryVoxelResidency {
             outcomes.push(GpuUploadOutcome::Residency(outcome));
         }
 
-        // The cell-copy submission is placed on the queue before any table or
-        // metadata writes below. A later consumer submission therefore cannot
-        // observe a generation whose complete cell page is not already ahead
-        // of it on the same queue timeline.
-        self.publish_dirty_slots(device, queue, &dirty_slots)?;
+        // Texture writes are queued before table and metadata publication. A
+        // consumer therefore cannot discover a generation whose complete page
+        // tile is not already ahead of it on the same queue timeline.
+        self.publish_dirty_slots(queue, &dirty_slots)?;
+        if !dirty_slots.is_empty() {
+            self.advance_publication_epoch();
+        }
         let metadata = self.build_metadata(&self.frames)?;
         self.publish_metadata(queue, &metadata, false);
         self.publish_table(queue, false);
@@ -290,7 +302,7 @@ impl PlanetaryVoxelResidency {
 
     pub fn apply_evict_batch(
         &mut self,
-        device: &wgpu::Device,
+        _device: &wgpu::Device,
         queue: &wgpu::Queue,
         evictions: Vec<PageEvict>,
     ) -> Result<Vec<EvictOutcome>, GpuResidencyError> {
@@ -327,9 +339,13 @@ impl PlanetaryVoxelResidency {
         {
             self.table.compact()?;
         }
-        // Poisoning removed slots precedes removing their discoverable table
-        // entries on the queue timeline, matching the upload publication rule.
-        self.publish_dirty_slots(device, queue, &dirty_slots)?;
+        // Removed slots are no longer discoverable through the table. A later
+        // reuse overwrites the complete texture tile before publishing its
+        // replacement entry.
+        self.publish_dirty_slots(queue, &dirty_slots)?;
+        if !dirty_slots.is_empty() {
+            self.advance_publication_epoch();
+        }
         let metadata = self.build_metadata(&self.frames)?;
         self.publish_metadata(queue, &metadata, false);
         self.publish_table(queue, false);
@@ -369,6 +385,7 @@ impl PlanetaryVoxelResidency {
 
     pub fn compact_page_table(&mut self, queue: &wgpu::Queue) -> Result<(), GpuResidencyError> {
         self.table.compact()?;
+        self.advance_publication_epoch();
         self.publish_table(queue, false);
         self.refresh_and_publish_counters(queue);
         Ok(())
@@ -383,6 +400,7 @@ impl PlanetaryVoxelResidency {
         let resources = GpuResidencyResources::new(device, &plan);
         self.plan = plan;
         self.resources = resources;
+        self.advance_publication_epoch();
         self.published_table.fill(GpuPageTableEntry::default());
         self.published_metadata.fill(GpuPageMeta::default());
 
@@ -393,7 +411,7 @@ impl PlanetaryVoxelResidency {
             .collect();
         for chunk in slots.chunks(self.config.max_batch_pages as usize) {
             let dirty_slots = chunk.iter().copied().collect();
-            self.publish_dirty_slots(device, queue, &dirty_slots)?;
+            self.publish_dirty_slots(queue, &dirty_slots)?;
         }
         self.counters.device_rebuilds = self.counters.device_rebuilds.saturating_add(1);
         let metadata = self.build_metadata(&self.frames)?;
@@ -470,7 +488,6 @@ impl PlanetaryVoxelResidency {
 
     fn publish_dirty_slots(
         &mut self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
         dirty_slots: &BTreeSet<u32>,
     ) -> Result<(), GpuResidencyError> {
@@ -484,42 +501,47 @@ impl PlanetaryVoxelResidency {
             });
         }
 
-        let mut cells = Vec::with_capacity(dirty_slots.len() * PAGE_CELL_COUNT);
         let pages_by_slot: BTreeMap<_, _> = self
             .cache
             .resident_pages()
             .map(|(_, page)| (page.slot, page.cells.as_ref()))
             .collect();
         for slot in dirty_slots {
-            if let Some(page_cells) = pages_by_slot.get(slot) {
-                cells.extend_from_slice(page_cells);
-            } else {
-                cells.resize(cells.len() + PAGE_CELL_COUNT, CellWord::AIR);
-            }
-        }
-        queue.write_buffer(&self.resources.staging, 0, bytemuck::cast_slice(&cells));
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Planetary Voxel Cell Publish"),
-        });
-        for (staging_page, slot) in dirty_slots.iter().enumerate() {
-            let (shard, destination_offset) = self
+            let Some(page_cells) = pages_by_slot.get(slot) else {
+                // An evicted slot is no longer discoverable through the page
+                // table. Its texels may remain until a complete replacement
+                // page is queued into the same slot.
+                continue;
+            };
+            let [x, y, z] = self
                 .plan
-                .shard_for_slot(*slot)
+                .atlas
+                .origin_for_slot(*slot)
                 .ok_or(GpuResidencyError::InvalidSlot(*slot))?;
-            encoder.copy_buffer_to_buffer(
-                &self.resources.staging,
-                staging_page as u64 * PAGE_CELL_BYTES as u64,
-                &self.resources.atlas_shards[shard],
-                destination_offset,
-                PAGE_CELL_BYTES as u64,
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.resources.atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(page_cells),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some((helio_planet_voxel_core::PAGE_EDGE * 4) as u32),
+                    rows_per_image: Some(helio_planet_voxel_core::PAGE_EDGE as u32),
+                },
+                wgpu::Extent3d {
+                    width: helio_planet_voxel_core::PAGE_EDGE as u32,
+                    height: helio_planet_voxel_core::PAGE_EDGE as u32,
+                    depth_or_array_layers: helio_planet_voxel_core::PAGE_EDGE as u32,
+                },
             );
+            self.cell_bytes_uploaded = self
+                .cell_bytes_uploaded
+                .saturating_add(PAGE_CELL_BYTES as u64);
         }
-        queue.submit([encoder.finish()]);
         self.counters.batches_submitted = self.counters.batches_submitted.saturating_add(1);
-        self.cell_bytes_uploaded = self
-            .cell_bytes_uploaded
-            .saturating_add((dirty_slots.len() as u64).saturating_mul(PAGE_CELL_BYTES as u64));
         Ok(())
     }
 
@@ -571,14 +593,19 @@ impl PlanetaryVoxelResidency {
         self.counters.peak_resident_cell_bytes_high = (peak_bytes >> 32) as u32;
         self.counters.allocated_gpu_bytes_low = self.plan.total_bytes as u32;
         self.counters.allocated_gpu_bytes_high = (self.plan.total_bytes >> 32) as u32;
-        self.counters.resource_buffers = self.resources.atlas_shards.len() as u32 + 5;
-        self.counters.atlas_shards = self.resources.atlas_shards.len() as u32;
+        self.counters.resource_buffers = 4;
+        self.counters.resource_textures = 1;
+        self.counters.atlas_capacity_pages = self.plan.atlas.capacity_pages;
 
         let uniform = GpuResidencyUniform {
             table_mask: self.table.capacity() - 1,
             max_probe: self.table.max_probe(),
             resident_pages: self.counters.resident_pages,
-            _pad: 0,
+            atlas_tiles_x: self.plan.atlas.tile_count[0],
+            atlas_tiles_y: self.plan.atlas.tile_count[1],
+            atlas_tiles_z: self.plan.atlas.tile_count[2],
+            publication_epoch_low: self.publication_epoch as u32,
+            publication_epoch_high: (self.publication_epoch >> 32) as u32,
         };
         queue.write_buffer(&self.resources.uniform, 0, bytemuck::bytes_of(&uniform));
         queue.write_buffer(
@@ -587,36 +614,47 @@ impl PlanetaryVoxelResidency {
             bytemuck::bytes_of(&self.counters),
         );
     }
+
+    fn advance_publication_epoch(&mut self) {
+        self.publication_epoch = self.publication_epoch.wrapping_add(1).max(1);
+    }
 }
 
 struct GpuResidencyResources {
-    atlas_shards: Vec<wgpu::Buffer>,
+    atlas: wgpu::Texture,
+    atlas_view: wgpu::TextureView,
     metadata: wgpu::Buffer,
     page_table: wgpu::Buffer,
-    staging: wgpu::Buffer,
     uniform: wgpu::Buffer,
     counters: wgpu::Buffer,
 }
 
 impl GpuResidencyResources {
     fn new(device: &wgpu::Device, plan: &GpuAllocationPlan) -> Self {
-        let atlas_shards = plan
-            .shards
-            .iter()
-            .enumerate()
-            .map(|(index, shard)| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("Planetary Voxel Cell Atlas Shard {index}")),
-                    size: shard.size_bytes,
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST
-                        | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                })
-            })
-            .collect();
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Planetary Voxel Cell Atlas"),
+            size: wgpu::Extent3d {
+                width: plan.atlas.extent[0],
+                height: plan.atlas.extent[1],
+                depth_or_array_layers: plan.atlas.extent[2],
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Planetary Voxel Cell Atlas View"),
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
         Self {
-            atlas_shards,
+            atlas,
+            atlas_view,
             metadata: create_buffer(
                 device,
                 "Planetary Voxel Page Metadata",
@@ -632,12 +670,6 @@ impl GpuResidencyResources {
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
-            ),
-            staging: create_buffer(
-                device,
-                "Planetary Voxel Upload Staging",
-                plan.staging_bytes,
-                wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             ),
             uniform: create_buffer(
                 device,

@@ -79,6 +79,7 @@ fn gpu_cull_is_generation_safe_conservative_and_capacity_bounded() {
             [0.0; 2],
             Mat4::IDENTITY,
         );
+        let cameras = [camera, camera];
         let uniforms = GpuTerrainCullUniforms {
             max_meshlets_per_bank: 5,
             draw_capacity: 1,
@@ -129,7 +130,12 @@ fn gpu_cull_is_generation_safe_conservative_and_capacity_bounded() {
             ..visible
         };
 
-        let camera_buffer = initialized(&device, "Cull Camera", bytemuck::bytes_of(&camera), false);
+        let camera_buffer = initialized(
+            &device,
+            "Cull Camera",
+            bytemuck::cast_slice(&cameras),
+            false,
+        );
         let uniform_buffer =
             initialized(&device, "Cull Uniform", bytemuck::bytes_of(&uniforms), true);
         let state_buffer = initialized(&device, "Cull State", bytemuck::bytes_of(&state), false);

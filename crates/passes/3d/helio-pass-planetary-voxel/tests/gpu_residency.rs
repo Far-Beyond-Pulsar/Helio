@@ -41,13 +41,11 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
             panic!("planetary voxel GPU validation error: {error:?}");
         }));
 
-        let config = PlanetaryVoxelGpuConfig::new(4, 16, 16, 4, 8, 4).unwrap();
+        let config = PlanetaryVoxelGpuConfig::new(4, 16, 16, 4, 8).unwrap();
         let mut residency = PlanetaryVoxelResidency::new(&device, &queue, config).unwrap();
         let initial_resources = residency.resource_stats();
-        assert_eq!(
-            initial_resources.buffers,
-            initial_resources.atlas_shards + 5
-        );
+        assert_eq!(initial_resources.buffers, 4);
+        assert_eq!(initial_resources.textures, 1);
 
         let planet_a = PlanetId([0x11; 16]);
         let planet_b = PlanetId([0x82; 16]);
@@ -211,14 +209,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         assert_eq!(results[1].generation(), 2);
         assert!(!results[2].found());
 
-        let first_cell: Vec<CellWord> = read_buffer_range(
-            &device,
-            &queue,
-            residency.atlas_buffers().next().unwrap(),
-            0,
-            size_of::<CellWord>() as u64,
-        );
-        assert_eq!(first_cell, vec![cell_a]);
+        assert_eq!(read_atlas_cell(&device, &queue, &residency, 0), cell_a);
         let metadata: Vec<GpuPageMeta> = read_buffer_range(
             &device,
             &queue,
@@ -248,7 +239,11 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
             4 * PAGE_CELL_BYTES as u64
         );
         assert_eq!(counters[0].resource_buffers, initial_resources.buffers);
-        assert_eq!(counters[0].atlas_shards, initial_resources.atlas_shards);
+        assert_eq!(counters[0].resource_textures, initial_resources.textures);
+        assert_eq!(
+            counters[0].atlas_capacity_pages,
+            residency.allocation_plan().atlas.capacity_pages
+        );
         assert_eq!(
             u64::from(counters[0].resident_cell_bytes_low)
                 | (u64::from(counters[0].resident_cell_bytes_high) << 32),
@@ -276,14 +271,10 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         ));
         let result = dispatch_lookup(&device, &queue, &residency, &queries[..1]);
         assert!(!result[0].found());
-        let cleared_cell: Vec<CellWord> = read_buffer_range(
-            &device,
-            &queue,
-            residency.atlas_buffers().next().unwrap(),
-            0,
-            size_of::<CellWord>() as u64,
-        );
-        assert_eq!(cleared_cell, vec![CellWord::AIR]);
+        // Eviction makes the old tile unreachable through the page table. The
+        // tile is deliberately not cleared; the next occupant overwrites the
+        // complete 32^3 page before its table entry is published.
+        assert_eq!(read_atlas_cell(&device, &queue, &residency, 0), cell_a);
 
         let replacement = CellWord::new(-512, 33, 5);
         assert!(matches!(
@@ -317,14 +308,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         let replacement_result = dispatch_lookup(&device, &queue, &residency, &queries[..1]);
         assert!(replacement_result[0].found());
         assert_eq!(replacement_result[0].generation(), 3);
-        let replacement_cell: Vec<CellWord> = read_buffer_range(
-            &device,
-            &queue,
-            residency.atlas_buffers().next().unwrap(),
-            0,
-            size_of::<CellWord>() as u64,
-        );
-        assert_eq!(replacement_cell, vec![replacement]);
+        assert_eq!(read_atlas_cell(&device, &queue, &residency, 0), replacement);
 
         let replacement_planet_cell = CellWord::new(-900, 44, 6);
         assert!(matches!(
@@ -364,14 +348,10 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         let replacement_planet_result = dispatch_lookup(&device, &queue, &residency, &queries[..1]);
         assert!(replacement_planet_result[0].found());
         assert_eq!(replacement_planet_result[0].generation(), 4);
-        let replacement_planet_readback: Vec<CellWord> = read_buffer_range(
-            &device,
-            &queue,
-            residency.atlas_buffers().next().unwrap(),
-            0,
-            size_of::<CellWord>() as u64,
+        assert_eq!(
+            read_atlas_cell(&device, &queue, &residency, 0),
+            replacement_planet_cell
         );
-        assert_eq!(replacement_planet_readback, vec![replacement_planet_cell]);
 
         validate_table_probe_backpressure(&device, &queue, planet_a);
     });
@@ -381,7 +361,7 @@ fn validate_table_probe_backpressure(device: &wgpu::Device, queue: &wgpu::Queue,
     let mut residency = PlanetaryVoxelResidency::new(
         device,
         queue,
-        PlanetaryVoxelGpuConfig::new(3, 8, 1, 3, 4, 2).unwrap(),
+        PlanetaryVoxelGpuConfig::new(3, 8, 1, 3, 4).unwrap(),
     )
     .unwrap();
     residency
@@ -545,6 +525,71 @@ fn read_buffer_range<T: Pod + Copy>(
     drop(mapped);
     readback.unmap();
     values
+}
+
+fn read_atlas_cell(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    residency: &PlanetaryVoxelResidency,
+    slot: u32,
+) -> CellWord {
+    let origin = residency
+        .allocation_plan()
+        .atlas
+        .origin_for_slot(slot)
+        .expect("resident slot must map to the atlas");
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Planetary Voxel Atlas Cell Readback"),
+        size: size_of::<CellWord>() as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Planetary Voxel Atlas Cell Readback Encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: residency.atlas_texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: origin[0],
+                y: origin[1],
+                z: origin[2],
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: None,
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = readback.slice(..);
+    let (tx, rx) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv()
+        .expect("GPU atlas readback callback must run")
+        .expect("GPU atlas readback mapping must succeed");
+    let mapped = slice
+        .get_mapped_range()
+        .expect("GPU atlas readback range must be available");
+    let cell = bytemuck::cast_slice::<u8, CellWord>(&mapped)[0];
+    drop(mapped);
+    readback.unmap();
+    cell
 }
 
 fn size_of<T>() -> usize {

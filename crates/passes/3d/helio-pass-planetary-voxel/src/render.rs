@@ -1,10 +1,12 @@
 use crate::{
-    max_meshlets_for_indices, FrameUpdateOutcome, GpuResidencyError, GpuTerrainCullCounters,
-    GpuTerrainCullUniforms, GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds,
-    GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, TransvoxelGpuError,
-    TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
-    TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionGpuError,
-    TERRAIN_MESHLET_BUILD_WGSL, TERRAIN_MESHLET_CULL_WGSL, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
+    max_meshlets_for_indices, FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters,
+    GpuSurfaceGatherJob, GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms,
+    GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuUploadOutcome,
+    PlanetarySurfaceRequest, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
+    SurfaceSamplingError, TransvoxelGpuError, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
+    TransvoxelGpuTransitionExtractor, TransvoxelGpuTransitionExtractorConfig,
+    TransvoxelTransitionGpuError, REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL,
+    TERRAIN_MESHLET_CULL_WGSL, TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
@@ -12,12 +14,11 @@ use helio_core::{
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_planet_voxel_core::{
-    CellWord, ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
-    TRANSITION_FACE_MASK,
+    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
+    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         mpsc::{self, Receiver, TryRecvError},
         Mutex,
@@ -86,6 +87,9 @@ struct GpuTerrainDebugUniform {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanetaryVoxelRenderConfig {
     pub residency: PlanetaryVoxelGpuConfig,
+    /// Resident slots that may own extracted surface arenas. Remaining
+    /// residency slots are sampling-only support pages.
+    pub max_surface_pages: u32,
     pub max_pending_surfaces: u32,
     pub regular: TransvoxelGpuExtractorConfig,
     pub transition: TransvoxelGpuTransitionExtractorConfig,
@@ -95,8 +99,9 @@ pub struct PlanetaryVoxelRenderConfig {
 impl PlanetaryVoxelRenderConfig {
     pub fn validation_demo() -> Self {
         Self {
-            residency: PlanetaryVoxelGpuConfig::new(5, 16, 12, 5, 16, 4)
+            residency: PlanetaryVoxelGpuConfig::new(32, 128, 16, 32, 64)
                 .expect("validation residency configuration is valid"),
+            max_surface_pages: 5,
             max_pending_surfaces: 8,
             regular: TransvoxelGpuExtractorConfig::new(65_536, 131_072)
                 .expect("validation regular extraction configuration is valid"),
@@ -113,8 +118,9 @@ impl PlanetaryVoxelRenderConfig {
     /// that would make a 64-page benchmark needlessly expensive.
     pub fn benchmark_demo() -> Self {
         Self {
-            residency: PlanetaryVoxelGpuConfig::new(64, 256, 64, 64, 64, 4)
+            residency: PlanetaryVoxelGpuConfig::new(320, 1_024, 64, 192, 320)
                 .expect("benchmark residency configuration is valid"),
+            max_surface_pages: 64,
             max_pending_surfaces: 64,
             regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
                 .expect("benchmark regular extraction configuration is valid"),
@@ -132,8 +138,9 @@ impl PlanetaryVoxelRenderConfig {
     /// allocation remains independent of planet size.
     pub fn horizon_demo() -> Self {
         Self {
-            residency: PlanetaryVoxelGpuConfig::new(384, 1_024, 64, 192, 384, 8)
+            residency: PlanetaryVoxelGpuConfig::new(480, 1_024, 64, 192, 480)
                 .expect("horizon residency configuration is valid"),
+            max_surface_pages: 384,
             max_pending_surfaces: 192,
             regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
                 .expect("horizon regular extraction configuration is valid"),
@@ -144,31 +151,41 @@ impl PlanetaryVoxelRenderConfig {
     }
 
     pub fn allocation_plan(self) -> Result<PlanetarySurfaceAllocationPlan, PlanetaryRenderError> {
+        if self.max_surface_pages == 0 {
+            return Err(PlanetaryRenderError::ZeroSurfacePages);
+        }
+        if self.max_surface_pages > self.residency.max_resident_pages {
+            return Err(PlanetaryRenderError::SurfacePageCapacity {
+                surfaces: self.max_surface_pages,
+                residents: self.residency.max_resident_pages,
+            });
+        }
         if self.max_pending_surfaces == 0 {
             return Err(PlanetaryRenderError::ZeroPendingSurfaces);
         }
-        let pages = u64::from(self.residency.max_resident_pages);
+        let resident_pages = u64::from(self.residency.max_resident_pages);
+        let surface_pages = u64::from(self.max_surface_pages);
         let banks = u64::from(SURFACE_BANKS);
         let regular_vertex_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(self.regular.max_vertices),
             core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
         ])?;
         let regular_index_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(self.regular.max_indices),
             core::mem::size_of::<u32>() as u64,
         ])?;
         let transition_vertex_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(self.transition.max_vertices),
             core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
         ])?;
         let transition_index_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(self.transition.max_indices),
             core::mem::size_of::<u32>() as u64,
@@ -176,43 +193,43 @@ impl PlanetaryVoxelRenderConfig {
         let regular_meshlets = max_meshlets_for_indices(self.regular.max_indices);
         let transition_meshlets = max_meshlets_for_indices(self.transition.max_indices);
         let regular_meshlet_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(regular_meshlets),
             core::mem::size_of::<GpuTerrainMeshlet>() as u64,
         ])?;
         let regular_meshlet_bounds_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(regular_meshlets),
             core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
         ])?;
         let transition_meshlet_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(transition_meshlets),
             core::mem::size_of::<GpuTerrainMeshlet>() as u64,
         ])?;
         let transition_meshlet_bounds_bytes = checked_product(&[
-            pages,
+            surface_pages,
             banks,
             u64::from(transition_meshlets),
             core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
         ])?;
-        let state_bytes = pages
+        let state_bytes = resident_pages
             .checked_mul(core::mem::size_of::<GpuSurfaceState>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let draw_page_bytes = pages
+        let draw_page_bytes = resident_pages
             .checked_mul(core::mem::size_of::<GpuDrawPage>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
         let feedback_bytes = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
-        let indirect_bytes = pages
+        let indirect_bytes = resident_pages
             .checked_mul(DRAW_ARGS_BYTES)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let regular_meshlet_draw_capacity = pages
+        let regular_meshlet_draw_capacity = surface_pages
             .checked_mul(u64::from(regular_meshlets))
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let transition_meshlet_draw_capacity = pages
+        let transition_meshlet_draw_capacity = surface_pages
             .checked_mul(u64::from(transition_meshlets))
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
         let regular_meshlet_indirect_bytes = regular_meshlet_draw_capacity
@@ -230,6 +247,7 @@ impl PlanetaryVoxelRenderConfig {
         let cull_counter_bytes = core::mem::size_of::<GpuTerrainCullCounters>() as u64;
         let diagnostic_readback_bytes = [
             feedback_bytes,
+            core::mem::size_of::<GpuSurfaceGatherCounters>() as u64,
             cull_counter_bytes,
             state_bytes,
             indirect_bytes,
@@ -402,38 +420,6 @@ pub struct PlanetarySurfaceAllocationPlan {
     pub total_bytes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlanetarySurfaceUpload {
-    pub key: PlanetPageKey,
-    pub generation: SourceGeneration,
-    pub halo_samples: Box<[CellWord]>,
-    pub transition_face_slabs: Box<[CellWord]>,
-    pub transition_mask: u8,
-    pub dirty_microbricks: u64,
-}
-
-impl PlanetarySurfaceUpload {
-    pub fn validate(&self) -> Result<(), PlanetaryRenderError> {
-        self.key.validate()?;
-        if self.halo_samples.len() != crate::EXTRACTION_SAMPLE_COUNT {
-            return Err(PlanetaryRenderError::RegularSampleCount {
-                actual: self.halo_samples.len(),
-                expected: crate::EXTRACTION_SAMPLE_COUNT,
-            });
-        }
-        if self.transition_face_slabs.len() != TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT {
-            return Err(PlanetaryRenderError::TransitionSampleCount {
-                actual: self.transition_face_slabs.len(),
-                expected: TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
-            });
-        }
-        if self.transition_mask & !TRANSITION_FACE_MASK != 0 {
-            return Err(PlanetaryRenderError::TransitionMask(self.transition_mask));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlanetaryRenderCounters {
     pub queued_surfaces: usize,
@@ -450,6 +436,12 @@ pub struct PlanetaryRenderDiagnostics {
     pub gpu_stale_rejections: u32,
     pub gpu_overflow_rejections: u32,
     pub gpu_incomplete_rejections: u32,
+    pub gather_regular_samples: u32,
+    pub gather_transition_samples: u32,
+    pub gather_table_probes: u32,
+    pub gather_page_misses: u32,
+    pub gather_stale_targets: u32,
+    pub gather_completed: u32,
     pub resident_lods: Vec<u8>,
     pub source_generation_min: Option<SourceGeneration>,
     pub source_generation_max: Option<SourceGeneration>,
@@ -567,6 +559,7 @@ struct PendingDiagnosticsReadback {
 
 #[derive(Clone, Copy)]
 struct DiagnosticsReadbackLayout {
+    gather_counter_offset: u64,
     cull_counter_offset: u64,
     state_offset: u64,
     regular_draw_offset: u64,
@@ -585,7 +578,14 @@ pub struct PlanetaryVoxelRenderPass {
     residency: PlanetaryVoxelResidency,
     regular_extractor: TransvoxelGpuExtractor,
     transition_extractor: TransvoxelGpuTransitionExtractor,
-    pending: VecDeque<PlanetarySurfaceUpload>,
+    surface_sampler: GpuSurfaceSampler,
+    pending: VecDeque<PlanetarySurfaceRequest>,
+    surface_requests: BTreeMap<PlanetPageKey, PlanetarySurfaceRequest>,
+    surface_dependencies: BTreeMap<PlanetPageKey, BTreeSet<PlanetPageKey>>,
+    surface_dependency_generations:
+        BTreeMap<PlanetPageKey, BTreeMap<PlanetPageKey, SourceGeneration>>,
+    dependency_targets: BTreeMap<PlanetPageKey, BTreeSet<PlanetPageKey>>,
+    invalidated_surfaces: BTreeSet<PlanetPageKey>,
     prepared: bool,
     visible: BTreeMap<PlanetPageKey, u8>,
     counters: PlanetaryRenderCounters,
@@ -646,6 +646,35 @@ pub struct PlanetaryVoxelRenderPass {
     attachment_mode: AttachmentMode,
 }
 
+fn drain_invalidated_surface_requests(
+    invalidated: &mut BTreeSet<PlanetPageKey>,
+    pending: &mut VecDeque<PlanetarySurfaceRequest>,
+    requests: &BTreeMap<PlanetPageKey, PlanetarySurfaceRequest>,
+    maximum_pending: usize,
+    mut resident_generation: impl FnMut(PlanetPageKey) -> Option<SourceGeneration>,
+) {
+    let candidates = invalidated.iter().copied().collect::<Vec<_>>();
+    for target in candidates {
+        if pending.iter().any(|queued| queued.key == target) {
+            invalidated.remove(&target);
+            continue;
+        }
+        if pending.len() >= maximum_pending {
+            break;
+        }
+        let Some(request) = requests.get(&target).copied() else {
+            invalidated.remove(&target);
+            continue;
+        };
+        if resident_generation(target) != Some(request.generation) {
+            invalidated.remove(&target);
+            continue;
+        }
+        pending.push_back(request);
+        invalidated.remove(&target);
+    }
+}
+
 impl PlanetaryVoxelRenderPass {
     pub fn new(
         device: &wgpu::Device,
@@ -690,6 +719,12 @@ impl PlanetaryVoxelRenderPass {
         let regular_extractor = TransvoxelGpuExtractor::new(device, config.regular)?;
         let transition_extractor =
             TransvoxelGpuTransitionExtractor::new(device, config.transition)?;
+        let surface_sampler = GpuSurfaceSampler::new(
+            device,
+            &residency,
+            regular_extractor.sample_buffer(),
+            transition_extractor.sample_buffer(),
+        )?;
         let job_buffer = create_buffer(
             device,
             "Planetary Surface Job",
@@ -1055,7 +1090,13 @@ impl PlanetaryVoxelRenderPass {
             residency,
             regular_extractor,
             transition_extractor,
+            surface_sampler,
             pending: VecDeque::new(),
+            surface_requests: BTreeMap::new(),
+            surface_dependencies: BTreeMap::new(),
+            surface_dependency_generations: BTreeMap::new(),
+            dependency_targets: BTreeMap::new(),
+            invalidated_surfaces: BTreeSet::new(),
             prepared: false,
             visible: BTreeMap::new(),
             counters: PlanetaryRenderCounters::default(),
@@ -1251,13 +1292,16 @@ impl PlanetaryVoxelRenderPass {
 
     fn diagnostics_readback_layout(&self) -> DiagnosticsReadbackLayout {
         let pages = u64::from(self.config.residency.max_resident_pages);
-        let cull_counter_offset = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
+        let gather_counter_offset = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
+        let cull_counter_offset =
+            gather_counter_offset + core::mem::size_of::<GpuSurfaceGatherCounters>() as u64;
         let state_offset =
             cull_counter_offset + core::mem::size_of::<GpuTerrainCullCounters>() as u64;
         let regular_draw_offset =
             state_offset + pages * core::mem::size_of::<GpuSurfaceState>() as u64;
         let transition_draw_offset = regular_draw_offset + pages * DRAW_ARGS_BYTES;
         DiagnosticsReadbackLayout {
+            gather_counter_offset,
             cull_counter_offset,
             state_offset,
             regular_draw_offset,
@@ -1285,6 +1329,13 @@ impl PlanetaryVoxelRenderPass {
             &readback,
             0,
             core::mem::size_of::<GpuSurfaceFeedback>() as u64,
+        );
+        encoder.copy_buffer_to_buffer(
+            self.surface_sampler.counters_buffer(),
+            0,
+            &readback,
+            layout.gather_counter_offset,
+            layout.cull_counter_offset - layout.gather_counter_offset,
         );
         encoder.copy_buffer_to_buffer(
             &self.meshlet_cull_counters,
@@ -1336,8 +1387,11 @@ impl PlanetaryVoxelRenderPass {
                 return false;
             }
         };
-        let feedback_bytes = &mapped[..layout.cull_counter_offset as usize];
+        let feedback_bytes = &mapped[..layout.gather_counter_offset as usize];
         let feedback = *bytemuck::from_bytes::<GpuSurfaceFeedback>(feedback_bytes);
+        let gather_counters = *bytemuck::from_bytes::<GpuSurfaceGatherCounters>(
+            &mapped[layout.gather_counter_offset as usize..layout.cull_counter_offset as usize],
+        );
         let cull_counters = *bytemuck::from_bytes::<GpuTerrainCullCounters>(
             &mapped[layout.cull_counter_offset as usize..layout.state_offset as usize],
         );
@@ -1356,6 +1410,12 @@ impl PlanetaryVoxelRenderPass {
         self.diagnostics_cache.gpu_stale_rejections = feedback.stale_rejections;
         self.diagnostics_cache.gpu_overflow_rejections = feedback.overflow_rejections;
         self.diagnostics_cache.gpu_incomplete_rejections = feedback.incomplete_rejections;
+        self.diagnostics_cache.gather_regular_samples = gather_counters.regular_samples;
+        self.diagnostics_cache.gather_transition_samples = gather_counters.transition_samples;
+        self.diagnostics_cache.gather_table_probes = gather_counters.table_probes;
+        self.diagnostics_cache.gather_page_misses = gather_counters.page_misses;
+        self.diagnostics_cache.gather_stale_targets = gather_counters.stale_targets;
+        self.diagnostics_cache.gather_completed = gather_counters.completed;
         self.diagnostics_cache.regular_vertices = states
             .iter()
             .filter(|state| state.valid != 0)
@@ -1469,14 +1529,26 @@ impl PlanetaryVoxelRenderPass {
         queue: &wgpu::Queue,
         uploads: Vec<PageUpload>,
     ) -> Result<Vec<GpuUploadOutcome>, PlanetaryRenderError> {
+        let upload_keys = uploads.iter().map(|upload| upload.key).collect::<Vec<_>>();
         let outcomes = self.residency.apply_upload_batch(device, queue, uploads)?;
-        for outcome in &outcomes {
+        let mut changed_dependencies = BTreeSet::new();
+        for (key, outcome) in upload_keys.into_iter().zip(&outcomes) {
             if let GpuUploadOutcome::Residency(UploadOutcome::Inserted { evicted, .. }) = outcome {
                 for page in evicted {
                     self.clear_slot(queue, page.slot);
+                    self.remove_surface_request(page.key);
                 }
             }
+            if matches!(
+                outcome,
+                GpuUploadOutcome::Residency(
+                    UploadOutcome::Inserted { .. } | UploadOutcome::Replaced { .. }
+                )
+            ) {
+                changed_dependencies.insert(key);
+            }
         }
+        self.requeue_changed_dependencies(&changed_dependencies);
         self.publish_draw_pages(queue)?;
         Ok(outcomes)
     }
@@ -1494,6 +1566,7 @@ impl PlanetaryVoxelRenderPass {
             } = outcome
             {
                 self.clear_slot(queue, page.slot);
+                self.remove_surface_request(page.key);
             }
         }
         self.publish_draw_pages(queue)?;
@@ -1510,6 +1583,11 @@ impl PlanetaryVoxelRenderPass {
             .iter()
             .map(|page| (page.key, page.transition_mask))
             .collect();
+        for page in &set.pages {
+            if let Some(resident) = self.residency.cache().resident(page.key) {
+                self.validate_surface_slot(page.key, resident.slot)?;
+            }
+        }
         let outcome = self.residency.apply_visible_set(queue, set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             self.visible = candidate;
@@ -1520,34 +1598,36 @@ impl PlanetaryVoxelRenderPass {
 
     pub fn queue_surface(
         &mut self,
-        upload: PlanetarySurfaceUpload,
+        request: PlanetarySurfaceRequest,
     ) -> Result<(), PlanetaryRenderError> {
-        upload.validate()?;
+        request.validate()?;
         let resident = self
             .residency
             .cache()
-            .resident(upload.key)
-            .ok_or(PlanetaryRenderError::SurfacePageNotResident(upload.key))?;
-        if resident.generation != upload.generation {
+            .resident(request.key)
+            .ok_or(PlanetaryRenderError::SurfacePageNotResident(request.key))?;
+        if resident.generation != request.generation {
             self.counters.stale_surface_rejections =
                 self.counters.stale_surface_rejections.saturating_add(1);
             return Err(PlanetaryRenderError::SurfaceGeneration {
-                key: upload.key,
+                key: request.key,
                 expected: resident.generation,
-                actual: upload.generation,
+                actual: request.generation,
             });
         }
-        if let Some(existing) = self
+        self.validate_surface_slot(request.key, resident.slot)?;
+        if let Some(index) = self
             .pending
-            .iter_mut()
-            .find(|pending| pending.key == upload.key)
+            .iter()
+            .position(|pending| pending.key == request.key)
         {
-            if upload.generation < existing.generation {
+            if request.generation < self.pending[index].generation {
                 self.counters.stale_surface_rejections =
                     self.counters.stale_surface_rejections.saturating_add(1);
-                return Err(PlanetaryRenderError::PendingSurfaceStale(upload.key));
+                return Err(PlanetaryRenderError::PendingSurfaceStale(request.key));
             }
-            *existing = upload;
+            self.register_surface_request(request)?;
+            self.pending[index] = request;
             return Ok(());
         }
         if self.pending.len() == self.config.max_pending_surfaces as usize {
@@ -1557,8 +1637,136 @@ impl PlanetaryVoxelRenderPass {
                 maximum: self.config.max_pending_surfaces,
             });
         }
-        self.pending.push_back(upload);
+        self.register_surface_request(request)?;
+        self.pending.push_back(request);
         Ok(())
+    }
+
+    fn validate_surface_slot(
+        &self,
+        key: PlanetPageKey,
+        slot: u32,
+    ) -> Result<(), PlanetaryRenderError> {
+        if slot >= self.config.max_surface_pages {
+            return Err(PlanetaryRenderError::SurfaceSlotCapacity {
+                key,
+                slot,
+                maximum: self.config.max_surface_pages,
+            });
+        }
+        Ok(())
+    }
+
+    fn register_surface_request(
+        &mut self,
+        request: PlanetarySurfaceRequest,
+    ) -> Result<(), PlanetaryRenderError> {
+        let dependencies = request.required_pages()?;
+        self.remove_surface_dependencies(request.key);
+        for dependency in &dependencies {
+            self.dependency_targets
+                .entry(*dependency)
+                .or_default()
+                .insert(request.key);
+        }
+        let generations = dependencies
+            .iter()
+            .filter_map(|dependency| {
+                self.residency
+                    .cache()
+                    .resident(*dependency)
+                    .map(|resident| (*dependency, resident.generation))
+            })
+            .collect();
+        self.surface_dependencies.insert(request.key, dependencies);
+        self.surface_dependency_generations
+            .insert(request.key, generations);
+        self.surface_requests.insert(request.key, request);
+        Ok(())
+    }
+
+    fn remove_surface_dependencies(&mut self, target: PlanetPageKey) {
+        let Some(dependencies) = self.surface_dependencies.remove(&target) else {
+            return;
+        };
+        for dependency in dependencies {
+            let remove_entry =
+                self.dependency_targets
+                    .get_mut(&dependency)
+                    .is_some_and(|targets| {
+                        targets.remove(&target);
+                        targets.is_empty()
+                    });
+            if remove_entry {
+                self.dependency_targets.remove(&dependency);
+            }
+        }
+    }
+
+    fn remove_surface_request(&mut self, target: PlanetPageKey) {
+        self.surface_requests.remove(&target);
+        self.surface_dependency_generations.remove(&target);
+        self.remove_surface_dependencies(target);
+        self.invalidated_surfaces.remove(&target);
+        self.pending.retain(|request| request.key != target);
+    }
+
+    fn requeue_changed_dependencies(&mut self, changed: &BTreeSet<PlanetPageKey>) {
+        let mut targets = BTreeSet::new();
+        for dependency in changed {
+            let current_generation = self
+                .residency
+                .cache()
+                .resident(*dependency)
+                .map(|resident| resident.generation);
+            let Some(dependents) = self.dependency_targets.get(dependency) else {
+                continue;
+            };
+            for target in dependents {
+                let expected_generation = self
+                    .surface_dependency_generations
+                    .get(target)
+                    .and_then(|generations| generations.get(dependency))
+                    .copied();
+                if current_generation != expected_generation {
+                    targets.insert(*target);
+                }
+            }
+        }
+        self.invalidated_surfaces.extend(targets);
+        self.drain_invalidated_surfaces();
+    }
+
+    fn drain_invalidated_surfaces(&mut self) {
+        drain_invalidated_surface_requests(
+            &mut self.invalidated_surfaces,
+            &mut self.pending,
+            &self.surface_requests,
+            self.config.max_pending_surfaces as usize,
+            |target| {
+                self.residency
+                    .cache()
+                    .resident(target)
+                    .map(|resident| resident.generation)
+            },
+        );
+    }
+
+    fn refresh_surface_dependency_generations(&mut self, target: PlanetPageKey) {
+        let Some(dependencies) = self.surface_dependencies.get(&target) else {
+            return;
+        };
+        let generations = dependencies
+            .iter()
+            .filter_map(|dependency| {
+                self.residency
+                    .cache()
+                    .resident(*dependency)
+                    .map(|resident| (*dependency, resident.generation))
+            })
+            .collect();
+        self.surface_dependency_generations
+            .insert(target, generations);
     }
 
     fn clear_slot(&mut self, queue: &wgpu::Queue, slot: u32) {
@@ -1627,19 +1835,54 @@ impl RenderPass for PlanetaryVoxelRenderPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.prepared = false;
-        while let Some(front) = self.pending.front() {
+        self.drain_invalidated_surfaces();
+        let queued = self.pending.len();
+        for _ in 0..queued {
+            let front = self
+                .pending
+                .pop_front()
+                .expect("queued count came from this bounded queue");
             let Some(resident) = self.residency.cache().resident(front.key) else {
-                self.pending.pop_front();
                 self.counters.stale_surface_rejections =
                     self.counters.stale_surface_rejections.saturating_add(1);
                 continue;
             };
             if resident.generation != front.generation {
-                self.pending.pop_front();
                 self.counters.stale_surface_rejections =
                     self.counters.stale_surface_rejections.saturating_add(1);
                 continue;
             }
+            let dependencies = match front.required_pages() {
+                Ok(dependencies) => dependencies,
+                Err(error) => {
+                    log::error!("planetary surface dependency planning failed: {error}");
+                    continue;
+                }
+            };
+            if dependencies
+                .iter()
+                .any(|key| self.residency.cache().resident(*key).is_none())
+            {
+                self.pending.push_back(front);
+                continue;
+            }
+            let Some(frame) = self.residency.planet_frame(front.key.planet) else {
+                self.pending.push_back(front);
+                continue;
+            };
+            let metadata = match GpuPageMeta::new(
+                front.key.page,
+                frame.frame_origin_lod0_cell(),
+                resident.slot,
+                resident.publication_generation,
+                front.transition_mask,
+            ) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    log::error!("planetary surface metadata failed: {error}");
+                    continue;
+                }
+            };
             let job = GpuSurfaceJob::new(
                 resident.slot,
                 front.transition_mask,
@@ -1647,26 +1890,26 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 self.config,
             );
             ctx.write_buffer(&self.job_buffer, 0, bytemuck::bytes_of(&job));
-            if let Err(error) = self.regular_extractor.prepare(
+            self.surface_sampler.prepare(
                 ctx.queue,
-                &front.halo_samples,
+                GpuSurfaceGatherJob::new(front, metadata, self.residency.publication_epoch()),
+            );
+            self.regular_extractor.prepare_gpu_samples(
+                ctx.queue,
                 resident.publication_generation,
                 front.dirty_microbricks,
-            ) {
-                log::error!("planetary regular extraction prepare failed: {error}");
-                self.pending.pop_front();
-                continue;
-            }
-            if let Err(error) = self.transition_extractor.prepare(
+                front.transition_mask,
+            );
+            if let Err(error) = self.transition_extractor.prepare_gpu_samples(
                 ctx.queue,
-                &front.transition_face_slabs,
                 front.transition_mask,
                 resident.publication_generation,
             ) {
                 log::error!("planetary transition extraction prepare failed: {error}");
-                self.pending.pop_front();
                 continue;
             }
+            self.refresh_surface_dependency_generations(front.key);
+            self.pending.push_front(front);
             self.prepared = true;
             break;
         }
@@ -1676,8 +1919,17 @@ impl RenderPass for PlanetaryVoxelRenderPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let compute = unsafe { &mut *ctx.compute_encoder_ptr };
         if self.prepared {
-            self.regular_extractor.encode(compute);
-            self.transition_extractor.encode(compute);
+            self.surface_sampler.encode(compute);
+            self.regular_extractor.encode_indirect(
+                compute,
+                self.surface_sampler.indirect_buffer(),
+                REGULAR_EXTRACTION_INDIRECT_OFFSETS,
+            );
+            self.transition_extractor.encode_indirect(
+                compute,
+                self.surface_sampler.indirect_buffer(),
+                TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
+            );
             dispatch_compute(
                 compute,
                 &self.regular_copy_pipeline,
@@ -2093,8 +2345,16 @@ pub enum PlanetaryRenderError {
     RegularExtraction(#[from] TransvoxelGpuError),
     #[error(transparent)]
     TransitionExtraction(#[from] TransvoxelTransitionGpuError),
+    #[error(transparent)]
+    SurfaceSampling(#[from] SurfaceSamplingError),
     #[error("planetary render queue must have at least one pending-surface slot")]
     ZeroPendingSurfaces,
+    #[error("planetary render allocation must reserve at least one surface page")]
+    ZeroSurfacePages,
+    #[error(
+        "planetary render requests {surfaces} surface pages but residency has only {residents} slots"
+    )]
+    SurfacePageCapacity { surfaces: u32, residents: u32 },
     #[error("planetary render allocation arithmetic overflowed")]
     ArithmeticOverflow,
     #[error("planetary surface arenas request {requested} bytes; configured maximum is {maximum}")]
@@ -2110,14 +2370,16 @@ pub enum PlanetaryRenderError {
     },
     #[error("planetary publication needs {required} storage bindings; device exposes {available}")]
     StorageBindingLimit { required: u32, available: u32 },
-    #[error("regular surface has {actual} samples; expected {expected}")]
-    RegularSampleCount { actual: usize, expected: usize },
-    #[error("transition surface has {actual} samples; expected {expected}")]
-    TransitionSampleCount { actual: usize, expected: usize },
-    #[error("transition mask {0:#010b} uses unsupported bits")]
-    TransitionMask(u8),
     #[error("surface page {0:?} is not resident")]
     SurfacePageNotResident(PlanetPageKey),
+    #[error(
+        "surface page {key:?} occupies sampling-only slot {slot}; renderable slots are 0..{maximum}"
+    )]
+    SurfaceSlotCapacity {
+        key: PlanetPageKey,
+        slot: u32,
+        maximum: u32,
+    },
     #[error("surface generation for {key:?} is {actual:?}; resident source is {expected:?}")]
     SurfaceGeneration {
         key: PlanetPageKey,
@@ -2141,12 +2403,14 @@ mod tests {
         let config = PlanetaryVoxelRenderConfig::validation_demo();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
-        assert_eq!(config.residency.max_resident_pages, 5);
-        assert_eq!(plan.indirect_bytes, 5 * DRAW_ARGS_BYTES);
+        assert_eq!(config.residency.max_resident_pages, 32);
+        assert_eq!(config.max_surface_pages, 5);
+        assert_eq!(plan.indirect_bytes, 32 * DRAW_ARGS_BYTES);
         assert_eq!(plan.feedback_bytes, 32);
         assert_eq!(
             plan.diagnostic_readback_bytes,
             plan.feedback_bytes
+                + core::mem::size_of::<GpuSurfaceGatherCounters>() as u64
                 + plan.cull_counter_bytes
                 + plan.state_bytes
                 + plan.indirect_bytes * 2
@@ -2167,9 +2431,10 @@ mod tests {
         let config = PlanetaryVoxelRenderConfig::benchmark_demo();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
-        assert_eq!(config.residency.max_resident_pages, 64);
+        assert_eq!(config.residency.max_resident_pages, 320);
+        assert_eq!(config.max_surface_pages, 64);
         assert_eq!(config.max_pending_surfaces, 64);
-        assert_eq!(plan.indirect_bytes, 64 * DRAW_ARGS_BYTES);
+        assert_eq!(plan.indirect_bytes, 320 * DRAW_ARGS_BYTES);
     }
 
     #[test]
@@ -2177,10 +2442,11 @@ mod tests {
         let config = PlanetaryVoxelRenderConfig::horizon_demo();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
-        assert_eq!(config.residency.max_resident_pages, 384);
+        assert_eq!(config.residency.max_resident_pages, 480);
+        assert_eq!(config.max_surface_pages, 384);
         assert_eq!(config.residency.max_batch_pages, 192);
         assert_eq!(config.max_pending_surfaces, 192);
-        assert_eq!(plan.indirect_bytes, 384 * DRAW_ARGS_BYTES);
+        assert_eq!(plan.indirect_bytes, 480 * DRAW_ARGS_BYTES);
     }
 
     #[test]
@@ -2208,37 +2474,64 @@ mod tests {
     }
 
     #[test]
-    fn surface_upload_rejects_wrong_extents_and_face_bits() {
-        let key = PlanetPageKey::new(
-            PlanetId([3; 16]),
-            helio_planet_voxel_core::PageKey::new(0, [0, 0, 0]),
-        );
-        let mut upload = PlanetarySurfaceUpload {
+    fn dependency_invalidations_wait_for_bounded_queue_capacity() {
+        let planet = PlanetId([9; 16]);
+        let generation = SourceGeneration::new(3, 7);
+        let first =
+            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [-1, 0, 0]));
+        let second =
+            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [0, 0, 0]));
+        let request = |key| PlanetarySurfaceRequest {
             key,
-            generation: SourceGeneration::new(1, 1),
-            halo_samples: Box::new([]),
-            transition_face_slabs: Box::new([]),
+            generation,
             transition_mask: 0,
-            dirty_microbricks: 0,
+            dirty_microbricks: u64::MAX,
         };
-        assert!(matches!(
-            upload.validate(),
-            Err(PlanetaryRenderError::RegularSampleCount { actual: 0, .. })
-        ));
+        let requests = BTreeMap::from([(first, request(first)), (second, request(second))]);
+        let mut invalidated = BTreeSet::from([first, second]);
+        let mut pending = VecDeque::new();
 
-        upload.halo_samples =
-            vec![CellWord::AIR; crate::EXTRACTION_SAMPLE_COUNT].into_boxed_slice();
-        assert!(matches!(
-            upload.validate(),
-            Err(PlanetaryRenderError::TransitionSampleCount { actual: 0, .. })
-        ));
+        drain_invalidated_surface_requests(&mut invalidated, &mut pending, &requests, 1, |_| {
+            Some(generation)
+        });
+        assert_eq!(pending.len(), 1);
+        assert_eq!(invalidated.len(), 1, "overflowed work must remain durable");
 
-        upload.transition_face_slabs =
-            vec![CellWord::AIR; TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT].into_boxed_slice();
-        upload.transition_mask = 0x80;
-        assert!(matches!(
-            upload.validate(),
-            Err(PlanetaryRenderError::TransitionMask(0x80))
-        ));
+        pending.clear();
+        drain_invalidated_surface_requests(&mut invalidated, &mut pending, &requests, 1, |_| {
+            Some(generation)
+        });
+        assert_eq!(pending.len(), 1);
+        assert!(invalidated.is_empty());
+    }
+
+    #[test]
+    fn invalidation_does_not_duplicate_or_revive_stale_surface_requests() {
+        let planet = PlanetId([4; 16]);
+        let generation = SourceGeneration::new(1, 2);
+        let key = PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(1, [-2, 3, 5]));
+        let request = PlanetarySurfaceRequest {
+            key,
+            generation,
+            transition_mask: 0,
+            dirty_microbricks: u64::MAX,
+        };
+        let requests = BTreeMap::from([(key, request)]);
+        let mut pending = VecDeque::from([request]);
+        let mut invalidated = BTreeSet::from([key]);
+
+        drain_invalidated_surface_requests(&mut invalidated, &mut pending, &requests, 8, |_| {
+            Some(generation)
+        });
+        assert_eq!(pending.len(), 1);
+        assert!(invalidated.is_empty());
+
+        pending.clear();
+        invalidated.insert(key);
+        drain_invalidated_surface_requests(&mut invalidated, &mut pending, &requests, 8, |_| {
+            Some(SourceGeneration::new(2, 0))
+        });
+        assert!(pending.is_empty());
+        assert!(invalidated.is_empty());
     }
 }

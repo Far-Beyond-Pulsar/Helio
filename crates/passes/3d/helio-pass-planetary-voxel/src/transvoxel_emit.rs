@@ -237,8 +237,15 @@ impl TransvoxelGpuExtractor {
         samples: &[CellWord],
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
     ) -> Result<wgpu::SubmissionIndex, TransvoxelGpuError> {
-        self.prepare(queue, samples, generation, dirty_microbricks)?;
+        self.prepare(
+            queue,
+            samples,
+            generation,
+            dirty_microbricks,
+            transition_mask,
+        )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Planetary Transvoxel Extraction Encoder"),
         });
@@ -255,6 +262,7 @@ impl TransvoxelGpuExtractor {
         samples: &[CellWord],
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
     ) -> Result<(), TransvoxelGpuError> {
         self.classifier.prepare(
             queue,
@@ -262,10 +270,35 @@ impl TransvoxelGpuExtractor {
             GpuTransvoxelDispatch::with_limits(
                 generation,
                 dirty_microbricks,
+                transition_mask,
                 self.config.max_vertices,
                 self.config.max_indices,
             ),
         )
+    }
+
+    pub(crate) fn prepare_gpu_samples(
+        &self,
+        queue: &wgpu::Queue,
+        generation: u64,
+        dirty_microbricks: u64,
+        transition_mask: u8,
+    ) {
+        queue.write_buffer(
+            self.classifier.dispatch_buffer(),
+            0,
+            bytemuck::bytes_of(&GpuTransvoxelDispatch::with_limits(
+                generation,
+                dirty_microbricks,
+                transition_mask,
+                self.config.max_vertices,
+                self.config.max_indices,
+            )),
+        );
+    }
+
+    pub(crate) fn sample_buffer(&self) -> &wgpu::Buffer {
+        self.classifier.sample_buffer()
     }
 
     /// Encodes the complete regular-cell extraction into a caller-owned
@@ -293,6 +326,41 @@ impl TransvoxelGpuExtractor {
             &self.emit_bind_group,
             TRANSVOXEL_CLASSIFY_WORKGROUPS,
             "Planetary Transvoxel Emission",
+        );
+    }
+
+    pub(crate) fn encode_indirect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        indirect: &wgpu::Buffer,
+        offsets: [u64; 4],
+    ) {
+        self.classifier
+            .encode_indirect(encoder, indirect, offsets[0]);
+        encoder.clear_buffer(&self.counters_buffer, 0, None);
+        dispatch_indirect(
+            encoder,
+            &self.scan_cells_pipeline,
+            &self.scan_cells_bind_group,
+            indirect,
+            offsets[1],
+            "Planetary Transvoxel Cell Scan Indirect",
+        );
+        dispatch_indirect(
+            encoder,
+            &self.scan_blocks_pipeline,
+            &self.scan_blocks_bind_group,
+            indirect,
+            offsets[2],
+            "Planetary Transvoxel Block Scan Indirect",
+        );
+        dispatch_indirect(
+            encoder,
+            &self.emit_pipeline,
+            &self.emit_bind_group,
+            indirect,
+            offsets[3],
+            "Planetary Transvoxel Emission Indirect",
         );
     }
 
@@ -363,6 +431,23 @@ fn dispatch(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.dispatch_workgroups(workgroups, 1, 1);
+}
+
+fn dispatch_indirect(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    indirect: &wgpu::Buffer,
+    offset: u64,
+    label: &'static str,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups_indirect(indirect, offset);
 }
 
 fn packed_regular_tables() -> Vec<u32> {

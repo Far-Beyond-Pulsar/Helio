@@ -4,6 +4,7 @@
 //!   Mouse click        - capture cursor / look
 //!   W/A/S/D            - move through canonical planet space
 //!   Space/Left Shift   - move up/down
+//!   Left/Right Control - spacecraft-speed boost
 //!   F2                 - toggle meshlet/page baseline draw path
 //!   F3                 - cycle truthful terrain debug views
 //!   F4                 - run a matched steady-state page/meshlet GPU benchmark
@@ -18,16 +19,14 @@ use helio::{
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_planetary_voxel::{
-    ExtractionFixture, ExtractionFixtureKind, HorizonLodFixturePlan, PlanetaryDebugView,
-    PlanetaryDrawPath, PlanetaryRenderDiagnostics, PlanetarySurfaceUpload,
-    PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass, TerrainLodTopology,
-    TransvoxelTransitionFaceFixture, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
+    ExtractionFixtureKind, HorizonLodFixturePlan, PlanetaryDebugView, PlanetaryDrawPath,
+    PlanetaryRenderDiagnostics, PlanetarySurfaceRequest, PlanetaryVoxelRenderConfig,
+    PlanetaryVoxelRenderPass, TerrainLodTopology,
 };
 use helio_planet_voxel_core::{
-    CellWord, EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, PlanetPosition, SourceGeneration, TransitionFace, VisibilityOutcome,
-    VisiblePage, VisiblePageSet, LOD0_CELL_SIZE_METERS, PAGE_CELL_BYTES, PAGE_EDGE,
-    PAGE_EDGE_CELLS,
+    EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey,
+    PlanetPosition, SourceGeneration, VisibilityOutcome, VisiblePage, VisiblePageSet,
+    LOD0_CELL_SIZE_METERS, PAGE_CELL_BYTES, PAGE_EDGE, PAGE_EDGE_CELLS,
 };
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -45,6 +44,11 @@ use winit::{
 const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
 const LOOK_SENSITIVITY: f32 = 0.002;
 const MOVE_SPEED_METERS_PER_SECOND: f64 = 1.5;
+const MAX_CRUISE_SPEED_METERS_PER_SECOND: f64 = 2_000_000.0;
+const MIN_BOOST_SPEED_METERS_PER_SECOND: f64 = 1_000.0;
+const MAX_BOOST_SPEED_METERS_PER_SECOND: f64 = 10_000_000.0;
+const CAMERA_ACCELERATION_HALF_LIFE_SECONDS: f64 = 0.35;
+const CAMERA_BRAKING_HALF_LIFE_SECONDS: f64 = 0.12;
 const INITIAL_YAW: f32 = -std::f32::consts::FRAC_PI_2;
 const INITIAL_PITCH: f32 = -0.55;
 const BENCHMARK_WARMUP_FRAMES: u32 = 60;
@@ -56,6 +60,7 @@ const HORIZON_ROOT_LOD: u8 = 11;
 const HORIZON_MAX_PLAN_PAGES: usize = 192;
 const HORIZON_HANDOFF_TIMEOUT_FRAMES: u64 = 1_200;
 const HORIZON_ALTITUDES_METERS: [f64; 3] = [1.5, 100.0, 1_000.0];
+const DEMO_SOURCE_GENERATION: SourceGeneration = SourceGeneration::new(1, 1);
 
 #[derive(Clone, Copy, Debug)]
 struct TimingSample {
@@ -338,7 +343,6 @@ struct HorizonStreamingState {
     pending: Option<PendingHorizonHandoff>,
     desired_focus_lod0_cell: [i64; 3],
     desired_minimum_lod: u8,
-    next_page_generation: u64,
     next_visible_frame: u64,
     cancel_requested: bool,
     handoffs: u64,
@@ -359,7 +363,6 @@ impl HorizonStreamingState {
             pending: None,
             desired_focus_lod0_cell: horizon_focus_lod0_cell(focus_m),
             desired_minimum_lod: horizon_minimum_lod(camera_m[1]),
-            next_page_generation: 1,
             next_visible_frame: 1,
             cancel_requested: false,
             handoffs: 0,
@@ -468,11 +471,10 @@ impl HorizonStreamingState {
             .unwrap_or_default();
         let mut generations = BTreeMap::new();
         for page in topology.pages() {
-            let generation = active_generations.get(&page).copied().unwrap_or_else(|| {
-                let generation = SourceGeneration::new(1, self.next_page_generation);
-                self.next_page_generation = self.next_page_generation.saturating_add(1);
-                generation
-            });
+            let generation = active_generations
+                .get(&page)
+                .copied()
+                .unwrap_or(DEMO_SOURCE_GENERATION);
             generations.insert(page, generation);
         }
 
@@ -549,6 +551,44 @@ impl HorizonStreamingState {
         queue: &wgpu::Queue,
         planet: PlanetId,
     ) -> Result<(), String> {
+        let pending_upload = self
+            .pending
+            .as_ref()
+            .filter(|pending| !pending.cancelled)
+            .and_then(|pending| {
+                pending
+                    .remaining_work
+                    .iter()
+                    .position(|work| work.upload_page)
+                    .map(|index| (index, pending.remaining_work[index]))
+            });
+        if let Some((index, work)) = pending_upload {
+            let upload = build_page_upload(planet, work.page, work.generation);
+            let outcomes = pass
+                .apply_upload_batch(device, queue, vec![upload])
+                .map_err(|error| format!("horizon target-page upload failed: {error}"))?;
+            if !matches!(
+                outcomes.as_slice(),
+                [helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
+                    helio_planet_voxel_core::UploadOutcome::Inserted { .. }
+                        | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                )]
+            ) {
+                return Err(format!(
+                    "horizon target-page residency rejected {:?}: {outcomes:?}",
+                    work.page
+                ));
+            }
+            let pending = self
+                .pending
+                .as_mut()
+                .expect("target upload keeps its pending handoff");
+            pending.remaining_work[index].upload_page = false;
+            pending.upload_count = pending.upload_count.saturating_add(1);
+            pending.upload_bytes = pending.upload_bytes.saturating_add(PAGE_CELL_BYTES as u64);
+            return Ok(());
+        }
+
         let Some(work) = self
             .pending
             .as_ref()
@@ -558,24 +598,12 @@ impl HorizonStreamingState {
             return Ok(());
         };
 
-        let (page_upload, surface) = if work.upload_page {
-            let demo = build_demo_page_with_generation(
-                planet,
-                work.page,
-                work.transition_mask,
-                work.generation,
-            );
-            (Some(demo.page_upload), demo.surface)
-        } else {
-            (
-                None,
-                build_surface_upload(planet, work.page, work.transition_mask, work.generation),
-            )
-        };
-        if let Some(upload) = page_upload {
-            pass.apply_upload_batch(device, queue, vec![upload])
-                .map_err(|error| format!("horizon incremental upload failed: {error}"))?;
-        }
+        debug_assert!(!work.upload_page);
+        let surface =
+            build_surface_upload(planet, work.page, work.transition_mask, work.generation);
+        self.prune_sampling_support_for(pass, device, queue, surface)?;
+        let (support_uploads, support_bytes) =
+            self.ensure_surface_dependencies(pass, device, queue, surface)?;
         let key = PlanetPageKey::new(planet, work.page);
         let resident = pass
             .residency()
@@ -588,9 +616,7 @@ impl HorizonStreamingState {
                 work.generation, resident.generation
             ));
         }
-        let surface_bytes = (surface.halo_samples.len() + surface.transition_face_slabs.len())
-            as u64
-            * core::mem::size_of::<CellWord>() as u64;
+        let surface_bytes = core::mem::size_of::<PlanetarySurfaceRequest>() as u64;
         pass.queue_surface(surface)
             .map_err(|error| format!("horizon incremental surface queue failed: {error}"))?;
 
@@ -599,22 +625,109 @@ impl HorizonStreamingState {
             .as_mut()
             .expect("staged horizon work keeps its pending handoff");
         assert_eq!(pending.remaining_work.pop_front(), Some(work));
-        pending.upload_count = pending
-            .upload_count
-            .saturating_add(u64::from(work.upload_page));
+        pending.upload_count = pending.upload_count.saturating_add(support_uploads);
         pending.upload_bytes = pending
             .upload_bytes
             .saturating_add(surface_bytes)
-            .saturating_add(if work.upload_page {
-                PAGE_CELL_BYTES as u64
-            } else {
-                0
-            });
+            .saturating_add(support_bytes);
         pending.surface_jobs = pending.surface_jobs.saturating_add(1);
         pending.transition_jobs = pending
             .transition_jobs
             .saturating_add(u64::from(work.transition_mask != 0));
         Ok(())
+    }
+
+    fn prune_sampling_support_for(
+        &mut self,
+        pass: &mut PlanetaryVoxelRenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: PlanetarySurfaceRequest,
+    ) -> Result<(), String> {
+        let mut retained = surface
+            .required_pages()
+            .map_err(|error| format!("horizon support retention planning failed: {error}"))?;
+        if let Some(active) = &self.active {
+            retained.extend(
+                active
+                    .generations
+                    .keys()
+                    .map(|page| PlanetPageKey::new(surface.key.planet, *page)),
+            );
+        }
+        if let Some(pending) = &self.pending {
+            retained.extend(
+                pending
+                    .plan
+                    .generations
+                    .keys()
+                    .map(|page| PlanetPageKey::new(surface.key.planet, *page)),
+            );
+        }
+        let evictions = pass
+            .residency()
+            .cache()
+            .resident_pages()
+            .filter(|(key, _)| key.planet == surface.key.planet && !retained.contains(key))
+            .map(|(key, resident)| PageEvict {
+                key,
+                generation: resident.generation,
+            })
+            .collect::<Vec<_>>();
+        let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
+        self.evictions = self.evictions.saturating_add(eviction_count);
+        Ok(())
+    }
+
+    fn ensure_surface_dependencies(
+        &mut self,
+        pass: &mut PlanetaryVoxelRenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: PlanetarySurfaceRequest,
+    ) -> Result<(u64, u64), String> {
+        let missing = surface
+            .required_pages()
+            .map_err(|error| format!("horizon surface dependency planning failed: {error}"))?
+            .into_iter()
+            .filter(|key| pass.residency().cache().resident(*key).is_none())
+            .collect::<Vec<_>>();
+        let upload_count = missing.len() as u64;
+        if missing.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut uploads = Vec::with_capacity(missing.len());
+        for key in missing {
+            uploads.push(build_page_upload(
+                key.planet,
+                key.page,
+                DEMO_SOURCE_GENERATION,
+            ));
+        }
+        let batch_pages = pass.residency().config().max_batch_pages as usize;
+        for chunk in uploads.chunks(batch_pages) {
+            let outcomes = pass
+                .apply_upload_batch(device, queue, chunk.to_vec())
+                .map_err(|error| format!("horizon support-page upload failed: {error}"))?;
+            if outcomes.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
+                        helio_planet_voxel_core::UploadOutcome::Inserted { .. }
+                            | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                    )
+                )
+            }) {
+                return Err(format!(
+                    "horizon support-page residency rejected an exact dependency batch: {outcomes:?}"
+                ));
+            }
+        }
+        Ok((
+            upload_count,
+            upload_count.saturating_mul(PAGE_CELL_BYTES as u64),
+        ))
     }
 
     fn finish_ready_handoff(
@@ -636,10 +749,16 @@ impl HorizonStreamingState {
             .any(|(current, baseline)| current > baseline)
         {
             return Err(format!(
-                "horizon GPU rejected work: stale={} overflow={} incomplete={}",
+                "horizon GPU rejected work: stale={} overflow={} incomplete={} gather[r={} t={} probes={} misses={} stale={} done={}]",
                 diagnostics.gpu_stale_rejections,
                 diagnostics.gpu_overflow_rejections,
-                diagnostics.gpu_incomplete_rejections
+                diagnostics.gpu_incomplete_rejections,
+                diagnostics.gather_regular_samples,
+                diagnostics.gather_transition_samples,
+                diagnostics.gather_table_probes,
+                diagnostics.gather_page_misses,
+                diagnostics.gather_stale_targets,
+                diagnostics.gather_completed,
             ));
         }
         if frame_index.saturating_sub(pending.started_frame) > HORIZON_HANDOFF_TIMEOUT_FRAMES {
@@ -664,21 +783,17 @@ impl HorizonStreamingState {
             .expect("ready horizon handoff remains pending");
         if pending.cancelled {
             let active_generations = self.active.as_ref().map(|active| &active.generations);
-            let evictions = pending
-                .plan
-                .generations
-                .iter()
-                .filter(|(page, generation)| {
-                    !active_generations.is_some_and(|active| active.contains_key(page))
-                        && pass
-                            .residency()
-                            .cache()
-                            .resident(PlanetPageKey::new(planet, **page))
-                            .is_some_and(|resident| resident.generation == **generation)
+            let evictions = pass
+                .residency()
+                .cache()
+                .resident_pages()
+                .filter(|(key, _)| {
+                    key.planet == planet
+                        && !active_generations.is_some_and(|active| active.contains_key(&key.page))
                 })
-                .map(|(page, generation)| PageEvict {
-                    key: PlanetPageKey::new(planet, *page),
-                    generation: *generation,
+                .map(|(key, resident)| PageEvict {
+                    key,
+                    generation: resident.generation,
                 })
                 .collect::<Vec<_>>();
             let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
@@ -751,19 +866,16 @@ impl HorizonStreamingState {
             }
         }
 
-        let evictions = self
-            .active
-            .as_ref()
-            .into_iter()
-            .flat_map(|active| {
-                active
-                    .generations
-                    .iter()
-                    .filter(|(page, _)| !pending.plan.generations.contains_key(page))
-                    .map(|(page, generation)| PageEvict {
-                        key: PlanetPageKey::new(planet, *page),
-                        generation: *generation,
-                    })
+        let evictions = pass
+            .residency()
+            .cache()
+            .resident_pages()
+            .filter(|(key, _)| {
+                key.planet == planet && !pending.plan.generations.contains_key(&key.page)
+            })
+            .map(|(key, resident)| PageEvict {
+                key,
+                generation: resident.generation,
             })
             .collect::<Vec<_>>();
         let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
@@ -850,24 +962,27 @@ fn apply_horizon_evictions(
     if evictions.is_empty() {
         return Ok(0);
     }
-    let outcomes = pass
-        .apply_evict_batch(device, queue, evictions.clone())
-        .map_err(|error| format!("horizon eviction batch failed: {error}"))?;
-    for (eviction, outcome) in evictions.into_iter().zip(outcomes) {
-        if !matches!(outcome, EvictOutcome::Recorded { .. }) {
-            return Err(format!(
-                "horizon eviction was not recorded for {:?}: {outcome:?}",
-                eviction.key
-            ));
-        }
-        if !pass
-            .residency_mut()
-            .retire_eviction_watermark(eviction.key, eviction.generation)
-        {
-            return Err(format!(
-                "horizon eviction watermark was not retired for {:?}",
-                eviction.key
-            ));
+    let batch_pages = pass.residency().config().max_batch_pages as usize;
+    for chunk in evictions.chunks(batch_pages) {
+        let outcomes = pass
+            .apply_evict_batch(device, queue, chunk.to_vec())
+            .map_err(|error| format!("horizon eviction batch failed: {error}"))?;
+        for (eviction, outcome) in chunk.iter().copied().zip(outcomes) {
+            if !matches!(outcome, EvictOutcome::Recorded { .. }) {
+                return Err(format!(
+                    "horizon eviction was not recorded for {:?}: {outcome:?}",
+                    eviction.key
+                ));
+            }
+            if !pass
+                .residency_mut()
+                .retire_eviction_watermark(eviction.key, eviction.generation)
+            {
+                return Err(format!(
+                    "horizon eviction watermark was not retired for {:?}",
+                    eviction.key
+                ));
+            }
         }
     }
     Ok(eviction_count)
@@ -884,6 +999,7 @@ struct AppState {
     planet: PlanetId,
     canonical_camera_m: [f64; 3],
     spawn_camera_m: [f64; 3],
+    camera_speed_mps: f64,
     frame_index: u64,
     yaw: f32,
     pitch: f32,
@@ -905,6 +1021,7 @@ struct AppState {
 impl AppState {
     fn reset_transient_input(&mut self) {
         self.keys.clear();
+        self.camera_speed_mps = 0.0;
         self.mouse_delta = (0.0, 0.0);
         self.cursor_grabbed = false;
         let _ = self.window.set_cursor_grab(CursorGrabMode::None);
@@ -952,7 +1069,19 @@ impl AppState {
         self.pitch = (self.pitch - self.mouse_delta.1 * LOOK_SENSITIVITY).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
         let orientation = self.orientation();
-        advance_camera(&mut self.canonical_camera_m, &self.keys, orientation, dt);
+        let target_speed_mps = if camera_has_movement_input(&self.keys) {
+            camera_speed_mps(self.canonical_camera_m, &self.keys)
+        } else {
+            0.0
+        };
+        self.camera_speed_mps = smooth_camera_speed(self.camera_speed_mps, target_speed_mps, dt);
+        advance_camera_at_speed(
+            &mut self.canonical_camera_m,
+            &self.keys,
+            orientation,
+            self.camera_speed_mps,
+            dt,
+        );
     }
 
     fn camera(&self, width: u32, height: u32) -> Camera {
@@ -981,7 +1110,7 @@ impl AppState {
     }
 
     fn update_horizon_streaming(&mut self) {
-        let focus_m = horizon_streaming_focus(self.canonical_camera_m, self.orientation());
+        let focus_m = horizon_streaming_focus(self.canonical_camera_m);
         let Some(streaming) = self.horizon_streaming.as_mut() else {
             return;
         };
@@ -1061,13 +1190,14 @@ impl AppState {
             .map(HorizonStreamingState::label)
             .unwrap_or_else(|| "static".to_string());
         self.window.set_title(&format!(
-            "Helio Planet Voxels | {:?}/{} | bench {} | stream {streaming} | cam[{:+.2},{:+.2},{:+.2}]m look[{:+.2},{:+.2}] focus{} grab{} keys{} | R={EARTH_RADIUS_METERS:.0}m 10cm | pages {} lod[{lods}] | src {source_generations} pub {publication_generations} | gpu jobs {}/{} reject s{} o{} i{} | regular V{} I{} M{} D{} | seam V{} I{} M{} D{} | cull o{} s{} f{} c{} x{} | queued {} bp{} rb{}",
+            "Helio Planet Voxels | {:?}/{} | bench {} | stream {streaming} | cam[{:+.2},{:+.2},{:+.2}]m speed{:.1}m/s look[{:+.2},{:+.2}] focus{} grab{} keys{} | R={EARTH_RADIUS_METERS:.0}m 10cm | pages {} lod[{lods}] | src {source_generations} pub {publication_generations} | gpu jobs {}/{} reject s{} o{} i{} | gather r{} t{} p{} miss{} stale{} done{} | regular V{} I{} M{} D{} | seam V{} I{} M{} D{} | cull o{} s{} f{} c{} x{} | queued {} bp{} rb{}",
             draw_path,
             debug_view.label(),
             self.benchmark.label(),
             camera_delta[0],
             camera_delta[1],
             camera_delta[2],
+            self.camera_speed_mps,
             self.yaw,
             self.pitch,
             u8::from(self.window.has_focus()),
@@ -1079,6 +1209,12 @@ impl AppState {
             diagnostics.gpu_stale_rejections,
             diagnostics.gpu_overflow_rejections,
             diagnostics.gpu_incomplete_rejections,
+            diagnostics.gather_regular_samples,
+            diagnostics.gather_transition_samples,
+            diagnostics.gather_table_probes,
+            diagnostics.gather_page_misses,
+            diagnostics.gather_stale_targets,
+            diagnostics.gather_completed,
             diagnostics.regular_vertices,
             diagnostics.regular_indices,
             diagnostics.regular_meshlets,
@@ -1391,6 +1527,24 @@ impl ApplicationHandler for App {
                 pages.iter().map(|page| page.page_upload.clone()).collect(),
             )
             .unwrap();
+            let target_keys = pages
+                .iter()
+                .map(|page| page.page_upload.key)
+                .collect::<std::collections::BTreeSet<_>>();
+            let dependencies = pages
+                .iter()
+                .flat_map(|page| page.surface.required_pages().unwrap())
+                .filter(|key| !target_keys.contains(key))
+                .collect::<std::collections::BTreeSet<_>>();
+            let support_uploads = dependencies
+                .into_iter()
+                .map(|key| build_page_upload(key.planet, key.page, DEMO_SOURCE_GENERATION))
+                .collect::<Vec<_>>();
+            for chunk in support_uploads.chunks(pass.residency().config().max_batch_pages as usize)
+            {
+                pass.apply_upload_batch(&device, &queue, chunk.to_vec())
+                    .unwrap();
+            }
             pass.apply_visible_set(
                 &queue,
                 VisiblePageSet {
@@ -1410,11 +1564,10 @@ impl ApplicationHandler for App {
                 pass.queue_surface(page.surface).unwrap();
             }
         }
-        let initial_orientation = Quat::from_euler(EulerRot::YXZ, INITIAL_YAW, INITIAL_PITCH, 0.0);
         let horizon_streaming = (!self.auto_benchmark).then(|| {
             HorizonStreamingState::new(
                 canonical_camera_m,
-                horizon_streaming_focus(canonical_camera_m, initial_orientation),
+                horizon_streaming_focus(canonical_camera_m),
             )
         });
 
@@ -1429,6 +1582,7 @@ impl ApplicationHandler for App {
             planet,
             canonical_camera_m,
             spawn_camera_m: canonical_camera_m,
+            camera_speed_mps: 0.0,
             frame_index: 1,
             yaw: INITIAL_YAW,
             pitch: INITIAL_PITCH,
@@ -1528,6 +1682,7 @@ impl ApplicationHandler for App {
                     };
                     state.canonical_camera_m[0] = sign * (EARTH_RADIUS_METERS + 0.6);
                     state.canonical_camera_m[2] = sign * 3.3;
+                    state.camera_speed_mps = 0.0;
                     state.last_title_update = Instant::now()
                         .checked_sub(std::time::Duration::from_secs(1))
                         .unwrap_or_else(Instant::now);
@@ -1539,6 +1694,7 @@ impl ApplicationHandler for App {
                         (state.horizon_altitude_index + 1) % HORIZON_ALTITUDES_METERS.len();
                     state.canonical_camera_m[1] =
                         HORIZON_ALTITUDES_METERS[state.horizon_altitude_index];
+                    state.camera_speed_mps = 0.0;
                     state.last_title_update = Instant::now()
                         .checked_sub(std::time::Duration::from_secs(1))
                         .unwrap_or_else(Instant::now);
@@ -1712,7 +1868,13 @@ impl ApplicationHandler for App {
     }
 }
 
-fn advance_camera(position_m: &mut [f64; 3], keys: &HashSet<KeyCode>, orientation: Quat, dt: f64) {
+fn advance_camera_at_speed(
+    position_m: &mut [f64; 3],
+    keys: &HashSet<KeyCode>,
+    orientation: Quat,
+    speed_mps: f64,
+    dt: f64,
+) {
     let look_forward = orientation * -Vec3::Z;
     let look_right = orientation * Vec3::X;
     let forward = Vec3::new(look_forward.x, 0.0, look_forward.z).normalize_or_zero();
@@ -1736,9 +1898,61 @@ fn advance_camera(position_m: &mut [f64; 3], keys: &HashSet<KeyCode>, orientatio
     if keys.contains(&KeyCode::ShiftLeft) {
         direction -= Vec3::Y;
     }
-    let step = direction.normalize_or_zero() * (MOVE_SPEED_METERS_PER_SECOND * dt) as f32;
+    let step = direction.normalize_or_zero() * (speed_mps.max(0.0) * dt.max(0.0)) as f32;
     for axis in 0..3 {
         position_m[axis] += f64::from(step[axis]);
+    }
+}
+
+fn camera_has_movement_input(keys: &HashSet<KeyCode>) -> bool {
+    [
+        KeyCode::KeyW,
+        KeyCode::KeyA,
+        KeyCode::KeyS,
+        KeyCode::KeyD,
+        KeyCode::Space,
+        KeyCode::ShiftLeft,
+    ]
+    .iter()
+    .any(|key| keys.contains(key))
+}
+
+fn smooth_camera_speed(current_mps: f64, target_mps: f64, dt: f64) -> f64 {
+    let current_mps = current_mps.max(0.0);
+    let target_mps = target_mps.max(0.0);
+    if dt <= 0.0 || current_mps == target_mps {
+        return current_mps;
+    }
+    if current_mps <= 100.0 && target_mps <= 100.0 {
+        return target_mps;
+    }
+    let half_life = if target_mps > current_mps {
+        CAMERA_ACCELERATION_HALF_LIFE_SECONDS
+    } else {
+        CAMERA_BRAKING_HALF_LIFE_SECONDS
+    };
+    let retained = 2.0_f64.powf(-dt / half_life);
+    let smoothed = target_mps + (current_mps - target_mps) * retained;
+    if (smoothed - target_mps).abs() <= target_mps.max(1.0) * 1.0e-9 {
+        target_mps
+    } else {
+        smoothed
+    }
+}
+
+fn camera_speed_mps(position_m: [f64; 3], keys: &HashSet<KeyCode>) -> f64 {
+    let altitude_m = position_m[1].max(0.0);
+    let cruise_speed = (altitude_m * 0.25).clamp(
+        MOVE_SPEED_METERS_PER_SECOND,
+        MAX_CRUISE_SPEED_METERS_PER_SECOND,
+    );
+    if keys.contains(&KeyCode::ControlLeft) || keys.contains(&KeyCode::ControlRight) {
+        (cruise_speed * 32.0).clamp(
+            MIN_BOOST_SPEED_METERS_PER_SECOND,
+            MAX_BOOST_SPEED_METERS_PER_SECOND,
+        )
+    } else {
+        cruise_speed
     }
 }
 
@@ -1746,19 +1960,11 @@ fn horizon_spawn_camera() -> [f64; 3] {
     [EARTH_RADIUS_METERS + 0.6, HORIZON_ALTITUDES_METERS[0], 0.0]
 }
 
-fn horizon_streaming_focus(camera_m: [f64; 3], orientation: Quat) -> [f64; 3] {
-    let forward = orientation * -Vec3::Z;
-    let surface_y = -LOD0_CELL_SIZE_METERS;
-    if forward.y < -1.0e-4 {
-        let distance = ((surface_y - camera_m[1]) / f64::from(forward.y)).clamp(0.0, 3_000.0);
-        [
-            camera_m[0] + f64::from(forward.x) * distance,
-            surface_y,
-            camera_m[2] + f64::from(forward.z) * distance,
-        ]
-    } else {
-        [camera_m[0], surface_y, camera_m[2]]
-    }
+fn horizon_streaming_focus(camera_m: [f64; 3]) -> [f64; 3] {
+    // Mandatory residency belongs to the camera's surface neighborhood. View
+    // and velocity may prioritize speculative work, but they must never move
+    // the authoritative fine footprint away from the observer.
+    [camera_m[0], -LOD0_CELL_SIZE_METERS, camera_m[2]]
 }
 
 fn horizon_focus_lod0_cell(camera_m: [f64; 3]) -> [i64; 3] {
@@ -1789,7 +1995,7 @@ fn rejection_counts(diagnostics: &PlanetaryRenderDiagnostics) -> [u32; 3] {
 
 struct DemoPage {
     page_upload: PageUpload,
-    surface: PlanetarySurfaceUpload,
+    surface: PlanetarySurfaceRequest,
 }
 
 fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
@@ -1800,7 +2006,7 @@ fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
     for z in 0..BENCHMARK_GRID_EDGE {
         for x in 0..BENCHMARK_GRID_EDGE {
             let page = PageKey::new(0, [first_page_x + x, -1, first_page_z + z]);
-            pages.push(build_demo_page(planet, page, 0, pages.len() as u64 + 1));
+            pages.push(build_demo_page(planet, page, 0));
         }
     }
     let first_min = pages[0].page_upload.key.page.lod0_cell_min().unwrap();
@@ -1812,34 +2018,15 @@ fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
     (canonical_camera_m, pages)
 }
 
-fn build_demo_page(
-    planet: PlanetId,
-    page: PageKey,
-    transition_mask: u8,
-    generation_sequence: u64,
-) -> DemoPage {
-    let generation = SourceGeneration::new(1, generation_sequence);
-    build_demo_page_with_generation(planet, page, transition_mask, generation)
-}
-
-fn build_demo_page_with_generation(
-    planet: PlanetId,
-    page: PageKey,
-    transition_mask: u8,
-    generation: SourceGeneration,
-) -> DemoPage {
-    let fixture = ExtractionFixture::new(ExtractionFixtureKind::Plane, page).unwrap();
+fn build_demo_page(planet: PlanetId, page: PageKey, transition_mask: u8) -> DemoPage {
     let key = PlanetPageKey::new(planet, page);
-    let cells = inner_page_cells(&fixture);
     DemoPage {
-        page_upload: PageUpload::new(key, generation, cells).unwrap(),
-        surface: PlanetarySurfaceUpload {
+        page_upload: build_page_upload(planet, page, DEMO_SOURCE_GENERATION),
+        surface: PlanetarySurfaceRequest {
             key,
-            generation,
-            halo_samples: fixture.samples().to_vec().into_boxed_slice(),
-            transition_face_slabs: transition_face_slabs(page),
+            generation: DEMO_SOURCE_GENERATION,
             transition_mask,
-            dirty_microbricks: fixture.metrics().active_microbrick_mask,
+            dirty_microbricks: u64::MAX,
         },
     }
 }
@@ -1849,45 +2036,31 @@ fn build_surface_upload(
     page: PageKey,
     transition_mask: u8,
     generation: SourceGeneration,
-) -> PlanetarySurfaceUpload {
-    let fixture = ExtractionFixture::new(ExtractionFixtureKind::Plane, page).unwrap();
-    PlanetarySurfaceUpload {
+) -> PlanetarySurfaceRequest {
+    PlanetarySurfaceRequest {
         key: PlanetPageKey::new(planet, page),
         generation,
-        halo_samples: fixture.samples().to_vec().into_boxed_slice(),
-        transition_face_slabs: transition_face_slabs(page),
         transition_mask,
-        dirty_microbricks: fixture.metrics().active_microbrick_mask,
+        dirty_microbricks: u64::MAX,
     }
 }
 
-fn transition_face_slabs(page: PageKey) -> Box<[CellWord]> {
-    if page.lod == 0 {
-        vec![CellWord::AIR; TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT].into_boxed_slice()
-    } else {
-        TransitionFace::ALL
-            .into_iter()
-            .flat_map(|face| {
-                TransvoxelTransitionFaceFixture::new(ExtractionFixtureKind::Plane, page, face)
-                    .unwrap()
-                    .slab_samples()
-                    .into_vec()
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    }
-}
-
-fn inner_page_cells(fixture: &ExtractionFixture) -> Vec<CellWord> {
+fn build_page_upload(planet: PlanetId, page: PageKey, generation: SourceGeneration) -> PageUpload {
+    let minimum = page.lod0_cell_min().unwrap();
+    let scale = 1_i64 << page.lod;
     let mut cells = Vec::with_capacity(PAGE_EDGE * PAGE_EDGE * PAGE_EDGE);
-    for z in 0..PAGE_EDGE as i32 {
-        for y in 0..PAGE_EDGE as i32 {
-            for x in 0..PAGE_EDGE as i32 {
-                cells.push(fixture.sample([x, y, z]).unwrap());
+    for z in 0..PAGE_EDGE as i64 {
+        for y in 0..PAGE_EDGE as i64 {
+            for x in 0..PAGE_EDGE as i64 {
+                cells.push(ExtractionFixtureKind::Plane.sample_canonical([
+                    minimum[0] + x * scale,
+                    minimum[1] + y * scale,
+                    minimum[2] + z * scale,
+                ]));
             }
         }
     }
-    cells
+    PageUpload::new(PlanetPageKey::new(planet, page), generation, cells).unwrap()
 }
 
 #[cfg(test)]
@@ -1895,58 +2068,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_camera_ray_intersects_a_resident_fine_page() {
-        let planet = PlanetId(*b"HELIO-EARTH-DEMO");
+    fn fine_residency_is_centered_beneath_the_camera() {
         let camera = horizon_spawn_camera();
-        let orientation = Quat::from_euler(EulerRot::YXZ, INITIAL_YAW, INITIAL_PITCH, 0.0);
-        let focus_m = horizon_streaming_focus(camera, orientation);
+        let focus_m = horizon_streaming_focus(camera);
+        assert_eq!(focus_m, [camera[0], -LOD0_CELL_SIZE_METERS, camera[2]]);
         let plan = HorizonLodFixturePlan::build(
             horizon_focus_lod0_cell(focus_m),
             HORIZON_ROOT_LOD,
             HORIZON_MAX_PLAN_PAGES,
         )
         .unwrap();
-        let forward = orientation * -Vec3::Z;
-        assert!(forward.x > 0.0 && forward.y < 0.0);
-        let surface_y = -LOD0_CELL_SIZE_METERS;
-        let distance = (surface_y - camera[1]) / f64::from(forward.y);
-        let intersection_x = camera[0] + f64::from(forward.x) * distance;
-        let intersection_z = camera[2] + f64::from(forward.z) * distance;
-        let intersection_cell =
-            horizon_focus_lod0_cell([intersection_x, surface_y, intersection_z]);
-        let fine = PageKey::address_lod0_cell(0, intersection_cell).unwrap().0;
+        let camera_surface_cell = horizon_focus_lod0_cell(focus_m);
+        let fine = PageKey::address_lod0_cell(0, camera_surface_cell)
+            .unwrap()
+            .0;
         assert!(plan.topology().pages().any(|page| page == fine));
-
-        let planet_camera = PlanetPosition::from_meters(camera).unwrap();
-        let frame = PlanetFrameUniform::from_camera(planet, planet_camera, 1);
-        let metadata = helio_planet_voxel_core::GpuPageMeta::new(
-            fine,
-            frame.frame_origin_lod0_cell(),
-            0,
-            1,
-            0,
-        )
-        .unwrap();
-        let local_surface = [16.0, 31.0, 16.0];
-        let world = metadata.camera_local_position_m(frame, local_surface);
-        let camera_uniform = Camera::perspective_look_at(
-            Vec3::ZERO,
-            orientation * -Vec3::Z,
-            orientation * Vec3::Y,
-            std::f32::consts::FRAC_PI_3,
-            1280.0 / 720.0,
-            0.01,
-            2_000.0,
-        );
-        let clip = camera_uniform.proj * camera_uniform.view * Vec3::from_array(world).extend(1.0);
-        let ndc = clip.truncate() / clip.w;
-        assert!(
-            clip.w > 0.0
-                && ndc.x.abs() <= 1.0
-                && ndc.y.abs() <= 1.0
-                && (0.0..=1.0).contains(&ndc.z),
-            "surface vertex world={world:?} projects to clip={clip:?}, ndc={ndc:?}"
-        );
     }
 
     #[test]
@@ -1954,15 +2090,83 @@ mod tests {
         let orientation = Quat::from_euler(EulerRot::YXZ, INITIAL_YAW, INITIAL_PITCH, 0.0);
         let mut position = [0.0; 3];
         let mut keys = HashSet::from([KeyCode::KeyW]);
-        advance_camera(&mut position, &keys, orientation, 1.0);
+        advance_camera_at_speed(
+            &mut position,
+            &keys,
+            orientation,
+            MOVE_SPEED_METERS_PER_SECOND,
+            1.0,
+        );
         assert!((position[0] - MOVE_SPEED_METERS_PER_SECOND).abs() < 1.0e-5);
         assert_eq!(position[1], 0.0);
         assert!(position[2].abs() < 1.0e-5);
 
         position = [0.0; 3];
         keys = HashSet::from([KeyCode::Space]);
-        advance_camera(&mut position, &keys, orientation, 1.0);
+        advance_camera_at_speed(
+            &mut position,
+            &keys,
+            orientation,
+            MOVE_SPEED_METERS_PER_SECOND,
+            1.0,
+        );
         assert_eq!(position, [0.0, MOVE_SPEED_METERS_PER_SECOND, 0.0]);
+    }
+
+    #[test]
+    fn camera_speed_scales_from_walking_to_fast_travel_with_manual_boost() {
+        let keys = HashSet::new();
+        assert_eq!(camera_speed_mps([0.0, 1.5, 0.0], &keys), 1.5);
+        assert_eq!(camera_speed_mps([0.0, 10_000.0, 0.0], &keys), 2_500.0);
+        assert_eq!(
+            camera_speed_mps([0.0, 8_000_000.0, 0.0], &keys),
+            MAX_CRUISE_SPEED_METERS_PER_SECOND
+        );
+
+        let boosted = HashSet::from([KeyCode::ControlLeft]);
+        assert_eq!(camera_speed_mps([0.0, 1.5, 0.0], &boosted), 1_000.0);
+        assert_eq!(
+            camera_speed_mps([0.0, 8_000_000.0, 0.0], &boosted),
+            MAX_BOOST_SPEED_METERS_PER_SECOND
+        );
+    }
+
+    #[test]
+    fn fast_travel_ramps_and_brakes_smoothly() {
+        let target = MAX_BOOST_SPEED_METERS_PER_SECOND;
+        let first = smooth_camera_speed(0.0, target, 1.0 / 60.0);
+        let second = smooth_camera_speed(first, target, 1.0 / 60.0);
+        assert!(first > 0.0 && first < target);
+        assert!(second > first && second < target);
+
+        let braking = smooth_camera_speed(second, 0.0, 1.0 / 60.0);
+        assert!(braking > 0.0 && braking < second);
+        assert_eq!(smooth_camera_speed(0.0, 1.5, 1.0 / 60.0), 1.5);
+    }
+
+    #[test]
+    fn fast_travel_speed_envelope_is_frame_rate_independent() {
+        let integrate = |steps: usize| {
+            let dt = 1.0 / steps as f64;
+            (0..steps).fold(0.0, |speed, _| {
+                smooth_camera_speed(speed, MAX_BOOST_SPEED_METERS_PER_SECOND, dt)
+            })
+        };
+        let at_30_hz = integrate(30);
+        let at_60_hz = integrate(60);
+        let at_144_hz = integrate(144);
+        assert!((at_30_hz - at_60_hz).abs() < 1.0e-6);
+        assert!((at_60_hz - at_144_hz).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn control_alone_does_not_move_the_camera() {
+        let keys = HashSet::from([KeyCode::ControlLeft]);
+        assert!(!camera_has_movement_input(&keys));
+        assert!(camera_has_movement_input(&HashSet::from([
+            KeyCode::ControlLeft,
+            KeyCode::KeyW,
+        ])));
     }
 
     #[test]

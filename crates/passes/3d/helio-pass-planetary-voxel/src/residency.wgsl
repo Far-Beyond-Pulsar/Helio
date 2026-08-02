@@ -15,7 +15,11 @@ struct GpuResidencyUniform {
     table_mask: u32,
     max_probe: u32,
     resident_pages: u32,
-    _pad: u32,
+    atlas_tiles_x: u32,
+    atlas_tiles_y: u32,
+    atlas_tiles_z: u32,
+    publication_epoch_low: u32,
+    publication_epoch_high: u32,
 };
 
 struct GpuResidencyCounters {
@@ -39,9 +43,10 @@ struct GpuResidencyCounters {
     allocated_gpu_bytes_low: u32,
     allocated_gpu_bytes_high: u32,
     resource_buffers: u32,
-    atlas_shards: u32,
+    resource_textures: u32,
+    atlas_capacity_pages: u32,
     device_rebuilds: u32,
-    _pad: vec2<u32>,
+    _pad: u32,
 };
 
 struct GpuLookupQuery {

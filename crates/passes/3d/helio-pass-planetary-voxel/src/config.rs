@@ -8,7 +8,6 @@ pub struct PlanetaryVoxelGpuConfig {
     pub max_probe: u32,
     pub max_batch_pages: u32,
     pub max_eviction_watermarks: u32,
-    pub max_atlas_shards: u32,
 }
 
 impl PlanetaryVoxelGpuConfig {
@@ -18,7 +17,6 @@ impl PlanetaryVoxelGpuConfig {
         max_probe: u32,
         max_batch_pages: u32,
         max_eviction_watermarks: u32,
-        max_atlas_shards: u32,
     ) -> Result<Self, GpuConfigError> {
         if max_resident_pages == 0 {
             return Err(GpuConfigError::ZeroResidentPages);
@@ -50,23 +48,18 @@ impl PlanetaryVoxelGpuConfig {
         if max_eviction_watermarks == 0 {
             return Err(GpuConfigError::ZeroEvictionWatermarks);
         }
-        if max_atlas_shards == 0 {
-            return Err(GpuConfigError::ZeroAtlasShards);
-        }
         let config = Self {
             max_resident_pages,
             table_capacity,
             max_probe,
             max_batch_pages,
             max_eviction_watermarks,
-            max_atlas_shards,
         };
-        config.total_gpu_bytes()?;
+        config.logical_gpu_bytes()?;
         for bytes in [
             config.cell_atlas_bytes()?,
             config.metadata_bytes()?,
             config.page_table_bytes()?,
-            config.staging_bytes()?,
         ] {
             usize::try_from(bytes).map_err(|_| GpuConfigError::ArithmeticOverflow)?;
         }
@@ -102,18 +95,13 @@ impl PlanetaryVoxelGpuConfig {
             .ok_or(GpuConfigError::ArithmeticOverflow)
     }
 
-    pub fn staging_bytes(self) -> Result<u64, GpuConfigError> {
-        u64::from(self.max_batch_pages)
-            .checked_mul(PAGE_CELL_BYTES as u64)
-            .ok_or(GpuConfigError::ArithmeticOverflow)
-    }
-
-    pub fn total_gpu_bytes(self) -> Result<u64, GpuConfigError> {
+    /// Device-independent lower bound. [`Self::allocation_plan`] reports the
+    /// exact allocation after accounting for unused tiles in the 3D atlas.
+    pub fn logical_gpu_bytes(self) -> Result<u64, GpuConfigError> {
         [
             self.cell_atlas_bytes()?,
             self.metadata_bytes()?,
             self.page_table_bytes()?,
-            self.staging_bytes()?,
             core::mem::size_of::<GpuResidencyUniform>() as u64,
             core::mem::size_of::<GpuResidencyCounters>() as u64,
         ]
@@ -129,38 +117,13 @@ impl PlanetaryVoxelGpuConfig {
         self,
         limits: &wgpu::Limits,
     ) -> Result<GpuAllocationPlan, GpuConfigError> {
-        let page_bytes = PAGE_CELL_BYTES as u64;
+        let atlas =
+            GpuAtlasTexturePlan::new(self.max_resident_pages, limits.max_texture_dimension_3d)?;
         let max_storage_bytes = limits.max_storage_buffer_binding_size;
-        let max_shard_bytes = limits.max_buffer_size.min(max_storage_bytes);
-        let pages_per_shard = (max_shard_bytes / page_bytes).min(u64::from(u32::MAX));
-        if pages_per_shard == 0 {
-            return Err(GpuConfigError::DeviceCannotFitPage {
-                page_bytes,
-                max_buffer_bytes: limits.max_buffer_size,
-                max_storage_bytes,
-            });
-        }
-        let shard_count = u64::from(self.max_resident_pages).div_ceil(pages_per_shard);
-        if shard_count > u64::from(self.max_atlas_shards) {
-            return Err(GpuConfigError::AtlasShardLimit {
-                required: shard_count as u32,
-                maximum: self.max_atlas_shards,
-            });
-        }
-        let atlas_binding_limit = limits
-            .max_storage_buffers_per_shader_stage
-            .saturating_sub(2);
-        if shard_count > u64::from(atlas_binding_limit) {
-            return Err(GpuConfigError::AtlasBindingLimit {
-                required: shard_count as u32,
-                available: atlas_binding_limit,
-            });
-        }
 
         for (name, bytes, storage) in [
             ("metadata", self.metadata_bytes()?, true),
             ("page table", self.page_table_bytes()?, true),
-            ("staging", self.staging_bytes()?, false),
             (
                 "residency uniform",
                 core::mem::size_of::<GpuResidencyUniform>() as u64,
@@ -188,59 +151,116 @@ impl PlanetaryVoxelGpuConfig {
                 maximum: limits.max_uniform_buffer_binding_size,
             });
         }
-
-        let mut shards = Vec::with_capacity(shard_count as usize);
-        let mut page_start = 0_u32;
-        while page_start < self.max_resident_pages {
-            let remaining = self.max_resident_pages - page_start;
-            let page_count = remaining.min(pages_per_shard as u32);
-            shards.push(GpuAtlasShardPlan {
-                page_start,
-                page_count,
-                size_bytes: u64::from(page_count) * page_bytes,
-            });
-            page_start += page_count;
+        if limits.max_sampled_textures_per_shader_stage == 0 {
+            return Err(GpuConfigError::SampledTextureLimit);
         }
+        let total_bytes = [
+            atlas.size_bytes,
+            self.metadata_bytes()?,
+            self.page_table_bytes()?,
+            uniform_bytes,
+            core::mem::size_of::<GpuResidencyCounters>() as u64,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or(GpuConfigError::ArithmeticOverflow)
+        })?;
         Ok(GpuAllocationPlan {
-            shards,
+            atlas,
             metadata_bytes: self.metadata_bytes()?,
             page_table_bytes: self.page_table_bytes()?,
-            staging_bytes: self.staging_bytes()?,
-            total_bytes: self.total_gpu_bytes()?,
+            total_bytes,
         })
     }
 }
 
 impl Default for PlanetaryVoxelGpuConfig {
     fn default() -> Self {
-        Self::new(256, 1024, 32, 16, 512, 16)
-            .expect("default planetary GPU residency budget is valid")
+        Self::new(256, 1024, 32, 16, 512).expect("default planetary GPU residency budget is valid")
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuAllocationPlan {
-    pub shards: Vec<GpuAtlasShardPlan>,
+    pub atlas: GpuAtlasTexturePlan,
     pub metadata_bytes: u64,
     pub page_table_bytes: u64,
-    pub staging_bytes: u64,
     pub total_bytes: u64,
 }
 
-impl GpuAllocationPlan {
-    pub fn shard_for_slot(&self, slot: u32) -> Option<(usize, u64)> {
-        self.shards.iter().enumerate().find_map(|(index, shard)| {
-            let local = slot.checked_sub(shard.page_start)?;
-            (local < shard.page_count).then_some((index, u64::from(local) * PAGE_CELL_BYTES as u64))
-        })
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuAtlasTexturePlan {
+    pub tile_count: [u32; 3],
+    pub extent: [u32; 3],
+    pub capacity_pages: u32,
+    pub size_bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GpuAtlasShardPlan {
-    pub page_start: u32,
-    pub page_count: u32,
-    pub size_bytes: u64,
+impl GpuAtlasTexturePlan {
+    fn new(max_resident_pages: u32, max_dimension: u32) -> Result<Self, GpuConfigError> {
+        let page_edge = helio_planet_voxel_core::PAGE_EDGE as u32;
+        let max_tiles = max_dimension / page_edge;
+        if max_tiles == 0 {
+            return Err(GpuConfigError::DeviceCannotFitPageTexture {
+                page_edge,
+                max_dimension,
+            });
+        }
+
+        let mut best: Option<([u32; 3], u64, u32)> = None;
+        for x in 1..=max_tiles {
+            for y in x..=max_tiles {
+                let xy = u64::from(x) * u64::from(y);
+                let required_z = u64::from(max_resident_pages).div_ceil(xy);
+                let z = y.max(
+                    u32::try_from(required_z).map_err(|_| GpuConfigError::ArithmeticOverflow)?,
+                );
+                if z > max_tiles {
+                    continue;
+                }
+                let capacity = xy
+                    .checked_mul(u64::from(z))
+                    .ok_or(GpuConfigError::ArithmeticOverflow)?;
+                let spread = z - x;
+                let candidate = ([x, y, z], capacity, spread);
+                if best.is_none_or(|(_, best_capacity, best_spread)| {
+                    (capacity, spread) < (best_capacity, best_spread)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        let (tile_count, capacity, _) = best.ok_or(GpuConfigError::AtlasTextureCapacity {
+            required_pages: max_resident_pages,
+            maximum_pages: max_tiles.saturating_pow(3),
+            max_dimension,
+        })?;
+        let extent = tile_count.map(|tiles| tiles * page_edge);
+        let size_bytes = capacity
+            .checked_mul(PAGE_CELL_BYTES as u64)
+            .ok_or(GpuConfigError::ArithmeticOverflow)?;
+        Ok(Self {
+            tile_count,
+            extent,
+            capacity_pages: u32::try_from(capacity)
+                .map_err(|_| GpuConfigError::ArithmeticOverflow)?,
+            size_bytes,
+        })
+    }
+
+    pub fn origin_for_slot(self, slot: u32) -> Option<[u32; 3]> {
+        if slot >= self.capacity_pages {
+            return None;
+        }
+        let [tiles_x, tiles_y, _] = self.tile_count;
+        let tile_x = slot % tiles_x;
+        let tile_y = (slot / tiles_x) % tiles_y;
+        let tile_z = slot / (tiles_x * tiles_y);
+        let edge = helio_planet_voxel_core::PAGE_EDGE as u32;
+        Some([tile_x * edge, tile_y * edge, tile_z * edge])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -265,24 +285,22 @@ pub enum GpuConfigError {
     },
     #[error("planetary GPU residency needs at least one eviction watermark")]
     ZeroEvictionWatermarks,
-    #[error("planetary GPU residency needs at least one atlas shard")]
-    ZeroAtlasShards,
     #[error("planetary GPU residency byte arithmetic overflowed")]
     ArithmeticOverflow,
     #[error(
-        "device cannot fit one {page_bytes}-byte page (buffer {max_buffer_bytes}, storage binding {max_storage_bytes})"
+        "device 3D texture dimension {max_dimension} cannot fit one {page_edge}-cell page edge"
     )]
-    DeviceCannotFitPage {
-        page_bytes: u64,
-        max_buffer_bytes: u64,
-        max_storage_bytes: u64,
-    },
-    #[error("cell atlas needs {required} shards, exceeding configured maximum {maximum}")]
-    AtlasShardLimit { required: u32, maximum: u32 },
+    DeviceCannotFitPageTexture { page_edge: u32, max_dimension: u32 },
     #[error(
-        "cell atlas needs {required} storage bindings, but the device has {available} after reserving metadata and page-table bindings"
+        "3D atlas needs {required_pages} page tiles, but a {max_dimension} texture can hold at most {maximum_pages}"
     )]
-    AtlasBindingLimit { required: u32, available: u32 },
+    AtlasTextureCapacity {
+        required_pages: u32,
+        maximum_pages: u32,
+        max_dimension: u32,
+    },
+    #[error("planetary GPU sampling needs one sampled texture binding")]
+    SampledTextureLimit,
     #[error(
         "{name} buffer requests {requested} bytes (buffer limit {max_buffer_bytes}, storage binding limit {max_storage_bytes})"
     )]
@@ -302,54 +320,53 @@ mod tests {
 
     #[test]
     fn budgets_use_checked_exact_bytes() {
-        let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8, 4).unwrap();
+        let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8).unwrap();
         assert_eq!(config.cell_atlas_bytes().unwrap(), 4 * 131_072);
         assert_eq!(config.metadata_bytes().unwrap(), 4 * 32);
         assert_eq!(config.page_table_bytes().unwrap(), 16 * 48);
-        assert_eq!(config.staging_bytes().unwrap(), 2 * 131_072);
     }
 
     #[test]
     fn table_load_and_probe_limits_are_explicit() {
         assert!(matches!(
-            PlanetaryVoxelGpuConfig::new(8, 16, 8, 1, 1, 1),
+            PlanetaryVoxelGpuConfig::new(8, 16, 8, 1, 1),
             Err(GpuConfigError::TableLoadFactor { .. })
         ));
         assert!(matches!(
-            PlanetaryVoxelGpuConfig::new(4, 16, 17, 1, 1, 1),
+            PlanetaryVoxelGpuConfig::new(4, 16, 17, 1, 1),
             Err(GpuConfigError::InvalidMaxProbe { .. })
         ));
     }
 
     #[test]
-    fn allocation_plan_shards_at_storage_binding_limit() {
-        let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8, 4).unwrap();
+    fn allocation_plan_packs_pages_into_balanced_3d_tiles() {
+        let config = PlanetaryVoxelGpuConfig::new(384, 1024, 64, 192, 384).unwrap();
         let limits = wgpu::Limits {
-            max_buffer_size: 2 * PAGE_CELL_BYTES as u64,
-            max_storage_buffer_binding_size: (2 * PAGE_CELL_BYTES) as u64,
+            max_texture_dimension_3d: 2_048,
             ..wgpu::Limits::downlevel_defaults()
         };
         let plan = config.allocation_plan(&limits).unwrap();
-        assert_eq!(plan.shards.len(), 2);
-        assert_eq!(plan.shard_for_slot(0), Some((0, 0)));
-        assert_eq!(plan.shard_for_slot(2), Some((1, 0)));
-        assert_eq!(plan.shard_for_slot(4), None);
+        assert_eq!(plan.atlas.tile_count, [6, 8, 8]);
+        assert_eq!(plan.atlas.capacity_pages, 384);
+        assert_eq!(plan.atlas.extent, [192, 256, 256]);
+        assert_eq!(plan.atlas.origin_for_slot(0), Some([0, 0, 0]));
+        assert_eq!(plan.atlas.origin_for_slot(383), Some([160, 224, 224]));
+        assert_eq!(plan.atlas.origin_for_slot(384), None);
     }
 
     #[test]
-    fn allocation_plan_rejects_unbindable_atlas_shards() {
-        let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8, 4).unwrap();
+    fn allocation_plan_rejects_insufficient_3d_texture_capacity() {
+        let config = PlanetaryVoxelGpuConfig::new(9, 32, 8, 2, 8).unwrap();
         let limits = wgpu::Limits {
-            max_buffer_size: PAGE_CELL_BYTES as u64,
-            max_storage_buffer_binding_size: PAGE_CELL_BYTES as u64,
-            max_storage_buffers_per_shader_stage: 4,
+            max_texture_dimension_3d: 64,
             ..wgpu::Limits::downlevel_defaults()
         };
         assert_eq!(
             config.allocation_plan(&limits),
-            Err(GpuConfigError::AtlasBindingLimit {
-                required: 4,
-                available: 2,
+            Err(GpuConfigError::AtlasTextureCapacity {
+                required_pages: 9,
+                maximum_pages: 8,
+                max_dimension: 64,
             })
         );
     }

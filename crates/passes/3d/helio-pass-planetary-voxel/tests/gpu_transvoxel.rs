@@ -37,7 +37,7 @@ fn headless_transvoxel_classification_matches_every_fixture_cell() {
 
         let mut classifier = TransvoxelGpuClassifier::new(&device).unwrap();
         assert_eq!(classifier.resource_stats().buffers, 6);
-        assert_eq!(classifier.resource_stats().allocated_bytes, 682_640);
+        assert_eq!(classifier.resource_stats().allocated_bytes, 682_656);
         let resources = classifier.resource_stats();
         classifier.resize(3840, 2160);
         assert_eq!(classifier.resource_stats(), resources);
