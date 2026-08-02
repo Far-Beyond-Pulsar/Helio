@@ -1,10 +1,12 @@
-//! 2D side-scrolling sandbox/mining platformer demo — every sprite in `assets/sprites/` (one
-//! file per sprite, extracted from the original non-uniform composite sheet,
-//! each file's own tight pixel bounds, no shared grid) gets packed at
-//! startup into a single non-uniform shelf-packed atlas texture and used
-//! somewhere in the world, grouped into themed zones (a forest, a village, a
-//! mining camp, a monster den guarding treasure, a market stall) rather than
-//! scattered everywhere.
+//! 2D side-scrolling sandbox/mining platformer demo — the `assets/sprites/`
+//! pack ships as *sheets* (a hero with idle/run/jump/attack/dead strips, a
+//! boar, a bee, a snail, a 16px terrain tileset, hand-composed building,
+//! hive, rock and tree tiles, plus a sky backdrop), so every PNG is sliced
+//! into individual frames at startup (`slice_sheets`), packed into a single
+//! non-uniform shelf-packed atlas texture, and used somewhere in the world,
+//! grouped into themed zones (a forest, a lake, a village, a mining camp, a
+//! monster den, a second forest, a hive-lit tail) rather than scattered
+//! everywhere.
 //!
 //! Controls:
 //! - A/D or Left/Right to move, Space to jump.
@@ -15,15 +17,16 @@
 //!   the terrain grid). Stacks are tracked internally (no on-screen counts);
 //!   a stack's icon disappears once it hits zero.
 //!
-//! Every placed object — terrain tile, tree, monster, chest, torch, the lot —
-//! is breakable; breaking a terrain tile actually opens a hole (collision
-//! reads the same broken-tile set), so digging is real, not just cosmetic.
+//! Every placed object — terrain tile, tree, building, hive, monster, the
+//! lot — is breakable; breaking a terrain tile actually opens a hole
+//! (collision reads the same broken-tile set), so digging is real, not just
+//! cosmetic.
 //!
 //! Rendering is the same GPU cull + radix-sort → batch pipeline as the other
 //! sprite demos (`SpriteCullPass` → `SpriteBatchPass`) — the terrain alone is
-//! ~5,500 instanced quads, inserted once at startup; only the player, a
-//! handful of animated critters/items, the in-progress crack overlay, and
-//! the hotbar icons re-upload their instance bytes after that.
+//! ~5,500 instanced quads, inserted once at startup; only the player, the
+//! animated critters/items, the in-progress crack overlay, the hotbar icons,
+//! and the parallax sky re-upload their instance bytes after that.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -99,44 +102,39 @@ struct GpuEmitter {
     g: f32,
     b: f32,
     _pad: f32,
+    _pad2: f32,  // 8 × f32 = 32 bytes, matching shader layout
 }
 
-const LIGHT_EMITTER_NAMES: &[&str] = &[
-    "torch", "torch_post", "torch_small", "torch_staff",
-    "lantern_hanging", "lantern_wall", "campfire", "furnace_lit",
-    "cabin", "hut",
-];
+// Emitters: `cabin` windows emit warm amber light.
+const LIGHT_EMITTER_NAMES: &[&str] = &["cabin"];
 
 fn emitter_style(name: &str) -> ([f32; 3], f32) {
     match name {
-        "campfire" | "furnace_lit" => ([1.0, 0.42, 0.10], 150.0),
-        "lantern_hanging" | "lantern_wall" => ([1.0, 0.75, 0.42], 85.0),
-        "cabin" | "hut" => ([1.0, 0.65, 0.35], 160.0),
-        _ => ([1.0, 0.58, 0.22], 110.0), // torches
+        _ => ([1.0, 0.70, 0.30], 180.0),  // cabin: warm amber window glow
     }
 }
 
-// Every one of the 77 sprites in `assets/sprites/` is placed exactly once
-// below, grouped into themed zones along the world (a forest, a village, a
-// mining camp, a monster den guarding treasure, a second forest, a market
-// stall) rather than scattered uniformly everywhere — `grass_b`/`stone_block`
-// (terrain) and the landmarks (`sign`, `cabin`, the three chests, `hut`,
-// `gold_ore`, `torch`, `player*`) account for the rest.
-const TREES: &[&str] = &["pine_tree", "oak_tree"];
-const FOREST_CLUTTER: &[&str] = &["flower_blue", "flower_orange", "mushroom", "leaf_sprig", "bush", "grass_a"];
-const FOREST_CRITTERS: &[&str] = &["bunny", "lizard_creature"];
-const MINING_ROCKS: &[&str] = &["rock", "rockpile", "rock_small", "rock_cluster", "stone_chunk_pile", "stone_pile_2"];
-const MINING_TOOLS: &[&str] = &["pickaxe_1", "pickaxe_2", "pickaxe_hammer", "axe"];
-const MINING_PROPS: &[&str] = &["anvil", "grindstone", "crate_pile", "log_pile", "workbench_small"];
-const DEN_MONSTERS: &[&str] = &["slime_blue", "slime_green", "zombie_green", "dragon_red", "eyeball_red"];
-const DEN_WEAPONS: &[&str] = &["sword_1", "sword_2", "dagger"];
-// Village furniture isn't scattered loose in the open anymore — the cabin
-// and a couple of `hut`s (plus two villager-posed NPCs standing by the
-// cabin door) carry the village's presence instead.
-const VILLAGE_LIGHTS: &[&str] = &["torch_post", "lantern_hanging", "campfire"];
-const MARKET_STALL: &[&str] = &["wood_table_2", "wood_wall_bracket", "stone_wall_segment"];
-const MARKET_WARES: &[&str] =
-    &["heart_red", "star_blue", "potion_red", "potion_blue", "coin_gold", "coin_silver", "coin_copper", "bomb"];
+// Slice names resolved by `slice_sheets` at startup: `/` keys reference an
+// animation group's normalized frames ("boar/walk" → the boar's walk sheet),
+// plain names reference hand-sliced tiles or single sprites.
+//
+// Trees — 3 tall + 2 medium variants per color for natural height variation.
+// Tall = row 0 (y 0-367), medium = row 1 (y 391-703); same column structure.
+const TREES: &[&str] = &[
+    "tree_green_1", "tree_green_2", "tree_green_3",
+    "tree_green_m1", "tree_green_m2",
+];
+// Forest A and B ground cover: four bush variants from Tree-Assets.
+const FOREST_CLUTTER: &[&str] = &["bush_a", "bush_b", "bush_c", "bush_d"];
+const FOREST_CRITTERS: &[&str] = &["snail/walk", "bee/fly"];
+// Monster den: dark silhouette trees + mobs.
+const DEN_TREES: &[&str] = &["tree_dark_1", "tree_dark_2", "tree_red_1"];
+const DEN_MONSTERS: &[&str] = &["boar/walk", "bee/fly", "boar/idle"];
+// Village: bushes around the cabin.
+const VILLAGE_PROPS: &[&str] = &["bush_a", "bush_b", "bush_c"];
+// Market/tail: golden and yellow autumn trees + bushes.
+const MARKET_TREES: &[&str] = &["tree_golden_1", "tree_golden_m1", "tree_yellow_1", "tree_yellow_m1"];
+const MARKET_CLUTTER: &[&str] = &["bush_c", "bush_d"];
 
 enum Animated {
     None,
@@ -347,14 +345,280 @@ fn pack_atlas(images: Vec<(String, RgbaImage)>) -> (RgbaImage, HashMap<String, P
     (atlas, uvs)
 }
 
+// ── Sheet slicer ─────────────────────────────────────────────────────────
+//
+// The new pack ships art as multi-frame *sheets*: a hero with
+// idle/run/attack/jump/dead strips, boar/bee/snail mobs, a 16px terrain
+// tileset, and hand-composed building/hive/rock/tree tiles. `slice_sheets`
+// cuts every sheet into individual sprites *before* `pack_atlas` shelves
+// them. Frames in a shared animation `group` are normalized to one common
+// box (union of every frame's opaque bounds — centered horizontally,
+// feet-aligned to the bottom) so the group can cycle frames without jitter
+// or ground-sliding, and the player/critters animate by just swapping UVs.
+
+fn crop_rect(img: &RgbaImage, x: u32, y: u32, w: u32, h: u32) -> RgbaImage {
+    image::imageops::crop_imm(img, x.min(img.width()), y.min(img.height()), w, h).to_image()
+}
+
+/// Returns the tight opaque-content bounds of `img`, or `None` if empty.
+fn trim_content(img: &RgbaImage) -> Option<RgbaImage> {
+    let (w, h) = img.dimensions();
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if img.get_pixel(x, y)[3] > 0 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if max_x < min_x || max_y < min_y {
+        return None;
+    }
+    Some(crop_rect(img, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+}
+
+fn avg_color(img: &RgbaImage) -> (u32, u32, u32) {
+    let (w, h) = img.dimensions();
+    let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for y in 0..h {
+        for x in 0..w {
+            let p = img.get_pixel(x, y);
+            if p[3] > 0 {
+                r += p[0] as u64;
+                g += p[1] as u64;
+                b += p[2] as u64;
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return (0, 0, 0);
+    }
+    ((r / n) as u32, (g / n) as u32, (b / n) as u32)
+}
+#[derive(Clone, Copy)]
+enum SliceSpec {
+    /// A regular `cols × rows` grid of `cell_w × cell_h` cells. Empty cells
+    /// are dropped; cells are trimmed to their opaque content. With `group`,
+    /// all frames across every sheet in the group are re-normalized to one
+    /// shared box (see above) and indexed as `{group}_{key}_{i}`.
+    Grid { cell_w: u32, cell_h: u32, cols: u32, rows: u32, group: Option<&'static str>, key: &'static str },
+    /// Hand-picked sub-rectangles `(x, y, w, h)` in sheet pixels, each its
+    /// own sprite, trimmed to content.
+    Rects(&'static [(&'static str, (u32, u32, u32, u32))]),
+    /// The whole sheet is one sprite.
+    Single(&'static str),
+    /// Not used by the demo (recolor variants, the raw HUD, `all.png`).
+    Skip,
+}
+
+/// Cell geometry / crop regions for every sheet in the pack, derived by
+/// pixel-gutter analysis of `assets/sprites/` (see the demo's analysis).
+fn slice_spec(path: &str) -> SliceSpec {
+    use SliceSpec::*;
+    match path {
+        // ── Hero — normalized to a shared box across every animation. ──────
+        "Character/Idle/Idle-Sheet" => Grid { cell_w: 64, cell_h: 80, cols: 4, rows: 1, group: Some("player"), key: "idle" },
+        "Character/Run/Run-Sheet" => Grid { cell_w: 80, cell_h: 80, cols: 8, rows: 1, group: Some("player"), key: "run" },
+        "Character/Attack-01/Attack-01-Sheet" => Grid { cell_w: 96, cell_h: 80, cols: 8, rows: 1, group: Some("player"), key: "attack" },
+        "Character/Jumlp-All/Jump-All-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 15, rows: 1, group: Some("player"), key: "jump" },
+        "Character/Jump-Start/Jump-Start-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("player"), key: "jump_start" },
+        "Character/Jump-End/Jump-End-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 3, rows: 1, group: Some("player"), key: "jump_end" },
+        "Character/Dead/Dead-Sheet" => Grid { cell_w: 80, cell_h: 64, cols: 8, rows: 1, group: Some("player"), key: "dead" },
+        // ── Boar. ─────────────────────────────────────────────────────────
+        "Mob/Boar/Idle/Idle-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 4, rows: 1, group: Some("boar"), key: "idle" },
+        "Mob/Boar/Run/Run-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 6, rows: 1, group: Some("boar"), key: "run" },
+        "Mob/Boar/Walk/Walk-Base-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 6, rows: 1, group: Some("boar"), key: "walk" },
+        "Mob/Boar/Hit-Vanish/Hit-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 4, rows: 1, group: Some("boar"), key: "hit" },
+        // ── Bee. ──────────────────────────────────────────────────────────
+        "Mob/Small Bee/Attack/Attack-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "attack" },
+        "Mob/Small Bee/Fly/Fly-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "fly" },
+        "Mob/Small Bee/Hit/Hit-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "hit" },
+        // ── Snail. ────────────────────────────────────────────────────────
+        "Mob/Snail/walk-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "walk" },
+        "Mob/Snail/Hide-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "hide" },
+        "Mob/Snail/Dead-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "dead" },
+        // ── 16px terrain tileset (classified by color in `classify_tiles`). ─
+        "Assets/Tiles" => Grid { cell_w: 16, cell_h: 16, cols: 25, rows: 25, group: None, key: "" },
+        // ── Hand-composed tiles. ──────────────────────────────────────────
+        // Tree-Assets.png (336×400): right column only — four bush variants.
+        // The left cave-dressing cluster is no longer used.
+        "Assets/Tree-Assets" => Rects(&[
+            ("bush_a",    (210,   5, 124,  86)),
+            ("bush_b",    (210, 101, 124,  86)),
+            ("bush_c",    (210, 197, 124,  86)),
+            ("bush_d",    (210, 293, 124,  86)),
+        ]),
+        // Buildings.png, Hive.png, Interior-01.png, Props-Rocks.png — not used.
+        "Assets/Buildings" | "Assets/Hive" | "Assets/Interior-01" | "Assets/Props-Rocks" => Skip,
+        // cabin.png (408×201): single standalone cabin with lit windows.
+        // Full content fills the sheet — no transparent margins.
+        "cabin" => Single("cabin"),
+        // Large pine-tree canvases (1344×1200):
+        //   Column gaps at x=107-111 and x=219-223 separate three individual
+        //   trees in the lit left half (x 0-463).
+        //   Row 0 (y 0-367) = tallest tier; row 1 (y 391-703) = medium tier.
+        "Trees/Green-Tree"  => Rects(&[
+            ("tree_green_1",  (  0,   0, 107, 368)),
+            ("tree_green_2",  (112,   0, 107, 368)),
+            ("tree_green_3",  (224,   0, 107, 368)),
+            ("tree_green_m1", (  0, 391, 107, 313)),
+            ("tree_green_m2", (112, 391, 107, 313)),
+        ]),
+        "Trees/Red-Tree"    => Rects(&[
+            ("tree_red_1",    (  0,   0, 107, 368)),
+            ("tree_red_2",    (112,   0, 107, 368)),
+            ("tree_red_m1",   (  0, 391, 107, 313)),
+        ]),
+        "Trees/Dark-Tree"   => Rects(&[
+            ("tree_dark_1",   (  0,   0, 107, 368)),
+            ("tree_dark_2",   (112,   0, 107, 368)),
+            ("tree_dark_m1",  (  0, 391, 107, 313)),
+        ]),
+        "Trees/Golden-Tree" => Rects(&[
+            ("tree_golden_1", (  0,   0, 107, 368)),
+            ("tree_golden_2", (112,   0, 107, 368)),
+            ("tree_golden_m1",(  0, 391, 107, 313)),
+        ]),
+        "Trees/Yellow-Tree" => Rects(&[
+            ("tree_yellow_1", (  0,   0, 107, 368)),
+            ("tree_yellow_2", (112,   0, 107, 368)),
+            ("tree_yellow_m1",(  0, 391, 107, 313)),
+        ]),
+        // 896×256 parallax forest silhouette strip — tiled behind the terrain.
+        "Trees/Background"  => Single("background_trees"),
+        "Background/Background" => Single("background"),
+        // Recolor variants, the packed `all.png`, and the HUD sheet aren't
+        // used by this demo.
+        _ => Skip,
+    }
+}
+
+struct SliceOutput {
+    frames: Vec<(String, RgbaImage)>,
+    /// `"player/idle" → ["player_idle_0", …]` etc., in sheet order.
+    anims: HashMap<String, Vec<String>>,
+}
+
+fn slice_sheets(sheets: Vec<(String, RgbaImage)>) -> SliceOutput {
+    let mut frames: Vec<(String, RgbaImage)> = Vec::new();
+    let mut anims: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<&'static str, Vec<(&'static str, RgbaImage)>> = HashMap::new();
+
+    for (path, img) in sheets {
+        match slice_spec(&path) {
+            SliceSpec::Skip => {}
+            SliceSpec::Single(name) => {
+                if let Some(t) = trim_content(&img) {
+                    frames.push((name.to_string(), t));
+                }
+            }
+            SliceSpec::Rects(rects) => {
+                for &(name, (x, y, w, h)) in rects {
+                    let cell = crop_rect(&img, x, y, w, h);
+                    if let Some(t) = trim_content(&cell) {
+                        frames.push((name.to_string(), t));
+                    }
+                }
+            }
+            SliceSpec::Grid { cell_w, cell_h, cols, rows, group, key } => {
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let cell = crop_rect(&img, c * cell_w, r * cell_h, cell_w, cell_h);
+                        if let Some(t) = trim_content(&cell) {
+                            match group {
+                                Some(g) => groups.entry(g).or_default().push((key, t)),
+                                None if path == "Assets/Tiles" => frames.push((format!("tile_{r}_{c}"), t)),
+                                None => frames.push((format!("{path}#{r}_{c}"), t)),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Normalize every animation group to a common box.
+    for (group, raw) in groups {
+        let (box_w, box_h) =
+            raw.iter().fold((0u32, 0u32), |(w, h), (_, im)| (w.max(im.width()), h.max(im.height())));
+        let mut order: HashMap<&'static str, Vec<String>> = HashMap::new();
+        for (i, (key, im)) in raw.into_iter().enumerate() {
+            let name = format!("{group}_{key}_{i}");
+            let mut canvas = RgbaImage::from_pixel(box_w, box_h, image::Rgba([0, 0, 0, 0]));
+            let x = (box_w - im.width()) / 2;
+            let y = box_h - im.height(); // feet aligned to the box bottom
+            image::imageops::overlay(&mut canvas, &im, x as i64, y as i64);
+            order.entry(key).or_default().push(name.clone());
+            frames.push((name, canvas));
+        }
+        for (key, names) in order {
+            anims.insert(format!("{group}/{key}"), names);
+        }
+    }
+
+    SliceOutput { frames, anims }
+}
+
+/// Picks the best terrain tile per class (grass/dirt/stone/water) by
+/// nearest-color match and renames those frames to `tile_grass` etc.
+fn classify_tiles(frames: &mut Vec<(String, RgbaImage)>) {
+    const TARGETS: [(&str, (u32, u32, u32)); 4] = [
+        ("tile_grass", (110, 130, 4)),
+        ("tile_dirt", (135, 108, 55)),
+        ("tile_stone", (112, 124, 132)),
+        ("tile_water", (50, 140, 176)),
+    ];
+    let mut best: [Option<(usize, u64)>; 4] = [None; 4];
+    for (i, (name, img)) in frames.iter().enumerate() {
+        if !name.starts_with("tile_") || name.contains(' ') {
+            continue;
+        }
+        // Require a reasonably filled tile so the avg color is meaningful.
+        let (w, h) = img.dimensions();
+        let mut opaque = 0u32;
+        for y in 0..h {
+            for x in 0..w {
+                if img.get_pixel(x, y)[3] > 0 {
+                    opaque += 1;
+                }
+            }
+        }
+        if opaque < 60 {
+            continue;
+        }
+        let (r, g, b) = avg_color(img);
+        for (ti, (_, (tr, tg, tb))) in TARGETS.iter().enumerate() {
+            let dr = r as i64 - *tr as i64;
+            let dg = g as i64 - *tg as i64;
+            let db = b as i64 - *tb as i64;
+            let dist = (dr * dr + dg * dg + db * db) as u64;
+            if best[ti].map(|(_, d)| dist < d).unwrap_or(true) {
+                best[ti] = Some((i, dist));
+            }
+        }
+    }
+    for (i, (class, _)) in TARGETS.iter().enumerate() {
+        if let Some((fi, _)) = best[i] {
+            frames[fi].0 = class.to_string();
+        }
+    }
+}
+
 // ── Breakable world objects ──────────────────────────────────────────────
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Breakable {
     pos: [f32; 2],
     size: [f32; 2],
     depth: f32,
-    name: &'static str,
+    name: String,
     /// `Some((col, row))` for terrain tiles only — lets breaking one open an
     /// actual hole in the collision heightfield.
     terrain_cell: Option<(i32, i32)>,
@@ -369,7 +633,7 @@ struct Breaking {
 }
 
 struct HotbarSlot {
-    name: &'static str,
+    name: String,
     count: u32,
     handle: SpriteHandle,
     uv: [f32; 4],
@@ -395,7 +659,7 @@ fn place_prop(
     let handle = sprite_pass.insert_sprite(
         SpriteInstance::new(pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
     );
-    objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name, terrain_cell: None });
+    objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
     s
 }
 
@@ -442,6 +706,7 @@ fn scatter_band(
     names: &[&'static str],
     animated: Animated,
     depth: f32,
+    anims: &HashMap<String, Vec<String>>,
 ) {
     let mut col = col_start;
     loop {
@@ -451,32 +716,48 @@ fn scatter_band(
         }
         let x = col as f32 * TILE + rng.range_i32(-6, 6) as f32;
         let name = names[rng.range_usize(names.len())];
-        let s = atlas[name];
         let top = surface_top_world_y((x / TILE).round() as i32);
-        let flip = rng.bool();
-        let uv = if flip { flip_u(s.uv) } else { s.uv };
         match animated {
             Animated::None => {
+                let s = atlas[name];
+                let flip = rng.bool();
+                let uv = if flip { flip_u(s.uv) } else { s.uv };
                 let pos = [x, top + s.h * 0.5];
                 let handle = sprite_pass.insert_sprite(
                     SpriteInstance::new(pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name, terrain_cell: None });
+                objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
             }
             Animated::Critter => {
+                let frames = &anims[name];
+                let s = *atlas.get(&frames[0]).expect("critter frame missing from atlas");
                 let base_pos = [x, top + s.h * 0.5];
                 let handle = sprite_pass.insert_sprite(
-                    SpriteInstance::new(base_pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
+                    SpriteInstance::new(base_pos, [s.w, s.h])
+                        .with_uv_rect(s.uv)
+                        .with_depth(depth)
+                        .with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos: base_pos, size: [s.w, s.h], depth, name, terrain_cell: None });
-                critters.push(Critter { handle, base_pos, phase: rng.next_f32() * std::f32::consts::TAU, spr: PackedSprite { uv, ..s } });
+                let name_owned = frames[0].clone();
+                objects.insert(
+                    handle,
+                    Breakable { pos: base_pos, size: [s.w, s.h], depth, name: name_owned, terrain_cell: None },
+                );
+                critters.push(Critter {
+                    handle,
+                    base_pos,
+                    phase: rng.next_f32() * std::f32::consts::TAU,
+                    frames: frames.clone(),
+                    fps: anim_fps(name),
+                });
             }
             Animated::Item => {
+                let s = atlas[name];
                 let base_pos = [x, top + s.h * 0.5 + 10.0];
                 let handle = sprite_pass.insert_sprite(
                     SpriteInstance::new(base_pos, [s.w, s.h]).with_uv_rect(s.uv).with_depth(depth).with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos: base_pos, size: [s.w, s.h], depth, name, terrain_cell: None });
+                objects.insert(handle, Breakable { pos: base_pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
                 items.push(Item {
                     handle,
                     base_pos,
@@ -486,6 +767,19 @@ fn scatter_band(
                 });
             }
         }
+    }
+}
+
+/// Per-mob animation rate (frames/second) tuned to each mob's frame count.
+fn anim_fps(key: &str) -> f32 {
+    if key.contains("boar") {
+        9.0   // 4/6 frames — weighty trot
+    } else if key.contains("bee") {
+        16.0  // 4 frames — rapid wing-flap
+    } else if key.contains("snail") {
+        5.0   // 8 frames — very slow crawl
+    } else {
+        10.0
     }
 }
 
@@ -511,7 +805,9 @@ struct Critter {
     handle: SpriteHandle,
     base_pos: [f32; 2],
     phase: f32,
-    spr: PackedSprite,
+    /// Normalized frames to cycle through (all the same box, feet-aligned).
+    frames: Vec<String>,
+    fps: f32,
 }
 
 struct Item {
@@ -520,6 +816,14 @@ struct Item {
     phase: f32,
     spin: f32,
     spr: PackedSprite,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlayerAnim {
+    Idle,
+    Run,
+    Jump,
+    Fall,
 }
 
 struct AppState {
@@ -535,13 +839,23 @@ struct AppState {
     atlas: HashMap<String, PackedSprite>,
     atlas_layer: u32,
     crack_uvs: [[f32; 4]; 3],
+    /// Animation groups from `slice_sheets`: `"player/idle" → frame keys`.
+    anims: HashMap<String, Vec<String>>,
 
     player_handle: SpriteHandle,
     player_pos: [f32; 2],
     player_vel: [f32; 2],
     player_on_ground: bool,
     player_facing_right: bool,
-    player_spr: PackedSprite,
+    /// The normalized player box — every hero frame shares this size, with
+    /// feet at the bottom, so collision and animation are stable.
+    player_box: [f32; 2],
+    player_anim: PlayerAnim,
+    player_anim_time: f32,
+
+    bg_handle: SpriteHandle,
+    bg_uv: [f32; 4],
+    bg_size: [f32; 2],
 
     camera_center: [f32; 2],
     keys: HashSet<KeyCode>,
@@ -623,19 +937,27 @@ impl ApplicationHandler for App {
             },
         );
 
-        let mut loaded = load_all_sprites();
+        let loaded = load_all_sprites();
         log::info!("[sprite_dig_demo] loaded {} embedded sprite files", loaded.len());
+        let sliced = slice_sheets(loaded);
+        let anims = sliced.anims;
+        let mut loaded = sliced.frames;
         loaded.push(("__white".to_string(), RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]))));
         for stage in 1..=3u32 {
             loaded.push((format!("__crack_{stage}"), make_crack_image(stage)));
         }
         let (atlas_img, atlas) = pack_atlas(loaded);
-        log::info!("[sprite_dig_demo] packed atlas: {}x{}", atlas_img.width(), atlas_img.height());
+        log::info!(
+            "[sprite_dig_demo] packed atlas: {}x{} ({} sprites)",
+            atlas_img.width(),
+            atlas_img.height(),
+            atlas.len()
+        );
         let crack_uvs = [atlas["__crack_1"].uv, atlas["__crack_2"].uv, atlas["__crack_3"].uv];
 
         let mut graph = RenderGraph::new(&device, &queue);
         let mut sprite_pass = SpriteBatchPass::new(&device, &queue, format);
-        sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.53, g: 0.75, b: 0.95, a: 1.0 }));
+        sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.42, g: 0.70, b: 0.94, a: 1.0 }));
         let atlas_layer =
             sprite_pass.add_atlas_layer(&device, &queue, atlas_img.width(), atlas_img.height(), atlas_img.as_raw());
 
@@ -651,8 +973,15 @@ impl ApplicationHandler for App {
         sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5, size.height as f32 * 0.5]);
         sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
 
-        let grass_uv = atlas["grass_b"].uv;
-        let stone_uv = atlas["stone_block"].uv;
+        // Terrain tiles from `Assets/Tiles.png` by direct cell mapping (16×16 grid):
+        // tile_1_1 = rgb(70,83,5)  fully-opaque solid green ground = surface/grass fill
+        // tile_3_1 = rgb(28,31,10) fully-opaque dark olive           = dirt layer
+        // tile_6_1 = rgb(63,54,34) fully-opaque warm brown            = stone/cave (tile_4_1 had transparent holes)
+        // tile_17_3 = rgb(49,138,175) water — confirmed by pixel scan
+        let grass_uv = atlas["tile_1_1"].uv;
+        let dirt_uv  = atlas["tile_3_1"].uv;
+        let stone_uv = atlas["tile_6_1"].uv;
+        let water_uv = atlas["tile_17_3"].uv;
         let mut objects: HashMap<SpriteHandle, Breakable> = HashMap::new();
         let mut occupancy_words = vec![0u32; ((OCC_COLS * OCC_ROWS + 31) / 32) as usize];
         let mark_occupied = |pos: [f32; 2], words: &mut [u32]| {
@@ -662,34 +991,59 @@ impl ApplicationHandler for App {
             }
         };
 
-        // ── Terrain: a heightfield of tiled sprite art (grass_b on the
-        // surface row, stone_block for every row underneath), inserted once.
-        // Every tile is breakable and tagged with its (col, row) cell so
-        // mining it out actually opens a hole in the collision heightfield
+        // ── Terrain: a heightfield of tiled sprite art (the surface tile on
+        // the top row, the underground tile for every row underneath — except
+        // a short lake stretch where the surface row is water), inserted
+        // once. Every tile is breakable and tagged with its (col, row) cell
+        // so mining it out actually opens a hole in the collision heightfield
         // *and* the radiance-cascades occupancy grid (real digging, real
         // light bouncing into the hole).
+        const LAKE_START: i32 = 42;
+        const LAKE_END: i32 = 50;
+        const DIRT_LAYERS: i32 = 3;
         for col in 0..WORLD_COLS {
             let top = surface_top_world_y(col);
+            let in_lake = col >= LAKE_START && col < LAKE_END;
             let jitter = 0.92 + hash01(col as u32 * 7 + 1) * 0.16;
             let pos = [col as f32 * TILE, top - TILE * 0.5];
+            let (surface_uv, surface_name) = if in_lake { (water_uv, "tile_17_3") } else { (grass_uv, "tile_1_1") };
             let handle = sprite_pass.insert_sprite(
                 SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
-                    .with_uv_rect(grass_uv)
+                    .with_uv_rect(surface_uv)
                     .with_color([jitter, jitter, jitter, 1.0])
                     .with_atlas_layer(atlas_layer),
             );
-            objects.insert(handle, Breakable { pos, size: [TILE, TILE], depth: 0.0, name: "grass_b", terrain_cell: Some((col, 0)) });
+            objects.insert(
+                handle,
+                Breakable {
+                    pos,
+                    size: [TILE, TILE],
+                    depth: 0.0,
+                    name: surface_name.to_string(),
+                    terrain_cell: Some((col, 0)),
+                },
+            );
             mark_occupied(pos, &mut occupancy_words);
             for r in 1..=(DIRT_ROWS + STONE_ROWS) {
+                let (uv, name) = if r <= DIRT_LAYERS { (dirt_uv, "tile_3_1") } else { (stone_uv, "tile_6_1") };
                 let jitter = 0.9 + hash01(col as u32 * 17 + r as u32 * 53) * 0.2;
                 let pos = [col as f32 * TILE, top - TILE * 0.5 - r as f32 * TILE];
                 let handle = sprite_pass.insert_sprite(
                     SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
-                        .with_uv_rect(stone_uv)
+                        .with_uv_rect(uv)
                         .with_color([jitter, jitter, jitter, 1.0])
                         .with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos, size: [TILE, TILE], depth: 0.0, name: "stone_block", terrain_cell: Some((col, r)) });
+                objects.insert(
+                    handle,
+                    Breakable {
+                        pos,
+                        size: [TILE, TILE],
+                        depth: 0.0,
+                        name: name.to_string(),
+                        terrain_cell: Some((col, r)),
+                    },
+                );
                 mark_occupied(pos, &mut occupancy_words);
             }
         }
@@ -699,15 +1053,15 @@ impl ApplicationHandler for App {
         let mut items: Vec<Item> = Vec::new();
 
         // ── Zone boundaries (columns) — each themed band gets its own
-        // sprites, so the world reads as "a forest, then a village, then a
-        // mine, then a monster den guarding treasure, then a second forest,
-        // then a market" instead of one uniform scatter of everything.
+        // sprites, so the world reads as "a forest, then a lake, then a
+        // village, then a mine, then a monster den, then a second forest,
+        // then a hive-lit tail" instead of one uniform scatter of everything.
         const SPAWN_END: i32 = 14;
-        const FOREST_A_END: i32 = 46;
-        const CABIN_COL: i32 = 48;
+        const FOREST_A_END: i32 = 40;
+        const VILLAGE_COL: i32 = 58;
         const MINING_START: i32 = 84;
-        const MINING_END: i32 = 108;
-        const DEN_END: i32 = 132;
+        const MINING_END: i32 = 110;
+        const DEN_END: i32 = 134;
         const HUT_COL: i32 = 148;
         const FOREST_B_END: i32 = 166;
         const MARKET_START: i32 = 168;
@@ -717,90 +1071,62 @@ impl ApplicationHandler for App {
             ($start:expr, $end:expr, $step:expr, $names:expr, $anim:expr, $depth:expr) => {
                 scatter_band(
                     &mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, &mut critters, &mut items,
-                    $start, $end, $step, $names, $anim, $depth,
+                    $start, $end, $step, $names, $anim, $depth, &anims,
                 )
             };
         }
 
-        // ── Spawn: the welcome sign, lightly decorated.
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "sign", 8.0 * TILE, 0.2, false);
+        // ── Spawn: lightly decorated with ground cover.
         scatter!(2, SPAWN_END, (4, 7), FOREST_CLUTTER, Animated::None, 0.2);
 
-        // ── Forest A: trees, undergrowth, a little wildlife.
-        scatter!(SPAWN_END, FOREST_A_END, (2, 4), TREES, Animated::None, 0.2);
-        scatter!(SPAWN_END, FOREST_A_END, (3, 6), FOREST_CLUTTER, Animated::None, 0.2);
+        // ── Forest A: green trees spaced generously (they are wide clusters),
+        // bushy ground cover, and a little wildlife.
+        scatter!(SPAWN_END, FOREST_A_END, (4, 8), TREES, Animated::None, 0.15);
+        scatter!(SPAWN_END, FOREST_A_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
         scatter!(SPAWN_END, FOREST_A_END, (10, 16), FOREST_CRITTERS, Animated::Critter, 0.3);
 
-        // ── Village: the cabin, a second hut nearby, and two villager-posed
-        // NPCs standing by the door — no furniture scattered in the open.
-        let cabin_x = CABIN_COL as f32 * TILE;
-        let cabin = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", cabin_x, 0.15, false);
-        let hut = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "hut", cabin_x + cabin.w * 0.5 + 90.0, 0.2, false);
+        // ── Village: cabin as the centrepiece, bushes either side.
+        let village_x = VILLAGE_COL as f32 * TILE;
+        let cabin_spr = atlas["cabin"];
+        let building = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", village_x + cabin_spr.w * 1.5, 0.15, false);
         lay_row(
-            &mut sprite_pass, &atlas, atlas_layer, &mut objects, VILLAGE_LIGHTS,
-            cabin_x + cabin.w * 0.5 + 90.0 + hut.w * 0.5 + 30.0, 0.2, 24.0,
+            &mut sprite_pass, &atlas, atlas_layer, &mut objects, VILLAGE_PROPS,
+            village_x - building.w * 0.5 - 30.0, 0.2, 14.0,
         );
-        let mut npc_cursor = cabin_x - cabin.w * 0.5 - 30.0;
-        for &name in &["player_pickaxe", "player_pickaxe_hood"] {
-            let s = atlas[name];
-            npc_cursor -= s.w * 0.5;
-            place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, name, npc_cursor, 0.3, false);
-            npc_cursor -= s.w * 0.5 + 20.0;
-        }
 
-        // ── Mining camp: rocks, a blacksmith's tools/props, an ore vein, a
-        // stash chest.
-        scatter!(MINING_START, MINING_END, (3, 5), MINING_ROCKS, Animated::None, 0.2);
-        scatter!(MINING_START, MINING_END, (6, 9), MINING_TOOLS, Animated::None, 0.2);
-        let mining_center = (MINING_START + MINING_END) / 2;
-        lay_row(&mut sprite_pass, &atlas, atlas_layer, &mut objects, MINING_PROPS, mining_center as f32 * TILE, 0.2, 16.0);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "gold_ore", (MINING_START + 4) as f32 * TILE, 0.2, false);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "gold_chest_small", (MINING_END - 3) as f32 * TILE, 0.2, false);
+        // ── Mining zone: dark trees and bushes (no structures).
+        scatter!(MINING_START, MINING_END, (4, 8), DEN_TREES, Animated::None, 0.15);
+        scatter!(MINING_START, MINING_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
 
-        // ── Monster den: guards clustered around the gold chest, with
-        // weapons dropped by a less fortunate adventurer.
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "chest_gold", ((MINING_END + DEN_END) / 2) as f32 * TILE, 0.2, false);
+        // ── Monster den: dark + red trees for atmosphere, mobs.
+        scatter!(MINING_END, DEN_END, (4, 7), DEN_TREES, Animated::None, 0.1);
         scatter!(MINING_END, DEN_END, (5, 8), DEN_MONSTERS, Animated::Critter, 0.3);
-        scatter!(MINING_END, DEN_END, (9, 13), DEN_WEAPONS, Animated::None, 0.2);
 
-        // ── Forest B: a second, wilder patch of woods around a shrine.
-        scatter!(DEN_END, FOREST_B_END, (2, 4), TREES, Animated::None, 0.2);
-        scatter!(DEN_END, FOREST_B_END, (3, 6), FOREST_CLUTTER, Animated::None, 0.2);
+        // ── Forest B: a second, wilder patch of woods with a big green
+        // landmark tree centred on the hut column.
+        scatter!(DEN_END, FOREST_B_END, (4, 8), TREES, Animated::None, 0.15);
+        scatter!(DEN_END, FOREST_B_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
         scatter!(DEN_END, FOREST_B_END, (12, 18), FOREST_CRITTERS, Animated::Critter, 0.3);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "hut", HUT_COL as f32 * TILE, 0.2, false);
+        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_1", HUT_COL as f32 * TILE, 0.12, false);
 
-        // ── Market stall: a small wood-and-stone stall structure with wares
-        // laid out on the table, and the shopkeeper's dark storage chest.
-        let stall_cursor = lay_row(&mut sprite_pass, &atlas, atlas_layer, &mut objects, MARKET_STALL, MARKET_START as f32 * TILE, 0.2, 10.0);
-        scatter!(MARKET_START, MARKET_START + 10, (1, 3), MARKET_WARES, Animated::Item, 0.3);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "chest_dark", stall_cursor + 20.0, 0.2, false);
-
-        // ── Tail end of the world: the path continues, lit at intervals.
-        scatter!(MARKET_START + 20, TAIL_END, (4, 7), FOREST_CLUTTER, Animated::None, 0.2);
-
-        // ── Regular path lighting the whole way through, distinct from the
-        // village's own torch variants — every ~22 columns.
-        let mut torch_col = 20;
-        while torch_col < TAIL_END {
-            place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "torch", torch_col as f32 * TILE, 0.2, false);
-            torch_col += 22;
-        }
+        // ── Market / tail: golden and yellow autumn trees + bushes.
+        scatter!(MARKET_START, MARKET_START + 20, (3, 6), MARKET_TREES, Animated::None, 0.15);
+        scatter!(MARKET_START, TAIL_END, (2, 4), MARKET_CLUTTER, Animated::None, 0.2);
 
         // ── Lighting: 2D radiance cascades reading the occupancy grid built
-        // above (occluders) plus every placed torch/lantern/campfire/cabin
-        // (the only actually-placed light emitters — see `LIGHT_EMITTER_NAMES`),
-        // each keeping a tight pool of light around itself.
+        // above (occluders) plus every placed interior prop that is a light
+        // emitter (see `LIGHT_EMITTER_NAMES`), each with a tight pool of light.
         let mut gpu_emitters: Vec<GpuEmitter> = objects
             .values()
-            .filter(|b| LIGHT_EMITTER_NAMES.contains(&b.name))
+            .filter(|b| LIGHT_EMITTER_NAMES.contains(&b.name.as_str()))
             .map(|b| {
-                let (color, radius) = emitter_style(b.name);
-                GpuEmitter { pos: b.pos, radius, r: color[0], g: color[1], b: color[2], _pad: 0.0 }
+                let (color, radius) = emitter_style(&b.name);
+                GpuEmitter { pos: b.pos, radius, r: color[0], g: color[1], b: color[2], _pad: 0.0, _pad2: 0.0 }
             })
             .collect();
         let real_emitter_count = gpu_emitters.len() as u32;
         let max_emitters = real_emitter_count.max(1);
-        gpu_emitters.resize(max_emitters as usize, GpuEmitter { pos: [0.0, 0.0], radius: 0.0, r: 0.0, g: 0.0, b: 0.0, _pad: 0.0 });
+        gpu_emitters.resize(max_emitters as usize, GpuEmitter { pos: [0.0, 0.0], radius: 0.0, r: 0.0, g: 0.0, b: 0.0, _pad: 0.0, _pad2: 0.0 });
         log::info!("[sprite_dig_demo] {real_emitter_count} light emitters");
 
         let occupancy_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -834,12 +1160,13 @@ impl ApplicationHandler for App {
             &queue,
             format,
             radiance_pass.radiance_view(),
-            [0.12, 0.11, 0.16],
-            1.6,
+            [1.35, 1.25, 1.10],  // bright, warm daytime sky ambient
+            2.0,
         );
 
-        // ── Player, spawned standing on the surface near the sign. ────────
-        let player_spr = atlas["player"];
+        // ── Player, spawned standing on the surface near the hive marker. ─
+        let player_frame = &anims["player/idle"][0];
+        let player_spr = atlas[player_frame];
         let spawn_col = 4;
         let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * 0.5];
         let player_handle = sprite_pass.insert_sprite(
@@ -848,6 +1175,24 @@ impl ApplicationHandler for App {
                 .with_depth(0.5)
                 .with_atlas_layer(atlas_layer),
         );
+
+        // ── Parallax background: the whole-sky `Background/Background.png`,
+        // scaled to cover the window and anchored in the sky region above
+        // terrain. The native sprite is 480×272; we scale it to window height
+        // × 1.1 so it always fills the visible sky regardless of resolution.
+        let bg_spr = atlas["background"];
+        let bg_scale = (size.height as f32 / bg_spr.h).max(2.0) * 1.1;
+        let bg_draw = [bg_spr.w * bg_scale, bg_spr.h * bg_scale];
+        let bg_handle = sprite_pass.insert_sprite(
+            SpriteInstance::new(
+                [bg_draw[0] * 0.5, size.height as f32 * 0.5],
+                bg_draw,
+            )
+            .with_uv_rect(bg_spr.uv)
+            .with_depth(-10.0)
+            .with_atlas_layer(atlas_layer),
+        );
+        let bg_uv = bg_spr.uv;
 
         graph.add_pass(Box::new(sprite_cull));
         graph.add_pass(Box::new(sprite_pass));
@@ -885,7 +1230,13 @@ impl ApplicationHandler for App {
             player_vel: [0.0, 0.0],
             player_on_ground: false,
             player_facing_right: true,
-            player_spr,
+            anims,
+            player_box: [player_spr.w, player_spr.h],
+            player_anim: PlayerAnim::Idle,
+            player_anim_time: 0.0,
+            bg_handle,
+            bg_uv,
+            bg_size: bg_draw,
             camera_center: player_pos,
             keys: HashSet::new(),
             mouse_pos: (0.0, 0.0),
@@ -947,7 +1298,7 @@ impl ApplicationHandler for App {
                 (MouseButton::Left, ElementState::Pressed) => {
                     let world = world_from_screen(state.mouse_pos, state.window_size, state.camera_center);
                     if let Some(handle) = hit_test(&state.objects, world) {
-                        let target = state.objects[&handle];
+                        let target = state.objects[&handle].clone();
                         state.breaking = Some(Breaking { handle, target, start: Instant::now(), crack_handle: None, stage: 0 });
                     }
                 }
@@ -968,7 +1319,7 @@ impl ApplicationHandler for App {
                         let sel = state.hotbar_selected.min(state.hotbar.len() - 1);
                         let (name, uv, w, h) = {
                             let s = &state.hotbar[sel];
-                            (s.name, s.uv, s.w, s.h)
+                            (s.name.clone(), s.uv, s.w, s.h)
                         };
                         let snapped = [(world[0] / TILE).round() * TILE, world[1]];
                         let atlas_layer = state.atlas_layer;
@@ -1061,7 +1412,7 @@ impl ApplicationHandler for App {
                     if let Some(slot) = state.hotbar.iter_mut().find(|s| s.name == breaking.target.name) {
                         slot.count += 1;
                     } else {
-                        let s = state.atlas[breaking.target.name];
+                        let s = state.atlas[&breaking.target.name];
                         let index = state.hotbar.len();
                         let pos = hotbar_slot_world_pos(state.camera_center, state.window_size, index, index + 1);
                         let handle = sprite_pass.insert_sprite(
@@ -1098,7 +1449,7 @@ impl ApplicationHandler for App {
                 state.player_pos[0] = state.player_pos[0].clamp(TILE * 1.0, (WORLD_COLS as f32 - 2.0) * TILE);
 
                 let col = (state.player_pos[0] / TILE).round() as i32;
-                let ground_y = ground_y_at(col, &state.broken_terrain) + state.player_spr.h * 0.5;
+                let ground_y = ground_y_at(col, &state.broken_terrain) + state.player_box[1] * 0.5;
                 if state.player_pos[1] <= ground_y {
                     state.player_pos[1] = ground_y;
                     state.player_vel[1] = 0.0;
@@ -1107,23 +1458,49 @@ impl ApplicationHandler for App {
                     state.player_on_ground = false;
                 }
 
-                let uv = if state.player_facing_right { state.player_spr.uv } else { flip_u(state.player_spr.uv) };
+                // ── Player animation: idle/run from the character sheet, and
+                // a two-pose jump (rising frames / falling frames).
+                let new_anim = if !state.player_on_ground {
+                    if state.player_vel[1] > 0.0 { PlayerAnim::Jump } else { PlayerAnim::Fall }
+                } else if state.player_vel[0].abs() > 1.0 {
+                    PlayerAnim::Run
+                } else {
+                    PlayerAnim::Idle
+                };
+                if new_anim != state.player_anim {
+                    state.player_anim = new_anim;
+                    state.player_anim_time = 0.0;
+                } else {
+                    state.player_anim_time += dt;
+                }
+                let (group, fps) = match state.player_anim {
+                    PlayerAnim::Idle => ("player/idle", 7.0),   // 4 frames — gentle sway
+                    PlayerAnim::Run  => ("player/run",  12.0),  // 8 frames — brisk sprint
+                    PlayerAnim::Jump => ("player/jump", 14.0),  // 15 frames — snappy arc
+                    PlayerAnim::Fall => ("player/jump_end", 10.0), // 3 frames — loop landing
+                };
+                let frames = &state.anims[group];
+                let frame_idx = ((state.player_anim_time * fps) as usize) % frames.len();
+                let spr = state.atlas[&frames[frame_idx]];
+                let uv = if state.player_facing_right { spr.uv } else { flip_u(spr.uv) };
                 let player_pos = state.player_pos;
                 sprite_pass.update_sprite(
                     state.player_handle,
-                    SpriteInstance::new(player_pos, [state.player_spr.w, state.player_spr.h])
+                    SpriteInstance::new(player_pos, [spr.w, spr.h])
                         .with_uv_rect(uv)
                         .with_depth(0.5)
                         .with_atlas_layer(atlas_layer),
                 );
 
                 for c in &state.critters {
+                    let frame_idx = ((time * c.fps) as usize) % c.frames.len();
+                    let spr = state.atlas[&c.frames[frame_idx]];
                     let mut pos = c.base_pos;
                     pos[1] += (time * 2.0 + c.phase).sin() * 6.0;
                     sprite_pass.update_sprite(
                         c.handle,
-                        SpriteInstance::new(pos, [c.spr.w, c.spr.h])
-                            .with_uv_rect(c.spr.uv)
+                        SpriteInstance::new(pos, [spr.w, spr.h])
+                            .with_uv_rect(spr.uv)
                             .with_depth(0.3)
                             .with_atlas_layer(atlas_layer),
                     );
@@ -1147,6 +1524,28 @@ impl ApplicationHandler for App {
                 let smoothing = (dt * 5.0).min(1.0);
                 state.camera_center[0] += (target[0] - state.camera_center[0]) * smoothing;
                 state.camera_center[1] += (target[1] - state.camera_center[1]) * smoothing;
+
+                // ── Background: sky backdrop scaled to fill the window.
+                // Horizontal: very slow drift (5 % of camera speed) that
+                // tiles every bg_draw_width, giving a gentle cloud motion
+                // without a visible seam.  Vertical: anchored to the upper
+                // portion of the visible screen (sky region above terrain).
+                let bg_size = state.bg_size;
+                let drift_x = state.camera_center[0] * 0.05;
+                let bg_pos = [
+                    state.camera_center[0]
+                        + drift_x.rem_euclid(bg_size[0])
+                        - bg_size[0] * 0.5,
+                    // upper ~35 % of the screen (Y-up: add half window height)
+                    state.camera_center[1] + state.window_size.1 as f32 * 0.35,
+                ];
+                sprite_pass.update_sprite(
+                    state.bg_handle,
+                    SpriteInstance::new(bg_pos, bg_size)
+                        .with_uv_rect(state.bg_uv)
+                        .with_depth(-10.0)
+                        .with_atlas_layer(atlas_layer),
+                );
 
                 // ── Hotbar: screen-locked (re-anchored to the camera every
                 // frame), the selected slot tinted — no on-screen counts,
