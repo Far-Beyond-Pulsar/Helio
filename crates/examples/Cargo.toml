@@ -196,6 +196,10 @@ name = "planar_reflection_demo"
 path = "planar_reflection_demo.rs"
 
 [[bin]]
+name = "builder_demo"
+path = "builder_demo.rs"
+
+[[bin]]
 name = "one_million_cubes"
 path = "one_million_cubes.rs"
 

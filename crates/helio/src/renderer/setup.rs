@@ -87,7 +87,12 @@ impl Renderer {
         (texture, view, layer0_view)
     }
 
-    pub fn new(
+    /// Construct a [`Renderer`] with all dependencies provided explicitly.
+    ///
+    /// Prefer [`RendererBuilder`](super::builder::RendererBuilder) for new code — it
+    /// creates the scene, debug state, and internal buffers automatically.
+    #[allow(deprecated)]
+    pub(crate) fn construct(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         surface_format: wgpu::TextureFormat,
@@ -101,6 +106,7 @@ impl Renderer {
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
     ) -> Self {
+
         scene.set_shadow_face_capacity(config.shadow_face_capacity);
         scene.set_render_size(width, height);
 
@@ -305,6 +311,47 @@ impl Renderer {
         }
     }
 
+    /// Create a [`Renderer`] that owns its device and queue.
+    ///
+    /// This is the original full-signature constructor kept for backward
+    /// compatibility.  Prefer [`RendererBuilder`](super::builder::RendererBuilder)
+    /// for new code — it creates the scene, debug state, and internal buffers
+    /// automatically.
+    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        surface_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        render_scale: f32,
+        config: RendererConfig,
+        scene: Scene,
+        graph: RenderGraph,
+        debug_state: Arc<Mutex<DebugDrawState>>,
+        debug_camera_buffer: wgpu::Buffer,
+        cull_stats_buffer: wgpu::Buffer,
+    ) -> Self {
+        Self::construct(
+            device,
+            queue,
+            surface_format,
+            width,
+            height,
+            render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buffer,
+            cull_stats_buffer,
+        )
+    }
+
+    /// Create a [`Renderer`] that shares a device/queue owned externally.
+    ///
+    /// Equivalent to [`new()`] with `owns_device = false`.
+    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
     pub fn new_with_external_device(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -319,7 +366,7 @@ impl Renderer {
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
     ) -> Self {
-        let mut renderer = Self::new(
+        let mut renderer = Self::construct(
             device,
             queue,
             surface_format,

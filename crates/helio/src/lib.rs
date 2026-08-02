@@ -42,7 +42,7 @@ pub use picking::{PickHit, ScenePicker};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, DebugCameraUniform, DebugDrawPass,
-    DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererConfig,
+    DebugDrawState, GiConfig, GraphBuilderFn, GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererBuilder, RendererConfig,
 };
 pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
