@@ -65,7 +65,11 @@ pub struct GpuResidencyUniform {
     pub table_mask: u32,
     pub max_probe: u32,
     pub resident_pages: u32,
-    pub _pad: u32,
+    pub atlas_tiles_x: u32,
+    pub atlas_tiles_y: u32,
+    pub atlas_tiles_z: u32,
+    pub publication_epoch_low: u32,
+    pub publication_epoch_high: u32,
 }
 
 #[repr(C, align(16))]
@@ -91,9 +95,10 @@ pub struct GpuResidencyCounters {
     pub allocated_gpu_bytes_low: u32,
     pub allocated_gpu_bytes_high: u32,
     pub resource_buffers: u32,
-    pub atlas_shards: u32,
+    pub resource_textures: u32,
+    pub atlas_capacity_pages: u32,
     pub device_rebuilds: u32,
-    pub _pad: [u32; 2],
+    pub _pad: u32,
 }
 
 #[repr(C, align(16))]

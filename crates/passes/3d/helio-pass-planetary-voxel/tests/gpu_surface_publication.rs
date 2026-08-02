@@ -119,6 +119,7 @@ fn uploaded_camera_view_projection_matches_split_gpu_multiplication() {
             [0.0; 2],
             Mat4::IDENTITY,
         );
+        let cameras = [camera, camera];
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Camera Matrix Contract Shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -150,7 +151,7 @@ fn main() {
         let camera_buffer = initialized_buffer(
             &device,
             "Camera Matrix Contract Storage",
-            bytemuck::bytes_of(&camera),
+            bytemuck::cast_slice(&cameras),
             wgpu::BufferUsages::STORAGE,
         );
         let probe_buffer = initialized_buffer(

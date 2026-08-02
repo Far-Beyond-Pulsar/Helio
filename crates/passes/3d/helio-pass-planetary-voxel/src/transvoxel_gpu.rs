@@ -298,6 +298,22 @@ impl TransvoxelGpuClassifier {
         }
     }
 
+    pub(crate) fn encode_indirect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        indirect: &wgpu::Buffer,
+        offset: u64,
+    ) {
+        encoder.clear_buffer(&self.counters_buffer, 0, None);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Planetary Transvoxel Classify Indirect Dispatch"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups_indirect(indirect, offset);
+    }
+
     pub(crate) fn dispatch_buffer(&self) -> &wgpu::Buffer {
         &self.dispatch_buffer
     }

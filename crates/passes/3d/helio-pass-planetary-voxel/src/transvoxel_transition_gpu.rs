@@ -1,6 +1,6 @@
 use crate::{
-    GpuTerrainVertex, GpuTransvoxelCellOffset, GpuTransvoxelScanBlock,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSVOXEL_TRANSITION_GPU_WGSL, transvoxel::generated,
+    transvoxel::generated, GpuTerrainVertex, GpuTransvoxelCellOffset, GpuTransvoxelScanBlock,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{CellWord, TRANSITION_FACE_MASK};
@@ -406,6 +406,27 @@ impl TransvoxelGpuTransitionExtractor {
         Ok(())
     }
 
+    pub(crate) fn prepare_gpu_samples(
+        &self,
+        queue: &wgpu::Queue,
+        transition_mask: u8,
+        generation: u64,
+    ) -> Result<(), TransvoxelTransitionGpuError> {
+        if transition_mask & !TRANSITION_FACE_MASK != 0 {
+            return Err(TransvoxelTransitionGpuError::TransitionMask(
+                transition_mask,
+            ));
+        }
+        let dispatch =
+            GpuTransvoxelTransitionDispatch::new(transition_mask, generation, self.config);
+        queue.write_buffer(&self.dispatch_buffer, 0, bytemuck::bytes_of(&dispatch));
+        Ok(())
+    }
+
+    pub(crate) fn sample_buffer(&self) -> &wgpu::Buffer {
+        &self.sample_buffer
+    }
+
     /// Encodes the complete transition extraction. [`Self::prepare`] must be
     /// called first.
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -437,6 +458,47 @@ impl TransvoxelGpuTransitionExtractor {
             &self.emit_bind_group,
             TRANSVOXEL_TRANSITION_CLASSIFY_WORKGROUPS,
             "Planetary Transvoxel Transition Emission",
+        );
+    }
+
+    pub(crate) fn encode_indirect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        indirect: &wgpu::Buffer,
+        offsets: [u64; 4],
+    ) {
+        encoder.clear_buffer(&self.counters_buffer, 0, None);
+        encode_dispatch_indirect(
+            encoder,
+            &self.classify_pipeline,
+            &self.classify_bind_group,
+            indirect,
+            offsets[0],
+            "Planetary Transvoxel Transition Classification Indirect",
+        );
+        encode_dispatch_indirect(
+            encoder,
+            &self.scan_cells_pipeline,
+            &self.scan_cells_bind_group,
+            indirect,
+            offsets[1],
+            "Planetary Transvoxel Transition Cell Scan Indirect",
+        );
+        encode_dispatch_indirect(
+            encoder,
+            &self.scan_blocks_pipeline,
+            &self.scan_blocks_bind_group,
+            indirect,
+            offsets[2],
+            "Planetary Transvoxel Transition Block Scan Indirect",
+        );
+        encode_dispatch_indirect(
+            encoder,
+            &self.emit_pipeline,
+            &self.emit_bind_group,
+            indirect,
+            offsets[3],
+            "Planetary Transvoxel Transition Emission Indirect",
         );
     }
 
@@ -511,6 +573,23 @@ fn encode_dispatch(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.dispatch_workgroups(workgroups, 1, 1);
+}
+
+fn encode_dispatch_indirect(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    indirect: &wgpu::Buffer,
+    offset: u64,
+    label: &'static str,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups_indirect(indirect, offset);
 }
 
 fn packed_transition_tables() -> Vec<u32> {

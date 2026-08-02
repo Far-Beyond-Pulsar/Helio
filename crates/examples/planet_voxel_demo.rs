@@ -18,16 +18,14 @@ use helio::{
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_planetary_voxel::{
-    ExtractionFixture, ExtractionFixtureKind, HorizonLodFixturePlan, PlanetaryDebugView,
-    PlanetaryDrawPath, PlanetaryRenderDiagnostics, PlanetarySurfaceUpload,
-    PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass, TerrainLodTopology,
-    TransvoxelTransitionFaceFixture, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
+    ExtractionFixtureKind, HorizonLodFixturePlan, PlanetaryDebugView, PlanetaryDrawPath,
+    PlanetaryRenderDiagnostics, PlanetarySurfaceRequest, PlanetaryVoxelRenderConfig,
+    PlanetaryVoxelRenderPass, TerrainLodTopology,
 };
 use helio_planet_voxel_core::{
-    CellWord, EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, PlanetPosition, SourceGeneration, TransitionFace, VisibilityOutcome,
-    VisiblePage, VisiblePageSet, LOD0_CELL_SIZE_METERS, PAGE_CELL_BYTES, PAGE_EDGE,
-    PAGE_EDGE_CELLS,
+    EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey,
+    PlanetPosition, SourceGeneration, VisibilityOutcome, VisiblePage, VisiblePageSet,
+    LOD0_CELL_SIZE_METERS, PAGE_CELL_BYTES, PAGE_EDGE, PAGE_EDGE_CELLS,
 };
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -56,6 +54,7 @@ const HORIZON_ROOT_LOD: u8 = 11;
 const HORIZON_MAX_PLAN_PAGES: usize = 192;
 const HORIZON_HANDOFF_TIMEOUT_FRAMES: u64 = 1_200;
 const HORIZON_ALTITUDES_METERS: [f64; 3] = [1.5, 100.0, 1_000.0];
+const DEMO_SOURCE_GENERATION: SourceGeneration = SourceGeneration::new(1, 1);
 
 #[derive(Clone, Copy, Debug)]
 struct TimingSample {
@@ -338,7 +337,6 @@ struct HorizonStreamingState {
     pending: Option<PendingHorizonHandoff>,
     desired_focus_lod0_cell: [i64; 3],
     desired_minimum_lod: u8,
-    next_page_generation: u64,
     next_visible_frame: u64,
     cancel_requested: bool,
     handoffs: u64,
@@ -359,7 +357,6 @@ impl HorizonStreamingState {
             pending: None,
             desired_focus_lod0_cell: horizon_focus_lod0_cell(focus_m),
             desired_minimum_lod: horizon_minimum_lod(camera_m[1]),
-            next_page_generation: 1,
             next_visible_frame: 1,
             cancel_requested: false,
             handoffs: 0,
@@ -468,11 +465,10 @@ impl HorizonStreamingState {
             .unwrap_or_default();
         let mut generations = BTreeMap::new();
         for page in topology.pages() {
-            let generation = active_generations.get(&page).copied().unwrap_or_else(|| {
-                let generation = SourceGeneration::new(1, self.next_page_generation);
-                self.next_page_generation = self.next_page_generation.saturating_add(1);
-                generation
-            });
+            let generation = active_generations
+                .get(&page)
+                .copied()
+                .unwrap_or_else(|| DEMO_SOURCE_GENERATION);
             generations.insert(page, generation);
         }
 
@@ -549,6 +545,44 @@ impl HorizonStreamingState {
         queue: &wgpu::Queue,
         planet: PlanetId,
     ) -> Result<(), String> {
+        let pending_upload = self
+            .pending
+            .as_ref()
+            .filter(|pending| !pending.cancelled)
+            .and_then(|pending| {
+                pending
+                    .remaining_work
+                    .iter()
+                    .position(|work| work.upload_page)
+                    .map(|index| (index, pending.remaining_work[index]))
+            });
+        if let Some((index, work)) = pending_upload {
+            let upload = build_page_upload(planet, work.page, work.generation);
+            let outcomes = pass
+                .apply_upload_batch(device, queue, vec![upload])
+                .map_err(|error| format!("horizon target-page upload failed: {error}"))?;
+            if !matches!(
+                outcomes.as_slice(),
+                [helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
+                    helio_planet_voxel_core::UploadOutcome::Inserted { .. }
+                        | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                )]
+            ) {
+                return Err(format!(
+                    "horizon target-page residency rejected {:?}: {outcomes:?}",
+                    work.page
+                ));
+            }
+            let pending = self
+                .pending
+                .as_mut()
+                .expect("target upload keeps its pending handoff");
+            pending.remaining_work[index].upload_page = false;
+            pending.upload_count = pending.upload_count.saturating_add(1);
+            pending.upload_bytes = pending.upload_bytes.saturating_add(PAGE_CELL_BYTES as u64);
+            return Ok(());
+        }
+
         let Some(work) = self
             .pending
             .as_ref()
@@ -558,24 +592,12 @@ impl HorizonStreamingState {
             return Ok(());
         };
 
-        let (page_upload, surface) = if work.upload_page {
-            let demo = build_demo_page_with_generation(
-                planet,
-                work.page,
-                work.transition_mask,
-                work.generation,
-            );
-            (Some(demo.page_upload), demo.surface)
-        } else {
-            (
-                None,
-                build_surface_upload(planet, work.page, work.transition_mask, work.generation),
-            )
-        };
-        if let Some(upload) = page_upload {
-            pass.apply_upload_batch(device, queue, vec![upload])
-                .map_err(|error| format!("horizon incremental upload failed: {error}"))?;
-        }
+        debug_assert!(!work.upload_page);
+        let surface =
+            build_surface_upload(planet, work.page, work.transition_mask, work.generation);
+        self.prune_sampling_support_for(pass, device, queue, surface)?;
+        let (support_uploads, support_bytes) =
+            self.ensure_surface_dependencies(pass, device, queue, surface)?;
         let key = PlanetPageKey::new(planet, work.page);
         let resident = pass
             .residency()
@@ -588,9 +610,7 @@ impl HorizonStreamingState {
                 work.generation, resident.generation
             ));
         }
-        let surface_bytes = (surface.halo_samples.len() + surface.transition_face_slabs.len())
-            as u64
-            * core::mem::size_of::<CellWord>() as u64;
+        let surface_bytes = core::mem::size_of::<PlanetarySurfaceRequest>() as u64;
         pass.queue_surface(surface)
             .map_err(|error| format!("horizon incremental surface queue failed: {error}"))?;
 
@@ -599,22 +619,109 @@ impl HorizonStreamingState {
             .as_mut()
             .expect("staged horizon work keeps its pending handoff");
         assert_eq!(pending.remaining_work.pop_front(), Some(work));
-        pending.upload_count = pending
-            .upload_count
-            .saturating_add(u64::from(work.upload_page));
+        pending.upload_count = pending.upload_count.saturating_add(support_uploads);
         pending.upload_bytes = pending
             .upload_bytes
             .saturating_add(surface_bytes)
-            .saturating_add(if work.upload_page {
-                PAGE_CELL_BYTES as u64
-            } else {
-                0
-            });
+            .saturating_add(support_bytes);
         pending.surface_jobs = pending.surface_jobs.saturating_add(1);
         pending.transition_jobs = pending
             .transition_jobs
             .saturating_add(u64::from(work.transition_mask != 0));
         Ok(())
+    }
+
+    fn prune_sampling_support_for(
+        &mut self,
+        pass: &mut PlanetaryVoxelRenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: PlanetarySurfaceRequest,
+    ) -> Result<(), String> {
+        let mut retained = surface
+            .required_pages()
+            .map_err(|error| format!("horizon support retention planning failed: {error}"))?;
+        if let Some(active) = &self.active {
+            retained.extend(
+                active
+                    .generations
+                    .keys()
+                    .map(|page| PlanetPageKey::new(surface.key.planet, *page)),
+            );
+        }
+        if let Some(pending) = &self.pending {
+            retained.extend(
+                pending
+                    .plan
+                    .generations
+                    .keys()
+                    .map(|page| PlanetPageKey::new(surface.key.planet, *page)),
+            );
+        }
+        let evictions = pass
+            .residency()
+            .cache()
+            .resident_pages()
+            .filter(|(key, _)| key.planet == surface.key.planet && !retained.contains(key))
+            .map(|(key, resident)| PageEvict {
+                key,
+                generation: resident.generation,
+            })
+            .collect::<Vec<_>>();
+        let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
+        self.evictions = self.evictions.saturating_add(eviction_count);
+        Ok(())
+    }
+
+    fn ensure_surface_dependencies(
+        &mut self,
+        pass: &mut PlanetaryVoxelRenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: PlanetarySurfaceRequest,
+    ) -> Result<(u64, u64), String> {
+        let missing = surface
+            .required_pages()
+            .map_err(|error| format!("horizon surface dependency planning failed: {error}"))?
+            .into_iter()
+            .filter(|key| pass.residency().cache().resident(*key).is_none())
+            .collect::<Vec<_>>();
+        let upload_count = missing.len() as u64;
+        if missing.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut uploads = Vec::with_capacity(missing.len());
+        for key in missing {
+            uploads.push(build_page_upload(
+                key.planet,
+                key.page,
+                DEMO_SOURCE_GENERATION,
+            ));
+        }
+        let batch_pages = pass.residency().config().max_batch_pages as usize;
+        for chunk in uploads.chunks(batch_pages) {
+            let outcomes = pass
+                .apply_upload_batch(device, queue, chunk.to_vec())
+                .map_err(|error| format!("horizon support-page upload failed: {error}"))?;
+            if outcomes.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
+                        helio_planet_voxel_core::UploadOutcome::Inserted { .. }
+                            | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                    )
+                )
+            }) {
+                return Err(format!(
+                    "horizon support-page residency rejected an exact dependency batch: {outcomes:?}"
+                ));
+            }
+        }
+        Ok((
+            upload_count,
+            upload_count.saturating_mul(PAGE_CELL_BYTES as u64),
+        ))
     }
 
     fn finish_ready_handoff(
@@ -636,10 +743,16 @@ impl HorizonStreamingState {
             .any(|(current, baseline)| current > baseline)
         {
             return Err(format!(
-                "horizon GPU rejected work: stale={} overflow={} incomplete={}",
+                "horizon GPU rejected work: stale={} overflow={} incomplete={} gather[r={} t={} probes={} misses={} stale={} done={}]",
                 diagnostics.gpu_stale_rejections,
                 diagnostics.gpu_overflow_rejections,
-                diagnostics.gpu_incomplete_rejections
+                diagnostics.gpu_incomplete_rejections,
+                diagnostics.gather_regular_samples,
+                diagnostics.gather_transition_samples,
+                diagnostics.gather_table_probes,
+                diagnostics.gather_page_misses,
+                diagnostics.gather_stale_targets,
+                diagnostics.gather_completed,
             ));
         }
         if frame_index.saturating_sub(pending.started_frame) > HORIZON_HANDOFF_TIMEOUT_FRAMES {
@@ -664,21 +777,17 @@ impl HorizonStreamingState {
             .expect("ready horizon handoff remains pending");
         if pending.cancelled {
             let active_generations = self.active.as_ref().map(|active| &active.generations);
-            let evictions = pending
-                .plan
-                .generations
-                .iter()
-                .filter(|(page, generation)| {
-                    !active_generations.is_some_and(|active| active.contains_key(page))
-                        && pass
-                            .residency()
-                            .cache()
-                            .resident(PlanetPageKey::new(planet, **page))
-                            .is_some_and(|resident| resident.generation == **generation)
+            let evictions = pass
+                .residency()
+                .cache()
+                .resident_pages()
+                .filter(|(key, _)| {
+                    key.planet == planet
+                        && !active_generations.is_some_and(|active| active.contains_key(&key.page))
                 })
-                .map(|(page, generation)| PageEvict {
-                    key: PlanetPageKey::new(planet, *page),
-                    generation: *generation,
+                .map(|(key, resident)| PageEvict {
+                    key,
+                    generation: resident.generation,
                 })
                 .collect::<Vec<_>>();
             let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
@@ -751,19 +860,16 @@ impl HorizonStreamingState {
             }
         }
 
-        let evictions = self
-            .active
-            .as_ref()
-            .into_iter()
-            .flat_map(|active| {
-                active
-                    .generations
-                    .iter()
-                    .filter(|(page, _)| !pending.plan.generations.contains_key(page))
-                    .map(|(page, generation)| PageEvict {
-                        key: PlanetPageKey::new(planet, *page),
-                        generation: *generation,
-                    })
+        let evictions = pass
+            .residency()
+            .cache()
+            .resident_pages()
+            .filter(|(key, _)| {
+                key.planet == planet && !pending.plan.generations.contains_key(&key.page)
+            })
+            .map(|(key, resident)| PageEvict {
+                key,
+                generation: resident.generation,
             })
             .collect::<Vec<_>>();
         let eviction_count = apply_horizon_evictions(pass, device, queue, evictions)?;
@@ -850,24 +956,27 @@ fn apply_horizon_evictions(
     if evictions.is_empty() {
         return Ok(0);
     }
-    let outcomes = pass
-        .apply_evict_batch(device, queue, evictions.clone())
-        .map_err(|error| format!("horizon eviction batch failed: {error}"))?;
-    for (eviction, outcome) in evictions.into_iter().zip(outcomes) {
-        if !matches!(outcome, EvictOutcome::Recorded { .. }) {
-            return Err(format!(
-                "horizon eviction was not recorded for {:?}: {outcome:?}",
-                eviction.key
-            ));
-        }
-        if !pass
-            .residency_mut()
-            .retire_eviction_watermark(eviction.key, eviction.generation)
-        {
-            return Err(format!(
-                "horizon eviction watermark was not retired for {:?}",
-                eviction.key
-            ));
+    let batch_pages = pass.residency().config().max_batch_pages as usize;
+    for chunk in evictions.chunks(batch_pages) {
+        let outcomes = pass
+            .apply_evict_batch(device, queue, chunk.to_vec())
+            .map_err(|error| format!("horizon eviction batch failed: {error}"))?;
+        for (eviction, outcome) in chunk.iter().copied().zip(outcomes) {
+            if !matches!(outcome, EvictOutcome::Recorded { .. }) {
+                return Err(format!(
+                    "horizon eviction was not recorded for {:?}: {outcome:?}",
+                    eviction.key
+                ));
+            }
+            if !pass
+                .residency_mut()
+                .retire_eviction_watermark(eviction.key, eviction.generation)
+            {
+                return Err(format!(
+                    "horizon eviction watermark was not retired for {:?}",
+                    eviction.key
+                ));
+            }
         }
     }
     Ok(eviction_count)
@@ -1061,7 +1170,7 @@ impl AppState {
             .map(HorizonStreamingState::label)
             .unwrap_or_else(|| "static".to_string());
         self.window.set_title(&format!(
-            "Helio Planet Voxels | {:?}/{} | bench {} | stream {streaming} | cam[{:+.2},{:+.2},{:+.2}]m look[{:+.2},{:+.2}] focus{} grab{} keys{} | R={EARTH_RADIUS_METERS:.0}m 10cm | pages {} lod[{lods}] | src {source_generations} pub {publication_generations} | gpu jobs {}/{} reject s{} o{} i{} | regular V{} I{} M{} D{} | seam V{} I{} M{} D{} | cull o{} s{} f{} c{} x{} | queued {} bp{} rb{}",
+            "Helio Planet Voxels | {:?}/{} | bench {} | stream {streaming} | cam[{:+.2},{:+.2},{:+.2}]m look[{:+.2},{:+.2}] focus{} grab{} keys{} | R={EARTH_RADIUS_METERS:.0}m 10cm | pages {} lod[{lods}] | src {source_generations} pub {publication_generations} | gpu jobs {}/{} reject s{} o{} i{} | gather r{} t{} p{} miss{} stale{} done{} | regular V{} I{} M{} D{} | seam V{} I{} M{} D{} | cull o{} s{} f{} c{} x{} | queued {} bp{} rb{}",
             draw_path,
             debug_view.label(),
             self.benchmark.label(),
@@ -1079,6 +1188,12 @@ impl AppState {
             diagnostics.gpu_stale_rejections,
             diagnostics.gpu_overflow_rejections,
             diagnostics.gpu_incomplete_rejections,
+            diagnostics.gather_regular_samples,
+            diagnostics.gather_transition_samples,
+            diagnostics.gather_table_probes,
+            diagnostics.gather_page_misses,
+            diagnostics.gather_stale_targets,
+            diagnostics.gather_completed,
             diagnostics.regular_vertices,
             diagnostics.regular_indices,
             diagnostics.regular_meshlets,
@@ -1391,6 +1506,24 @@ impl ApplicationHandler for App {
                 pages.iter().map(|page| page.page_upload.clone()).collect(),
             )
             .unwrap();
+            let target_keys = pages
+                .iter()
+                .map(|page| page.page_upload.key)
+                .collect::<std::collections::BTreeSet<_>>();
+            let dependencies = pages
+                .iter()
+                .flat_map(|page| page.surface.required_pages().unwrap())
+                .filter(|key| !target_keys.contains(key))
+                .collect::<std::collections::BTreeSet<_>>();
+            let support_uploads = dependencies
+                .into_iter()
+                .map(|key| build_page_upload(key.planet, key.page, DEMO_SOURCE_GENERATION))
+                .collect::<Vec<_>>();
+            for chunk in support_uploads.chunks(pass.residency().config().max_batch_pages as usize)
+            {
+                pass.apply_upload_batch(&device, &queue, chunk.to_vec())
+                    .unwrap();
+            }
             pass.apply_visible_set(
                 &queue,
                 VisiblePageSet {
@@ -1789,7 +1922,7 @@ fn rejection_counts(diagnostics: &PlanetaryRenderDiagnostics) -> [u32; 3] {
 
 struct DemoPage {
     page_upload: PageUpload,
-    surface: PlanetarySurfaceUpload,
+    surface: PlanetarySurfaceRequest,
 }
 
 fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
@@ -1800,7 +1933,7 @@ fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
     for z in 0..BENCHMARK_GRID_EDGE {
         for x in 0..BENCHMARK_GRID_EDGE {
             let page = PageKey::new(0, [first_page_x + x, -1, first_page_z + z]);
-            pages.push(build_demo_page(planet, page, 0, pages.len() as u64 + 1));
+            pages.push(build_demo_page(planet, page, 0));
         }
     }
     let first_min = pages[0].page_upload.key.page.lod0_cell_min().unwrap();
@@ -1812,34 +1945,15 @@ fn build_benchmark_patch(planet: PlanetId) -> ([f64; 3], Vec<DemoPage>) {
     (canonical_camera_m, pages)
 }
 
-fn build_demo_page(
-    planet: PlanetId,
-    page: PageKey,
-    transition_mask: u8,
-    generation_sequence: u64,
-) -> DemoPage {
-    let generation = SourceGeneration::new(1, generation_sequence);
-    build_demo_page_with_generation(planet, page, transition_mask, generation)
-}
-
-fn build_demo_page_with_generation(
-    planet: PlanetId,
-    page: PageKey,
-    transition_mask: u8,
-    generation: SourceGeneration,
-) -> DemoPage {
-    let fixture = ExtractionFixture::new(ExtractionFixtureKind::Plane, page).unwrap();
+fn build_demo_page(planet: PlanetId, page: PageKey, transition_mask: u8) -> DemoPage {
     let key = PlanetPageKey::new(planet, page);
-    let cells = inner_page_cells(&fixture);
     DemoPage {
-        page_upload: PageUpload::new(key, generation, cells).unwrap(),
-        surface: PlanetarySurfaceUpload {
+        page_upload: build_page_upload(planet, page, DEMO_SOURCE_GENERATION),
+        surface: PlanetarySurfaceRequest {
             key,
-            generation,
-            halo_samples: fixture.samples().to_vec().into_boxed_slice(),
-            transition_face_slabs: transition_face_slabs(page),
+            generation: DEMO_SOURCE_GENERATION,
             transition_mask,
-            dirty_microbricks: fixture.metrics().active_microbrick_mask,
+            dirty_microbricks: u64::MAX,
         },
     }
 }
@@ -1849,45 +1963,31 @@ fn build_surface_upload(
     page: PageKey,
     transition_mask: u8,
     generation: SourceGeneration,
-) -> PlanetarySurfaceUpload {
-    let fixture = ExtractionFixture::new(ExtractionFixtureKind::Plane, page).unwrap();
-    PlanetarySurfaceUpload {
+) -> PlanetarySurfaceRequest {
+    PlanetarySurfaceRequest {
         key: PlanetPageKey::new(planet, page),
         generation,
-        halo_samples: fixture.samples().to_vec().into_boxed_slice(),
-        transition_face_slabs: transition_face_slabs(page),
         transition_mask,
-        dirty_microbricks: fixture.metrics().active_microbrick_mask,
+        dirty_microbricks: u64::MAX,
     }
 }
 
-fn transition_face_slabs(page: PageKey) -> Box<[CellWord]> {
-    if page.lod == 0 {
-        vec![CellWord::AIR; TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT].into_boxed_slice()
-    } else {
-        TransitionFace::ALL
-            .into_iter()
-            .flat_map(|face| {
-                TransvoxelTransitionFaceFixture::new(ExtractionFixtureKind::Plane, page, face)
-                    .unwrap()
-                    .slab_samples()
-                    .into_vec()
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    }
-}
-
-fn inner_page_cells(fixture: &ExtractionFixture) -> Vec<CellWord> {
+fn build_page_upload(planet: PlanetId, page: PageKey, generation: SourceGeneration) -> PageUpload {
+    let minimum = page.lod0_cell_min().unwrap();
+    let scale = 1_i64 << page.lod;
     let mut cells = Vec::with_capacity(PAGE_EDGE * PAGE_EDGE * PAGE_EDGE);
-    for z in 0..PAGE_EDGE as i32 {
-        for y in 0..PAGE_EDGE as i32 {
-            for x in 0..PAGE_EDGE as i32 {
-                cells.push(fixture.sample([x, y, z]).unwrap());
+    for z in 0..PAGE_EDGE as i64 {
+        for y in 0..PAGE_EDGE as i64 {
+            for x in 0..PAGE_EDGE as i64 {
+                cells.push(ExtractionFixtureKind::Plane.sample_canonical([
+                    minimum[0] + x * scale,
+                    minimum[1] + y * scale,
+                    minimum[2] + z * scale,
+                ]));
             }
         }
     }
-    cells
+    PageUpload::new(PlanetPageKey::new(planet, page), generation, cells).unwrap()
 }
 
 #[cfg(test)]
