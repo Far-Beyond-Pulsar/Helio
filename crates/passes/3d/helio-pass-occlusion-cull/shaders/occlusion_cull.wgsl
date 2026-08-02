@@ -260,41 +260,39 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let idx = wg_id.x;
-    if idx >= params.draw_count {
-        return;
-    }
-
-    // Check if frustum cull left this batch visible at all.
-    let visible_count = indirect[idx * 5u + 1u];
-    if visible_count == 0u {
-        return;
-    }
-
-    let dc = draw_calls[idx];
-    let cam_pos = cameras[0].position_near.xyz;
+    let active_draw = idx < params.draw_count;
+    var visible_count = 0u;
 
     // Cooperatively Hi-Z-test only the instances that already survived
     // frustum culling (`visible_count` of them, packed in `compacted_indices`
     // starting at `dc.first_instance`), compacting survivors into
     // `compacted_indices_2` via a workgroup-shared atomic counter.
-    for (var i = lid.x; i < visible_count; i += 64u) {
-        let original_idx = compacted_indices[dc.first_instance + i];
-        let inst = instances[original_idx];
-        if !instance_is_occluded(inst, cam_pos) {
-            let slot = atomicAdd(&wg_counter, 1u);
-            compacted_indices_2[dc.first_instance + slot] = original_idx;
+    //
+    // Every invocation must reach the barrier below. Although `idx` and the
+    // indirect count are uniform for a workgroup, FXC cannot prove uniformity
+    // through storage-buffer reads and rejects a barrier reached after the old
+    // early returns. Keep all draw-dependent work inside the branch instead.
+    if active_draw {
+        visible_count = indirect[idx * 5u + 1u];
+        let dc = draw_calls[idx];
+        let cam_pos = cameras[0].position_near.xyz;
+        for (var i = lid.x; i < visible_count; i += 64u) {
+            let original_idx = compacted_indices[dc.first_instance + i];
+            let inst = instances[original_idx];
+            if !instance_is_occluded(inst, cam_pos) {
+                let slot = atomicAdd(&wg_counter, 1u);
+                compacted_indices_2[dc.first_instance + slot] = original_idx;
+            }
         }
     }
 
     workgroupBarrier();
 
-    if lid.x != 0u {
-        return;
-    }
-
-    let final_count = atomicLoad(&wg_counter);
-    indirect[idx * 5u + 1u] = final_count;
-    if final_count == 0u {
-        atomicAdd(&stats[4u], 1u);
+    if lid.x == 0u && active_draw && visible_count > 0u {
+        let final_count = atomicLoad(&wg_counter);
+        indirect[idx * 5u + 1u] = final_count;
+        if final_count == 0u {
+            atomicAdd(&stats[4u], 1u);
+        }
     }
 }
