@@ -49,7 +49,8 @@ use winit::{
 // ── World layout ─────────────────────────────────────────────────────────
 
 const TILE: f32 = 48.0;
-const ZOOM: f32 = 2.0; // camera zoom (1.0 = 1 px per world unit, 2.0 = 2× magnification)
+const ZOOM: f32 = 1.5; // camera zoom (1.0 = 1 px per world unit, 2.0 = 2× magnification)
+const PLAYER_SCALE: f32 = 2.0; // hero frames drawn at 200% native size
 const WORLD_COLS: i32 = 240;
 const DIRT_ROWS: i32 = 8;
 const STONE_ROWS: i32 = 14;
@@ -1257,9 +1258,9 @@ impl ApplicationHandler for App {
         let player_frame = &anims["player/idle"][0];
         let player_spr = atlas[player_frame];
         let spawn_col = 4;
-        let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * 0.5];
+        let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * PLAYER_SCALE * 0.5];
         let player_handle = sprite_pass.insert_sprite(
-            SpriteInstance::new(player_pos, [player_spr.w, player_spr.h])
+            SpriteInstance::new(player_pos, [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE])
                 .with_uv_rect(player_spr.uv)
                 .with_depth(0.5)
                 .with_atlas_layer(atlas_layer),
@@ -1320,7 +1321,7 @@ impl ApplicationHandler for App {
             player_on_ground: false,
             player_facing_right: true,
             anims,
-            player_box: [player_spr.w, player_spr.h],
+            player_box: [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE],
             player_anim: PlayerAnim::Idle,
             player_anim_time: 0.0,
             bg_handle,
@@ -1575,7 +1576,7 @@ impl ApplicationHandler for App {
                 let player_pos = state.player_pos;
                 sprite_pass.update_sprite(
                     state.player_handle,
-                    SpriteInstance::new(player_pos, [spr.w, spr.h])
+                    SpriteInstance::new(player_pos, [spr.w * PLAYER_SCALE, spr.h * PLAYER_SCALE])
                         .with_uv_rect(uv)
                         .with_depth(0.5)
                         .with_atlas_layer(atlas_layer),
