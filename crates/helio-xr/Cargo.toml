@@ -18,7 +18,7 @@ openxr = { version = "0.21", features = [] }
 libloading = "0.9"
 # Matches the ash version wgpu-hal 30.0.0 is built against. Only the handle
 # types / `vk::Handle` trait are used to convert raw u64 handles.
-ash = { version = "0.38", default-features = false }
+ash = { version = "0.38", default-features = false, features = ["loaded"] }
 wgpu = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
