@@ -2951,6 +2951,7 @@ dependencies = [
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
+ "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades",
  "helio-pass-shadow",
@@ -2968,6 +2969,7 @@ dependencies = [
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
  "image",
+ "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
 
