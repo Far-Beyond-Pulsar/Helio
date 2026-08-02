@@ -49,6 +49,7 @@ use winit::{
 // ── World layout ─────────────────────────────────────────────────────────
 
 const TILE: f32 = 48.0;
+const ZOOM: f32 = 2.0; // camera zoom (1.0 = 1 px per world unit, 2.0 = 2× magnification)
 const WORLD_COLS: i32 = 240;
 const DIRT_ROWS: i32 = 8;
 const STONE_ROWS: i32 = 14;
@@ -118,9 +119,7 @@ fn emitter_style(name: &str) -> ([f32; 3], f32) {
 // animation group's normalized frames ("boar/walk" → the boar's walk sheet),
 // plain names reference hand-sliced tiles or single sprites.
 //
-// Trees — one composite foliage-cluster rect per size tier per color.
-// Each rect captures all 3 depth-layer columns together (x 0-330) so the
-// full overlapping pine group renders as intended by the artist.
+// Tree base names — layer suffix _0/_1/_2 is appended by place_tree/scatter_trees.
 const TREES: &[&str] = &["tree_green_tall", "tree_green_med"];
 // Forest A and B ground cover: four bush variants from Tree-Assets.
 const FOREST_CLUTTER: &[&str] = &["bush_a", "bush_b", "bush_c", "bush_d"];
@@ -175,8 +174,8 @@ fn flip_u(uv: [f32; 4]) -> [f32; 4] {
 }
 
 fn world_from_screen(mouse: (f64, f64), window_size: (u32, u32), camera_center: [f32; 2]) -> [f32; 2] {
-    let sx = mouse.0 as f32 - window_size.0 as f32 * 0.5;
-    let sy = mouse.1 as f32 - window_size.1 as f32 * 0.5;
+    let sx = (mouse.0 as f32 - window_size.0 as f32 * 0.5) / ZOOM;
+    let sy = (mouse.1 as f32 - window_size.1 as f32 * 0.5) / ZOOM;
     [camera_center[0] + sx, camera_center[1] - sy]
 }
 
@@ -198,8 +197,8 @@ fn hit_test(objects: &HashMap<SpriteHandle, Breakable>, p: [f32; 2]) -> Option<S
 
 fn hotbar_slot_world_pos(camera_center: [f32; 2], window_size: (u32, u32), index: usize, total: usize) -> [f32; 2] {
     let n = total.max(1) as f32;
-    let x_offset = (index as f32 - (n - 1.0) * 0.5) * HOTBAR_SLOT_SPACING;
-    let y_offset = window_size.1 as f32 * 0.5 - HOTBAR_MARGIN_TOP;
+    let x_offset = (index as f32 - (n - 1.0) * 0.5) * HOTBAR_SLOT_SPACING / ZOOM;
+    let y_offset = window_size.1 as f32 * 0.5 / ZOOM - HOTBAR_MARGIN_TOP;
     [camera_center[0] + x_offset, camera_center[1] + y_offset]
 }
 
@@ -459,29 +458,49 @@ fn slice_spec(path: &str) -> SliceSpec {
         // Full content fills the sheet — no transparent margins.
         "cabin" => Single("cabin"),
         // Large pine-tree canvases (1344×1200):
-//   The three foliage columns (x 0-330) are depth layers of one composite
-        //   tree group — crop all three together as one rect per size tier.
-        //   Row 0 (y 0-367) = tallest; row 1 (y 391-703) = medium.
+//   Each column (x=0, x=112, x=224) is one depth layer of the same tree.
+//   All three layers must be rendered at the same world XY, composited
+//   back-to-front, to produce one complete tree.
         "Trees/Green-Tree"  => Rects(&[
-            ("tree_green_tall", (0,   0, 331, 368)),
-            ("tree_green_med",  (0, 391, 331, 313)),
+    ("tree_green_tall_0", (  0,   0, 107, 368)),
+    ("tree_green_tall_1", (112,   0, 107, 368)),
+    ("tree_green_tall_2", (224,   0, 107, 368)),
+    ("tree_green_med_0",  (  0, 391, 107, 313)),
+    ("tree_green_med_1",  (112, 391, 107, 313)),
+    ("tree_green_med_2",  (224, 391, 107, 313)),
         ]),
-        "Trees/Red-Tree"    => Rects(&[
-            ("tree_red_tall",   (0,   0, 331, 368)),
-            ("tree_red_med",    (0, 391, 331, 313)),
+"Trees/Red-Tree"    => Rects(&[
+    ("tree_red_tall_0",   (  0,   0, 107, 368)),
+    ("tree_red_tall_1",   (112,   0, 107, 368)),
+    ("tree_red_tall_2",   (224,   0, 107, 368)),
+    ("tree_red_med_0",    (  0, 391, 107, 313)),
+    ("tree_red_med_1",    (112, 391, 107, 313)),
+    ("tree_red_med_2",    (224, 391, 107, 313)),
         ]),
-        "Trees/Dark-Tree"   => Rects(&[
-            ("tree_dark_tall",  (0,   0, 331, 368)),
-            ("tree_dark_med",   (0, 391, 331, 313)),
-        ]),
-        "Trees/Golden-Tree" => Rects(&[
-            ("tree_golden_tall",(0,   0, 331, 368)),
-            ("tree_golden_med", (0, 391, 331, 313)),
-        ]),
-        "Trees/Yellow-Tree" => Rects(&[
-            ("tree_yellow_tall",(0,   0, 331, 368)),
-            ("tree_yellow_med", (0, 391, 331, 313)),
-        ]),
+"Trees/Dark-Tree"   => Rects(&[
+    ("tree_dark_tall_0",  (  0,   0, 107, 368)),
+    ("tree_dark_tall_1",  (112,   0, 107, 368)),
+    ("tree_dark_tall_2",  (224,   0, 107, 368)),
+    ("tree_dark_med_0",   (  0, 391, 107, 313)),
+    ("tree_dark_med_1",   (112, 391, 107, 313)),
+    ("tree_dark_med_2",   (224, 391, 107, 313)),
+]),
+"Trees/Golden-Tree" => Rects(&[
+    ("tree_golden_tall_0",(  0,   0, 107, 368)),
+    ("tree_golden_tall_1",(112,   0, 107, 368)),
+    ("tree_golden_tall_2",(224,   0, 107, 368)),
+    ("tree_golden_med_0", (  0, 391, 107, 313)),
+    ("tree_golden_med_1", (112, 391, 107, 313)),
+    ("tree_golden_med_2", (224, 391, 107, 313)),
+]),
+"Trees/Yellow-Tree" => Rects(&[
+    ("tree_yellow_tall_0",(  0,   0, 107, 368)),
+    ("tree_yellow_tall_1",(112,   0, 107, 368)),
+    ("tree_yellow_tall_2",(224,   0, 107, 368)),
+    ("tree_yellow_med_0", (  0, 391, 107, 313)),
+    ("tree_yellow_med_1", (112, 391, 107, 313)),
+    ("tree_yellow_med_2", (224, 391, 107, 313)),
+]),
         // 896×256 parallax forest silhouette strip — tiled behind the terrain.
         "Trees/Background"  => Single("background_trees"),
         "Background/Background" => Single("background"),
@@ -762,7 +781,65 @@ fn scatter_band(
     }
 }
 
-/// Per-mob animation rate (frames/second) tuned to each mob's frame count.
+/// Places one complete tree by rendering its three depth layers (suffix _0/_1/_2)
+/// at the same world XY position, back-to-front (depth 0.02 apart).
+fn place_tree(
+    sprite_pass: &mut SpriteBatchPass,
+    atlas: &HashMap<String, PackedSprite>,
+    atlas_layer: u32,
+    objects: &mut HashMap<SpriteHandle, Breakable>,
+    base: &str,
+    x: f32,
+    depth: f32,
+    flip: bool,
+) {
+    let col = (x / TILE).round() as i32;
+    let top = surface_top_world_y(col);
+    for (i, suffix) in ["_0", "_1", "_2"].iter().enumerate() {
+        let key = format!("{base}{suffix}");
+        let Some(&s) = atlas.get(&key) else { continue };
+        let uv = if flip { flip_u(s.uv) } else { s.uv };
+        let pos = [x, top + s.h * 0.5];
+        let layer_depth = depth + (2 - i) as f32 * 0.01;
+        let handle = sprite_pass.insert_sprite(
+            SpriteInstance::new(pos, [s.w, s.h])
+                .with_uv_rect(uv)
+                .with_depth(layer_depth)
+                .with_atlas_layer(atlas_layer),
+        );
+        // Only register layer 0 as a breakable so it isn't triple-counted.
+        if i == 0 {
+            objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth: layer_depth, name: key, terrain_cell: None });
+        }
+    }
+}
+
+/// Scatters trees from `base_names` across `[col_start, col_end)` using `place_tree`.
+#[allow(clippy::too_many_arguments)]
+fn scatter_trees(
+    sprite_pass: &mut SpriteBatchPass,
+    atlas: &HashMap<String, PackedSprite>,
+    atlas_layer: u32,
+    objects: &mut HashMap<SpriteHandle, Breakable>,
+    rng: &mut Rng,
+    col_start: i32,
+    col_end: i32,
+    step: (i32, i32),
+    base_names: &[&str],
+    depth: f32,
+) {
+    let mut col = col_start;
+    loop {
+        col += rng.range_i32(step.0, step.1);
+        if col >= col_end { break; }
+        let x = col as f32 * TILE + rng.range_i32(-6, 6) as f32;
+        let base = base_names[rng.range_usize(base_names.len())];
+        let flip = rng.bool();
+        place_tree(sprite_pass, atlas, atlas_layer, objects, base, x, depth, flip);
+    }
+}
+
+
 fn anim_fps(key: &str) -> f32 {
     if key.contains("boar") {
         9.0   // 4/6 frames — weighty trot
@@ -962,7 +1039,7 @@ impl ApplicationHandler for App {
             POOL_CAPACITY as u32,
             POOL_CAPACITY as u32,
         );
-        sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5, size.height as f32 * 0.5]);
+        sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5 / ZOOM, size.height as f32 * 0.5 / ZOOM]);
         sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
 
         // Terrain tiles from `Assets/Tiles.png` by direct cell mapping (16×16 grid):
@@ -1093,7 +1170,7 @@ impl ApplicationHandler for App {
 
         // ── Forest A: green trees spaced generously (they are wide clusters),
         // bushy ground cover, and a little wildlife.
-        scatter!(SPAWN_END, FOREST_A_END, (4, 8), TREES, Animated::None, 0.15);
+        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, SPAWN_END, FOREST_A_END, (4, 8), TREES, 0.15);
         scatter!(SPAWN_END, FOREST_A_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
         scatter!(SPAWN_END, FOREST_A_END, (10, 16), FOREST_CRITTERS, Animated::Critter, 0.3);
 
@@ -1107,22 +1184,22 @@ impl ApplicationHandler for App {
         );
 
         // ── Mining zone: dark trees and bushes (no structures).
-        scatter!(MINING_START, MINING_END, (4, 8), DEN_TREES, Animated::None, 0.15);
+        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MINING_START, MINING_END, (4, 8), DEN_TREES, 0.15);
         scatter!(MINING_START, MINING_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
 
         // ── Monster den: dark + red trees for atmosphere, mobs.
-        scatter!(MINING_END, DEN_END, (4, 7), DEN_TREES, Animated::None, 0.1);
+        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MINING_END, DEN_END, (4, 7), DEN_TREES, 0.1);
         scatter!(MINING_END, DEN_END, (5, 8), DEN_MONSTERS, Animated::Critter, 0.3);
 
         // ── Forest B: a second, wilder patch of woods with a big green
         // landmark tree centred on the hut column.
-        scatter!(DEN_END, FOREST_B_END, (4, 8), TREES, Animated::None, 0.15);
+        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, DEN_END, FOREST_B_END, (4, 8), TREES, 0.15);
         scatter!(DEN_END, FOREST_B_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
         scatter!(DEN_END, FOREST_B_END, (12, 18), FOREST_CRITTERS, Animated::Critter, 0.3);
-        place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_tall", HUT_COL as f32 * TILE, 0.12, false, 0.0);
+        place_tree(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_tall", HUT_COL as f32 * TILE, 0.12, false);
 
         // ── Market / tail: golden and yellow autumn trees + bushes.
-        scatter!(MARKET_START, MARKET_START + 20, (3, 6), MARKET_TREES, Animated::None, 0.15);
+        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MARKET_START, MARKET_START + 20, (3, 6), MARKET_TREES, 0.15);
         scatter!(MARKET_START, TAIL_END, (2, 4), MARKET_CLUTTER, Animated::None, 0.2);
 
         // ── Lighting: 2D radiance cascades reading the occupancy grid built
@@ -1576,13 +1653,13 @@ impl ApplicationHandler for App {
                     );
                 }
 
-                sprite_pass.set_camera(state.camera_center, None);
                 let (win_w, win_h) = state.window_size;
+                sprite_pass.set_camera(state.camera_center, Some([win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM]));
                 state
                     .graph
                     .find_pass_mut::<SpriteCullPass>()
                     .expect("sprite cull pass missing from graph")
-                    .set_view_rect(state.camera_center, [win_w as f32 * 0.5, win_h as f32 * 0.5]);
+                    .set_view_rect(state.camera_center, [win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM]);
                 state
                     .graph
                     .find_pass_mut::<RadianceCascades2DPass>()
