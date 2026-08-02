@@ -138,8 +138,9 @@ fn assert_same_dependency_result(actual: &Result<(), String>, expected: &Result<
 
 fn test_planetary_config() -> PlanetaryVoxelRenderConfig {
     PlanetaryVoxelRenderConfig {
-        residency: PlanetaryVoxelGpuConfig::new(2, 8, 8, 2, 4, 2)
+        residency: PlanetaryVoxelGpuConfig::new(2, 8, 8, 2, 4)
             .expect("test residency configuration is valid"),
+        max_surface_pages: 2,
         max_pending_surfaces: 2,
         regular: TransvoxelGpuExtractorConfig::new(1_024, 2_048)
             .expect("test regular extraction configuration is valid"),
