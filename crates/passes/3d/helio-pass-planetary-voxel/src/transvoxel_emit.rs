@@ -237,8 +237,15 @@ impl TransvoxelGpuExtractor {
         samples: &[CellWord],
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
     ) -> Result<wgpu::SubmissionIndex, TransvoxelGpuError> {
-        self.prepare(queue, samples, generation, dirty_microbricks)?;
+        self.prepare(
+            queue,
+            samples,
+            generation,
+            dirty_microbricks,
+            transition_mask,
+        )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Planetary Transvoxel Extraction Encoder"),
         });
@@ -255,6 +262,7 @@ impl TransvoxelGpuExtractor {
         samples: &[CellWord],
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
     ) -> Result<(), TransvoxelGpuError> {
         self.classifier.prepare(
             queue,
@@ -262,6 +270,7 @@ impl TransvoxelGpuExtractor {
             GpuTransvoxelDispatch::with_limits(
                 generation,
                 dirty_microbricks,
+                transition_mask,
                 self.config.max_vertices,
                 self.config.max_indices,
             ),
@@ -273,6 +282,7 @@ impl TransvoxelGpuExtractor {
         queue: &wgpu::Queue,
         generation: u64,
         dirty_microbricks: u64,
+        transition_mask: u8,
     ) {
         queue.write_buffer(
             self.classifier.dispatch_buffer(),
@@ -280,6 +290,7 @@ impl TransvoxelGpuExtractor {
             bytemuck::bytes_of(&GpuTransvoxelDispatch::with_limits(
                 generation,
                 dirty_microbricks,
+                transition_mask,
                 self.config.max_vertices,
                 self.config.max_indices,
             )),

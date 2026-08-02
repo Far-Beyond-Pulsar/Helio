@@ -468,11 +468,11 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
         .expect("Transvoxel classify WGSL validates");
 
     assert_eq!(align_of::<GpuTransvoxelDispatch>(), 16);
-    assert_eq!(size_of::<GpuTransvoxelDispatch>(), 32);
+    assert_eq!(size_of::<GpuTransvoxelDispatch>(), 48);
     assert_eq!(
         wgsl_struct_in(TRANSVOXEL_CLASSIFY_WGSL, "GpuTransvoxelDispatch"),
         (
-            32,
+            48,
             vec![
                 ("dirty_microbricks_low".into(), 0),
                 ("dirty_microbricks_high".into(), 4),
@@ -482,6 +482,10 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
                 ("max_vertices".into(), 20),
                 ("max_indices".into(), 24),
                 ("scan_block_count".into(), 28),
+                ("transition_mask".into(), 32),
+                ("_pad0".into(), 36),
+                ("_pad1".into(), 40),
+                ("_pad2".into(), 44),
             ],
         )
     );

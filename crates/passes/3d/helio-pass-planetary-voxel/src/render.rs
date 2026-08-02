@@ -1898,6 +1898,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 ctx.queue,
                 resident.publication_generation,
                 front.dirty_microbricks,
+                front.transition_mask,
             );
             if let Err(error) = self.transition_extractor.prepare_gpu_samples(
                 ctx.queue,

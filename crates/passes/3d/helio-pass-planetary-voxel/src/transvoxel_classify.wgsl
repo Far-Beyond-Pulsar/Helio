@@ -11,6 +11,10 @@ struct GpuTransvoxelDispatch {
     max_vertices: u32,
     max_indices: u32,
     scan_block_count: u32,
+    transition_mask: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct GpuTransvoxelCell {

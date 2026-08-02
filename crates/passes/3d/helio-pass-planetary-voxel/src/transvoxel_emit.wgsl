@@ -5,6 +5,7 @@ const SCAN_WORKGROUP_SIZE: u32 = 256u;
 const REGULAR_VERTEX_TABLE_STRIDE: u32 = 12u;
 const REGULAR_TOPOLOGY_TABLE_OFFSET: u32 = 3072u;
 const REGULAR_TOPOLOGY_TABLE_STRIDE: u32 = 15u;
+const TRANSITION_CELL_WIDTH: f32 = 0.25;
 
 struct GpuTransvoxelDispatch {
     dirty_microbricks_low: u32,
@@ -15,6 +16,10 @@ struct GpuTransvoxelDispatch {
     max_vertices: u32,
     max_indices: u32,
     scan_block_count: u32,
+    transition_mask: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct GpuTransvoxelCell {
@@ -242,6 +247,47 @@ fn normalized_or_up(value: vec3<f32>) -> vec3<f32> {
     return value * inverseSqrt(squared_length);
 }
 
+fn near_transition_faces(position: vec3<f32>) -> u32 {
+    var mask = 0u;
+    if position.x < 1.0 { mask |= 1u << 0u; }
+    if position.x > 31.0 { mask |= 1u << 1u; }
+    if position.y < 1.0 { mask |= 1u << 2u; }
+    if position.y > 31.0 { mask |= 1u << 3u; }
+    if position.z < 1.0 { mask |= 1u << 4u; }
+    if position.z > 31.0 { mask |= 1u << 5u; }
+    return mask;
+}
+
+// Equations 4.2 and 4.3 from Lengyel's Transvoxel dissertation. A boundary
+// vertex uses its secondary position only when every page face it touches owns
+// a transition; otherwise it stays primary so a same-LOD neighbor remains
+// watertight along that edge or corner.
+fn transition_secondary_position(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let near_faces = near_transition_faces(position);
+    let active_faces = dispatch.transition_mask & 0x3fu;
+    if near_faces == 0u || (near_faces & ~active_faces) != 0u {
+        return position;
+    }
+
+    var offset = vec3<f32>(0.0);
+    if (near_faces & (1u << 0u)) != 0u {
+        offset.x = (1.0 - position.x) * TRANSITION_CELL_WIDTH;
+    } else if (near_faces & (1u << 1u)) != 0u {
+        offset.x = (31.0 - position.x) * TRANSITION_CELL_WIDTH;
+    }
+    if (near_faces & (1u << 2u)) != 0u {
+        offset.y = (1.0 - position.y) * TRANSITION_CELL_WIDTH;
+    } else if (near_faces & (1u << 3u)) != 0u {
+        offset.y = (31.0 - position.y) * TRANSITION_CELL_WIDTH;
+    }
+    if (near_faces & (1u << 4u)) != 0u {
+        offset.z = (1.0 - position.z) * TRANSITION_CELL_WIDTH;
+    } else if (near_faces & (1u << 5u)) != 0u {
+        offset.z = (31.0 - position.z) * TRANSITION_CELL_WIDTH;
+    }
+    return position + offset - normal * dot(offset, normal);
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn emit_regular_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let linear = global_id.x;
@@ -290,12 +336,14 @@ fn emit_regular_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let first_position = vec3<f32>(REGULAR_CORNERS[first_corner]);
         let second_position = vec3<f32>(REGULAR_CORNERS[second_corner]);
-        let position = cell_position + mix(first_position, second_position, interpolation);
+        let primary_position = cell_position + mix(first_position, second_position, interpolation);
         let gradient = mix(
             sample_gradient(first_sample),
             sample_gradient(second_sample),
             interpolation,
         );
+        let normal = normalized_or_up(gradient);
+        let position = transition_secondary_position(primary_position, normal);
         let material = select(
             (second_word >> 16u) & 0xffu,
             (first_word >> 16u) & 0xffu,
@@ -304,7 +352,7 @@ fn emit_regular_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
         vertices[first_vertex + vertex] = GpuTerrainVertex(
             position,
             material,
-            normalized_or_up(gradient),
+            normal,
             0u,
         );
     }

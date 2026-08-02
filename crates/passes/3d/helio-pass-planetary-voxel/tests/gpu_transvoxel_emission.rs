@@ -2,8 +2,8 @@ use bytemuck::Pod;
 use helio_pass_planetary_voxel::{
     regular_case_from_fixture, ExtractionFixture, ExtractionFixtureKind, GpuTerrainVertex,
     GpuTransvoxelCellOffset, GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock,
-    TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TRANSVOXEL_REGULAR_CORNERS,
-    TRANSVOXEL_SCAN_WORKGROUP_SIZE,
+    TransitionFace, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
+    TRANSVOXEL_REGULAR_CORNERS, TRANSVOXEL_SCAN_WORKGROUP_SIZE,
 };
 use helio_planet_voxel_core::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
 use std::sync::mpsc;
@@ -39,7 +39,7 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
         let mut extractor =
             TransvoxelGpuExtractor::new(&device, TransvoxelGpuExtractorConfig::default()).unwrap();
         assert_eq!(extractor.resource_stats().buffers, 12);
-        assert_eq!(extractor.resource_stats().allocated_bytes, 15_771_248);
+        assert_eq!(extractor.resource_stats().allocated_bytes, 15_771_264);
         let resources = extractor.resource_stats();
         extractor.resize(3840, 2160);
         assert_eq!(extractor.resource_stats(), resources);
@@ -47,9 +47,9 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
         for (fixture_index, kind) in ExtractionFixtureKind::ALL.into_iter().enumerate() {
             let generation = 1_000 + fixture_index as u64;
             let fixture = fixture(kind);
-            let expected = expected_mesh(&fixture, u64::MAX);
+            let expected = expected_mesh(&fixture, u64::MAX, 0);
             extractor
-                .dispatch(&device, &queue, fixture.samples(), generation, u64::MAX)
+                .dispatch(&device, &queue, fixture.samples(), generation, u64::MAX, 0)
                 .unwrap();
             let counters = read_one::<GpuTransvoxelEmissionCounters>(
                 &device,
@@ -123,7 +123,7 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
             }
 
             extractor
-                .dispatch(&device, &queue, fixture.samples(), generation, u64::MAX)
+                .dispatch(&device, &queue, fixture.samples(), generation, u64::MAX, 0)
                 .unwrap();
             let repeated_vertices: Vec<GpuTerrainVertex> = read_buffer(
                 &device,
@@ -154,7 +154,7 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
         let fixture = fixture(ExtractionFixtureKind::Plane);
         let dirty_generation = 1_500;
         let dirty_microbricks = 1_u64 << 12;
-        let dirty_expected = expected_mesh(&fixture, dirty_microbricks);
+        let dirty_expected = expected_mesh(&fixture, dirty_microbricks, 0);
         extractor
             .dispatch(
                 &device,
@@ -162,6 +162,7 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
                 fixture.samples(),
                 dirty_generation,
                 dirty_microbricks,
+                0,
             )
             .unwrap();
         let dirty_counters =
@@ -212,10 +213,43 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
             }
         }
 
+        let transition_mask = TransitionFace::PositiveX.bit();
+        let expected_secondary = expected_mesh(&fixture, u64::MAX, transition_mask);
+        extractor
+            .dispatch(
+                &device,
+                &queue,
+                fixture.samples(),
+                1_750,
+                u64::MAX,
+                transition_mask,
+            )
+            .unwrap();
+        let secondary_counters =
+            read_one::<GpuTransvoxelEmissionCounters>(&device, &queue, extractor.counters_buffer());
+        let secondary_vertices: Vec<GpuTerrainVertex> = read_buffer(
+            &device,
+            &queue,
+            extractor.vertices_buffer(),
+            u64::from(secondary_counters.emitted_vertices) * size_of::<GpuTerrainVertex>() as u64,
+        );
+        assert_vertices_close(
+            ExtractionFixtureKind::Plane,
+            &secondary_vertices,
+            &expected_secondary.vertices,
+        );
+        assert!(secondary_vertices.iter().any(|vertex| {
+            (vertex.position[0] - 31.75).abs() <= 1.0e-5
+                && (1.0..31.0).contains(&vertex.position[2])
+        }));
+        assert!(!secondary_vertices.iter().any(|vertex| {
+            (vertex.position[0] - 32.0).abs() <= 1.0e-5 && (1.0..31.0).contains(&vertex.position[2])
+        }));
+
         let tiny =
             TransvoxelGpuExtractor::new(&device, TransvoxelGpuExtractorConfig::new(1, 1).unwrap())
                 .unwrap();
-        tiny.dispatch(&device, &queue, fixture.samples(), 2_000, u64::MAX)
+        tiny.dispatch(&device, &queue, fixture.samples(), 2_000, u64::MAX, 0)
             .unwrap();
         let counters =
             read_one::<GpuTransvoxelEmissionCounters>(&device, &queue, tiny.counters_buffer());
@@ -235,7 +269,11 @@ struct ExpectedMesh {
     cell_ranges: Vec<Option<(u32, u32)>>,
 }
 
-fn expected_mesh(fixture: &ExtractionFixture, dirty_microbricks: u64) -> ExpectedMesh {
+fn expected_mesh(
+    fixture: &ExtractionFixture,
+    dirty_microbricks: u64,
+    transition_mask: u8,
+) -> ExpectedMesh {
     let mut mesh = ExpectedMesh {
         vertices: Vec::new(),
         indices: Vec::new(),
@@ -274,12 +312,14 @@ fn expected_mesh(fixture: &ExtractionFixture, dirty_microbricks: u64) -> Expecte
                     };
                     let first_position = first.map(|axis| axis as f32);
                     let second_position = second.map(|axis| axis as f32);
-                    let position = mix(first_position, second_position, interpolation);
+                    let primary_position = mix(first_position, second_position, interpolation);
                     let normal = normalize_or_up(mix(
                         gradient(fixture, first),
                         gradient(fixture, second),
                         interpolation,
                     ));
+                    let position =
+                        transition_secondary_position(primary_position, normal, transition_mask);
                     let material = if first_density <= 0.0 {
                         first_word.material()
                     } else {
@@ -301,6 +341,62 @@ fn expected_mesh(fixture: &ExtractionFixture, dirty_microbricks: u64) -> Expecte
         }
     }
     mesh
+}
+
+fn transition_secondary_position(
+    position: [f32; 3],
+    normal: [f32; 3],
+    transition_mask: u8,
+) -> [f32; 3] {
+    let mut near_faces = 0_u8;
+    if position[0] < 1.0 {
+        near_faces |= TransitionFace::NegativeX.bit();
+    }
+    if position[0] > 31.0 {
+        near_faces |= TransitionFace::PositiveX.bit();
+    }
+    if position[1] < 1.0 {
+        near_faces |= TransitionFace::NegativeY.bit();
+    }
+    if position[1] > 31.0 {
+        near_faces |= TransitionFace::PositiveY.bit();
+    }
+    if position[2] < 1.0 {
+        near_faces |= TransitionFace::NegativeZ.bit();
+    }
+    if position[2] > 31.0 {
+        near_faces |= TransitionFace::PositiveZ.bit();
+    }
+    if near_faces == 0 || near_faces & !transition_mask != 0 {
+        return position;
+    }
+
+    let mut offset = [0.0; 3];
+    if near_faces & TransitionFace::NegativeX.bit() != 0 {
+        offset[0] = (1.0 - position[0]) * 0.25;
+    } else if near_faces & TransitionFace::PositiveX.bit() != 0 {
+        offset[0] = (31.0 - position[0]) * 0.25;
+    }
+    if near_faces & TransitionFace::NegativeY.bit() != 0 {
+        offset[1] = (1.0 - position[1]) * 0.25;
+    } else if near_faces & TransitionFace::PositiveY.bit() != 0 {
+        offset[1] = (31.0 - position[1]) * 0.25;
+    }
+    if near_faces & TransitionFace::NegativeZ.bit() != 0 {
+        offset[2] = (1.0 - position[2]) * 0.25;
+    } else if near_faces & TransitionFace::PositiveZ.bit() != 0 {
+        offset[2] = (31.0 - position[2]) * 0.25;
+    }
+    let normal_component = offset
+        .into_iter()
+        .zip(normal)
+        .map(|(delta, axis)| delta * axis)
+        .sum::<f32>();
+    [
+        position[0] + offset[0] - normal[0] * normal_component,
+        position[1] + offset[1] - normal[1] * normal_component,
+        position[2] + offset[2] - normal[2] * normal_component,
+    ]
 }
 
 fn gradient(fixture: &ExtractionFixture, position: [i32; 3]) -> [f32; 3] {
