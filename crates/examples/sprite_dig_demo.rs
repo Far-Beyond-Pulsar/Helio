@@ -1258,9 +1258,9 @@ impl ApplicationHandler for App {
         let player_frame = &anims["player/idle"][0];
         let player_spr = atlas[player_frame];
         let spawn_col = 4;
-        let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * 0.5];
+        let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * PLAYER_SCALE * 0.5];
         let player_handle = sprite_pass.insert_sprite(
-            SpriteInstance::new(player_pos, [player_spr.w, player_spr.h])
+            SpriteInstance::new(player_pos, [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE])
                 .with_uv_rect(player_spr.uv)
                 .with_depth(0.5)
                 .with_atlas_layer(atlas_layer),
@@ -1321,7 +1321,7 @@ impl ApplicationHandler for App {
             player_on_ground: false,
             player_facing_right: true,
             anims,
-            player_box: [player_spr.w, player_spr.h],
+            player_box: [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE],
             player_anim: PlayerAnim::Idle,
             player_anim_time: 0.0,
             bg_handle,
