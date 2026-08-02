@@ -130,6 +130,18 @@ impl Clone for RadiantTemplateRegistry {
     }
 }
 
+/// A cheaply-clonable, thread-safe handle to a registry that the renderer
+/// and its passes share instead of each keeping their own copy.
+///
+/// `RadiantTemplate::clone()` intentionally leaks its `name`/`wgsl_source`
+/// via `Box::leak` (needed to satisfy their `&'static str` fields), so
+/// deep-cloning a whole `RadiantTemplateRegistry` — as used to happen once
+/// per rendered frame to hand it to the GPU scene and again in every pass
+/// that merged it into a local copy — leaked continuously. Sharing one
+/// instance behind `Arc<RwLock<_>>` means registration (rare) mutates it in
+/// place and nothing ever needs to clone it again.
+pub type SharedTemplateRegistry = std::sync::Arc<std::sync::RwLock<RadiantTemplateRegistry>>;
+
 impl RadiantTemplateRegistry {
     /// Create an empty registry (no built-in templates).
     /// Used by TransparentPass to avoid inheriting gbuffer templates.

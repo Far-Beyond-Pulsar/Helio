@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use helio::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};
+use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
@@ -32,7 +32,14 @@ struct TransparentGlobals {
 pub struct TransparentPass {
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
-    template_registry: RadiantTemplateRegistry,
+    /// This pass's own class-0 override (the transparent base — never
+    /// synced from the scene).
+    local_class0: helio::radiant::RadiantTemplate,
+    /// User-registered custom templates (id >= 5), shared with the renderer
+    /// and other passes — never deep-cloned (see `SharedTemplateRegistry`).
+    shared_registry: Option<helio::radiant::SharedTemplateRegistry>,
+    /// Key set as of the last sync, to detect content changes cheaply.
+    last_shared_keys: Vec<u32>,
     pipeline_layout: wgpu::PipelineLayout,
     bind_group: wgpu::BindGroup,
     bind_group_layout_1: wgpu::BindGroupLayout,
@@ -144,10 +151,9 @@ impl TransparentPass {
             immediate_size: 0,
         });
 
-        // Create a fresh registry with ONLY the transparent base shader at class 0.
-        // NOT using RadiantTemplateRegistry::new() because that populates classes 0-4
-        // with gbuffer templates that have incompatible bind group layouts.
-        let mut reg = RadiantTemplateRegistry::new_empty();
+        // Just the transparent base shader at class 0 — NOT
+        // RadiantTemplateRegistry::new(), which populates classes 0-4 with
+        // gbuffer templates that have incompatible bind group layouts.
         let base_src = include_str!("../../../../helio/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
             let mut resolved = String::with_capacity(
@@ -160,12 +166,17 @@ impl TransparentPass {
         } else {
             base_src
         };
-        reg.override_class(0, "transparent_base", resolved_src);
+        let local_class0 = helio::radiant::RadiantTemplate {
+            name: "transparent_base",
+            wgsl_source: resolved_src,
+        };
 
         Self {
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
-            template_registry: reg,
+            local_class0,
+            shared_registry: None,
+            last_shared_keys: Vec::new(),
             pipeline_layout,
             bind_group,
             bind_group_layout_1: bgl_1,
@@ -176,9 +187,6 @@ impl TransparentPass {
         }
     }
 
-    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
-        &mut self.template_registry
-    }
 }
 
 impl RenderPass for TransparentPass {
@@ -260,20 +268,22 @@ impl RenderPass for TransparentPass {
         // Sync transparent templates from GpuScene (merge into existing registry,
         // keeping the transparent base at class 0).
         if let Some(reg_any) = ctx.scene.transparent_template_registry.as_ref() {
-            if let Some(reg) = reg_any.downcast_ref::<helio::radiant::RadiantTemplateRegistry>() {
-                let old_keys = self.template_registry.keys();
-                for (id, tpl) in reg.iter() {
-                    // Only add custom templates (id >= 5) — class 0 is always the
-                    // transparent base and must not be overwritten.
-                    if *id >= 5 {
-                        self.template_registry.register(*id, tpl.clone());
-                    }
-                }
-                let new_keys = self.template_registry.keys();
-                if old_keys != new_keys {
+            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
+                // Only custom templates (id >= 5) apply here — class 0 is
+                // always the transparent base and must not be overwritten.
+                let new_keys: Vec<u32> = shared
+                    .read()
+                    .unwrap()
+                    .keys()
+                    .into_iter()
+                    .filter(|id| *id >= 5)
+                    .collect();
+                if self.last_shared_keys != new_keys {
                     self.pipelines.clear();
                     self.shader_cache = helio::radiant::RadiantShaderCache::new();
+                    self.last_shared_keys = new_keys;
                 }
+                self.shared_registry = Some(std::sync::Arc::clone(shared));
             }
         }
 
@@ -344,13 +354,22 @@ impl TransparentPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let template = match self.template_registry.get(key.template_id) {
-                Some(t) => t,
-                None => {
-                    log::debug!("[Transparent] template class {} not found, falling back to class 0", key.template_id);
-                    self.template_registry.get(0).expect("Default transparent template missing")
-                }
+            // Ids >= 5 are user-registered custom templates that live in the
+            // shared scene-wide registry; class 0 is this pass's own
+            // transparent base. `shared_arc` is a fresh local Arc clone so
+            // `guard`'s lifetime doesn't tie up `self`.
+            let shared_arc = if key.template_id >= 5 {
+                self.shared_registry.clone()
+            } else {
+                None
             };
+            let guard = shared_arc.as_ref().map(|a| a.read().unwrap());
+            let template = guard.as_ref().and_then(|g| g.get(key.template_id)).unwrap_or_else(|| {
+                if key.template_id >= 5 {
+                    log::debug!("[Transparent] template class {} not found, falling back to class 0", key.template_id);
+                }
+                &self.local_class0
+            });
             let module = self.shader_cache.get_or_compile(
                 device, key, template, graph_wgsl, 16, "Transparent Shader",
             );

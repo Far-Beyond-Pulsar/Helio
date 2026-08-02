@@ -69,12 +69,18 @@ impl super::super::Scene {
             gpu_index,
         });
         debug_assert_eq!(gpu_index as usize, dense_index);
-        
+
+        // Index by application tag so the owner can find this light again
+        // without keeping its own id map. Tag 0 means "untagged".
+        if user_tag != 0 {
+            self.lights_by_tag.insert(user_tag, id);
+        }
+
         // Invalidate any previous bake if this is a static/stationary light
         if !movability.can_move() {
             self.bake_invalidated = true;
         }
-        
+
         id
     }
 
@@ -164,9 +170,16 @@ impl super::super::Scene {
     /// scene.remove_light(light_id)?;
     /// ```
     pub fn remove_light(&mut self, id: LightId) -> Result<()> {
+        let user_tag = self.lights.get(id).map(|r| r.user_tag).unwrap_or(0);
         let removed = self.lights.remove(id).ok_or_else(|| invalid("light"))?;
         let gpu_removed = self.gpu_scene.lights.swap_remove(removed.dense_index);
         debug_assert!(gpu_removed.is_some());
+
+        // Drop the tag index entry, but only if it still points at *this*
+        // light — a newer light may have since claimed the same tag.
+        if user_tag != 0 && self.lights_by_tag.get(&user_tag) == Some(&id) {
+            self.lights_by_tag.remove(&user_tag);
+        }
 
         // Update gpu_index for the element that was swap-moved into the vacated slot
         if let Some((moved_handle, new_dense_index)) = removed.moved {

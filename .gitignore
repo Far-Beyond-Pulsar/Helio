@@ -26,3 +26,5 @@ hlfs.md
 .DS_Store
 *.zip
 *.bin
+*.log
+assets/sprites.png

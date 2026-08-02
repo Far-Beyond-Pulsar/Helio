@@ -15,7 +15,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use helio::{DebugDrawState, Renderer, RendererConfig, Scene};
+use helio::{Renderer, RendererConfig};
 
 use crate::{HelioWasmApp, InputState};
 
@@ -382,65 +382,20 @@ async fn init_wgpu<T: HelioWasmApp>(
         },
     );
 
-    let scene = Scene::new(device.clone(), queue.clone());
-
-    let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Debug Camera Buffer"),
-        size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Cull Stats Buffer"),
-        size: 32,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-
     // The demo may swap in a custom render graph (voxel meshing, injected
     // post-process effects, …); otherwise fall back to the default deferred
     // graph. `render_scale` is threaded into both the graph config and the
     // renderer so a custom graph with no TAA upscale can pin it to 1.0.
     let render_scale = T::render_scale();
-    let graph = T::build_graph(
-        &device,
-        &queue,
-        &scene,
-        RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
-        debug_state.clone(),
-        &debug_camera_buf,
-        &cull_stats_buf,
-    )
-    .unwrap_or_else(|| {
-        helio_default_graphs::build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None, // debug_overlay
-        )
-    });
+    let config = RendererConfig::new(width, height, surface_format).with_render_scale(render_scale);
 
-    let mut renderer = Renderer::new(
-        device.clone(),
-        queue.clone(),
-        surface_format,
-        width,
-        height,
-        render_scale,
-        RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
-        scene,
-        graph,
-        debug_state,
-        debug_camera_buf,
-        cull_stats_buf,
-    );
+    let mut renderer = helio::RendererBuilder::new(config)
+        .with_graph(Box::new(|d, q, s, cfg, ds, cb, csb| {
+            T::build_graph(d, q, s, cfg, ds.clone(), cb, csb).unwrap_or_else(|| {
+                helio_default_graphs::build_default_graph(d, q, s, cfg, ds, cb, csb, None)
+            })
+        }))
+        .build(device.clone(), queue.clone(), width, height, surface_format);
 
     let demo = T::init(
         &mut renderer,

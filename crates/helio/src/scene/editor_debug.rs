@@ -19,6 +19,8 @@ const COLOR_POST_PROCESS_BLEND: [f32; 4] = [0.45, 0.25, 0.6, 1.0]; // dim violet
 const COLOR_WATER: [f32; 4] = [0.2, 0.55, 1.0, 1.0]; // blue
 const COLOR_WATER_HITBOX: [f32; 4] = [0.2, 0.9, 0.8, 1.0]; // teal
 const COLOR_DECAL: [f32; 4] = [1.0, 0.5, 0.2, 1.0]; // orange
+const COLOR_FOLIAGE: [f32; 4] = [0.45, 0.85, 0.25, 1.0]; // green
+const COLOR_FOLIAGE_INTERACTOR: [f32; 4] = [0.85, 1.0, 0.4, 1.0]; // pale green
 
 const SPHERE_SEGMENTS: u32 = 24;
 const CONE_SEGMENTS: u32 = 16;
@@ -230,6 +232,20 @@ impl super::Scene {
                 v3(&rec.gpu.new_min),
                 v3(&rec.gpu.new_max),
                 COLOR_WATER_HITBOX,
+            );
+        }
+
+        // Foliage layers — the world-space AABB the placement pass samples.
+        // Interactors are invisible spheres, so outline them too; the editor
+        // needs to see where grass will part.
+        for (_, rec) in self.foliage_layers.iter_with_handles() {
+            sink.aabb(rec.layer.bounds[0], rec.layer.bounds[1], COLOR_FOLIAGE);
+        }
+        for (_, rec) in self.foliage_interactors.iter_with_handles() {
+            sink.wire_sphere(
+                rec.interactor.position,
+                rec.interactor.radius,
+                COLOR_FOLIAGE_INTERACTOR,
             );
         }
 

@@ -1,0 +1,387 @@
+[
+  {
+    "h": 190,
+    "name": "pine_tree",
+    "w": 141
+  },
+  {
+    "h": 159,
+    "name": "oak_tree",
+    "w": 145
+  },
+  {
+    "h": 87,
+    "name": "grass_a",
+    "w": 128
+  },
+  {
+    "h": 73,
+    "name": "grass_b",
+    "w": 85
+  },
+  {
+    "h": 70,
+    "name": "stone_block",
+    "w": 82
+  },
+  {
+    "h": 67,
+    "name": "wood_bench",
+    "w": 144
+  },
+  {
+    "h": 65,
+    "name": "rock",
+    "w": 103
+  },
+  {
+    "h": 50,
+    "name": "bush",
+    "w": 54
+  },
+  {
+    "h": 110,
+    "name": "player",
+    "w": 86
+  },
+  {
+    "h": 110,
+    "name": "player_pickaxe",
+    "w": 64
+  },
+  {
+    "h": 110,
+    "name": "player_pickaxe_hood",
+    "w": 93
+  },
+  {
+    "h": 92,
+    "name": "hut",
+    "w": 61
+  },
+  {
+    "h": 20,
+    "name": "leaf_sprig",
+    "w": 38
+  },
+  {
+    "h": 82,
+    "name": "torch",
+    "w": 28
+  },
+  {
+    "h": 31,
+    "name": "dagger",
+    "w": 26
+  },
+  {
+    "h": 66,
+    "name": "rockpile",
+    "w": 64
+  },
+  {
+    "h": 84,
+    "name": "flower_blue",
+    "w": 72
+  },
+  {
+    "h": 50,
+    "name": "sign",
+    "w": 52
+  },
+  {
+    "h": 60,
+    "name": "mushroom",
+    "w": 49
+  },
+  {
+    "h": 55,
+    "name": "flower_orange",
+    "w": 50
+  },
+  {
+    "h": 66,
+    "name": "chest_gold",
+    "w": 103
+  },
+  {
+    "h": 74,
+    "name": "pickaxe_1",
+    "w": 70
+  },
+  {
+    "h": 74,
+    "name": "pickaxe_2",
+    "w": 76
+  },
+  {
+    "h": 70,
+    "name": "pickaxe_hammer",
+    "w": 79
+  },
+  {
+    "h": 73,
+    "name": "axe",
+    "w": 76
+  },
+  {
+    "h": 73,
+    "name": "sword_1",
+    "w": 66
+  },
+  {
+    "h": 75,
+    "name": "sword_2",
+    "w": 74
+  },
+  {
+    "h": 40,
+    "name": "slime_blue",
+    "w": 62
+  },
+  {
+    "h": 62,
+    "name": "dragon_red",
+    "w": 128
+  },
+  {
+    "h": 58,
+    "name": "slime_green",
+    "w": 100
+  },
+  {
+    "h": 71,
+    "name": "eyeball_red",
+    "w": 99
+  },
+  {
+    "h": 114,
+    "name": "zombie_green",
+    "w": 68
+  },
+  {
+    "h": 47,
+    "name": "crate_pile",
+    "w": 55
+  },
+  {
+    "h": 47,
+    "name": "rock_small",
+    "w": 56
+  },
+  {
+    "h": 49,
+    "name": "rock_cluster",
+    "w": 60
+  },
+  {
+    "h": 50,
+    "name": "stone_chunk_pile",
+    "w": 63
+  },
+  {
+    "h": 49,
+    "name": "gold_ore",
+    "w": 65
+  },
+  {
+    "h": 57,
+    "name": "gold_chest_small",
+    "w": 68
+  },
+  {
+    "h": 69,
+    "name": "bunny",
+    "w": 70
+  },
+  {
+    "h": 70,
+    "name": "lizard_creature",
+    "w": 179
+  },
+  {
+    "h": 52,
+    "name": "heart_red",
+    "w": 64
+  },
+  {
+    "h": 57,
+    "name": "star_blue",
+    "w": 56
+  },
+  {
+    "h": 63,
+    "name": "potion_red",
+    "w": 48
+  },
+  {
+    "h": 61,
+    "name": "potion_blue",
+    "w": 49
+  },
+  {
+    "h": 44,
+    "name": "coin_gold",
+    "w": 45
+  },
+  {
+    "h": 44,
+    "name": "coin_silver",
+    "w": 46
+  },
+  {
+    "h": 45,
+    "name": "coin_copper",
+    "w": 46
+  },
+  {
+    "h": 67,
+    "name": "bomb",
+    "w": 58
+  },
+  {
+    "h": 52,
+    "name": "torch_staff",
+    "w": 278
+  },
+  {
+    "h": 61,
+    "name": "log_pile",
+    "w": 81
+  },
+  {
+    "h": 58,
+    "name": "furnace_unlit",
+    "w": 71
+  },
+  {
+    "h": 56,
+    "name": "stone_pile_2",
+    "w": 73
+  },
+  {
+    "h": 76,
+    "name": "furnace_lit",
+    "w": 80
+  },
+  {
+    "h": 78,
+    "name": "wood_fence_1",
+    "w": 64
+  },
+  {
+    "h": 78,
+    "name": "wood_fence_2",
+    "w": 58
+  },
+  {
+    "h": 65,
+    "name": "bed_white",
+    "w": 115
+  },
+  {
+    "h": 55,
+    "name": "anvil",
+    "w": 103
+  },
+  {
+    "h": 53,
+    "name": "workbench_1",
+    "w": 74
+  },
+  {
+    "h": 201,
+    "name": "cabin",
+    "w": 408
+  },
+  {
+    "h": 85,
+    "name": "torch_post",
+    "w": 37
+  },
+  {
+    "h": 81,
+    "name": "grindstone",
+    "w": 142
+  },
+  {
+    "h": 76,
+    "name": "lantern_hanging",
+    "w": 65
+  },
+  {
+    "h": 61,
+    "name": "lantern_wall",
+    "w": 44
+  },
+  {
+    "h": 68,
+    "name": "torch_small",
+    "w": 28
+  },
+  {
+    "h": 85,
+    "name": "campfire",
+    "w": 91
+  },
+  {
+    "h": 84,
+    "name": "wood_door",
+    "w": 71
+  },
+  {
+    "h": 82,
+    "name": "wood_ladder_rack",
+    "w": 69
+  },
+  {
+    "h": 85,
+    "name": "hammock_swing",
+    "w": 108
+  },
+  {
+    "h": 70,
+    "name": "chain_post_1",
+    "w": 21
+  },
+  {
+    "h": 76,
+    "name": "chain_post_2",
+    "w": 22
+  },
+  {
+    "h": 75,
+    "name": "wood_wall_bracket",
+    "w": 91
+  },
+  {
+    "h": 63,
+    "name": "wood_table_1",
+    "w": 140
+  },
+  {
+    "h": 56,
+    "name": "stone_wall_segment",
+    "w": 157
+  },
+  {
+    "h": 57,
+    "name": "wood_table_2",
+    "w": 142
+  },
+  {
+    "h": 65,
+    "name": "chest_dark",
+    "w": 116
+  },
+  {
+    "h": 44,
+    "name": "workbench_small",
+    "w": 92
+  },
+  {
+    "h": 49,
+    "name": "bed_red",
+    "w": 161
+  }
+]

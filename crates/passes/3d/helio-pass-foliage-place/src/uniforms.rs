@@ -77,9 +77,17 @@ pub struct PlaceUniforms {
     /// Side length in metres covered by the terrain capture.
     pub terrain_extent: f32,
 
+    /// Number of valid entries in the foliage layer table.
+    ///
+    /// The layer table buffer is fixed-capacity, so the placement shader must not loop
+    /// `arrayLength` entries — stale entries beyond `layer_count` would gate candidates
+    /// against last generation's bounds. Zero means "no layers", which the shader treats
+    /// as the legacy carpet-everything behaviour.
+    pub layer_count: u32,
+
     /// Reserved. Must be written as zero so a future build can distinguish "left at the
     /// default" from "predates the field".
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 2],
 }
 
 /// Per-frame constants for the tile cull, cluster cull and finalize dispatches.
@@ -190,7 +198,8 @@ mod tests {
         assert_eq!(offset_of(&value.terrain_origin_x as *const f32 as *const u8), 40);
         assert_eq!(offset_of(&value.terrain_origin_z as *const f32 as *const u8), 44);
         assert_eq!(offset_of(&value.terrain_extent as *const f32 as *const u8), 48);
-        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 52);
+        assert_eq!(offset_of(&value.layer_count as *const u32 as *const u8), 52);
+        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 56);
     }
 
     #[test]
@@ -219,7 +228,8 @@ mod tests {
 
     #[test]
     fn reserved_padding_defaults_to_zero() {
-        assert_eq!(PlaceUniforms::default()._pad, [0; 3]);
+        assert_eq!(PlaceUniforms::default().layer_count, 0);
+        assert_eq!(PlaceUniforms::default()._pad, [0; 2]);
         assert_eq!(FoliageCullUniforms::default()._pad, [0; 1]);
     }
 }

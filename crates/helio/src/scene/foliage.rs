@@ -22,7 +22,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use helio_foliage_core::{
-    pack_kind_and_flags, FoliageKind, GpuFoliageType, FOLIAGE_FLAG_CASTS_SHADOW,
+    pack_kind_and_flags, FoliageKind, GpuFoliageLayer, GpuFoliageType, FOLIAGE_FLAG_CASTS_SHADOW,
     FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
 };
 use libhelio::{FoliageFrameData, Wind};
@@ -203,18 +203,41 @@ impl FoliageTypeDescriptor {
 
 /// Where a set of foliage types grows.
 ///
-/// The GPU-side layer table is not built yet — for now a scene behaves as if it had a
-/// single implicit layer covering every registered type, which is enough for uniform
-/// ground cover. Density and exclusion maps are stored and will be bound once
-/// `FoliageTerrainPass` exists to sample them.
+/// Placement accepts a candidate only when its world position lies inside at least one
+/// layer's AABB — set `has_infinite_extent` to exempt a layer from that test and carpet
+/// the whole ring. An empty layer table keeps the legacy "carpet everything" behaviour,
+/// so publishers that predate the layer table are not silently culled.
+///
+/// Density and exclusion maps are stored and will be bound once `FoliageTerrainPass`
+/// exists to sample them.
 #[derive(Debug, Clone)]
 pub struct FoliageLayer {
     /// Types this layer places.
     pub types: Vec<FoliageTypeId>,
-    /// World-space AABB the layer covers, as `[min_xyz, max_xyz]`.
+    /// World-space AABB the layer covers, as `[min_xyz, max_xyz]`. Ignored when
+    /// `has_infinite_extent` is set.
     pub bounds: [Vec3; 2],
     /// Placement seed. Two layers with the same seed and bounds place identically.
     pub seed: u32,
+    /// When set, the layer's bounds are not enforced: every candidate is inside it,
+    /// which is the behaviour a scene had before layer bounds were consulted at all.
+    pub has_infinite_extent: bool,
+}
+
+impl FoliageLayer {
+    /// Convert to the GPU record.
+    pub(crate) fn to_gpu(&self) -> GpuFoliageLayer {
+        let [min, max] = self.bounds;
+        GpuFoliageLayer {
+            bounds_min: [min.x, min.y, min.z, 0.0],
+            bounds_max: [
+                max.x,
+                max.y,
+                max.z,
+                if self.has_infinite_extent { 1.0 } else { 0.0 },
+            ],
+        }
+    }
 }
 
 /// A moving body that pushes foliage aside.
@@ -319,6 +342,9 @@ impl Scene {
     /// Register a foliage layer.
     pub fn add_foliage_layer(&mut self, layer: FoliageLayer) -> FoliageLayerId {
         let (id, _) = self.foliage_layers.insert(FoliageLayerRecord { layer });
+        self.foliage_layers_dirty = true;
+        // The layer table and the type table share one generation counter; a layer edit
+        // must also re-roll the ring so blades outside the new bounds disappear.
         self.foliage_types_dirty = true;
         id
     }
@@ -328,6 +354,7 @@ impl Scene {
         self.foliage_layers
             .remove(id)
             .ok_or_else(|| invalid("foliage layer"))?;
+        self.foliage_layers_dirty = true;
         self.foliage_types_dirty = true;
         Ok(())
     }
@@ -427,6 +454,7 @@ impl Scene {
 
     /// Rebuild the CPU mirrors the foliage passes consume. Called from `flush`.
     pub(in crate::scene) fn rebuild_foliage_buffers(&mut self) {
+        let mut topology_changed = false;
         if self.foliage_types_dirty {
             self.foliage_cpu_types.clear();
             self.foliage_cpu_types.extend(
@@ -434,10 +462,25 @@ impl Scene {
                     .iter()
                     .map(|(_, record)| record.descriptor.to_gpu()),
             );
-            // Only topology changes reach here — see the module header on why wind must
-            // never take this path.
-            self.foliage_generation = self.foliage_generation.wrapping_add(1);
+            topology_changed = true;
             self.foliage_types_dirty = false;
+        }
+
+        if self.foliage_layers_dirty {
+            self.foliage_cpu_layers.clear();
+            self.foliage_cpu_layers.extend(
+                self.foliage_layers
+                    .iter()
+                    .map(|(_, record)| record.layer.to_gpu()),
+            );
+            topology_changed = true;
+            self.foliage_layers_dirty = false;
+        }
+
+        // Only topology changes reach here — see the module header on why wind must never
+        // take this path.
+        if topology_changed {
+            self.foliage_generation = self.foliage_generation.wrapping_add(1);
         }
 
         if self.foliage_interactors_dirty {
@@ -460,9 +503,9 @@ impl Scene {
         }
         Some(FoliageFrameData {
             types: bytemuck::cast_slice(&self.foliage_cpu_types),
-            layers: &[],
+            layers: bytemuck::cast_slice(&self.foliage_cpu_layers),
             type_count: self.foliage_cpu_types.len() as u32,
-            layer_count: 0,
+            layer_count: self.foliage_cpu_layers.len() as u32,
             wind: self.wind.to_gpu(),
             generation: self.foliage_generation,
         })

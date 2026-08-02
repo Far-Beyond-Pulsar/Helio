@@ -78,8 +78,15 @@ impl super::super::Scene {
             .ok_or_else(|| invalid("mesh"))?
             .ref_count += 1;
 
+        let user_tag = desc.user_tag;
         let record = object_gpu_data(desc.mesh, material_slot, desc, mesh_slice);
         let (id, _dense_index) = self.objects.insert(record);
+
+        // Index by application tag so the owner can find this object again
+        // without keeping its own id map. Tag 0 means "untagged".
+        if user_tag != 0 {
+            self.objects_by_tag.insert(user_tag, id);
+        }
 
         // Track static topology changes for shadow atlas caching
         if let Some(r) = self.objects.get_mut_with_index(id).map(|(_, r)| r) {

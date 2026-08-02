@@ -75,6 +75,15 @@ pub struct Scene {
     /// Object pool (dense array)
     pub(in crate::scene) objects: DenseArena<ObjectRecord, ObjectId>,
 
+    /// Reverse index: application-defined `user_tag` → handle.
+    ///
+    /// Lets an application find the actor it created for one of its own
+    /// entities without keeping a parallel id map of its own. Tag `0` is
+    /// the "untagged" default and is never indexed. Maintained by the
+    /// insert/remove paths for objects and lights.
+    pub(in crate::scene) objects_by_tag: HashMap<u64, ObjectId>,
+    pub(in crate::scene) lights_by_tag: HashMap<u64, LightId>,
+
     /// True when the objects list has changed and the GPU instance/draw_call/indirect
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
@@ -193,6 +202,12 @@ pub struct Scene {
     /// Foliage layers (where each type grows).
     pub(in crate::scene) foliage_layers:
         DenseArena<super::foliage::FoliageLayerRecord, crate::handles::FoliageLayerId>,
+
+    /// Set when the foliage layer table changes (bounds or infinite extent).
+    pub(in crate::scene) foliage_layers_dirty: bool,
+
+    /// CPU mirror of the foliage layer table, published as raw bytes each frame.
+    pub(in crate::scene) foliage_cpu_layers: Vec<helio_foliage_core::GpuFoliageLayer>,
 
     /// Bodies that displace foliage.
     pub(in crate::scene) foliage_interactors:
@@ -323,6 +338,8 @@ impl Scene {
             decals_dirty_range: None,
             lights: DenseArena::new(),
             objects: DenseArena::new(),
+            objects_by_tag: HashMap::new(),
+            lights_by_tag: HashMap::new(),
             objects_dirty: true,             // rebuild on first flush
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet
@@ -354,6 +371,8 @@ impl Scene {
             foliage_cpu_types: Vec::new(),
             foliage_generation: 0,
             foliage_layers: DenseArena::new(),
+            foliage_layers_dirty: false,
+            foliage_cpu_layers: Vec::new(),
             foliage_interactors: DenseArena::new(),
             foliage_interactors_dirty: false,
             foliage_interactors_dirty_range: None,

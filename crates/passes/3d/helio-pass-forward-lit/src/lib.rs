@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use helio::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};
+use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
@@ -32,7 +32,13 @@ struct ForwardLitGlobals {
 pub struct ForwardLitPass {
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
-    template_registry: RadiantTemplateRegistry,
+    /// This pass's own class-0 override (never synced from the scene).
+    local_class0: helio::radiant::RadiantTemplate,
+    /// User-registered custom templates (id >= 5), shared with the renderer
+    /// and other passes — never deep-cloned (see `SharedTemplateRegistry`).
+    shared_registry: Option<helio::radiant::SharedTemplateRegistry>,
+    /// Key set as of the last sync, to detect content changes cheaply.
+    last_shared_keys: Vec<u32>,
     pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
@@ -141,9 +147,8 @@ impl ForwardLitPass {
             immediate_size: 0,
         });
 
-        let mut reg = RadiantTemplateRegistry::new_empty();
         let base_src_raw = include_str!("../shaders/forward_lit.wgsl");
-        if base_src_raw.contains("//!use pbr_eval") {
+        let wgsl_source: &'static str = if base_src_raw.contains("//!use pbr_eval") {
             // Insert PBR_EVAL after the `enable` directive (must come before
             // any declarations in WGSL but after the enable line).
             let insert_pos = base_src_raw.find("enable ").and_then(|i| {
@@ -156,16 +161,21 @@ impl ForwardLitPass {
             resolved.push('\n');
             resolved.push_str(libhelio::shader::PBR_EVAL);
             resolved.push_str(&base_src_raw[insert_pos..]);
-            let leaked: &'static str = Box::leak(resolved.into_boxed_str());
-            reg.override_class(0, "forward_lit", leaked);
+            Box::leak(resolved.into_boxed_str())
         } else {
-            reg.override_class(0, "forward_lit", base_src_raw);
+            base_src_raw
+        };
+        let local_class0 = helio::radiant::RadiantTemplate {
+            name: "forward_lit",
+            wgsl_source,
         };
 
         Self {
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
-            template_registry: reg,
+            local_class0,
+            shared_registry: None,
+            last_shared_keys: Vec::new(),
             pipeline_layout,
             bind_group_layout_0,
             bind_group_layout_1,
@@ -179,10 +189,6 @@ impl ForwardLitPass {
         }
     }
 
-    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
-        &mut self.template_registry
-    }
-
     fn get_or_create_pipeline(
         &mut self,
         device: &wgpu::Device,
@@ -191,13 +197,23 @@ impl ForwardLitPass {
         write_depth: bool,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let template = match self.template_registry.get(key.template_id) {
-                Some(t) => t,
-                None => {
-                    log::debug!("[ForwardLit] template class {} not found, falling back to class 0", key.template_id);
-                    self.template_registry.get(0).expect("Default forward-lit template missing")
-                }
+            // Ids >= 5 are user-registered custom templates that live in the
+            // shared scene-wide registry; anything else (including a miss)
+            // falls back to this pass's own class-0 override. `shared_arc`
+            // is a fresh local Arc clone so `guard`'s lifetime doesn't tie
+            // up `self`.
+            let shared_arc = if key.template_id >= 5 {
+                self.shared_registry.clone()
+            } else {
+                None
             };
+            let guard = shared_arc.as_ref().map(|a| a.read().unwrap());
+            let template = guard.as_ref().and_then(|g| g.get(key.template_id)).unwrap_or_else(|| {
+                if key.template_id >= 5 {
+                    log::debug!("[ForwardLit] template class {} not found, falling back to class 0", key.template_id);
+                }
+                &self.local_class0
+            });
             let module = self.shader_cache.get_or_compile(
                 device, key, template, graph_wgsl, MAX_TEXTURES, "ForwardLit Shader",
             );
@@ -510,18 +526,20 @@ impl RenderPass for ForwardLitPass {
         );
 
         if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
-            if let Some(reg) = reg_any.downcast_ref::<helio::radiant::RadiantTemplateRegistry>() {
-                let old_keys = self.template_registry.keys();
-                for (id, tpl) in reg.iter() {
-                    if *id >= 5 {
-                        self.template_registry.register(*id, tpl.clone());
-                    }
-                }
-                let new_keys = self.template_registry.keys();
-                if old_keys != new_keys {
+            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
+                let new_keys: Vec<u32> = shared
+                    .read()
+                    .unwrap()
+                    .keys()
+                    .into_iter()
+                    .filter(|id| *id >= 5)
+                    .collect();
+                if self.last_shared_keys != new_keys {
                     self.pipelines.clear();
                     self.shader_cache = helio::radiant::RadiantShaderCache::new();
+                    self.last_shared_keys = new_keys;
                 }
+                self.shared_registry = Some(std::sync::Arc::clone(shared));
             }
         }
 
