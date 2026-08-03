@@ -39,7 +39,7 @@ pub use material::{
 };
 pub use libhelio::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
-    MAX_MATERIAL_TEXTURES,
+    EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use picking::{PickHit, ScenePicker};

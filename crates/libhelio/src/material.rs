@@ -24,6 +24,11 @@ pub const MAX_MATERIAL_TEXTURES: usize = 16;
 pub const BINDLESS_MATERIAL_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
+/// Sampled-texture slots reserved for non-material inputs in the most
+/// constrained material-consuming stage. Decal collection reads depth plus
+/// four G-buffer textures alongside the material table.
+pub const EXPANDED_MATERIAL_TEXTURE_RESERVE: usize = 5;
+
 /// GPU material texture binding implementation selected for one device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialBindingMode {
@@ -58,9 +63,14 @@ impl MaterialBindingConfig {
         #[cfg(target_arch = "wasm32")]
         let mode = MaterialBindingMode::Expanded;
 
-        let stage_limit = limits
-            .max_sampled_textures_per_shader_stage
-            .min(limits.max_samplers_per_shader_stage) as usize;
+        let sampled_texture_limit = limits.max_sampled_textures_per_shader_stage as usize;
+        let sampler_limit = limits.max_samplers_per_shader_stage as usize;
+        let stage_limit = match mode {
+            MaterialBindingMode::BindingArray => sampled_texture_limit.min(sampler_limit),
+            MaterialBindingMode::Expanded => sampled_texture_limit
+                .saturating_sub(EXPANDED_MATERIAL_TEXTURE_RESERVE)
+                .min(sampler_limit),
+        };
         let binding_limit = match mode {
             MaterialBindingMode::BindingArray => usize::MAX,
             MaterialBindingMode::Expanded => {
@@ -252,7 +262,7 @@ impl GpuMaterial {
 mod material_binding_tests {
     use super::{
         MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
-        MAX_MATERIAL_TEXTURES,
+        EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
     };
 
     fn limits(sampled_textures: u32, samplers: u32, bindings: u32) -> wgpu::Limits {
@@ -273,7 +283,10 @@ mod material_binding_tests {
         ] {
             let config = MaterialBindingConfig::from_capabilities(features, limits(16, 16, 64));
             assert_eq!(config.mode, MaterialBindingMode::Expanded);
-            assert_eq!(config.max_textures, 16.min(MAX_MATERIAL_TEXTURES));
+            assert_eq!(
+                config.max_textures,
+                (16 - EXPANDED_MATERIAL_TEXTURE_RESERVE).min(MAX_MATERIAL_TEXTURES)
+            );
         }
     }
 
