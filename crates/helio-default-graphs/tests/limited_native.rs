@@ -172,6 +172,25 @@ async fn run_default_graph(
     renderer
         .render(&camera, &target_view)
         .expect("the complete selected-tier default graph must render");
+
+    let resized_target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Limited Native Resized Render Target"),
+        size: wgpu::Extent3d {
+            width: 48,
+            height: 24,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.surface_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    renderer.set_render_size(48, 24);
+    renderer
+        .render(&camera, &resized_target.create_view(&Default::default()))
+        .expect("the complete selected-tier default graph must render after resize");
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let validation_error = validation_scope.pop().await;
     assert!(

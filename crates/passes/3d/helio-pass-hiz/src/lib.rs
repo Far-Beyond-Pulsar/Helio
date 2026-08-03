@@ -2,10 +2,12 @@
 //!
 //! Two-phase build each frame — fully GPU-driven, O(1) CPU:
 //!
-//!  Phase 1 — Depth copy  (hiz_depth_copy.wgsl, one dispatch)
-//!    Reads the `Depth32Float` render-attachment texture written by DepthPrepassPass
-//!    and writes each depth value into mip-0 of the R32Float HiZ texture.
-//!    This is necessary because Depth32Float cannot be bound as a storage texture.
+//!  Phase 1 — Depth copy  (texture -> buffer -> texture)
+//!    Copies the exact previous-frame `Depth32Float` render-target bytes into
+//!    mip-0 of the R32Float HiZ textures. The intermediate buffer avoids depth
+//!    operations in translated shaders. Downlevel GL adapters that cannot copy
+//!    depth textures receive a conservative far-depth pyramid instead, keeping
+//!    rendering correct while disabling dynamic occlusion and SSR.
 //!
 //!  Phase 2 — Mip chain  (hiz_build.wgsl, ~log2(max_dim) dispatches)
 //!    Downsamples using MAX-reduction so each texel stores the farthest depth
@@ -50,24 +52,28 @@ pub struct HiZBuildPass {
     mip_uniforms: Vec<wgpu::Buffer>,
     mip_dispatch_groups: Vec<(u32, u32)>,
 
-    // Depth-copy pipeline (Depth32Float -> R32Float mip-0)
-    copy_pipeline: wgpu::ComputePipeline,
-    copy_bgl: wgpu::BindGroupLayout,
-    copy_bind_group: Option<wgpu::BindGroup>,
-    copy_bind_group_key: Option<usize>,
+    // Exact GPU copy staging (Depth32Float -> bytes -> R32Float mip-0).
+    depth_copy_buffer: wgpu::Buffer,
+    depth_copy_bytes_per_row: u32,
+    depth_copy_supported: bool,
+
+    // Safe fallback for downlevel adapters without depth texture/buffer copies.
+    // Both pyramids are filled with far depth, conservatively disabling dynamic
+    // occlusion and SSR instead of rejecting the entire renderer.
+    fallback_pipeline: wgpu::ComputePipeline,
+    fallback_bgl: wgpu::BindGroupLayout,
+    fallback_bind_group: Option<wgpu::BindGroup>,
 
     // ── Min pyramid ("hiz_min") ─────────────────────────────────────────────
     // Same policy and same dimensions as the max chain above, opposite reduction.
     // Shares this pass so pyramid sizing/mip-count/resize logic lives in exactly
     // one place; a consumer that needs min-depth reads the resource rather than
     // growing its own builder. Mip 0 is identical to the max chain's (a plain
-    // depth copy — min and max of one texel are the same), so it reuses
-    // `copy_pipeline`; only levels 1+ diverge.
+    // depth copy — min and max of one texel are the same); only levels 1+
+    // diverge.
     min_mip_pipeline: wgpu::ComputePipeline,
     min_mip_bind_groups: Vec<wgpu::BindGroup>,
     min_mip_views: Vec<wgpu::TextureView>,
-    min_copy_bind_group: Option<wgpu::BindGroup>,
-    min_copy_bind_group_key: Option<usize>,
 
     // HiZ sampler (always owned by this pass)
     pub hiz_sampler: Arc<wgpu::Sampler>,
@@ -170,24 +176,31 @@ impl HiZBuildPass {
             cache: None,
         });
 
-        // Phase 1: depth-copy pipeline
-        let copy_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HiZ Depth Copy Shader"),
+        let (depth_copy_buffer, depth_copy_bytes_per_row) =
+            create_depth_copy_buffer(device, width, height);
+        let depth_copy_supported = depth_texture_buffer_copies_supported(device);
+        if !depth_copy_supported {
+            log::warn!(
+                "HiZ depth copies are unavailable on this downlevel adapter; dynamic occlusion \
+                 culling and SSR use a conservative far-depth fallback"
+            );
+        }
+        let fallback_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HiZ Far Depth Fallback Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/hiz_depth_copy.wgsl").into(),
+                include_str!("../shaders/hiz_far_depth_fallback.wgsl").into(),
             ),
         });
-
-        let copy_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("HiZ Copy BGL"),
+        let fallback_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HiZ Far Depth Fallback BGL"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::R32Float,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
                     },
                     count: None,
                 },
@@ -203,17 +216,15 @@ impl HiZBuildPass {
                 },
             ],
         });
-
-        let copy_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("HiZ Copy PL"),
-            bind_group_layouts: &[Some(&copy_bgl)],
+        let fallback_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("HiZ Far Depth Fallback PL"),
+            bind_group_layouts: &[Some(&fallback_bgl)],
             immediate_size: 0,
         });
-
-        let copy_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("HiZ Copy Pipeline"),
-            layout: Some(&copy_pl),
-            module: &copy_shader,
+        let fallback_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("HiZ Far Depth Fallback Pipeline"),
+            layout: Some(&fallback_layout),
+            module: &fallback_shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
@@ -233,15 +244,15 @@ impl HiZBuildPass {
             mip_bind_groups: Vec::new(),
             mip_uniforms,
             mip_dispatch_groups,
-            copy_pipeline,
-            copy_bgl,
-            copy_bind_group: None,
-            copy_bind_group_key: None,
+            depth_copy_buffer,
+            depth_copy_bytes_per_row,
+            depth_copy_supported,
+            fallback_pipeline,
+            fallback_bgl,
+            fallback_bind_group: None,
             min_mip_pipeline,
             min_mip_bind_groups: Vec::new(),
             min_mip_views: Vec::new(),
-            min_copy_bind_group: None,
-            min_copy_bind_group_key: None,
             hiz_sampler,
             mip_views: Vec::new(),
             width,
@@ -261,57 +272,13 @@ impl HiZBuildPass {
         self.static_hiz_metadata.as_ref()
     }
 
-    /// Seeds and builds the min-depth pyramid consumed by SsrPass.
+    /// Builds the min-depth pyramid consumed by SsrPass after mip 0 is seeded.
     ///
     /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
     fn build_min_pyramid(&mut self, ctx: &mut PassContext) {
-        // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
-        // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
-        // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
-        let depth_view = ctx
-            .resources
-            .depth_sampler_view
-            .get()
-            .unwrap_or(ctx.depth);
-        let depth_key = depth_view as *const _ as usize;
-        if self.min_copy_bind_group_key != Some(depth_key) {
-            self.min_copy_bind_group =
-                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("HiZ Min Copy BG"),
-                    layout: &self.copy_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(depth_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.min_mip_views[0]),
-                        },
-                    ],
-                }));
-            self.min_copy_bind_group_key = Some(depth_key);
-        }
-
         let encoder = unsafe { &mut *ctx.encoder_ptr };
 
-        // Seed mip 0. Same shader as the max chain: at 1:1 there is nothing to
-        // reduce, so the two pyramids only diverge from level 1 on.
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("HiZ Min Seed"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.copy_pipeline);
-            pass.set_bind_group(0, self.min_copy_bind_group.as_ref().unwrap(), &[]);
-            pass.dispatch_workgroups(
-                self.width.div_ceil(WORKGROUP_SIZE),
-                self.height.div_ceil(WORKGROUP_SIZE),
-                1,
-            );
-        }
-
-        // Remaining levels via MIN-reduction.
+        // Levels 1+ via MIN-reduction.
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ Min MipChain"),
@@ -452,6 +419,38 @@ fn mip_levels(w: u32, h: u32) -> u32 {
     (u32::BITS - max_dim.leading_zeros()).max(1)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn depth_texture_buffer_copies_supported(device: &wgpu::Device) -> bool {
+    // Native Vulkan, Metal and DX12 implementations expose the WebGPU depth-copy
+    // contract. WGPU's GL compatibility backend may omit the corresponding
+    // downlevel flag, and Device does not retain the Adapter properties needed
+    // to query that flag directly. Backend identity is therefore the exact
+    // capability boundary available to an externally supplied Device.
+    unsafe { device.as_hal::<wgpu::hal::api::Gles>() }.is_none()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn depth_texture_buffer_copies_supported(_device: &wgpu::Device) -> bool {
+    true
+}
+
+fn create_depth_copy_buffer(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Buffer, u32) {
+    let unpadded_bytes_per_row = width
+        .max(1)
+        .saturating_mul(std::mem::size_of::<f32>() as u32);
+    let bytes_per_row = unpadded_bytes_per_row
+        .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        .saturating_mul(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let size = u64::from(bytes_per_row).saturating_mul(u64::from(height.max(1)));
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("HiZ Depth Copy Buffer"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    (buffer, bytes_per_row)
+}
+
 /// Per-level src/dst sizes and dispatch extents for a pyramid of `width`x`height`.
 fn build_mip_uniforms(
     device: &wgpu::Device,
@@ -507,10 +506,20 @@ impl RenderPass for HiZBuildPass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         // Both are R32Float, which the resource pool automatically gives a full
         // mip chain (see graph::resource_lifetime).
-        builder.write_color_raw("hiz", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw("hiz_min", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.write_color_raw(
+            "hiz",
+            wgpu::TextureFormat::R32Float,
+            ResourceSize::MatchSurface,
+        );
+        builder
+            .with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST);
+        builder.write_color_raw(
+            "hiz_min",
+            wgpu::TextureFormat::R32Float,
+            ResourceSize::MatchSurface,
+        );
+        builder
+            .with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST);
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
@@ -518,12 +527,9 @@ impl RenderPass for HiZBuildPass {
         // so they are rebuilt from the new graph-owned texture in execute().
         self.mip_views.clear();
         self.mip_bind_groups.clear();
-        self.copy_bind_group = None;
-        self.copy_bind_group_key = None;
         self.min_mip_views.clear();
         self.min_mip_bind_groups.clear();
-        self.min_copy_bind_group = None;
-        self.min_copy_bind_group_key = None;
+        self.fallback_bind_group = None;
         self.first_frame = true;
     }
 
@@ -536,9 +542,21 @@ impl RenderPass for HiZBuildPass {
         None
     }
 
-    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        // Static HiZ mip uniforms are initialized once in `new()` and do not
-        // need to be re-uploaded every frame unless the pass is recreated.
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        if ctx.resize && (self.width != ctx.width || self.height != ctx.height) {
+            self.width = ctx.width.max(1);
+            self.height = ctx.height.max(1);
+            (self.depth_copy_buffer, self.depth_copy_bytes_per_row) =
+                create_depth_copy_buffer(ctx.device, self.width, self.height);
+            (self.mip_uniforms, self.mip_dispatch_groups) = build_mip_uniforms(
+                ctx.device,
+                ctx.queue,
+                self.width,
+                self.height,
+                "HiZ Mip Uniform",
+            );
+            self.first_frame = true;
+        }
         Ok(())
     }
 
@@ -638,6 +656,91 @@ impl RenderPass for HiZBuildPass {
             self.min_mip_bind_groups = bgs;
         }
 
+        let hiz_texture = ctx
+            .resource_pool
+            .get_texture("hiz")
+            .expect("HiZ texture 'hiz' must be declared as a graph resource");
+        let hiz_min_texture = ctx
+            .resource_pool
+            .get_texture("hiz_min")
+            .expect("HiZ texture 'hiz_min' must be declared as a graph resource");
+        let copy_extent = wgpu::Extent3d {
+            width: self.width.max(1),
+            height: self.height.max(1),
+            depth_or_array_layers: 1,
+        };
+        let copy_layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(self.depth_copy_bytes_per_row),
+            rows_per_image: Some(self.height.max(1)),
+        };
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+
+        if self.depth_copy_supported {
+            let depth_texture = ctx
+                .resources
+                .depth_texture
+                .get()
+                .expect("Renderer must publish the active depth texture for HiZ");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: depth_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.depth_copy_buffer,
+                    layout: copy_layout,
+                },
+                copy_extent,
+            );
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.depth_copy_buffer,
+                    layout: copy_layout,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: hiz_min_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                copy_extent,
+            );
+        } else {
+            if self.fallback_bind_group.is_none() {
+                self.fallback_bind_group =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("HiZ Far Depth Fallback BG"),
+                        layout: &self.fallback_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&self.mip_views[0]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.min_mip_views[0],
+                                ),
+                            },
+                        ],
+                    }));
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("HiZ Far Depth Fallback"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fallback_pipeline);
+            pass.set_bind_group(0, self.fallback_bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(
+                self.width.div_ceil(WORKGROUP_SIZE),
+                self.height.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
         // ── Min pyramid: rebuilt every frame ─────────────────────────────────
         // Deliberately outside the camera-static early-out below. That optimization
         // is sound for the max chain because its consumer (occlusion culling) is
@@ -651,49 +754,32 @@ impl RenderPass for HiZBuildPass {
         let camera_gen = ctx.scene.camera_generation;
         let resolution_changed = false;
 
-        if !self.first_frame && camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
+        if !self.first_frame && camera_gen == self.prev_camera_generation && !resolution_changed {
             return Ok(());
         }
 
         self.first_frame = false;
         self.prev_camera_generation = camera_gen;
 
-        // Rebuild depth-copy bind group if the depth texture view pointer changed
-        let depth_key = ctx.depth as *const _ as usize;
-        if self.copy_bind_group_key != Some(depth_key) {
-            self.copy_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("HiZ Copy BG"),
-                layout: &self.copy_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(ctx.depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_views[0]),
-                    },
-                ],
-            }));
-            self.copy_bind_group_key = Some(depth_key);
-        }
-
-        // Phase 1: copy depth -> HiZ mip-0
-        {
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("HiZ DepthCopy"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.copy_pipeline);
-            pass.set_bind_group(0, self.copy_bind_group.as_ref().unwrap(), &[]);
-            let wg_x = self.width.div_ceil(WORKGROUP_SIZE);
-            let wg_y = self.height.div_ceil(WORKGROUP_SIZE);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        if self.depth_copy_supported {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.depth_copy_buffer,
+                    layout: copy_layout,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: hiz_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                copy_extent,
+            );
         }
 
         // Phase 2: build the remaining mip levels via MAX-reduction
         {
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ MipChain"),
                 timestamp_writes: None,
             });
