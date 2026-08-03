@@ -9,3 +9,6 @@ libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

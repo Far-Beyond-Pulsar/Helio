@@ -221,11 +221,10 @@ impl Renderer {
     ///
     /// `multiview` selects a `multiview_mask = 0b11` clear pass, required when
     /// `target` is a two-layer array view (the OpenXR swapchain image). In
-    /// multiview mode the graph's render passes get the renderer's two-layer
-    /// `xr_depth_view` as their depth-stencil attachment; otherwise the
-    /// single-layer `depth_view`. (The depth written into
-    /// `frame_resources.depth_texture` for *sampling* passes stays the
-    /// single-layer texture in both modes — see `render_xr` for why.)
+    /// multiview mode the graph's render passes and `depth_texture` resource get
+    /// the renderer's two-layer XR depth target; otherwise they get the
+    /// single-layer desktop target. Sampling passes use `depth_sampler_view`,
+    /// which exposes layer 0 as a plain D2 view in XR.
     fn submit_frame(
         &mut self,
         camera: &Camera,
@@ -491,7 +490,20 @@ impl Renderer {
         if let Some(ref ies) = self.ies_texture_view {
             frame_resources.ies_textures.write(ies, "Renderer");
         }
-        frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
+        #[cfg(not(target_arch = "wasm32"))]
+        let depth_texture: &wgpu::Texture = if multiview {
+            self.xr_depth_texture.as_ref().ok_or_else(|| {
+                invalid_xr(
+                    "render_xr() called but the renderer has no multiview depth texture \
+                     (was RendererConfig built with enable_xr?)",
+                )
+            })?
+        } else {
+            &self.depth_texture
+        };
+        #[cfg(target_arch = "wasm32")]
+        let depth_texture: &wgpu::Texture = &self.depth_texture;
+        frame_resources.depth_texture.write(depth_texture, "Renderer");
         #[cfg(not(target_arch = "wasm32"))]
         let depth_sampler_view: &wgpu::TextureView = if multiview {
             self.xr_depth_view_layer0

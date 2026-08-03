@@ -62,7 +62,8 @@ impl Renderer {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         // Array view: the depth-stencil attachment for the multiview render
@@ -136,9 +137,8 @@ impl Renderer {
         // passes must be a 2-layer array view (the executor forces
         // `multiview_mask = 0b11` on every pass). The OpenXR swapchain image is
         // `width × height × 2`, so the array depth is allocated at the internal
-        // resolution. It is kept separate from `depth_texture`, which stays
-        // single-layer because passes that *sample* scene depth (e.g.
-        // VolumetricFogPass) bind it as a plain `texture_depth_2d`.
+        // resolution. It is kept separate from the desktop `depth_texture`;
+        // passes that sample scene depth receive a plain D2 view of layer 0.
         #[cfg(not(target_arch = "wasm32"))]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = if config.enable_xr {
             let (t, v, l0) = Self::create_xr_depth_resources(&device, internal_w, internal_h);

@@ -3145,6 +3145,7 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
 
