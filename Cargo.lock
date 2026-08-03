@@ -3186,6 +3186,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
 
@@ -3469,6 +3470,7 @@ dependencies = [
  "helio-voxel-core",
  "libhelio",
  "log",
+ "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
 

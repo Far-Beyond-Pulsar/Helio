@@ -4,6 +4,8 @@
 //! multi-draw rendering of per-brick meshlets.  CPU only touches a small
 //! dirty-brick list each frame.
 
+mod marching_cubes;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
@@ -13,6 +15,8 @@ use helio_voxel_core::{
     GpuBrickMeshlet, GpuBrickMeta, MAX_SURFACE_INDICES_PER_BRICK, MAX_SURFACE_VERTS_PER_BRICK,
 };
 use libhelio::DrawIndexedIndirectArgs;
+
+use marching_cubes::PACKED_TRI_TABLE;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 // Kept modest because vertex_buf/index_buf scale with
@@ -250,6 +254,17 @@ impl VoxelMeshPass {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let packed_tri_table_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Packed Triangle Table"),
+            size: std::mem::size_of_val(&PACKED_TRI_TABLE) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &packed_tri_table_buf,
+            0,
+            bytemuck::cast_slice(&PACKED_TRI_TABLE),
+        );
 
         // ── Shaders ──────────────────────────────────────────────────────────
         let extract_src = include_str!("../shaders/voxel_surface_extract.wgsl");
@@ -348,6 +363,16 @@ impl VoxelMeshPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -363,6 +388,7 @@ impl VoxelMeshPass {
                 wgpu::BindGroupEntry { binding: 5, resource: indirect_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: dirty_brick_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: normal_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: packed_tri_table_buf.as_entire_binding() },
             ],
         });
 
