@@ -34,15 +34,6 @@ use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
-use std::num::NonZeroU32;
-
-/// Bindless texture array size per shader stage.
-/// Capped at 16 on wasm32, Apple native Metal, and Android; 256 on other desktop backends.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
-const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
-const MAX_TEXTURES: usize = 16;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -67,6 +58,7 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
+    material_binding: libhelio::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// Shared with the renderer and GPU scene — never deep-cloned (see
@@ -100,6 +92,7 @@ pub struct GBufferPass {
 impl GBufferPass {
     /// Create the GBuffer pass.
     pub fn new(device: &wgpu::Device) -> Self {
+        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
         // ── Globals buffer ────────────────────────────────────────────────────
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GBufferGlobals"),
@@ -174,7 +167,7 @@ impl GBufferPass {
             });
 
         // ── Bind Group Layout 1: material + textures ──────────────────────────
-        let bind_group_layout_1 = create_material_bgl(device);
+        let bind_group_layout_1 = create_material_bgl(device, material_binding);
 
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -193,6 +186,7 @@ impl GBufferPass {
         });
 
         Self {
+            material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
             template_registry: None,
@@ -483,41 +477,12 @@ impl RenderPass for GBufferPass {
                         .as_entire_binding(),
                 },
             ];
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureViewArray(
-                        main_scene.material_textures.texture_views,
-                    ),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::SamplerArray(
-                        main_scene.material_textures.samplers,
-                    ),
-                });
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                for (index, view) in main_scene
-                    .material_textures
-                    .texture_views
-                    .iter()
-                    .enumerate()
-                {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + index as u32,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    });
-                }
-                for (index, sampler) in main_scene.material_textures.samplers.iter().enumerate() {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    });
-                }
-            }
+            self.material_binding.append_bind_group_entries(
+                &mut entries,
+                2,
+                main_scene.material_textures.texture_views,
+                main_scene.material_textures.samplers,
+            );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 1"),
                 layout: &self.bind_group_layout_1,
@@ -716,7 +681,7 @@ impl GBufferPass {
                 key,
                 template,
                 graph_wgsl,
-                MAX_TEXTURES,
+                self.material_binding,
                 "GBuffer Shader",
             );
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -846,11 +811,10 @@ impl GBufferPass {
 // Both GBufferPass and TransparentPass need the same material bind group layout.
 // This should be moved to a shared crate (helio-core or libhelio) so neither
 // pass depends on the other for basic infrastructure.
-pub fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    #[cfg(not(target_arch = "wasm32"))]
-    let texture_array_count =
-        NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
-
+pub fn create_material_bgl(
+    device: &wgpu::Device,
+    material_binding: libhelio::MaterialBindingConfig,
+) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -873,48 +837,7 @@ pub fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             count: None,
         },
     ];
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: Some(texture_array_count),
-        });
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: Some(texture_array_count),
-        });
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-        }
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            });
-        }
-    }
+    material_binding.append_layout_entries(&mut entries, 2, wgpu::ShaderStages::FRAGMENT);
 
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("GBuffer BGL 1"),

@@ -5,13 +5,12 @@
 //!
 //! # Capacity Limits
 //!
-//! The scene supports a maximum of [`MAX_TEXTURES`](crate::material::MAX_TEXTURES) (16384)
-//! concurrent textures due to bindless array limits.
+//! The scene capacity is selected from the active device's material binding tier.
 
 use wgpu::util::DeviceExt;
 
 use crate::handles::TextureId;
-use crate::material::{TextureUpload, MAX_TEXTURES};
+use crate::material::TextureUpload;
 
 use super::super::errors::{invalid, Result, SceneError};
 use super::super::types::TextureRecord;
@@ -57,7 +56,9 @@ impl super::super::Scene {
     /// })?;
     /// ```
     pub fn insert_texture(&mut self, texture: TextureUpload) -> Result<TextureId> {
-        if !self.textures.has_free_slot() && self.textures.slot_len() >= MAX_TEXTURES {
+        if !self.textures.has_free_slot()
+            && self.textures.slot_len() >= self.material_binding.max_textures
+        {
             return Err(SceneError::TextureCapacityExceeded);
         }
 
@@ -152,6 +153,11 @@ impl super::super::Scene {
         self.texture_binding_version
     }
 
+    /// Material binding representation shared by every pass for this scene.
+    pub fn material_binding_config(&self) -> libhelio::MaterialBindingConfig {
+        self.material_binding
+    }
+
     /// Get the texture view for a given slot index.
     ///
     /// Returns the placeholder white texture view if the slot is invalid or empty.
@@ -186,4 +192,3 @@ impl super::super::Scene {
             .unwrap_or(&self.placeholder_sampler)
     }
 }
-

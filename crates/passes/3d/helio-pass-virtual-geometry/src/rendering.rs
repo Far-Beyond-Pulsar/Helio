@@ -1,10 +1,7 @@
-#[cfg(not(target_arch = "wasm32"))]
-use std::num::NonZeroU32;
-
 use crate::{
     CullUniforms, InstanceCullData, LodQuality, VgGlobals, VirtualGeometryBudget,
     VirtualGeometryDebugStats, DRAW_COUNTER_BYTES, INITIAL_INSTANCES, INITIAL_MESHLETS,
-    INITIAL_OBJECTS, MAX_TEXTURES,
+    INITIAL_OBJECTS,
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
@@ -24,6 +21,7 @@ enum DebugReadbackState {
 }
 
 pub struct VirtualGeometryPass {
+    pub(crate) material_binding: libhelio::MaterialBindingConfig,
     pub(crate) select_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_bgl: wgpu::BindGroupLayout,
@@ -76,6 +74,7 @@ impl VirtualGeometryPass {
         camera_buf: &wgpu::Buffer,
         budget: VirtualGeometryBudget,
     ) -> Self {
+        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
         let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VG Cull Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
@@ -84,15 +83,26 @@ impl VirtualGeometryPass {
             let s = include_str!("../shaders/vg_gbuffer.wgsl")
                 .replace(
                     "binding_array<texture_2d<f32>, 256>",
-                    &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+                    &format!(
+                        "binding_array<texture_2d<f32>, {}>",
+                        material_binding.max_textures
+                    ),
                 )
                 .replace(
                     "binding_array<sampler, 256>",
-                    &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+                    &format!(
+                        "binding_array<sampler, {}>",
+                        material_binding.max_textures
+                    ),
                 );
-            #[cfg(target_arch = "wasm32")]
-            let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
-            s
+            if material_binding.uses_binding_arrays() {
+                s
+            } else {
+                libhelio::shader::apply_webgpu_material_bindings(
+                    &s,
+                    material_binding.max_textures,
+                )
+            }
         };
         let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VG GBuffer Shader"),
@@ -346,7 +356,7 @@ impl VirtualGeometryPass {
             ],
         }));
 
-        let draw_bgl_1 = create_material_bgl(device);
+        let draw_bgl_1 = create_material_bgl(device, material_binding);
 
         let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("VG Draw PL"),
@@ -514,6 +524,7 @@ impl VirtualGeometryPass {
         });
 
         Self {
+            material_binding,
             select_pipeline,
             cull_pipeline,
             cull_bgl,
@@ -961,41 +972,12 @@ impl RenderPass for VirtualGeometryPass {
                         .as_entire_binding(),
                 },
             ];
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureViewArray(
-                        main_scene.material_textures.texture_views,
-                    ),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::SamplerArray(
-                        main_scene.material_textures.samplers,
-                    ),
-                });
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                for (index, view) in main_scene
-                    .material_textures
-                    .texture_views
-                    .iter()
-                    .enumerate()
-                {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + index as u32,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    });
-                }
-                for (index, sampler) in main_scene.material_textures.samplers.iter().enumerate() {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    });
-                }
-            }
+            self.material_binding.append_bind_group_entries(
+                &mut entries,
+                2,
+                main_scene.material_textures.texture_views,
+                main_scene.material_textures.samplers,
+            );
             self.draw_bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Draw BG1"),
                 layout: &self.draw_bgl_1,
@@ -1383,9 +1365,10 @@ impl RenderPass for VirtualGeometryPass {
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    #[cfg(not(target_arch = "wasm32"))]
-    let count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero");
+fn create_material_bgl(
+    device: &wgpu::Device,
+    material_binding: libhelio::MaterialBindingConfig,
+) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -1408,48 +1391,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             count: None,
         },
     ];
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: Some(count),
-        });
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: Some(count),
-        });
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-        }
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            });
-        }
-    }
+    material_binding.append_layout_entries(&mut entries, 2, wgpu::ShaderStages::FRAGMENT);
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("VG Material BGL"),
         entries: &entries,

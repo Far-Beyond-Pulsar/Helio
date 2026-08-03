@@ -366,7 +366,7 @@ impl Renderer {
 
         let mut texture_views = ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
         let mut samplers = ArrayVec::<&wgpu::Sampler, { crate::material::MAX_TEXTURES }>::new();
-        for slot in 0..crate::material::MAX_TEXTURES {
+        for slot in 0..self.scene.material_binding_config().max_textures {
             texture_views.push(self.scene.texture_view_for_slot(slot));
             samplers.push(self.scene.texture_sampler_for_slot(slot));
         }

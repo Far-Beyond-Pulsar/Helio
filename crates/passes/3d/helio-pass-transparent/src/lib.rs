@@ -371,7 +371,12 @@ impl TransparentPass {
                 &self.local_class0
             });
             let module = self.shader_cache.get_or_compile(
-                device, key, template, graph_wgsl, 16, "Transparent Shader",
+                device,
+                key,
+                template,
+                graph_wgsl,
+                libhelio::MaterialBindingConfig::for_device(device),
+                "Transparent Shader",
             );
             let alpha_blend = wgpu::BlendState {
                 color: wgpu::BlendComponent {

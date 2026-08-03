@@ -37,6 +37,10 @@ pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
     TextureUpload, MAX_TEXTURES,
 };
+pub use libhelio::{
+    MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
+    MAX_MATERIAL_TEXTURES,
+};
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use picking::{PickHit, ScenePicker};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};

@@ -5,14 +5,6 @@ use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::num::NonZeroU32;
-
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
-const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
-const MAX_TEXTURES: usize = 16;
-
 const TILE_SIZE: u32 = 16;
 
 #[repr(C)]
@@ -30,6 +22,7 @@ struct ForwardLitGlobals {
 }
 
 pub struct ForwardLitPass {
+    material_binding: libhelio::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// This pass's own class-0 override (never synced from the scene).
@@ -55,6 +48,7 @@ pub struct ForwardLitPass {
 
 impl ForwardLitPass {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ForwardLitGlobals"),
             size: std::mem::size_of::<ForwardLitGlobals>() as u64,
@@ -139,7 +133,7 @@ impl ForwardLitPass {
                 ],
             });
 
-        let bind_group_layout_1 = create_material_bgl(device);
+        let bind_group_layout_1 = create_material_bgl(device, material_binding);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ForwardLit PL"),
@@ -171,6 +165,7 @@ impl ForwardLitPass {
         };
 
         Self {
+            material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
             local_class0,
@@ -215,7 +210,12 @@ impl ForwardLitPass {
                 &self.local_class0
             });
             let module = self.shader_cache.get_or_compile(
-                device, key, template, graph_wgsl, MAX_TEXTURES, "ForwardLit Shader",
+                device,
+                key,
+                template,
+                graph_wgsl,
+                self.material_binding,
+                "ForwardLit Shader",
             );
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("ForwardLit Pipeline"),
@@ -477,36 +477,12 @@ impl RenderPass for ForwardLitPass {
                     resource: ms.material_textures.material_textures.as_entire_binding(),
                 },
             ];
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureViewArray(
-                        ms.material_textures.texture_views,
-                    ),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::SamplerArray(
-                        ms.material_textures.samplers,
-                    ),
-                });
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                for (index, view) in ms.material_textures.texture_views.iter().enumerate() {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + index as u32,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    });
-                }
-                for (index, sampler) in ms.material_textures.samplers.iter().enumerate() {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    });
-                }
-            }
+            self.material_binding.append_bind_group_entries(
+                &mut entries,
+                2,
+                ms.material_textures.texture_views,
+                ms.material_textures.samplers,
+            );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ForwardLit BG 1"),
                 layout: &self.bind_group_layout_1,
@@ -595,11 +571,10 @@ impl RenderPass for ForwardLitPass {
     }
 }
 
-fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    #[cfg(not(target_arch = "wasm32"))]
-    let texture_array_count =
-        NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
-
+fn create_material_bgl(
+    device: &wgpu::Device,
+    material_binding: libhelio::MaterialBindingConfig,
+) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -622,48 +597,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             count: None,
         },
     ];
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: Some(texture_array_count),
-        });
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: Some(texture_array_count),
-        });
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-        }
-        for index in 0..MAX_TEXTURES {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            });
-        }
-    }
+    material_binding.append_layout_entries(&mut entries, 2, wgpu::ShaderStages::FRAGMENT);
 
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("ForwardLit BGL 1"),

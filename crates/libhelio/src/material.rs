@@ -2,6 +2,165 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Maximum scene material textures exposed by Helio on this platform.
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
+pub const MAX_MATERIAL_TEXTURES: usize = 256;
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub const MAX_MATERIAL_TEXTURES: usize = 16;
+
+/// Native features required by Helio's descriptor-indexed material table.
+/// The pair is one capability; a partial feature set always uses the complete
+/// baseline binding implementation.
+pub const BINDLESS_MATERIAL_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
+    .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
+
+/// GPU material texture binding implementation selected for one device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialBindingMode {
+    BindingArray,
+    Expanded,
+}
+
+/// One authoritative material binding contract shared by the scene and every
+/// pass that reads material textures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaterialBindingConfig {
+    pub mode: MaterialBindingMode,
+    pub max_textures: usize,
+}
+
+impl MaterialBindingConfig {
+    pub fn for_device(device: &wgpu::Device) -> Self {
+        Self::from_capabilities(device.features(), device.limits())
+    }
+
+    /// Select the material binding representation from adapter/device capabilities.
+    ///
+    /// Keeping this decision pure lets device creation, scene capacity, and pass
+    /// construction share one auditable capability contract.
+    pub fn from_capabilities(features: wgpu::Features, limits: wgpu::Limits) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mode = if features.contains(BINDLESS_MATERIAL_FEATURES) {
+            MaterialBindingMode::BindingArray
+        } else {
+            MaterialBindingMode::Expanded
+        };
+        #[cfg(target_arch = "wasm32")]
+        let mode = MaterialBindingMode::Expanded;
+
+        let stage_limit = limits
+            .max_sampled_textures_per_shader_stage
+            .min(limits.max_samplers_per_shader_stage) as usize;
+        let binding_limit = match mode {
+            MaterialBindingMode::BindingArray => usize::MAX,
+            MaterialBindingMode::Expanded => {
+                (limits.max_bindings_per_bind_group as usize).saturating_sub(2) / 2
+            }
+        };
+        let max_textures = MAX_MATERIAL_TEXTURES.min(stage_limit).min(binding_limit);
+        assert!(
+            max_textures > 0,
+            "Helio requires at least one sampled texture and sampler binding"
+        );
+        Self { mode, max_textures }
+    }
+
+    pub fn uses_binding_arrays(self) -> bool {
+        self.mode == MaterialBindingMode::BindingArray
+    }
+
+    pub fn append_layout_entries(
+        self,
+        entries: &mut Vec<wgpu::BindGroupLayoutEntry>,
+        first_binding: u32,
+        visibility: wgpu::ShaderStages,
+    ) {
+        let texture_entry = |binding, count| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count,
+        };
+        let sampler_entry = |binding, count| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count,
+        };
+
+        match self.mode {
+            MaterialBindingMode::BindingArray => {
+                let count = std::num::NonZeroU32::new(self.max_textures as u32)
+                    .expect("material texture table is non-empty");
+                entries.push(texture_entry(first_binding, Some(count)));
+                entries.push(sampler_entry(first_binding + 1, Some(count)));
+            }
+            MaterialBindingMode::Expanded => {
+                for index in 0..self.max_textures as u32 {
+                    entries.push(texture_entry(first_binding + index, None));
+                }
+                for index in 0..self.max_textures as u32 {
+                    entries.push(sampler_entry(
+                        first_binding + self.max_textures as u32 + index,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn append_bind_group_entries<'a>(
+        self,
+        entries: &mut Vec<wgpu::BindGroupEntry<'a>>,
+        first_binding: u32,
+        texture_views: &'a [&'a wgpu::TextureView],
+        samplers: &'a [&'a wgpu::Sampler],
+    ) {
+        assert_eq!(texture_views.len(), self.max_textures);
+        assert_eq!(samplers.len(), self.max_textures);
+        match self.mode {
+            MaterialBindingMode::BindingArray => {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: first_binding,
+                    resource: wgpu::BindingResource::TextureViewArray(texture_views),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: first_binding + 1,
+                    resource: wgpu::BindingResource::SamplerArray(samplers),
+                });
+            }
+            MaterialBindingMode::Expanded => {
+                for (index, view) in texture_views.iter().enumerate() {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: first_binding + index as u32,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    });
+                }
+                for (index, sampler) in samplers.iter().enumerate() {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: first_binding + self.max_textures as u32 + index as u32,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// Material workflow discriminant.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +194,9 @@ pub const MATERIAL_CLASS_CUSTOM: u32 = 0xFFFF;
 
 /// GPU material data. 112 bytes.
 ///
-/// All texture indices reference the global bindless texture array.
+/// All texture indices reference the global material texture table. Depending
+/// on device capabilities, that table is either descriptor-indexed or expanded
+/// into ordinary texture/sampler bindings.
 /// If a texture is not present, the index is u32::MAX.
 ///
 /// # WGSL equivalent
@@ -87,3 +248,58 @@ impl GpuMaterial {
     pub const NO_TEXTURE: u32 = u32::MAX;
 }
 
+#[cfg(test)]
+mod material_binding_tests {
+    use super::{
+        MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
+        MAX_MATERIAL_TEXTURES,
+    };
+
+    fn limits(sampled_textures: u32, samplers: u32, bindings: u32) -> wgpu::Limits {
+        wgpu::Limits {
+            max_sampled_textures_per_shader_stage: sampled_textures,
+            max_samplers_per_shader_stage: samplers,
+            max_bindings_per_bind_group: bindings,
+            ..wgpu::Limits::default()
+        }
+    }
+
+    #[test]
+    fn missing_or_partial_binding_array_features_select_expanded_bindings() {
+        for features in [
+            wgpu::Features::empty(),
+            wgpu::Features::TEXTURE_BINDING_ARRAY,
+            wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        ] {
+            let config = MaterialBindingConfig::from_capabilities(features, limits(16, 16, 64));
+            assert_eq!(config.mode, MaterialBindingMode::Expanded);
+            assert_eq!(config.max_textures, 16.min(MAX_MATERIAL_TEXTURES));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn complete_binding_array_feature_pair_selects_descriptor_indexing() {
+        let config = MaterialBindingConfig::from_capabilities(
+            BINDLESS_MATERIAL_FEATURES,
+            limits(256, 256, 8),
+        );
+        assert_eq!(config.mode, MaterialBindingMode::BindingArray);
+        assert_eq!(config.max_textures, MAX_MATERIAL_TEXTURES.min(256));
+    }
+
+    #[test]
+    fn expanded_binding_count_is_bounded_by_texture_sampler_pairs() {
+        let config =
+            MaterialBindingConfig::from_capabilities(wgpu::Features::empty(), limits(64, 64, 22));
+        assert_eq!(config.mode, MaterialBindingMode::Expanded);
+        assert_eq!(config.max_textures, 10);
+
+        let mut entries = Vec::new();
+        config.append_layout_entries(&mut entries, 2, wgpu::ShaderStages::FRAGMENT);
+        assert_eq!(entries.len(), 20);
+        assert_eq!(entries.first().map(|entry| entry.binding), Some(2));
+        assert_eq!(entries.last().map(|entry| entry.binding), Some(21));
+        assert!(entries.iter().all(|entry| entry.count.is_none()));
+    }
+}
