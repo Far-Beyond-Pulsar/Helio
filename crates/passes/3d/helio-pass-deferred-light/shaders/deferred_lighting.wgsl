@@ -1063,25 +1063,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(sf, sf, sf, 1.0);
     }
 
-    // ── Debug modes 30/31: SSR diagnosis ─────────────────────────────────────
-    // Use these as a PAIR. SsrPass writes (0,0,0,0) when the ray found nothing,
-    // and (colour, confidence) when it hit — so comparing the two separates the
-    // two very different reasons a reflection can be absent:
-    //
-    //   31 black  + 30 black  → the march found no hit (traversal/geometry).
-    //   31 colour + 30 black  → a hit was found and then faded away by a
-    //                           confidence term (back-face/facing/edge/distance).
-    //
-    // Without this pair the two are indistinguishable in the final image: both
-    // just look like missing reflection, and tuning is guesswork.
-    if globals.debug_mode == 30u {
-        let a = textureLoad(ssr_tex, pix, 0).a;
-        return vec4<f32>(a, a, a, 1.0);
-    }
-    if globals.debug_mode == 31u {
-        return vec4<f32>(textureLoad(ssr_tex, pix, 0).rgb, 1.0);
-    }
-
     // ── Debug mode 11: light-space projection for first light face 0 ─────────
     // Orange gradient = pixel is inside the light frustum, depth = ndc.z.
     // Dark blue = pixel is outside the frustum (w<=0 or uv out of [0,1]).
@@ -1200,60 +1181,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
     let lightmap_indirect = lightmap_sample * albedo;
 
-    // ── Indirect specular: SSR + environment cubemap ──────────────────────────
-    let R            = reflect(-V, N);
-    let env_lod      = roughness * ENV_MAX_LOD;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
-    // Parallax-corrected, influence-blended captures, falling back to the
-    // skylight where none reach. Rougher surfaces pull from higher mips of the
-    // pre-filtered chain, so reflection blur tracks roughness.
-    var spec_ind = vec3<f32>(0.0);
-    if globals.enable_env_reflections != 0u {
-        let env_sample = sample_reflection_environment(world_pos, R, env_lod);
-        let env_brdf   = env_brdf_approx(NdV, roughness);
-        spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
-    }
-
-    // ── SSR composite ────────────────────────────────────────────────────
-    // Blend screen-space reflections over the cubemap fallback, weighted by
-    // the trace's confidence.
-    //
-    // Alpha IS the blend weight. SsrPass folds every validity term into it —
-    // edge, viewer-facing, back-face, ray distance, and roughness — precisely
-    // so this composite can dissolve an untrustworthy reflection back into
-    // the probe.
-    // On targets without reflection support SsrPass never ran, so ssr_tex is
-    // the 1×1 black fallback; the flag makes that explicit rather than relying
-    // on the fallback's alpha.
-    let ssr_hit      = textureLoad(ssr_tex, pix, 0);
-    if globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
-        let ssr_sample = ssr_hit.rgb * F_ibl;
-        spec_ind = mix(spec_ind, ssr_sample, ssr_hit.a);
-    }
-
-    // ── Planar reflection composite ──────────────────────────────────────
-    // Planar reflections are more accurate on their native surfaces (floors,
-    // mirrors, water) than SSR or the cubemap. They are blended on top of
-    // whatever SSR found, with their own confidence weighting.
-    //
-    // The planar trace runs *before* deferred lighting (like SSR), so its
-    // output is unlit scene colour — multiply by F_ibl to match the IBL
-    // fallback's energy level, exactly as SSR does above.
-    let planar_hit    = textureLoad(planar_tex, pix, 0);
-    if globals.enable_reflections != 0u && planar_hit.a > 0.0 {
-        let planar_sample = planar_hit.rgb * F_ibl;
-        spec_ind = mix(spec_ind, planar_sample, planar_hit.a);
-    }
-
-    // ── RC-enhanced specular (rough surfaces) ────────────────────────────
-    // Radiance cascades store irradiance from the scene's GI. For rough
-    // surfaces (roughness > 0.6), a single SSR trace or ray query cannot
-    // converge the full glossy lobe, so we fall back to the RC irradiance
-    // as a broad directional wash.  This prevents rough reflections from
-    // going black when SSR misses.
-    if globals.has_rc_gi > 0u && roughness > 0.6 {
-        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
-        spec_ind = mix(spec_ind, rc_spec, smoothstep(0.6, 0.9, roughness) * 0.4);
-    }
+    // Indirect specular is composed by fs_reflection in a second draw. This
+    // keeps both fragment stages within the WebGPU baseline texture limit.
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
     // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct
@@ -1294,8 +1223,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     //   • For un-lightmapped surfaces the normal dynamic path applies AO to the
     //     hemisphere/RC ambient term as usual.
     let lo_final      = Lo * (1.0 - lm_weight);          // suppress Lo for baked pixels
-    let indirect_dyn  = (ambient_final + spec_ind) * ao_combined;  // AO on dynamic GI
-    let indirect_bake =  lightmap_indirect + spec_ind;              // no AO on lightmap
+    let indirect_dyn  = ambient_final * ao_combined;  // AO on dynamic GI
+    let indirect_bake = lightmap_indirect;            // no AO on lightmap
     let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
     var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
@@ -1327,4 +1256,86 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
+}
+
+// Reflection composition is deliberately isolated from base lighting so neither
+// fragment entry point exceeds the WebGPU baseline of 16 sampled textures.
+// The normal path is additively blended over fs_main; SSR debug modes use the
+// companion replacement pipeline.
+@fragment
+fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
+    let depth = textureLoad(gbuf_depth, pix, 0);
+    if depth >= 1.0 { discard; }
+
+    let ssr_hit = textureLoad(ssr_tex, pix, 0);
+    if globals.debug_mode == 30u {
+        return vec4<f32>(vec3<f32>(ssr_hit.a), 1.0);
+    }
+    if globals.debug_mode == 31u {
+        return vec4<f32>(ssr_hit.rgb, 1.0);
+    }
+
+    // These modes replace lighting with another diagnostic in fs_main.
+    if globals.debug_mode == 1u || globals.debug_mode == 2u
+        || globals.debug_mode == 4u || globals.debug_mode == 5u
+        || globals.debug_mode == 10u || globals.debug_mode == 11u
+        || globals.debug_mode == 20u || globals.debug_mode == 21u {
+        return vec4<f32>(0.0);
+    }
+
+    let normal_r = textureLoad(gbuf_normal, pix, 0);
+    let orm_r = textureLoad(gbuf_orm, pix, 0);
+    let emissive_r = textureLoad(gbuf_emissive, pix, 0);
+    let N = normalize(normal_r.xyz);
+    let roughness = orm_r.g;
+    let F0 = clamp(
+        vec3<f32>(normal_r.w, orm_r.a, emissive_r.a),
+        vec3<f32>(0.0),
+        vec3<f32>(0.999),
+    );
+
+    let screen_size = vec2<f32>(textureDimensions(gbuf_normal));
+    let screen_uv = in.clip_pos.xy / screen_size;
+    let ao_combined = orm_r.r * textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    let lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_vg = lightmap_uv.x < -1.5;
+    let has_lightmap = !is_vg && lightmap_uv.x >= 0.0;
+
+    let ndc_xy = vec2<f32>(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0);
+    let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_pos = world_h.xyz / world_h.w;
+    let V = normalize(cameras[0].position_near.xyz - world_pos);
+    let NdV = max(dot(N, V), 0.0);
+    let F_ibl = fresnel_schlick_roughness(NdV, F0, roughness);
+    let R = reflect(-V, N);
+
+    var spec_ind = vec3<f32>(0.0);
+    if globals.enable_env_reflections != 0u {
+        let env_lod = roughness * ENV_MAX_LOD;
+        let env_sample = sample_reflection_environment(world_pos, R, env_lod);
+        let env_brdf = env_brdf_approx(NdV, roughness);
+        spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    }
+
+    if globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
+        spec_ind = mix(spec_ind, ssr_hit.rgb * F_ibl, ssr_hit.a);
+    }
+
+    let planar_hit = textureLoad(planar_tex, pix, 0);
+    if globals.enable_reflections != 0u && planar_hit.a > 0.0 {
+        spec_ind = mix(spec_ind, planar_hit.rgb * F_ibl, planar_hit.a);
+    }
+
+    if globals.has_rc_gi > 0u && roughness > 0.6 {
+        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
+        spec_ind = mix(
+            spec_ind,
+            rc_spec,
+            smoothstep(0.6, 0.9, roughness) * 0.4,
+        );
+    }
+
+    let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
+    return vec4<f32>(contribution, 0.0);
 }

@@ -2934,6 +2934,7 @@ dependencies = [
 name = "helio-default-graphs"
 version = "0.1.0"
 dependencies = [
+ "glam 0.33.2",
  "helio",
  "helio-core",
  "helio-foliage-core",
