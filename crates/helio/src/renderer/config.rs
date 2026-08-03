@@ -1,4 +1,5 @@
 use crate::material::MAX_TEXTURES;
+use libhelio::BINDLESS_MATERIAL_FEATURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -51,16 +52,15 @@ pub fn select_hdr_surface_format(
 }
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
-    #[cfg(not(target_arch = "wasm32"))]
-    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
-        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-        | wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
+    #[cfg(not(target_arch = "wasm32"))]
+    if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
+        optional |= BINDLESS_MATERIAL_FEATURES;
+    }
     // Request ray tracing if available (native only, requires Vulkan)
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -109,6 +109,7 @@ pub fn required_experimental_features(adapter_features: wgpu::Features) -> wgpu:
 #[cfg(test)]
 mod tests {
     use super::{required_wgpu_features, RendererConfig};
+    use libhelio::BINDLESS_MATERIAL_FEATURES;
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
@@ -121,6 +122,18 @@ mod tests {
         let requested = required_wgpu_features(wgpu::Features::empty());
         assert!(!requested.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT));
         assert!(!requested.contains(wgpu::Features::TIMESTAMP_QUERY));
+    }
+
+    #[test]
+    fn complete_material_binding_array_capability_is_requested_together() {
+        let requested = required_wgpu_features(BINDLESS_MATERIAL_FEATURES);
+        assert!(requested.contains(BINDLESS_MATERIAL_FEATURES));
+    }
+
+    #[test]
+    fn partial_material_binding_array_capability_is_not_requested() {
+        let requested = required_wgpu_features(wgpu::Features::TEXTURE_BINDING_ARRAY);
+        assert!(!requested.intersects(BINDLESS_MATERIAL_FEATURES));
     }
 
     #[test]

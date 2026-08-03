@@ -6,10 +6,7 @@ use crate::{GpuMaterial, TextureId};
 /// WebGPU baseline guarantees only 16; native Vulkan/D3D12 supports 256.
 /// Mobile GPUs (Apple, Android/Adreno) get the same conservative cap as wasm —
 /// their shader compilers/descriptor limits choke on a 256-wide binding array.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
-pub const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
-pub const MAX_TEXTURES: usize = 16;
+pub const MAX_TEXTURES: usize = libhelio::MAX_MATERIAL_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureSamplerDesc {
@@ -203,4 +200,3 @@ impl GpuMaterialTextures {
         }
     }
 }
-

@@ -49,6 +49,9 @@ pub struct Scene {
     /// Texture binding version (increments on add/remove)
     pub(in crate::scene) texture_binding_version: u64,
 
+    /// Material texture representation and capacity selected for this device.
+    pub(in crate::scene) material_binding: libhelio::MaterialBindingConfig,
+
     /// Material texture storage buffer (GPU-side texture descriptors)
     pub(in crate::scene) material_textures: GrowableBuffer<crate::material::GpuMaterialTextures>,
 
@@ -286,6 +289,7 @@ impl Scene {
     /// let scene = Scene::new(device, queue);
     /// ```
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        let material_binding = libhelio::MaterialBindingConfig::for_device(&device);
         helio_core::upload::record_upload_bytes(4);
         let placeholder_texture = device.create_texture_with_data(
             &queue,
@@ -323,6 +327,7 @@ impl Scene {
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
             textures: SparsePool::new(),
             texture_binding_version: 0,
+            material_binding,
             material_textures: GrowableBuffer::new(
                 device,
                 256,

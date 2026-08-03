@@ -39,14 +39,19 @@ impl RadiantShaderCache {
         key: RadiantShaderKey,
         template: &super::template::RadiantTemplate,
         graph_wgsl: &str,
-        max_textures: usize,
+        material_binding: libhelio::MaterialBindingConfig,
         label: &str,
     ) -> &wgpu::ShaderModule {
         if !self.modules.contains_key(&key) {
-            let source = template.build_shader_source(graph_wgsl, max_textures);
-            #[cfg(target_arch = "wasm32")]
-            let source =
-                super::template::RadiantTemplate::apply_webgpu_fixups(&source, max_textures);
+            let source = template.build_shader_source(graph_wgsl, material_binding.max_textures);
+            let source = if material_binding.uses_binding_arrays() {
+                source
+            } else {
+                super::template::RadiantTemplate::apply_webgpu_fixups(
+                    &source,
+                    material_binding.max_textures,
+                )
+            };
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(source.into()),

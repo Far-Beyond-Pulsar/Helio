@@ -50,3 +50,4 @@ helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
 
 [dev-dependencies]
 pollster = { workspace = true }
+glam = { workspace = true }

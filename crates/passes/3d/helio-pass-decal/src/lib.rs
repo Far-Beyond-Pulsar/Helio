@@ -2,19 +2,12 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
-/// Size of the scene's bindless texture table. Must match `helio::material::MAX_TEXTURES`,
-/// which the renderer uses to size the per-frame view/sampler arrays.
-/// Capped at 16 on wasm32, Apple native Metal, and Android; 256 on other desktop backends.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
-const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
-const MAX_TEXTURES: usize = 16;
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
 pub struct DecalPass {
+    material_binding: libhelio::MaterialBindingConfig,
     collect_pipeline: wgpu::ComputePipeline,
     apply_pipeline: wgpu::ComputePipeline,
     bgl_collect: wgpu::BindGroupLayout,
@@ -40,7 +33,8 @@ impl DecalPass {
     /// from `main_scene`), so this pass owns no texture state of its own.
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue, _decal_buf: &wgpu::Buffer,
                _camera_buf: &wgpu::Buffer, _w: u32, _h: u32) -> Self {
-        let collect_src = decal_collect_source();
+        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let collect_src = decal_collect_source(material_binding);
         let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Collect"),
             source: wgpu::ShaderSource::Wgsl(collect_src.into()),
@@ -73,7 +67,7 @@ impl DecalPass {
                 bgl_entry_tex_storage(11, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba16Float),
             ],
         });
-        let bgl_textures = create_decal_texture_bgl(device);
+        let bgl_textures = create_decal_texture_bgl(device, material_binding);
         let collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Decal Collect PL"),
             bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures)],
@@ -110,6 +104,7 @@ impl DecalPass {
         });
 
         Self {
+            material_binding,
             collect_pipeline, apply_pipeline, bgl_collect, bgl_apply, bgl_textures,
             bg_collect: None, bg_apply: None, bg_textures: None,
             bg_collect_key: None, bg_apply_key: None, bg_textures_version: None,
@@ -146,68 +141,37 @@ fn make_temp(device: &wgpu::Device, format: wgpu::TextureFormat, label: &str, si
 ///
 /// The WGSL is written against the 256-entry native table; on wasm the arrays are
 /// rewritten to individual bindings (baseline WebGPU has no `binding_array`), and
-/// elsewhere the declared length is resized to match [`MAX_TEXTURES`] — the BGL and
+/// elsewhere the declared length is resized to match the selected material tier — the BGL and
 /// the shader must agree exactly or `create_bind_group` fails validation.
-fn decal_collect_source() -> String {
+fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> String {
     let src = include_str!("../shaders/decal_collect.wgsl");
-    #[cfg(target_arch = "wasm32")]
-    {
-        libhelio::shader::apply_webgpu_decal_bindings(src, MAX_TEXTURES)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
+    if material_binding.uses_binding_arrays() {
         src.replace(
             "binding_array<texture_2d<f32>, 256>",
-            &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+            &format!(
+                "binding_array<texture_2d<f32>, {}>",
+                material_binding.max_textures
+            ),
         )
         .replace(
             "binding_array<sampler, 256>",
-            &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+            &format!(
+                "binding_array<sampler, {}>",
+                material_binding.max_textures
+            ),
         )
+    } else {
+        libhelio::shader::apply_webgpu_decal_bindings(src, material_binding.max_textures)
     }
 }
 
 /// BGL for group 1: the scene's bindless texture table, shared with the GBuffer pass.
-fn create_decal_texture_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    #[allow(unused_mut)]
+fn create_decal_texture_bgl(
+    device: &wgpu::Device,
+    material_binding: libhelio::MaterialBindingConfig,
+) -> wgpu::BindGroupLayout {
     let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let count = std::num::NonZeroU32::new(MAX_TEXTURES as u32);
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-            },
-            count,
-        });
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count,
-        });
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for index in 0..MAX_TEXTURES as u32 {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: index, visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                },
-                count: None,
-            });
-        }
-        for index in 0..MAX_TEXTURES as u32 {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: MAX_TEXTURES as u32 + index, visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            });
-        }
-    }
+    material_binding.append_layout_entries(&mut entries, 0, wgpu::ShaderStages::COMPUTE);
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Decal Textures BGL"), entries: &entries,
     })
@@ -274,7 +238,10 @@ impl RenderPass for DecalPass {
         let tex_version = main_scene.material_textures.version;
         if self.bg_textures_version != Some(tex_version) || self.bg_textures.is_none() {
             self.bg_textures = Some(build_texture_bind_group(
-                ctx.device, &self.bgl_textures, &main_scene.material_textures,
+                ctx.device,
+                &self.bgl_textures,
+                &main_scene.material_textures,
+                self.material_binding,
             ));
             self.bg_textures_version = Some(tex_version);
         }
@@ -324,35 +291,15 @@ fn build_texture_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     textures: &libhelio::MaterialTextureBindings,
+    material_binding: libhelio::MaterialBindingConfig,
 ) -> wgpu::BindGroup {
-    #[allow(unused_mut)]
     let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureViewArray(textures.texture_views),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 1,
-            resource: wgpu::BindingResource::SamplerArray(textures.samplers),
-        });
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        for (index, view) in textures.texture_views.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: index as u32,
-                resource: wgpu::BindingResource::TextureView(view),
-            });
-        }
-        for (index, sampler) in textures.samplers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: MAX_TEXTURES as u32 + index as u32,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            });
-        }
-    }
+    material_binding.append_bind_group_entries(
+        &mut entries,
+        0,
+        textures.texture_views,
+        textures.samplers,
+    );
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Decal Textures BG"), layout, entries: &entries,
     })
@@ -374,7 +321,10 @@ mod tests {
     #[test]
     fn webgpu_fixup_rewrites_every_binding_array_in_the_real_shader() {
         let src = include_str!("../shaders/decal_collect.wgsl");
-        let fixed = libhelio::shader::apply_webgpu_decal_bindings(src, super::MAX_TEXTURES);
+        let fixed = libhelio::shader::apply_webgpu_decal_bindings(
+            src,
+            libhelio::MAX_MATERIAL_TEXTURES.min(16),
+        );
 
         assert!(
             !fixed.contains("binding_array"),

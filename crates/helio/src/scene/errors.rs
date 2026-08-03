@@ -24,8 +24,8 @@ pub enum SceneError {
 
     /// The scene's texture capacity has been exceeded.
     ///
-    /// The scene can hold a maximum of [`crate::MAX_TEXTURES`] textures.
-    #[error("scene texture capacity exceeded")]
+    /// The capacity is selected from the device's complete material binding tier.
+    #[error("scene texture capacity exceeded for the active material binding tier")]
     TextureCapacityExceeded,
 
     /// An operation was rejected because of an incompatible resource state.
@@ -50,4 +50,3 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 pub(super) fn invalid(resource: &'static str) -> SceneError {
     SceneError::InvalidHandle { resource }
 }
-

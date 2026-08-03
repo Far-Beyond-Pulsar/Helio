@@ -3,6 +3,15 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::borrow::Cow;
 
+/// Maximum sampled textures visible to either deferred-light fragment entry point.
+///
+/// Base lighting uses nine G-buffer inputs and six scene textures. Reflection
+/// composition uses six G-buffer inputs and four reflection textures.
+pub const BASE_SAMPLED_TEXTURE_COUNT: u32 = 15;
+pub const REFLECTION_SAMPLED_TEXTURE_COUNT: u32 = 10;
+const _: () = assert!(BASE_SAMPLED_TEXTURE_COUNT <= 16);
+const _: () = assert!(REFLECTION_SAMPLED_TEXTURE_COUNT <= 16);
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DeferredGlobals {
@@ -44,20 +53,27 @@ struct DeferredGlobals {
 
 pub struct DeferredLightPass {
     pipeline: wgpu::RenderPipeline,
+    reflection_pipeline: wgpu::RenderPipeline,
+    reflection_debug_pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     shadow_config_buf: wgpu::Buffer,
-    bgl_0: wgpu::BindGroupLayout,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
     bgl_3: wgpu::BindGroupLayout,
+    reflection_bgl_1: wgpu::BindGroupLayout,
+    reflection_bgl_2: wgpu::BindGroupLayout,
     bind_group_0: wgpu::BindGroup,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    reflection_bind_group_1: Option<wgpu::BindGroup>,
+    reflection_bind_group_2: Option<wgpu::BindGroup>,
+    bind_group_1_key: Option<[usize; 9]>,
     bind_group_2_key:
         Option<[usize; 14]>,
     bind_group_3_key: Option<(usize, usize)>,
+    reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    reflection_bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
@@ -83,8 +99,6 @@ pub struct DeferredLightPass {
     fallback_ssr_view: wgpu::TextureView,
     /// 1×1 black Rgba16Float fallback for planar reflections when not available.
     fallback_planar_view: wgpu::TextureView,
-    /// Linear clamp sampler for planar reflection blending.
-    planar_sampler: wgpu::Sampler,
     fallback_ies_view: wgpu::TextureView,
     ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
@@ -240,25 +254,8 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
-                // Reflection cube array: layer 6*i is capture i's cubemap.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::CubeArray,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
                 storage_entry(4),
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -296,19 +293,6 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // SSR accum texture (binding 14, Rgba16Float, half resolution)
-                texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
-                // Reflection captures (binding 15), sorted largest influence first
-                storage_entry(15),
-                // Planar reflection texture (binding 16, Rgba16Float, full resolution)
-                texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
-                // Planar reflection sampler (binding 17)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 17,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
                 // IES texture array (binding 18)
                 wgpu::BindGroupLayoutEntry {
                     binding: 18,
@@ -339,6 +323,65 @@ impl DeferredLightPass {
                 storage_entry(1), // tile_light_counts
             ],
         });
+
+        // Reflection composition is a second draw in the same render pass. Its
+        // deliberately narrow layouts keep this fragment stage at ten sampled
+        // textures while base deferred lighting remains at fifteen.
+        let reflection_bgl_1 = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("DeferredReflection BGL1"),
+                entries: &[
+                    texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                ],
+            },
+        );
+        let reflection_bgl_2 = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("DeferredReflection BGL2"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::CubeArray,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_entry(15),
+                    texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
+                ],
+            },
+        );
 
         let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DeferredLight BG0"),
@@ -392,6 +435,87 @@ impl DeferredLightPass {
             multiview_mask: None,
             cache: None,
         });
+        let reflection_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("DeferredReflection PL"),
+                bind_group_layouts: &[
+                    Some(&bgl_0),
+                    Some(&reflection_bgl_1),
+                    Some(&reflection_bgl_2),
+                ],
+                immediate_size: 0,
+            });
+        let reflection_pipeline = device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredReflection Additive Pipeline"),
+                layout: Some(&reflection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_reflection"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+        let reflection_debug_pipeline = device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredReflection Debug Pipeline"),
+                layout: Some(&reflection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_reflection"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
 
         let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
         let (_fallback_static_shadow_tex, fallback_static_shadow_view) = fallback_shadow_texture(device);
@@ -415,7 +539,7 @@ impl DeferredLightPass {
             compare: None, // No comparison - returns actual depth values for PCSS blocker search
             ..Default::default()
         });
-        let (fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
+        let (_fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
         let fallback_env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Env Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -426,11 +550,11 @@ impl DeferredLightPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let (fallback_rc_texture, fallback_rc_view) =
+        let (_fallback_rc_texture, fallback_rc_view) =
             black_2d_texture(device, queue, "Deferred Fallback RC");
 
         // Fallback caustics texture (black 1x1 RGBA16Float)
-        let (fallback_caustics_texture, fallback_caustics_view) =
+        let (_fallback_caustics_texture, fallback_caustics_view) =
             black_2d_texture(device, queue, "Deferred Fallback Caustics");
 
         // Caustics sampler
@@ -550,7 +674,7 @@ impl DeferredLightPass {
 
         // Fallback 1×1 black Rgba16Float lightmap texture.
         // Used when baked lightmap is not available (no indirect lighting).
-        let (fallback_lightmap_tex, fallback_lightmap_view) =
+        let (_fallback_lightmap_tex, fallback_lightmap_view) =
             black_2d_texture(device, queue, "Deferred Fallback Lightmap");
         let fallback_lightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Fallback Lightmap Sampler"),
@@ -568,18 +692,6 @@ impl DeferredLightPass {
         // Fallback 1×1 black Rgba16Float planar reflection texture.
         let (_fallback_planar_texture, fallback_planar_view) =
             black_2d_texture(device, queue, "Deferred Fallback Planar");
-
-        // Linear clamp sampler for planar reflection texture.
-        let planar_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Deferred Planar Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
 
         // Fallback 1×1 zero Rg16Float lightmap UV texture.
         // Used when lightmap UVs are not available from GBuffer.
@@ -608,19 +720,26 @@ impl DeferredLightPass {
 
         Self {
             pipeline,
+            reflection_pipeline,
+            reflection_debug_pipeline,
             globals_buf,
             shadow_config_buf,
-            bgl_0,
             bgl_1,
             bgl_2,
             bgl_3,
+            reflection_bgl_1,
+            reflection_bgl_2,
             bind_group_0,
             bind_group_1: None,
             bind_group_2: None,
             bind_group_3: None,
+            reflection_bind_group_1: None,
+            reflection_bind_group_2: None,
             bind_group_1_key: None,
             bind_group_2_key: None,
             bind_group_3_key: None,
+            reflection_bind_group_1_key: None,
+            reflection_bind_group_2_key: None,
             fallback_tile_lists,
             fallback_tile_counts,
             pre_aa_format,
@@ -641,7 +760,6 @@ impl DeferredLightPass {
             fallback_lightmap_uv_view,
             fallback_ssr_view,
             fallback_planar_view,
-            planar_sampler,
             fallback_ies_view,
             ies_sampler,
             debug_mode: 0,
@@ -653,6 +771,7 @@ impl DeferredLightPass {
     /// - 0  = normal PBR lighting
     /// - 10 = shadow factor greyscale (white=lit, black=shadowed)
     /// - 11 = raw shadow atlas depth slice 0 (unmipped, linear)
+    ///
     /// Enable/disable the environment-cubemap indirect specular term.
     pub fn set_env_reflections(&mut self, enabled: bool) {
         self.enable_env_reflections = enabled;
@@ -810,16 +929,17 @@ impl RenderPass for DeferredLightPass {
         let sss_view = ctx.resources.gbuffer_sss.get().unwrap_or(&self.fallback_lightmap_uv_view);
         let extra_view = ctx.resources.gbuffer_extra.get().unwrap_or(&self.fallback_lightmap_uv_view);
 
-        let gbuffer_key = (
+        let gbuffer_key = [
             gbuffer.albedo as *const _ as usize,
             gbuffer.normal as *const _ as usize,
             gbuffer.orm as *const _ as usize,
             gbuffer.emissive as *const _ as usize,
             ctx.depth as *const _ as usize,
             ao_view as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
             sss_view as *const _ as usize,
             extra_view as *const _ as usize,
-        );
+        ];
         if self.bind_group_1_key != Some(gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG1"),
@@ -850,6 +970,39 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
+        let reflection_gbuffer_key = (
+            gbuffer.normal as *const _ as usize,
+            gbuffer.orm as *const _ as usize,
+            gbuffer.emissive as *const _ as usize,
+            ctx.depth as *const _ as usize,
+            ao_view as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
+        );
+        if self.reflection_bind_group_1_key != Some(reflection_gbuffer_key) {
+            self.reflection_bind_group_1 = Some(ctx.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("DeferredReflection BG1"),
+                    layout: &self.reflection_bgl_1,
+                    entries: &[
+                        texture_view_entry(1, gbuffer.normal),
+                        texture_view_entry(2, gbuffer.orm),
+                        texture_view_entry(3, gbuffer.emissive),
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        texture_view_entry(5, ao_view),
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.fallback_ao_sampler),
+                        },
+                        texture_view_entry(7, lightmap_uv_view),
+                    ],
+                },
+            ));
+            self.reflection_bind_group_1_key = Some(reflection_gbuffer_key);
+        }
+
         let shadow_view = ctx.resources.shadow_atlas.get().unwrap_or(&self.fallback_shadow_view);
         let static_shadow_view = ctx.resources.static_shadow_atlas.get().unwrap_or(&self.fallback_static_shadow_view);
         let shadow_sampler = ctx
@@ -875,6 +1028,22 @@ impl RenderPass for DeferredLightPass {
         let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
 
+        let caustics_view = ctx
+            .resources
+            .water_caustics
+            .get()
+            .unwrap_or(&self.fallback_caustics_view);
+        let water_volumes = ctx
+            .resources
+            .water_volumes
+            .get()
+            .unwrap_or(&self.fallback_water_volumes);
+        let ies_view = ctx
+            .resources
+            .ies_textures
+            .get()
+            .unwrap_or(&self.fallback_ies_view);
+
         // SSR texture from SsrPass
         let ssr_view = ctx.resources.ssr_trace.get().unwrap_or(&self.fallback_ssr_view);
         // Planar reflection texture from PlanarReflectionPass
@@ -883,17 +1052,17 @@ impl RenderPass for DeferredLightPass {
         let scene_key = [
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
-            static_shadow_view as *const _ as usize,
             shadow_sampler as *const _ as usize,
-            env_view as *const _ as usize,
             ctx.scene.shadow_matrices as *const _ as usize,
             rc_view as *const _ as usize,
-            ssr_view as *const _ as usize,
-            env_sampler as *const _ as usize,
-            ctx.scene.reflection_captures as *const _ as usize,
-            planar_view as *const _ as usize,
-            &self.planar_sampler as *const _ as usize,
-            &self.fallback_ies_view as *const _ as usize,
+            &self.shadow_depth_sampler as *const _ as usize,
+            caustics_view as *const _ as usize,
+            &self.caustics_sampler as *const _ as usize,
+            water_volumes as *const _ as usize,
+            static_shadow_view as *const _ as usize,
+            lightmap_view as *const _ as usize,
+            lightmap_sampler as *const _ as usize,
+            ies_view as *const _ as usize,
             &self.ies_sampler as *const _ as usize,
         ];
         if self.bind_group_2_key != Some(scene_key) {
@@ -913,22 +1082,17 @@ impl RenderPass for DeferredLightPass {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(shadow_sampler),
                     },
-                    texture_view_entry(3, env_view),
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: ctx.scene.shadow_matrices.as_entire_binding(),
                     },
                     texture_view_entry(5, rc_view),
                     wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(env_sampler),
-                    },
-                    wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
                     },
                     // Water caustics texture (binding 8)
-                    texture_view_entry(8, ctx.resources.water_caustics.get().unwrap_or(&self.fallback_caustics_view)),
+                    texture_view_entry(8, caustics_view),
                     // Caustics sampler (binding 9)
                     wgpu::BindGroupEntry {
                         binding: 9,
@@ -937,7 +1101,7 @@ impl RenderPass for DeferredLightPass {
                     // Water volumes buffer (binding 10)
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: ctx.resources.water_volumes.get().unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
+                        resource: water_volumes.as_entire_binding(),
                     },
                     // Static shadow atlas (binding 11) — cached, only changes with Static topology
                     texture_view_entry(11, static_shadow_view),
@@ -948,24 +1112,11 @@ impl RenderPass for DeferredLightPass {
                         binding: 13,
                         resource: wgpu::BindingResource::Sampler(lightmap_sampler),
                     },
-                    // SSR accum texture (binding 14)
-                    texture_view_entry(14, ssr_view),
-                    wgpu::BindGroupEntry {
-                        binding: 15,
-                        resource: ctx.scene.reflection_captures.as_entire_binding(),
-                    },
-                    // Planar reflection texture (binding 16)
-                    texture_view_entry(16, planar_view),
-                    // Planar reflection sampler (binding 17)
-                    wgpu::BindGroupEntry {
-                        binding: 17,
-                        resource: wgpu::BindingResource::Sampler(&self.planar_sampler),
-                    },
                     // IES textures (binding 18) — from frame resources, fallback to identity
                     wgpu::BindGroupEntry {
                         binding: 18,
                         resource: wgpu::BindingResource::TextureView(
-                            ctx.resources.ies_textures.get().unwrap_or(&self.fallback_ies_view)
+                            ies_view
                         ),
                     },
                     // IES sampler (binding 19)
@@ -976,6 +1127,38 @@ impl RenderPass for DeferredLightPass {
                 ],
             }));
             self.bind_group_2_key = Some(scene_key);
+        }
+
+        let reflection_scene_key = (
+            env_view as *const _ as usize,
+            rc_view as *const _ as usize,
+            env_sampler as *const _ as usize,
+            ssr_view as *const _ as usize,
+            ctx.scene.reflection_captures as *const _ as usize,
+            planar_view as *const _ as usize,
+        );
+        if self.reflection_bind_group_2_key != Some(reflection_scene_key) {
+            self.reflection_bind_group_2 = Some(ctx.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("DeferredReflection BG2"),
+                    layout: &self.reflection_bgl_2,
+                    entries: &[
+                        texture_view_entry(3, env_view),
+                        texture_view_entry(5, rc_view),
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(env_sampler),
+                        },
+                        texture_view_entry(14, ssr_view),
+                        wgpu::BindGroupEntry {
+                            binding: 15,
+                            resource: ctx.scene.reflection_captures.as_entire_binding(),
+                        },
+                        texture_view_entry(16, planar_view),
+                    ],
+                },
+            ));
+            self.reflection_bind_group_2_key = Some(reflection_scene_key);
         }
 
         // ── Bind group 3: tile light culling results ──────────────────────────
@@ -1000,6 +1183,17 @@ impl RenderPass for DeferredLightPass {
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
         rp.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
+        rp.draw(0..3, 0..1);
+
+        let reflection_pipeline = if matches!(self.debug_mode, 30 | 31) {
+            &self.reflection_debug_pipeline
+        } else {
+            &self.reflection_pipeline
+        };
+        rp.set_pipeline(reflection_pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, self.reflection_bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.reflection_bind_group_2.as_ref().unwrap(), &[]);
         rp.draw(0..3, 0..1);
         Ok(())
     }

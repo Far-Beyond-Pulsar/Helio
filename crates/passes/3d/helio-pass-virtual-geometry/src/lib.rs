@@ -9,13 +9,6 @@ use helio_core::GpuInstanceData;
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Bindless texture array size per shader stage.
-/// Capped at 16 on wasm32, Apple native Metal, and Android; 256 on other desktop backends.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
-pub(crate) const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
-pub(crate) const MAX_TEXTURES: usize = 16;
-
 pub const LOD_LEVEL_COUNT: u32 = 8;
 
 /// Draw publication counters written by the GPU cull stages.
