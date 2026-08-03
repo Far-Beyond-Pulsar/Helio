@@ -12,3 +12,6 @@ libhelio = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
