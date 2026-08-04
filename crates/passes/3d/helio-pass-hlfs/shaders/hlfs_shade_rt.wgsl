@@ -132,8 +132,8 @@ fn rt_shadow(light: GpuLight, world_pos: vec3<f32>, N: vec3<f32>) -> f32 {
 
     let origin = world_pos + N * NORMAL_OFFSET_SCALE * 0.4;
     var vis = 0.0;
-    if light.light_type < 0.5 {
-        let mut sq: ray_query;
+    if light.light_type == 0u {
+        var sq: ray_query;
         rayQueryInitialize(&sq, acc_struct,
             RayDesc(0x01u, 0xFFu, 0.005, 9999.0, origin, -light.direction_outer.xyz));
         rayQueryProceed(&sq);

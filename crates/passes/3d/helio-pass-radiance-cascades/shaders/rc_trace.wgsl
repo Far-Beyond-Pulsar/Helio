@@ -94,7 +94,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     var dist:     f32;
     var atten:    f32;
 
-    if light.light_type < 0.5 {
+    if light.light_type == 0.0f {
         // Directional
         to_light = -light.direction;
         dist     = 1000.0;
@@ -107,7 +107,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
         to_light = diff / dist;
         atten    = clamp(1.0 - (dist / light.range), 0.0, 1.0);
         atten    = atten * atten;
-        if light.light_type > 1.5 {
+        if light.light_type > 1.5f {
             let cos_angle  = dot(-to_light, light.direction);
             let cos_outer  = light.cos_outer;
             let cos_inner  = light.cos_inner;
@@ -126,7 +126,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let origin = hit_pos + hit_normal * 0.004;
     var vis = 0.0;
 
-    if light.light_type < 0.5 {
+    if light.light_type == 0.0f {
         // Directional — single ray toward the sun, t_max = effectively infinite
         var sq: ray_query;
         rayQueryInitialize(&sq, acc_struct,

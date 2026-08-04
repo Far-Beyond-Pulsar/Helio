@@ -848,7 +848,7 @@ impl PostProcessBlender {
     /// Linearly interpolate between two PostProcessSettings.
     fn lerp_settings(a: &PostProcessSettings, b: &PostProcessSettings, t: f32) -> PostProcessSettings {
         PostProcessSettings {
-            exposure_mode: if t > 0.5 { b.exposure_mode } else { a.exposure_mode },
+            exposure_mode: if t >= 0.5 { b.exposure_mode } else { a.exposure_mode },
             exposure_compensation: lerp(a.exposure_compensation, b.exposure_compensation, t),
             exposure_min: lerp(a.exposure_min, b.exposure_min, t),
             exposure_max: lerp(a.exposure_max, b.exposure_max, t),
@@ -860,7 +860,7 @@ impl PostProcessBlender {
             bloom_knee: lerp(a.bloom_knee, b.bloom_knee, t),
             bloom_radius: lerp(a.bloom_radius, b.bloom_radius, t),
             bloom_tint: lerp3(a.bloom_tint, b.bloom_tint, t),
-            bloom_enabled: if t > 0.5 { b.bloom_enabled } else { a.bloom_enabled },
+            bloom_enabled: if t >= 0.5 { b.bloom_enabled } else { a.bloom_enabled },
 
             color_saturation: lerp3(a.color_saturation, b.color_saturation, t),
             color_contrast: lerp3(a.color_contrast, b.color_contrast, t),
@@ -870,9 +870,9 @@ impl PostProcessBlender {
 
             white_temp: lerp(a.white_temp, b.white_temp, t),
             white_tint: lerp(a.white_tint, b.white_tint, t),
-            white_balance_enabled: if t > 0.5 { b.white_balance_enabled } else { a.white_balance_enabled },
+            white_balance_enabled: if t >= 0.5 { b.white_balance_enabled } else { a.white_balance_enabled },
 
-            tonemap_operator: if t > 0.5 { b.tonemap_operator } else { a.tonemap_operator },
+            tonemap_operator: if t >= 0.5 { b.tonemap_operator } else { a.tonemap_operator },
             tonemap_exposure: lerp(a.tonemap_exposure, b.tonemap_exposure, t),
             tonemap_white_point: lerp(a.tonemap_white_point, b.tonemap_white_point, t),
 
@@ -880,16 +880,16 @@ impl PostProcessBlender {
             vignette_smoothness: lerp(a.vignette_smoothness, b.vignette_smoothness, t),
             vignette_roundness: lerp(a.vignette_roundness, b.vignette_roundness, t),
             vignette_color: lerp3(a.vignette_color, b.vignette_color, t),
-            vignette_enabled: if t > 0.5 { b.vignette_enabled } else { a.vignette_enabled },
+            vignette_enabled: if t >= 0.5 { b.vignette_enabled } else { a.vignette_enabled },
 
             ca_intensity: lerp(a.ca_intensity, b.ca_intensity, t),
             ca_start_offset: lerp(a.ca_start_offset, b.ca_start_offset, t),
-            ca_enabled: if t > 0.5 { b.ca_enabled } else { a.ca_enabled },
+            ca_enabled: if t >= 0.5 { b.ca_enabled } else { a.ca_enabled },
 
             grain_intensity: lerp(a.grain_intensity, b.grain_intensity, t),
             grain_response: lerp(a.grain_response, b.grain_response, t),
             grain_size: lerp(a.grain_size, b.grain_size, t),
-            grain_enabled: if t > 0.5 { b.grain_enabled } else { a.grain_enabled },
+            grain_enabled: if t >= 0.5 { b.grain_enabled } else { a.grain_enabled },
 
             dof_focal_distance: lerp(a.dof_focal_distance, b.dof_focal_distance, t),
             dof_focal_region: lerp(a.dof_focal_region, b.dof_focal_region, t),
@@ -897,14 +897,14 @@ impl PostProcessBlender {
             dof_far_transition: lerp(a.dof_far_transition, b.dof_far_transition, t),
             dof_scale: lerp(a.dof_scale, b.dof_scale, t),
             dof_max_bokeh_size: lerp(a.dof_max_bokeh_size, b.dof_max_bokeh_size, t),
-            dof_aperture_blades: if t > 0.5 { b.dof_aperture_blades } else { a.dof_aperture_blades },
+            dof_aperture_blades: if t >= 0.5 { b.dof_aperture_blades } else { a.dof_aperture_blades },
             dof_aperture_rotation: lerp(a.dof_aperture_rotation, b.dof_aperture_rotation, t),
             dof_sensor_diagonal: lerp(a.dof_sensor_diagonal, b.dof_sensor_diagonal, t),
-            dof_enabled: if t > 0.5 { b.dof_enabled } else { a.dof_enabled },
+            dof_enabled: if t >= 0.5 { b.dof_enabled } else { a.dof_enabled },
 
             motion_blur_amount: lerp(a.motion_blur_amount, b.motion_blur_amount, t),
             motion_blur_max: lerp(a.motion_blur_max, b.motion_blur_max, t),
-            motion_blur_enabled: if t > 0.5 { b.motion_blur_enabled } else { a.motion_blur_enabled },
+            motion_blur_enabled: if t >= 0.5 { b.motion_blur_enabled } else { a.motion_blur_enabled },
 
             blend_weight_bloom: lerp(a.blend_weight_bloom, b.blend_weight_bloom, t),
             blend_weight_dof: lerp(a.blend_weight_dof, b.blend_weight_dof, t),
@@ -914,12 +914,12 @@ impl PostProcessBlender {
             blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
             blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
 
-            hdr_output_mode: if t > 0.5 { b.hdr_output_mode } else { a.hdr_output_mode },
+            hdr_output_mode: if t >= 0.5 { b.hdr_output_mode } else { a.hdr_output_mode },
             hdr_max_nits: lerp(a.hdr_max_nits, b.hdr_max_nits, t),
             hdr_ui_brightness: lerp(a.hdr_ui_brightness, b.hdr_ui_brightness, t),
 
-            fog_enabled: if t > 0.5 { b.fog_enabled } else { a.fog_enabled },
-            fog_mode: if t > 0.5 { b.fog_mode } else { a.fog_mode },
+            fog_enabled: if t >= 0.5 { b.fog_enabled } else { a.fog_enabled },
+            fog_mode: if t >= 0.5 { b.fog_mode } else { a.fog_mode },
             fog_density: lerp(a.fog_density, b.fog_density, t),
             fog_height_falloff: lerp(a.fog_height_falloff, b.fog_height_falloff, t),
             fog_start_distance: lerp(a.fog_start_distance, b.fog_start_distance, t),
@@ -936,9 +936,9 @@ impl PostProcessBlender {
             highlights_min: lerp(a.highlights_min, b.highlights_min, t),
             shadow_highlight_balance: lerp(a.shadow_highlight_balance, b.shadow_highlight_balance, t),
             hue_shift: lerp(a.hue_shift, b.hue_shift, t),
-            lut_generation: if t > 0.5 { b.lut_generation } else { a.lut_generation },
+            lut_generation: if t >= 0.5 { b.lut_generation } else { a.lut_generation },
             lut_intensity: lerp(a.lut_intensity, b.lut_intensity, t),
-            lut_platform: if t > 0.5 { b.lut_platform } else { a.lut_platform },
+            lut_platform: if t >= 0.5 { b.lut_platform } else { a.lut_platform },
         }
     }
 }

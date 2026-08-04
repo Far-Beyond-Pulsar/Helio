@@ -241,7 +241,7 @@ fn lerp3v(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> { return a + (b - a) 
 
 fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: f32) -> GpuPostProcessUniforms {
     var r: GpuPostProcessUniforms;
-    r.exposure_mode          = select(base.exposure_mode, vol.exposure_mode, t > 0.5);
+    r.exposure_mode          = select(base.exposure_mode, vol.exposure_mode, t >= 0.5);
     r.exposure_compensation  = lerpf(base.exposure_compensation, vol.exposure_compensation, t);
     r.exposure_min           = lerpf(base.exposure_min, vol.exposure_min, t);
     r.exposure_max           = lerpf(base.exposure_max, vol.exposure_max, t);
@@ -250,7 +250,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.bloom_knee             = lerpf(base.bloom_knee, vol.bloom_knee, t);
     r.bloom_radius           = lerpf(base.bloom_radius, vol.bloom_radius, t);
     r.bloom_tint             = lerp3v(base.bloom_tint, vol.bloom_tint, t);
-    r.bloom_enabled          = select(base.bloom_enabled, vol.bloom_enabled, t > 0.5);
+    r.bloom_enabled          = select(base.bloom_enabled, vol.bloom_enabled, t >= 0.5);
     r.color_saturation       = lerp3v(base.color_saturation, vol.color_saturation, t);
     r.color_contrast         = lerp3v(base.color_contrast, vol.color_contrast, t);
     r.color_gamma            = lerp3v(base.color_gamma, vol.color_gamma, t);
@@ -258,22 +258,22 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.color_offset           = lerp3v(base.color_offset, vol.color_offset, t);
     r.white_temp             = lerpf(base.white_temp, vol.white_temp, t);
     r.white_tint             = lerpf(base.white_tint, vol.white_tint, t);
-    r.white_balance_enabled  = select(base.white_balance_enabled, vol.white_balance_enabled, t > 0.5);
-    r.tonemap_operator       = select(base.tonemap_operator, vol.tonemap_operator, t > 0.5);
+    r.white_balance_enabled  = select(base.white_balance_enabled, vol.white_balance_enabled, t >= 0.5);
+    r.tonemap_operator       = select(base.tonemap_operator, vol.tonemap_operator, t >= 0.5);
     r.tonemap_exposure       = lerpf(base.tonemap_exposure, vol.tonemap_exposure, t);
     r.tonemap_white_point    = lerpf(base.tonemap_white_point, vol.tonemap_white_point, t);
     r.vignette_intensity     = lerpf(base.vignette_intensity, vol.vignette_intensity, t);
     r.vignette_smoothness    = lerpf(base.vignette_smoothness, vol.vignette_smoothness, t);
     r.vignette_roundness     = lerpf(base.vignette_roundness, vol.vignette_roundness, t);
     r.vignette_color         = lerp3v(base.vignette_color, vol.vignette_color, t);
-    r.vignette_enabled       = select(base.vignette_enabled, vol.vignette_enabled, t > 0.5);
+    r.vignette_enabled       = select(base.vignette_enabled, vol.vignette_enabled, t >= 0.5);
     r.ca_intensity           = lerpf(base.ca_intensity, vol.ca_intensity, t);
     r.ca_start_offset        = lerpf(base.ca_start_offset, vol.ca_start_offset, t);
-    r.ca_enabled             = select(base.ca_enabled, vol.ca_enabled, t > 0.5);
+    r.ca_enabled             = select(base.ca_enabled, vol.ca_enabled, t >= 0.5);
     r.grain_intensity        = lerpf(base.grain_intensity, vol.grain_intensity, t);
     r.grain_response         = lerpf(base.grain_response, vol.grain_response, t);
     r.grain_size             = lerpf(base.grain_size, vol.grain_size, t);
-    r.grain_enabled          = select(base.grain_enabled, vol.grain_enabled, t > 0.5);
+    r.grain_enabled          = select(base.grain_enabled, vol.grain_enabled, t >= 0.5);
     r.dof_focal_distance     = lerpf(base.dof_focal_distance, vol.dof_focal_distance, t);
     r.dof_focal_region       = lerpf(base.dof_focal_region, vol.dof_focal_region, t);
     r.dof_aperture_shape     = lerpf(base.dof_aperture_shape, vol.dof_aperture_shape, t);
@@ -284,7 +284,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.dof_sensor_diagonal    = lerpf(base.dof_sensor_diagonal, vol.dof_sensor_diagonal, t);
     r.motion_blur_amount     = lerpf(base.motion_blur_amount, vol.motion_blur_amount, t);
     r.motion_blur_max        = lerpf(base.motion_blur_max, vol.motion_blur_max, t);
-    r.motion_blur_enabled    = select(base.motion_blur_enabled, vol.motion_blur_enabled, t > 0.5);
+    r.motion_blur_enabled    = select(base.motion_blur_enabled, vol.motion_blur_enabled, t >= 0.5);
     r.blend_weight_bloom        = lerpf(base.blend_weight_bloom, vol.blend_weight_bloom, t);
     r.blend_weight_dof          = lerpf(base.blend_weight_dof, vol.blend_weight_dof, t);
     r.blend_weight_motion_blur  = lerpf(base.blend_weight_motion_blur, vol.blend_weight_motion_blur, t);
@@ -296,8 +296,8 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     // left unwritten here is indeterminate — and the caller copies this whole struct
     // over the post-process uniform buffer, so a miss would corrupt fog config for
     // every frame in which any post-process volume is active.
-    r.fog_enabled               = select(base.fog_enabled, vol.fog_enabled, t > 0.5);
-    r.fog_mode                  = select(base.fog_mode, vol.fog_mode, t > 0.5);
+    r.fog_enabled               = select(base.fog_enabled, vol.fog_enabled, t >= 0.5);
+    r.fog_mode                  = select(base.fog_mode, vol.fog_mode, t >= 0.5);
     r.fog_density               = lerpf(base.fog_density, vol.fog_density, t);
     r.fog_height_falloff        = lerpf(base.fog_height_falloff, vol.fog_height_falloff, t);
     r.fog_start_distance        = lerpf(base.fog_start_distance, vol.fog_start_distance, t);
@@ -306,7 +306,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.fog_scattering_anisotropy = lerpf(base.fog_scattering_anisotropy, vol.fog_scattering_anisotropy, t);
     r.fog_color                 = lerp3v(base.fog_color, vol.fog_color, t);
     r.fog_emissive              = lerp3v(base.fog_emissive, vol.fog_emissive, t);
-    r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t > 0.5);
+    r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t >= 0.5);
     r.hdr_max_nits              = lerpf(base.hdr_max_nits, vol.hdr_max_nits, t);
     r.hdr_ui_brightness         = lerpf(base.hdr_ui_brightness, vol.hdr_ui_brightness, t);
     r.lift_color                = lerp3v(base.lift_color, vol.lift_color, t);
@@ -316,9 +316,9 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.highlights_min            = lerpf(base.highlights_min, vol.highlights_min, t);
     r.shadow_highlight_balance  = lerpf(base.shadow_highlight_balance, vol.shadow_highlight_balance, t);
     r.hue_shift                 = lerpf(base.hue_shift, vol.hue_shift, t);
-    r.lut_generation            = select(base.lut_generation, vol.lut_generation, t > 0.5);
+    r.lut_generation            = select(base.lut_generation, vol.lut_generation, t >= 0.5);
     r.lut_intensity             = lerpf(base.lut_intensity, vol.lut_intensity, t);
-    r.lut_platform              = select(base.lut_platform, vol.lut_platform, t > 0.5);
+    r.lut_platform              = select(base.lut_platform, vol.lut_platform, t >= 0.5);
     // Padding fields are implicitly copied via the field-by-field assignment above.
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
