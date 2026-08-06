@@ -230,14 +230,23 @@ impl Scene {
                 continue;
             };
             let corners = portal_quad_corners(&record.a, record.half_extent);
-            let c0_clip = viewer_vp * corners[0].extend(1.0);
-            println!(
-                "portal #{} corner0 clip=({:.1},{:.1},{:.1},{:.1})",
-                i, c0_clip.x, c0_clip.y, c0_clip.z, c0_clip.w,
-            );
+            for ci in 0..4 {
+                let c = viewer_vp * corners[ci].extend(1.0);
+                let visible = c.w > 0.0;
+                let ndc = if visible { c.truncate() / c.w } else { glam::Vec3::ZERO };
+                let uv_x = ndc.x * 0.5 + 0.5;
+                let uv_y = 0.5 - ndc.y * 0.5;
+                println!(
+                    "  corner[{}]: world=({:.1},{:.1},{:.1}) clip=({:.1},{:.1},{:.1},{:.1}) ndc=({:.3},{:.3},{:.3}) uv=({:.3},{:.3}) {}",
+                    ci, corners[ci].x, corners[ci].y, corners[ci].z,
+                    c.x, c.y, c.z, c.w,
+                    ndc.x, ndc.y, ndc.z, uv_x, uv_y,
+                    if visible { "KEPT" } else { "SKIP" },
+                );
+            }
             let region_rect = screen_rect_for_points(viewer_vp, &corners, &dest_viewport);
+            println!("portal #{} region_rect=({:.0},{:.0},{:.0},{:.0})", i, region_rect[0], region_rect[1], region_rect[2], region_rect[3]);
             if region_rect[2] <= 0.0 || region_rect[3] <= 0.0 {
-                println!("portal #{} NOT VISIBLE (w={:.2})", i, c0_clip.w);
                 continue;
             }
 
@@ -276,11 +285,8 @@ impl Scene {
                     eye.forward().x, eye.forward().y, eye.forward().z,
                 );
             }
-            // XXX: diagnostic — skip oblique clip to test if frustum cull is
-            // discarding geometry.
-            //let clip = oblique_clip_plane_view(&eye, &record.b, near.max(0.01));
-            //let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, Some(clip));
-            let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, None);
+            let clip = oblique_clip_plane_view(&eye, &record.b, near.max(0.01));
+            let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, Some(clip));
 
             let camera_slot = FIRST_PORTAL_SLOT + *next_slot;
             let view_index = self.secondary_cpu_views.len() as u32;

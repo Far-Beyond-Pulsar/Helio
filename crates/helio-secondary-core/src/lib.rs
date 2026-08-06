@@ -129,6 +129,8 @@ const _: () = assert!(std::mem::size_of::<GpuSecondaryView>() == 120);
 /// Uses the wgpu UV convention (y down, origin top-left). Points behind the
 /// camera are skipped. Returns a zero rect when nothing projects.
 pub fn screen_rect_for_points(view_proj: &Mat4, points: &[Vec3], viewport: &[u32; 2]) -> [f32; 4] {
+    let vpw = viewport[0] as f32;
+    let vph = viewport[1] as f32;
     let mut min = [f32::INFINITY; 2];
     let mut max = [-f32::INFINITY; 2];
     for &p in points {
@@ -137,11 +139,12 @@ pub fn screen_rect_for_points(view_proj: &Mat4, points: &[Vec3], viewport: &[u32
             continue;
         }
         let ndc = clip.truncate() / clip.w;
-        let uv = [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5];
-        min[0] = min[0].min(uv[0]);
-        min[1] = min[1].min(uv[1]);
-        max[0] = max[0].max(uv[0]);
-        max[1] = max[1].max(uv[1]);
+        let px = (ndc.x * 0.5 + 0.5) * vpw;
+        let py = (0.5 - ndc.y * 0.5) * vph;
+        min[0] = min[0].min(px);
+        min[1] = min[1].min(py);
+        max[0] = max[0].max(px);
+        max[1] = max[1].max(py);
     }
     if !min[0].is_finite() || !min[1].is_finite() {
         return [0.0, 0.0, 0.0, 0.0];

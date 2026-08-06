@@ -22,7 +22,7 @@ use helio::{
     DebugDrawState, LightId, PortalDescriptor, PortalPose, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, point_light, spot_light};
+use v3_demo_common::{box_mesh, make_material, point_light, spot_light, directional_light};
 
 use winit::{
     application::ApplicationHandler,
@@ -182,14 +182,7 @@ impl ApplicationHandler for App {
             0.3,
             [0.05, 0.2, 0.4],
             0.6,
-        ));
-        let diag_frame_mat = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.9, 0.2, 1.0],
-            0.3,
-            0.1,
-            [0.1, 0.4, 0.1],
-            0.3,
-        ));
+        )        );
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18) —
         // identical to `indoor_corridor`, minus the solid end walls (a
@@ -271,28 +264,6 @@ impl ApplicationHandler for App {
             half_extent: DOORWAY_HALF_EXTENT,
             user_tag: 0,
         });
-
-        // Diagnostic pair — opposite-facing (proven working config from
-        // portals_demo). A at z=15 facing -Z, B at z=-12 facing +Z.
-        let diag_a_eye = glam::Vec3::new(0.0, -1.5, -15.0); // -(15) = -15
-        let diag_a = PortalPose::from_look_at(
-            diag_a_eye,
-            diag_a_eye + glam::Vec3::new(0.0, 0.0, -1.0),
-            glam::Vec3::Y,
-        );
-        let diag_b = PortalPose::from_look_at(
-            glam::Vec3::new(0.0, -1.5, -12.0),
-            glam::Vec3::new(0.0, -1.5, -11.0),
-            glam::Vec3::Y,
-        );
-        renderer.scene_mut().add_portal(PortalDescriptor {
-            a: diag_a,
-            b: diag_b,
-            half_extent: DOORWAY_HALF_EXTENT,
-            user_tag: 0,
-        });
-        build_doorway_frame(&mut renderer, diag_frame_mat, 15.0);
-        build_doorway_frame(&mut renderer, diag_frame_mat, -12.0);
 
         let mut light_ids = Vec::new();
         for &z in &[-14.0f32, -7.0, 0.0, 7.0, 14.0] {

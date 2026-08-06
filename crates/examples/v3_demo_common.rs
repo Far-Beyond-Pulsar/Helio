@@ -3,6 +3,7 @@ use helio::{
     GpuLight, GpuMaterial, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectDescriptor,
     PackedVertex, Renderer,
 };
+use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
 
 pub fn make_material(
     base_color: [f32; 4],
@@ -102,7 +103,7 @@ pub fn insert_object_with_movability(
             transform.w_axis.z,
             radius,
         ],
-        flags: 0,
+        flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
         groups: helio::GroupMask::NONE,
         movability,
         user_tag: 0,
