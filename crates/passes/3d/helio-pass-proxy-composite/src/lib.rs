@@ -260,6 +260,7 @@ impl RenderPass for ProxyCompositePass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let Some(secondary) = ctx.frame_resources.secondary.get() else {
+            println!("ProxyComposite: no secondary frame data");
             self.active_view_count = 0;
             for view in &mut self.views {
                 view.active = false;
@@ -270,6 +271,11 @@ impl RenderPass for ProxyCompositePass {
         let gpu_views: &[GpuSecondaryView] = bytemuck::cast_slice(secondary.view_bytes);
         let view_count = (secondary.view_count as usize).min(gpu_views.len()).min(self.views.len());
         self.active_view_count = view_count;
+        println!("ProxyComposite: {} active views (published {})", view_count, secondary.view_count);
+        for vi in 0..view_count.min(5) {
+            let v = &gpu_views[vi];
+            println!("  view[{}]: camera_slot={}, region_rect=({:.0},{:.0},{:.0},{:.0}), parent={}", vi, v.camera_slot, v.region_rect[0], v.region_rect[1], v.region_rect[2], v.region_rect[3], v.parent_index);
+        }
 
         // Every pooled secondary-view slot shares one fixed resolution
         // regardless of recursion depth (see `SECONDARY_RESOLUTION_DIVISOR`'s

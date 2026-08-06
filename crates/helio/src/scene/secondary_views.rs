@@ -110,6 +110,17 @@ impl Scene {
         self.secondary_cpu_views.clear();
         let queue = self.gpu_scene.queue.clone();
         let main_vp = Mat4::from_cols_array(&main_camera.view_proj);
+        println!(
+            "view_proj[2]=({:.2},{:.2},{:.2},{:.2}) [3]=({:.2},{:.2},{:.2},{:.2})",
+            main_camera.view_proj[8], main_camera.view_proj[9], main_camera.view_proj[10], main_camera.view_proj[11],
+            main_camera.view_proj[12], main_camera.view_proj[13], main_camera.view_proj[14], main_camera.view_proj[15],
+        );
+        println!(
+            "cam pos=({:.1},{:.1},{:.1}) fwd=({:.1},{:.1},{:.1}) near={:.2} far={:.2}",
+            main_camera.position_near[0], main_camera.position_near[1], main_camera.position_near[2],
+            main_camera.forward_far[0], main_camera.forward_far[1], main_camera.forward_far[2],
+            main_camera.position_near[3], main_camera.forward_far[3],
+        );
 
         // ── Sublevels ────────────────────────────────────────────────────
         for i in 0..self.sublevels.dense_len() {
@@ -219,17 +230,57 @@ impl Scene {
                 continue;
             };
             let corners = portal_quad_corners(&record.a, record.half_extent);
+            let c0_clip = viewer_vp * corners[0].extend(1.0);
+            println!(
+                "portal #{} corner0 clip=({:.1},{:.1},{:.1},{:.1})",
+                i, c0_clip.x, c0_clip.y, c0_clip.z, c0_clip.w,
+            );
             let region_rect = screen_rect_for_points(viewer_vp, &corners, &dest_viewport);
             if region_rect[2] <= 0.0 || region_rect[3] <= 0.0 {
-                // Not visible from this viewer this frame: no slot consumed,
-                // and nothing recurses through it.
+                println!("portal #{} NOT VISIBLE (w={:.2})", i, c0_clip.w);
                 continue;
             }
 
             let pair = PortalPair { a: record.a, b: record.b };
-            let eye = pair.eye_pose(viewer_pose);
-            let clip = oblique_clip_plane_view(&eye, &record.b, near.max(0.01));
-            let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, Some(clip));
+            let mut eye = pair.eye_pose(viewer_pose);
+                println!(
+                "portal view #{:?}: a_pos=({:.1},{:.1},{:.1}) a_fwd=({:.1},{:.1},{:.1}), \
+                 eye pre-flip: pos=({:.1},{:.1},{:.1}) fwd=({:.1},{:.1},{:.1}), \
+                 b_pos=({:.1},{:.1},{:.1}) b_fwd=({:.1},{:.1},{:.1}), \
+                 region_rect=({:.0},{:.0},{:.0},{:.0})",
+                i, record.a.position().x, record.a.position().y, record.a.position().z,
+                record.a.forward().x, record.a.forward().y, record.a.forward().z,
+                eye.position().x, eye.position().y, eye.position().z,
+                eye.forward().x, eye.forward().y, eye.forward().z,
+                record.b.position().x, record.b.position().y, record.b.position().z,
+                record.b.forward().x, record.b.forward().y, record.b.forward().z,
+                region_rect[0], region_rect[1], region_rect[2], region_rect[3],
+            );
+            // When both portals in a pair face the same direction, the
+            // pair_map is a pure translation and eye_pose places the camera
+            // on the *destination* side of B looking away from its scene.
+            // Detect this and reflect the eye across B's plane to the entry
+            // side so it looks toward B (and thus its destination scene).
+            let b_fwd = record.b.forward();
+            let side = (eye.position() - record.b.position()).dot(b_fwd);
+            if side > 0.0 {
+                // Reflect the eye position across B's plane to the entry side
+                // while preserving the orientation (forward direction stays the
+                // same — it now points toward B instead of away).
+                let reflect_pos = eye.position() - 2.0 * side * b_fwd;
+                let rot = rotation_part(eye.transform);
+                eye = PortalPose { transform: Mat4::from_translation(reflect_pos) * rot };
+            println!(
+                    "  -> flipped eye to entry side: pos=({:.1},{:.1},{:.1}) fwd=({:.1},{:.1},{:.1})",
+                    eye.position().x, eye.position().y, eye.position().z,
+                    eye.forward().x, eye.forward().y, eye.forward().z,
+                );
+            }
+            // XXX: diagnostic — skip oblique clip to test if frustum cull is
+            // discarding geometry.
+            //let clip = oblique_clip_plane_view(&eye, &record.b, near.max(0.01));
+            //let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, Some(clip));
+            let cam = portal_eye_camera(main_camera, &eye, fov_y, aspect, near, far, None);
 
             let camera_slot = FIRST_PORTAL_SLOT + *next_slot;
             let view_index = self.secondary_cpu_views.len() as u32;

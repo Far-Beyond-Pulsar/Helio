@@ -432,6 +432,7 @@ impl RenderPass for SecondaryGBufferPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let Some(secondary) = ctx.frame_resources.secondary.get() else {
+            println!("SecondaryGBuffer: no secondary frame data");
             self.active_view_count = 0;
             for view in &mut self.views {
                 view.active = false;
@@ -442,6 +443,7 @@ impl RenderPass for SecondaryGBufferPass {
         let views: &[GpuSecondaryView] = bytemuck::cast_slice(secondary.view_bytes);
         let view_count = (secondary.view_count as usize).min(views.len()).min(self.views.len());
         self.active_view_count = view_count;
+        println!("SecondaryGBuffer: {} active views", view_count);
 
         let draw_needed = ctx.scene.draw_calls.len() as u32;
         let instance_needed = ctx.scene.instances.len() as u32;
