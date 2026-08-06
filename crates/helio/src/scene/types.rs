@@ -113,8 +113,19 @@ pub struct PickableObject {
     /// Mesh handle — used to look up the per-mesh BVH in [`crate::ScenePicker`].
     pub mesh_id: MeshId,
 
-    /// Current world-space model matrix (updated by `update_object_transform`).
+    /// Current model matrix (updated by `update_object_transform`).
+    ///
+    /// World space for an ordinary object. **Sublevel-local** (not world
+    /// space) for an object belonging to an active sublevel's group — see
+    /// [`GroupMask`] on this struct and `ScenePicker::rebuild_instances`,
+    /// which composes it with that sublevel's placement before use, mirroring
+    /// what `helio_secondary_core::sublevel_camera` does for rendering.
     pub transform: Mat4,
+
+    /// This object's group membership — read by `ScenePicker::rebuild_instances`
+    /// to detect sublevel membership (`transform` needs the sublevel's
+    /// placement composed in) and otherwise unused by picking.
+    pub groups: GroupMask,
 
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,

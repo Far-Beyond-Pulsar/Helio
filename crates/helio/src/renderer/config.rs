@@ -293,6 +293,14 @@ pub struct RendererConfig {
     /// create the `helio-xr` session/swapchain and hand it to the renderer via
     /// [`Renderer::set_xr_session`](crate::Renderer#method.set_xr_session).
     pub enable_xr: bool,
+
+    /// Enable the portal rendering pipeline. Default `false`.
+    ///
+    /// When `false`, the default graph never constructs the portal/sublevel
+    /// passes — same zero-overhead pattern as `enable_foliage`.
+    pub enable_portals: bool,
+    /// Enable the sublevel rendering pipeline. Default `false`.
+    pub enable_sublevels: bool,
 }
 
 impl RendererConfig {
@@ -317,6 +325,8 @@ impl RendererConfig {
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
+            enable_portals: false,
+            enable_sublevels: false,
         }
     }
 

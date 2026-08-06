@@ -2847,6 +2847,8 @@ dependencies = [
  "helio-foliage-core",
  "helio-pass-postprocess",
  "helio-pass-tsr",
+ "helio-portal-core",
+ "helio-secondary-core",
  "helio-voxel-core",
  "helio-xr",
  "image",
@@ -2959,7 +2961,9 @@ dependencies = [
  "helio-pass-planar-reflection",
  "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
+ "helio-pass-proxy-composite",
  "helio-pass-radiance-cascades",
+ "helio-pass-secondary-gbuffer",
  "helio-pass-shadow",
  "helio-pass-shadow-cull",
  "helio-pass-shadow-dirty",
@@ -2974,7 +2978,10 @@ dependencies = [
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
+ "helio-portal-core",
+ "helio-secondary-core",
  "image",
+ "libhelio",
  "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
@@ -3238,6 +3245,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-proxy-composite"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-secondary-gbuffer",
+ "helio-secondary-core",
+ "libhelio",
+ "log",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-radiance-cascades"
 version = "0.1.0"
 dependencies = [
@@ -3267,6 +3287,19 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-secondary-gbuffer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-secondary-core",
+ "libhelio",
+ "log",
+ "naga 30.0.0",
  "wgpu 30.0.0",
 ]
 
@@ -3532,6 +3565,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-portal-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
+]
+
+[[package]]
 name = "helio-scenedb"
 version = "0.1.0"
 dependencies = [
@@ -3540,6 +3581,16 @@ dependencies = [
  "pollster 0.4.0",
  "pulsar_scenedb",
  "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-secondary-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
+ "helio-portal-core",
+ "libhelio",
 ]
 
 [[package]]

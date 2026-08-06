@@ -118,8 +118,25 @@ fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
 
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+/// Mirrors `libhelio::INSTANCE_FLAG_SUBLEVEL_HIDDEN`.
+const INSTANCE_FLAG_SUBLEVEL_HIDDEN: u32 = 8u;
+/// Mirrors `libhelio::INSTANCE_FLAG_SHADOW_ONLY`.
+const INSTANCE_FLAG_SHADOW_ONLY: u32 = 16u;
 
 fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> bool {
+    // A sublevel member's `model` is sublevel-local, not world space — drawing
+    // it through the main camera would place it at the wrong position. It is
+    // rendered instead by `SecondaryGBufferPass` through a camera that bakes
+    // the sublevel's placement in. This check wins over ALWAYS_VISIBLE below:
+    // an object can be both "never cull me" and "not mine to draw here".
+    if (inst.flags & INSTANCE_FLAG_SUBLEVEL_HIDDEN) != 0u {
+        return false;
+    }
+    // Shadow-proxy volumes (a sublevel's coarse stand-in caster) are never
+    // part of the visible G-buffer — only the shadow cull draws them.
+    if (inst.flags & INSTANCE_FLAG_SHADOW_ONLY) != 0u {
+        return false;
+    }
     // Per-object cull opt-out. Culling here is driven by one world-space bounding sphere,
     // which is a poor fit for very large or very flat geometry (a ground plane's sphere
     // is set by its diagonal): such objects cull almost nothing and are easy to bound

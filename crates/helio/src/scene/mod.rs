@@ -71,9 +71,12 @@ mod helpers;
 mod lifecycle;
 mod multi_mesh;
 mod objects;
+mod portals;
 mod postprocess;
 mod resources;
+mod secondary_views;
 mod stats;
+mod sublevels;
 mod types;
 mod virtual_geometry;
 mod voxel;
@@ -90,6 +93,9 @@ pub use foliage::{
     FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFoliageInteractor,
 };
 pub use errors::*;
+pub use portals::PortalDescriptor;
+pub use secondary_views::PortalTeleport;
+pub use sublevels::SublevelDescriptor;
 pub use types::{ObjectDescriptor, PickableObject, VoxelVolumeDescriptor};
 pub use voxel::VoxelMode;
 

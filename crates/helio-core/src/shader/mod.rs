@@ -85,6 +85,27 @@ pub const WIND: &str = include_str!("foliage_wind.wgsl");
 /// Marker opting a shader into the foliage wind model. Must appear in the source.
 pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
 
+/// The shared G-buffer declarations and surface evaluation: `Camera`/`Globals`/
+/// `GpuMaterial`/`VertexOutput`/`SurfaceData` structs, the material-texture
+/// sampling helpers, `default_pbr_surface` and `compute_velocity`.
+///
+/// Lives here rather than next to the pass because every shader that writes the
+/// G-buffer must agree on them byte-for-byte — the main gbuffer pass, the
+/// secondary (portal/sublevel) G-buffer pass, and the tier-2 Radiant templates
+/// composed on top of the base all evaluate the same material model. It used to
+/// live inline in `gbuffer.wgsl`, which the secondary pass would otherwise have
+/// had to copy.
+///
+/// Unlike the prelude it declares the `Camera` struct and `CAMERA_SLOTS` itself,
+/// so it must not be combined with [`PRELUDE`] in one shader: both define
+/// `CAMERA_SLOTS` and the duplicate fails at parse time. A shader opting in owns
+/// its bindings and entry points; this file is declarations and pure helpers
+/// only.
+pub const GBUFFER_COMMON: &str = include_str!("gbuffer_common.wgsl");
+
+/// Marker opting a shader into the shared G-buffer module. Must appear in the source.
+pub const GBUFFER_COMMON_MARKER: &str = "//!use helio_gbuffer_common";
+
 /// Returns `true` if `source` opts into the prelude.
 pub fn uses_prelude(source: &str) -> bool {
     source.contains(MARKER)

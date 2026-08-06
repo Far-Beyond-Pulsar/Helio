@@ -1,0 +1,15 @@
+[package]
+name = "helio-pass-proxy-composite"
+version = "0.1.0"
+edition = "2021"
+description = "Helio render pass: merge secondary G-buffers into the main G-buffer chain"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core                   = { workspace = true }
+libhelio                     = { workspace = true }
+helio-secondary-core         = { workspace = true }
+helio-pass-secondary-gbuffer = { workspace = true }
+wgpu                         = { workspace = true }
+bytemuck                     = { workspace = true, features = ["derive"] }
+log                          = { workspace = true }

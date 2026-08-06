@@ -200,6 +200,15 @@ impl Renderer {
         self.scene.update_camera(jittered_camera);
         self.scene.flush();
 
+        // Sublevel/portal camera slots are derived from this frame's main
+        // camera — must run after `update_camera`, and (since it needs
+        // `&mut self.scene`) before `submit_frame` starts building
+        // `FrameResources`, which borrows from `self.scene` for the rest of
+        // the frame. See `Scene::refresh_secondary_views`'s doc comment.
+        let main_camera_uniforms = *self.scene.gpu_scene().camera.data();
+        self.scene
+            .refresh_secondary_views(&main_camera_uniforms, [internal_w, internal_h]);
+
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
 
@@ -539,6 +548,16 @@ impl Renderer {
             }
         }
         frame_resources.foliage_interactor_count = foliage_interactor_count;
+
+        // Sublevels + portals. `refresh_secondary_views` already ran this
+        // frame (in `render()`, before `submit_frame`). Mirrors the foliage
+        // contract immediately above: `None` when nothing is active, and the
+        // slot is left unwritten — `SecondaryGBufferPass`/`ProxyCompositePass`
+        // early-out on that, same zero-overhead idiom.
+        if let Some(secondary_data) = self.scene.secondary_frame_data() {
+            frame_resources.secondary.write(secondary_data, "Renderer");
+        }
+
         frame_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
             frame_resources.baked_ao.write(ao, "Renderer");

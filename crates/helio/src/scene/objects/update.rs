@@ -367,6 +367,7 @@ impl super::super::Scene {
             id,
             mesh_id: rec.mesh,
             transform: Mat4::from_cols_array(&rec.instance.model),
+            groups: rec.groups,
             user_tag: rec.user_tag,
         })
     }

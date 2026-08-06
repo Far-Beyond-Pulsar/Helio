@@ -449,17 +449,31 @@ impl ScenePicker {
     /// Objects whose mesh was not registered via [`register_mesh`] are excluded.
     pub fn rebuild_instances(&mut self, scene: &Scene) {
         self.instances.clear();
+        // Active sublevels' `(group, placement)` — an object whose `groups`
+        // intersects one of these carries a **sublevel-local** transform
+        // (see `PickableObject::transform`'s doc comment), so its picking
+        // transform must have the placement composed in, the same way
+        // `helio_secondary_core::sublevel_camera` does for the render camera.
+        // Small (typically 0-2 entries) and rebuilt once here, not per-object.
+        let sublevel_placements = scene.active_sublevel_placements();
+
         for obj in scene.iter_pickable_objects() {
             let key = mesh_key(obj.mesh_id);
             let Some(bvh) = self.mesh_bvhs.get(&key) else {
                 continue; // Mesh not registered — skip (e.g. skybox, water volumes).
             };
 
+            let world_transform = sublevel_placements
+                .iter()
+                .find(|(group, _)| obj.groups.contains(*group))
+                .map(|(_, placement)| *placement * obj.transform)
+                .unwrap_or(obj.transform);
+
             // Tight world AABB from local BVH root + current object transform.
             let (world_min, world_max) =
-                transform_aabb(bvh.local_min, bvh.local_max, obj.transform);
+                transform_aabb(bvh.local_min, bvh.local_max, world_transform);
 
-            let inv = obj.transform.inverse();
+            let inv = world_transform.inverse();
             // Normal transform: transpose of inverse of the upper-left 3×3.
             let normal_mat = Mat3::from_mat4(inv).transpose();
 
@@ -473,7 +487,7 @@ impl ScenePicker {
             self.instances.push(PickInstance {
                 actor_id,
                 mesh_key: key,
-                transform: obj.transform,
+                transform: world_transform,
                 inv_transform: inv,
                 normal_mat,
                 world_min,
@@ -616,6 +630,48 @@ impl ScenePicker {
         }
 
         best_hit
+    }
+
+    /// [`ScenePicker::cast_ray`], extended to continue through a registered
+    /// portal's surface (design doc §9 "Picking" — pick-through-portal).
+    ///
+    /// If the ray crosses a portal's `a` surface before hitting anything
+    /// solid (or before a *closer* portal, if several are crossed), the ray
+    /// is re-cast from the crossing point mapped through that portal's
+    /// `pair_map` — the same map the camera uses to teleport — and the
+    /// reported `t` is the *total* distance from the original `origin`, so
+    /// distance comparisons and re-casts from the result behave normally.
+    /// Recursion is capped at depth 1, matching this crate's portal
+    /// recursion scope cut (only the object/light actually visible through
+    /// the portal is picked, not something visible through a *second*
+    /// portal beyond it).
+    pub fn cast_ray_through_portals(&self, scene: &Scene, origin: Vec3, dir: Vec3) -> Option<PickHit> {
+        if dir.length_squared() < 1e-20 {
+            return None;
+        }
+        let dir_n = dir.normalize();
+
+        let mut best = self.cast_ray(scene, origin, dir_n);
+        let mut best_t = best.as_ref().map(|h| h.t).unwrap_or(f32::MAX);
+
+        for (pair, crossing_t) in scene.portal_ray_crossings(origin, dir_n) {
+            if crossing_t >= best_t {
+                continue; // something solid (or a closer portal) already wins
+            }
+            let crossing_point = origin + dir_n * crossing_t;
+            let mapped_origin = pair.map_point(crossing_point);
+            let mapped_dir = pair.map_direction(dir_n);
+            if let Some(mut hit) = self.cast_ray(scene, mapped_origin, mapped_dir) {
+                let total_t = crossing_t + hit.t;
+                if total_t < best_t {
+                    hit.t = total_t;
+                    best_t = total_t;
+                    best = Some(hit);
+                }
+            }
+        }
+
+        best
     }
 }
 

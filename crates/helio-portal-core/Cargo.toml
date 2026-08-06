@@ -1,0 +1,11 @@
+[package]
+name = "helio-portal-core"
+version = "0.1.0"
+edition = "2021"
+description = "Portal pair math: pair_map, eye construction, teleport, crossing detection and oblique clip for Helio"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+
+[dev-dependencies]

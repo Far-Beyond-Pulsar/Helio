@@ -60,6 +60,8 @@ fn normalize_plane(p: vec4<f32>) -> vec4<f32> {
 
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
+/// Mirrors `libhelio::INSTANCE_FLAG_SUBLEVEL_HIDDEN`.
+const INSTANCE_FLAG_SUBLEVEL_HIDDEN: u32 = 8u;
 
 fn sphere_in_frustum(vp: mat4x4<f32>, center: vec3<f32>, radius: f32) -> bool {
     let p0 = normalize_plane(vp[3] + vp[0]);
@@ -87,6 +89,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let center = inst.bounds.xyz;
     let radius = inst.bounds.w;
     if radius <= 0.0 { return; }
+    // Sublevel members carry sublevel-local transforms; casting them into the
+    // main shadow atlas at their raw local position would put the shadow in
+    // the wrong place. Sublevels cast via a single proxy volume instead (see
+    // `Scene::update_secondary_views` / the sublevel shadow-proxy publish).
+    if (inst.flags & INSTANCE_FLAG_SUBLEVEL_HIDDEN) != 0u { return; }
 
     for (var face = 0u; face < MAX_FACES; face++) {
         if face_dirty[face] == 0u { continue; }

@@ -288,3 +288,15 @@ path = "sprite_dig_demo.rs"
 [[bin]]
 name = "foliage_demo"
 path = "foliage_demo.rs"
+
+[[bin]]
+name = "sublevels_demo"
+path = "sublevels_demo.rs"
+
+[[bin]]
+name = "portals_demo"
+path = "portals_demo.rs"
+
+[[bin]]
+name = "hallway_portals_demo"
+path = "hallway_portals_demo.rs"

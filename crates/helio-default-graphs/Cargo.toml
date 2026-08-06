@@ -47,7 +47,12 @@ helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
+helio-pass-secondary-gbuffer = { workspace = true }
+helio-pass-proxy-composite = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
 glam = { workspace = true }
+libhelio = { workspace = true }
+helio-secondary-core = { workspace = true }
+helio-portal-core = { workspace = true }

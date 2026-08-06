@@ -424,6 +424,17 @@ pub struct FrameResources<'a> {
     /// HLFS-specific globals uniform buffer (HlfsGlobals layout).
     pub hlfs_globals: Option<&'a wgpu::Buffer>,
 
+    // ── Secondary views (portals + sublevels) ───────────────────────────
+
+    /// Per-frame secondary-view descriptors for portal eyes and sublevel cameras.
+    ///
+    /// Published by the high-level `Renderer`; read by `SecondaryGBufferPass` and
+    /// `ProxyCompositePass`. Left unwritten when no portals or sublevels are
+    /// registered, which is how those passes early-out of `prepare()` and record
+    /// zero commands. Do not "helpfully" write an empty `SecondaryFrameData`
+    /// instead — an unwritten slot is a zero-cost path; a written one is not.
+    pub secondary: Tracked<SecondaryFrameData<'a>>,
+
     // ── DOF resources (populated by PostProcessPass / DofPass) ──
 
     /// Pre-DOF HDR colour — output of the post-process uber-shader before
@@ -570,6 +581,7 @@ impl<'a> FrameResources<'a> {
             ssr_trace: Tracked::empty(),
             planar_reflection: Tracked::empty(),
             planar_reflection_sampler: Tracked::empty(),
+            secondary: Tracked::empty(),
             hlfs_clip_stack: None,
             hlfs_globals: None,
             pre_dof: Tracked::empty(),
@@ -647,6 +659,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(color_grading_lut);
             reset_field!(ies_textures);
             reset_field!(reflection_captures);
+            reset_field!(secondary);
             reset_field!(ssr_trace);
             reset_field!(planar_reflection);
             reset_field!(planar_reflection_sampler);
@@ -727,6 +740,21 @@ pub struct FoliageFrameData<'a> {
     /// every frame and the residency cache's whole point — that steady-state foliage costs
     /// nothing on the CPU — is lost. Tables change on authoring edits only.
     pub generation: u64,
+}
+
+/// Per-frame secondary-view descriptors for portal eyes and sublevel cameras.
+///
+/// Carried as a raw byte slice for the same reason [`FoliageFrameData`] is: `libhelio`
+/// holds the inter-pass contract and must not depend on the crate that defines
+/// `GpuSecondaryView`. The producer and the consuming passes agree on the layout — an
+/// array of `GpuSecondaryView` entries — and interpret the bytes identically.
+#[derive(Clone, Copy)]
+pub struct SecondaryFrameData<'a> {
+    /// Raw bytes of a `[GpuSecondaryView; MAX_SECONDARY_VIEWS]` array.
+    /// Only the first `view_count` entries are meaningful.
+    pub view_bytes: &'a [u8],
+    /// Number of active secondary views this frame.
+    pub view_count: u32,
 }
 
 /// Views into the top-down foliage terrain capture.

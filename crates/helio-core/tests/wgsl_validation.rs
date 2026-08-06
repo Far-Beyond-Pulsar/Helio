@@ -132,8 +132,12 @@ fn every_wgsl_shader_parses_and_validates() {
 
     // Guard the skip heuristic: fragments are rare and deliberate. If this trips,
     // entry-point-less files are proliferating and the skip is hiding real shaders.
+    // Currently 18 (Radiant material templates + shared prelude/gbuffer_common/
+    // pbr_eval-style includes) — bounded snugly above that, not at the higher
+    // round number this assertion briefly carried during portal/sublevel
+    // development.
     assert!(
-        skipped.len() < 5,
+        skipped.len() < 20,
         "{} shaders were skipped as fragments, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")

@@ -30,8 +30,9 @@ pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
     DecalId, FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId,
-    MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
-    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, SublevelId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId,
+    WaterVolumeId,
 };
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -51,12 +52,13 @@ pub use renderer::{
 pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
     Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
-    GpuFoliageInteractor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
-    ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
-    SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
-    WaterHitboxActor, WaterHitboxDescriptor,
-    WaterVolumeActor, WaterVolumeDescriptor,
+    GpuFoliageInteractor, ObjectDescriptor, PickableObject, PortalDescriptor, PortalTeleport,
+    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene,
+    SceneActor, SceneActorId, SceneActorTrait, SceneError, SublevelDescriptor, VoxelMode,
+    VoxelVolumeDescriptor, WaterHitboxActor, WaterHitboxDescriptor, WaterVolumeActor,
+    WaterVolumeDescriptor,
 };
+pub use helio_portal_core::{PortalPair, PortalPose};
 pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 

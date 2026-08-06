@@ -1,0 +1,19 @@
+[package]
+name = "helio-pass-secondary-gbuffer"
+version = "0.1.0"
+edition = "2021"
+description = "Helio render pass: off-screen secondary G-buffer fill for portal/sublevel views"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core           = { workspace = true }
+libhelio             = { workspace = true }
+helio-secondary-core = { workspace = true }
+wgpu                 = { workspace = true }
+bytemuck             = { workspace = true, features = ["derive"] }
+log                  = { workspace = true }
+
+[dev-dependencies]
+# Matches the naga inside wgpu 30, so the shader-source-generation unit tests
+# validate exactly what device.create_shader_module would receive.
+naga = { version = "30.0.0", features = ["wgsl-in"] }

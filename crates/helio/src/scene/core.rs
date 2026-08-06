@@ -17,8 +17,9 @@ use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    DecalId, LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
-    SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId,
+    ReflectionCaptureId, SectionedInstanceId, SublevelId, TextureId, VirtualObjectId,
+    VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
@@ -255,6 +256,45 @@ pub struct Scene {
     // ── Reflection captures ─────────────────────────────────────────────────────
     pub(in crate::scene) reflection_captures:
         DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
+
+    // ── Sublevels + portals (docs/portals_and_sublevels.md) ─────────────────────
+    /// Registered sublevels. See `crate::scene::sublevels`.
+    pub(in crate::scene) sublevels: DenseArena<super::sublevels::SublevelRecord, SublevelId>,
+
+    /// Registered portal pairs. See `crate::scene::portals`.
+    pub(in crate::scene) portals: DenseArena<super::portals::PortalRecord, PortalId>,
+
+    /// Set whenever a sublevel/portal is added, removed, or its
+    /// placement/pose changes. Informational only today (the per-frame
+    /// publish in `update_secondary_views` always rebuilds from current
+    /// state); kept as a hook for a future skip-if-unchanged fast path.
+    pub(in crate::scene) secondary_dirty: bool,
+
+    /// CPU staging buffer for this frame's `GpuSecondaryView` array, rebuilt
+    /// every call to `update_secondary_views`. Lives on `Scene` (rather than
+    /// a local in the function) purely so `SecondaryFrameData::view_bytes`
+    /// has somewhere to borrow from that outlives the call.
+    pub(in crate::scene) secondary_cpu_views: Vec<helio_secondary_core::GpuSecondaryView>,
+
+    /// Camera world position as of the last `take_portal_teleport` call.
+    /// `None` before the first call (no crossing test is run on the first
+    /// frame — there is no previous position to have crossed from).
+    pub(in crate::scene) portal_prev_camera_pos: Option<glam::Vec3>,
+
+    /// Shared unit-box mesh for sublevel shadow-proxy volumes, created lazily
+    /// on the first sublevel that needs one and reused by every sublevel
+    /// thereafter (one mesh, many instances at different transforms — see
+    /// `crate::scene::sublevels::shadow_proxy`).
+    pub(in crate::scene) sublevel_proxy_mesh: Option<MeshId>,
+    /// Shared flat black material for shadow-proxy volumes. They are
+    /// `INSTANCE_FLAG_SHADOW_ONLY` (excluded from the main G-buffer cull), so
+    /// this material's color is never actually sampled — it exists only
+    /// because `insert_object` requires a valid material handle.
+    pub(in crate::scene) sublevel_proxy_material: Option<MaterialId>,
+
+    /// Set by `take_portal_teleport` when a crossing occurred; cleared by
+    /// `take_taa_reset_pending`.
+    pub(in crate::scene) taa_reset_pending: bool,
 }
 
 impl Scene {
@@ -394,6 +434,14 @@ impl Scene {
             section_to_instance: HashMap::new(),
             voxel_volumes: DenseArena::new(),
             reflection_captures: DenseArena::new(),
+            sublevels: DenseArena::new(),
+            portals: DenseArena::new(),
+            secondary_dirty: false,
+            secondary_cpu_views: Vec::new(),
+            portal_prev_camera_pos: None,
+            sublevel_proxy_mesh: None,
+            sublevel_proxy_material: None,
+            taa_reset_pending: false,
         }
     }
 

@@ -11,6 +11,8 @@ use helio_pass_flare::LensFlarePass;
 use helio_pass_forward_lit::ForwardLitPass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
+use helio_pass_proxy_composite::ProxyCompositePass;
+use helio_pass_secondary_gbuffer::SecondaryGBufferPass;
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
@@ -225,6 +227,14 @@ fn add_geometry_passes(
             foliage_indirect,
             blades_per_tile,
         )));
+    }
+
+    // Secondary G-buffer fill and proxy composite — only when portals or
+    // sublevels are enabled. Zero-overhead: with both gates off, the graph
+    // never constructs these passes (same pattern as enable_foliage).
+    if config.enable_portals || config.enable_sublevels {
+        graph.add_pass(Box::new(SecondaryGBufferPass::new(device)));
+        graph.add_pass(Box::new(ProxyCompositePass::new(device)));
     }
 
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);

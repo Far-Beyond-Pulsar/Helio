@@ -64,7 +64,11 @@ helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-foliage-core = { path = "crates/helio-foliage-core" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
+helio-pass-secondary-gbuffer = { path = "crates/passes/3d/helio-pass-secondary-gbuffer" }
+helio-pass-proxy-composite = { path = "crates/passes/3d/helio-pass-proxy-composite" }
 helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
+helio-portal-core = { path = "crates/helio-portal-core" }
+helio-secondary-core = { path = "crates/helio-secondary-core" }
 helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }

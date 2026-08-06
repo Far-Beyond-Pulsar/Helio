@@ -91,6 +91,8 @@ pub struct Renderer {
     /// this field was first added.
     pub(crate) enable_foliage: bool,
     pub(crate) foliage_blades_per_m2: Option<f32>,
+    pub(crate) enable_portals: bool,
+    pub(crate) enable_sublevels: bool,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
     /// TSR quality preset, preserved across graph rebuilds.
@@ -447,6 +449,30 @@ impl Renderer {
         &mut self.scene
     }
 
+    /// Test the camera's motion since the last call against every registered
+    /// portal and, on a crossing, return the teleported pose. Convenience
+    /// wrapper over [`Scene::take_portal_teleport`] — equivalent to
+    /// `renderer.scene_mut().take_portal_teleport(pos)`.
+    ///
+    /// Call this **before** building the `Camera` you pass to
+    /// [`Renderer::render`] this frame; see `Scene::take_portal_teleport`'s
+    /// doc comment for the full call-order contract.
+    pub fn take_portal_teleport(&mut self, camera_world_pos: glam::Vec3) -> Option<crate::scene::PortalTeleport> {
+        self.scene.take_portal_teleport(camera_world_pos)
+    }
+
+    /// Consume the "a portal teleport happened, reset TAA/TSR history"
+    /// signal raised by [`Renderer::take_portal_teleport`]. Returns `true` at
+    /// most once per crossing.
+    ///
+    /// Mirrors `enable_xr`/`enable_foliage`-style renderer-level state
+    /// accessors. This crate only raises the signal — actually resetting
+    /// temporal history (recreating the graph, as the engine already does on
+    /// camera cuts) is the embedder's responsibility.
+    pub fn portal_teleport_taa_reset(&mut self) -> bool {
+        self.scene.take_taa_reset_pending()
+    }
+
     pub fn debug_state(&self) -> Arc<Mutex<DebugDrawState>> {
         self.debug_state.clone()
     }
@@ -651,6 +677,8 @@ impl Renderer {
             enable_xr: self.enable_xr,
             enable_foliage: self.enable_foliage,
             foliage_blades_per_m2: self.foliage_blades_per_m2,
+            enable_portals: self.enable_portals,
+            enable_sublevels: self.enable_sublevels,
         }
     }
 
