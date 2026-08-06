@@ -452,9 +452,9 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 // The engine-wide camera buffer (`GpuCameraBuffer`, label "Camera Storage") is a
-// storage buffer sized for 2 cameras (mono/stereo), matching every other pass's
-// `var<storage, read> cameras: array<CameraUniforms, 2>`. Bindings that reference
-// it must use this, not `uniform_entry`.
+// storage buffer sized for CAMERA_SLOTS cameras, matching every other pass's
+// `var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>`. Bindings
+// that reference it must use this, not `uniform_entry`.
 fn camera_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,

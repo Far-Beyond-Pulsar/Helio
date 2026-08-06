@@ -124,6 +124,9 @@ fn uploaded_camera_view_projection_matches_split_gpu_multiplication() {
             label: Some("Camera Matrix Contract Shader"),
             source: wgpu::ShaderSource::Wgsl(
                 r#"
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
@@ -135,7 +138,7 @@ struct Camera {
     prev_view_proj: mat4x4<f32>,
 }
 struct Probe { combined: vec4<f32>, split: vec4<f32> }
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<storage, read_write> probe: Probe;
 @compute @workgroup_size(1)
 fn main() {

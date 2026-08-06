@@ -6,7 +6,10 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::graph::ResourceSize;
-use helio_core::{GpuCameraUniforms, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{
+    CAMERA_SLOTS, GpuCameraUniforms, PassContext, PrepareContext, RenderPass,
+    Result as HelioResult,
+};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -78,7 +81,7 @@ impl SsaoPass {
 
         let ssao_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SSAO Camera"),
-            size: (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
+            size: (std::mem::size_of::<GpuCameraUniforms>() * CAMERA_SLOTS as usize) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

@@ -61,7 +61,7 @@ pub fn view_to_world_matrix(pose: &ViewPose) -> glam::Mat4 {
 }
 
 /// Build the two eye `GpuCameraUniforms` (left, right) Helio's stereo
-/// `array<Camera, 2>` storage buffer expects.
+/// `array<Camera, CAMERA_SLOTS>` storage buffer expects.
 ///
 /// Upload them with `GpuCameraUniforms::upload_stereo`.
 pub fn xr_view_to_camera(

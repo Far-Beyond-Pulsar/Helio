@@ -37,6 +37,9 @@ struct EmitterDef {
     _pad:               array<f32, 12>,
 }
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct CameraUniforms {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -52,7 +55,7 @@ struct CameraUniforms {
 @group(0) @binding(1)  var<storage, read> particles:        array<Particle>;
 @group(0) @binding(2)  var<storage, read> emitters:         array<EmitterDef>;
 @group(0) @binding(3)  var<storage, read> compact_buf:      array<u32>;
-@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>;
 @group(0) @binding(10) var                particle_tex:     texture_2d<f32>;
 @group(0) @binding(11) var                particle_sampler: sampler;
 

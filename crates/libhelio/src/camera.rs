@@ -3,6 +3,13 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
+/// Total number of GPU camera slots shared by the whole renderer.
+///
+/// The shader camera array is `array<Camera, CAMERA_SLOTS>` everywhere
+/// (`const CAMERA_SLOTS: u32 = 7u` in WGSL mirrors this value). Slots:
+/// 0–1 XR eyes, 2–4 portal views, 5–6 sublevel views.
+pub const CAMERA_SLOTS: u32 = 7;
+
 /// Per-frame camera uniforms uploaded to GPU every frame.
 ///
 /// Layout matches the WGSL `Camera` struct in all shaders.
@@ -61,6 +68,15 @@ impl GpuCameraUniforms {
     pub fn upload_stereo(queue: &wgpu::Queue, buffer: &wgpu::Buffer, left: &Self, right: &Self) {
         let data = [*left, *right];
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(&data));
+    }
+
+    /// Upload a single camera into `slot` of a multi-slot storage buffer.
+    ///
+    /// The buffer must be sized for at least `CAMERA_SLOTS` elements
+    /// (`slot` indexes into the `array<Camera, CAMERA_SLOTS>` shader binding).
+    pub fn upload_slot(queue: &wgpu::Queue, buffer: &wgpu::Buffer, slot: u32, camera: &Self) {
+        let offset = (slot as u64) * (std::mem::size_of::<GpuCameraUniforms>() as u64);
+        queue.write_buffer(buffer, offset, bytemuck::bytes_of(camera));
     }
 }
 

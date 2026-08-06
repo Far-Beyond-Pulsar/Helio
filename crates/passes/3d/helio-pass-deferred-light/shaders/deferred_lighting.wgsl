@@ -19,6 +19,9 @@ const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -134,7 +137,7 @@ struct ShadowConfig {
     pcf_sample_count:     u32,                      // Standard PCF sample count (4/8/12/16)
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var <uniform> globals:       Globals;
 @group(0) @binding(7) var <uniform> shadow_config: ShadowConfig;
 

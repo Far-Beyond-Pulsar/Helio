@@ -57,6 +57,9 @@ struct GpuShadowMatrix {
 
 /// Camera data for CSM cascade computation.
 /// Layout must match GpuCameraUniforms in libhelio/src/camera.rs (256 bytes).
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct CameraUniforms {
     view:           mat4x4f,   // offset   0
     proj:           mat4x4f,   // offset  64
@@ -79,7 +82,7 @@ struct ShadowMatrixParams {
 
 @group(0) @binding(0) var<storage, read>       lights:         array<GpuLight>;
 @group(0) @binding(1) var<storage, read_write> shadow_mats:    array<GpuShadowMatrix>;
-@group(0) @binding(2) var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(2) var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>;
 @group(0) @binding(3) var<uniform>             params:         ShadowMatrixParams;
 @group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per caster slot
 @group(0) @binding(5) var<storage, read_write> shadow_hashes:  array<u32>;  // FNV hashes to detect changes

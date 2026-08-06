@@ -8,6 +8,9 @@
 // Structs
 // ──────────────────────────────────────────────────────────────────────────────
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -51,7 +54,7 @@ struct SkyUniforms {
 // Bind groups
 // ──────────────────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(1) @binding(0) var<uniform> sky:        SkyUniforms;
 @group(1) @binding(1) var          sky_lut:     texture_2d<f32>;
 @group(1) @binding(2) var          sky_sampler: sampler;

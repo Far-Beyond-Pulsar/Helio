@@ -14,7 +14,7 @@
 // this pass (see #139).
 //
 // Bindings
-//   0  cameras          storage  array<Camera, 2> (prelude layout)
+//   0  cameras          storage  array<Camera, CAMERA_SLOTS> (prelude layout)
 //   1  water_volumes    storage read
 //   2  water_sim        texture_2d<f32>  (RGBA16F: R=height, G=velocity, B/A=normal.xz)
 //   3  water_samp       sampler          (linear, repeat  — for sim)
@@ -45,7 +45,7 @@ struct WaterVolume {
     _pad:                  vec4f,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<storage, read> volumes:        array<WaterVolume>;
 @group(0) @binding(2) var water_sim:      texture_2d_array<f32>;
 @group(0) @binding(3) var water_samp:     sampler;

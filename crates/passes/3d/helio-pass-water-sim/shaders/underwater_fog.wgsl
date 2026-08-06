@@ -15,7 +15,7 @@
 // over water_output.
 //
 // Bindings
-//   0  cameras       storage  array<Camera, 2> (prelude layout)
+//   0  cameras       storage  array<Camera, CAMERA_SLOTS> (prelude layout)
 //   1  volumes       storage  array<WaterVolume>
 //   2  scene_tex     texture  water_output bound as source
 //   3  scene_samp    sampler  linear clamp
@@ -43,7 +43,7 @@ struct WaterVolume {
     _pad:                  vec4f,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<storage, read> volumes:    array<WaterVolume>;
 @group(0) @binding(2) var scene_tex:     texture_2d<f32>;
 @group(0) @binding(3) var scene_samp:    sampler;

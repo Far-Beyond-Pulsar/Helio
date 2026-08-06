@@ -18,7 +18,7 @@
 //!use helio_prelude
 //!use helio_hiz
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(1) @binding(0) var gbuf_normal:          texture_2d<f32>;
 @group(1) @binding(1) var gbuf_orm:             texture_2d<f32>;
 @group(1) @binding(2) var gbuf_depth:           texture_depth_2d;

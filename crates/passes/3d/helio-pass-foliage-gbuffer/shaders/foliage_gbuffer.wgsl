@@ -186,7 +186,7 @@ struct FoliageTile {
     generation: u32,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> globals: FoliageGlobals;
 @group(0) @binding(2) var<uniform> wind: Wind;
 @group(0) @binding(3) var<storage, read> foliage_types: array<FoliageType>;

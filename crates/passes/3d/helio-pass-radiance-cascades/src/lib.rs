@@ -52,6 +52,9 @@ pub struct RadianceCascadesPass {
 }
 
 const FALLBACK_WGSL: &str = r#"
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct RCDynamic {
     world_min:   vec4<f32>,
     world_max:   vec4<f32>,
@@ -77,7 +80,7 @@ struct Camera {
 @group(0) @binding(1) var<uniform>  rc_dyn:      RCDynamic;
 @group(0) @binding(2) var depth_tex:    texture_depth_2d;
 @group(0) @binding(3) var scene_color:  texture_2d<f32>;
-@group(0) @binding(4) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(4) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 const PROBE_DIM:   u32 = 8u;
 const DIR_DIM:     u32 = 4u;

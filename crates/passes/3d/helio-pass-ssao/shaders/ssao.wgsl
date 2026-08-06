@@ -17,7 +17,7 @@ struct Globals {
     csm_splits: vec4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
 // G-buffer textures (group 1)

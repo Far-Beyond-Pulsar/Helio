@@ -21,6 +21,9 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 // Bind group 0 — uniforms & scene data
 // ─────────────────────────────────────────────────────────────────────────────
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:          mat4x4<f32>,
     proj:          mat4x4<f32>,
@@ -29,7 +32,7 @@ struct Camera {
     position_near: vec4<f32>,
     direction_far: vec4<f32>,
 }
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 struct LightCullParams {
     num_tiles_x:   u32,

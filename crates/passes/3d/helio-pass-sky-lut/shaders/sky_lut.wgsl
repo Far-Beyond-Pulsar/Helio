@@ -8,6 +8,9 @@
 //   u = azimuth / (2π) + 0.5            ∈ [0, 1]   (wraps)
 //   v = sin(elevation) * 0.5 + 0.5      ∈ [0, 1]   (sin-mapping, better horizon res)
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view_proj:     mat4x4<f32>,
     position:      vec3<f32>,
@@ -40,7 +43,7 @@ struct SkyUniforms {
     _pad0: f32, _pad1: f32, _pad2: f32,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(1) @binding(0) var<uniform> sky:    SkyUniforms;
 
 // ── Vertex: full-screen triangle ─────────────────────────────────────────────

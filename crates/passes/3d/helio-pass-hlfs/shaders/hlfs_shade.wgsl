@@ -3,6 +3,9 @@
 //! Combines direct samples with field queries to produce final pixel colors.
 //! This is where the O(1) per-pixel shading happens.
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -37,7 +40,7 @@ struct HlfsGlobals {
 @group(0) @binding(4) var clip_stack_sampler: sampler;
 @group(0) @binding(5) var pre_aa_texture: texture_2d<f32>;  // Sky + debug layers
 @group(0) @binding(6) var<uniform> globals: HlfsGlobals;
-@group(0) @binding(7) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(7) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(8) var<storage, read> lights: array<GpuLight>;
 
 struct GpuLight {

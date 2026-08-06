@@ -6,6 +6,9 @@
 
 // Group 0: global uniforms (camera + globals)
 // Layout must match GpuCameraUniforms in libhelio/src/camera.rs (368 bytes).
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:          mat4x4<f32>,   // offset   0 — world→view
     proj:          mat4x4<f32>,   // offset  64 — view→clip
@@ -22,7 +25,7 @@ struct Globals {
     ambient_intensity: f32,
     _padding: f32,
 }
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
 // Group 1: sprite texture

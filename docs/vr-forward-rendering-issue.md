@@ -28,7 +28,7 @@ modes). VR should be *an activation of that same pipeline*, not a parallel one:
 |---|---|---|
 | Render targets | 2D textures | 2D-array textures, 2 layers |
 | `multiview_mask` | `None` (per pass) | `Some(0b11)`, injected by graph executor |
-| Camera data | single view/proj | `array<Camera, 2>` storage buffer indexed by `view_index` |
+| Camera data | single view/proj | `array<Camera, CAMERA_SLOTS>` storage buffer indexed by `view_index` |
 | Swapchain | wgpu surface | OpenXR swapchain (VkImage wrapped as wgpu textures) |
 
 ## Current state
@@ -41,7 +41,7 @@ modes). VR should be *an activation of that same pipeline*, not a parallel one:
   - `GraphTexturePool::set_xr_mode(true)` allocates internal colour/depth
     targets as 2-layer `D2Array` textures.
 - **`crates/libhelio`** — camera converted from a single `var<uniform> Camera`
-  to `var<storage, read> cameras: array<Camera, 2>`:
+  to `var<storage, read> cameras: array<Camera, CAMERA_SLOTS>`:
   - 49 WGSL shaders updated (`cameras[0].field` — mono-safe, `view_index` ready).
   - All pass bind group layouts updated `Uniform → Storage { read_only }`.
   - Camera storage buffer doubled (2 × `GpuCameraUniforms`), `upload_stereo()`

@@ -2,6 +2,9 @@
 // Reads per-vertex data from storage buffer (vec4: xyz=position, w=material)
 // Outputs to G-buffer: albedo @ loc0, normal @ loc1, orm @ loc2, emissive @ loc3
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -61,7 +64,7 @@ struct MeshletParams {
     _pad2:       u32,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(2) var<uniform> params: MeshletParams;
 

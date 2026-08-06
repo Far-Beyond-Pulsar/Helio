@@ -17,8 +17,13 @@
 // use this struct rather than redeclaring it:
 //
 //     //!use helio_prelude
-//     @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+//     @group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 //
+/// Number of camera slots in the GPU camera set: 2 XR eyes (slots 0-1) +
+/// MAX_PORTAL_VIEWS (3) + MAX_SUBLEVEL_VIEWS (2). Secondary cameras
+/// (portals, sublevels) start at slot 2 in mono and XR.
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,

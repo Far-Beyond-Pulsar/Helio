@@ -40,6 +40,9 @@ const CAS_SHARPNESS:            f32 = 0.45;
 @group(0) @binding(3) var linear_sampler: sampler;
 @group(0) @binding(4) var point_sampler:  sampler;
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct CameraUniforms {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -50,7 +53,7 @@ struct CameraUniforms {
     jitter_frame:   vec4<f32>,
     prev_view_proj: mat4x4<f32>,
 }
-@group(0) @binding(5) var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(5) var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>;
 
 struct TsrUniform {
     jitter_offset:  vec2<f32>, // sub-pixel jitter in [-0.5, 0.5)

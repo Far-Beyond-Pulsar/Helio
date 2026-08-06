@@ -7,6 +7,9 @@
 enable wgpu_ray_query;
 
 // ── Camera (mirrors helio_core GpuCameraUniforms) ──────────────────────────
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -38,7 +41,7 @@ fn helio_gbuffer_normal(encoded: vec3<f32>) -> vec3<f32> {
     return normalize(encoded * 2.0 - 1.0);
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 @group(1) @binding(0) var gbuf_normal:          texture_2d<f32>;
 @group(1) @binding(1) var gbuf_orm:             texture_2d<f32>;

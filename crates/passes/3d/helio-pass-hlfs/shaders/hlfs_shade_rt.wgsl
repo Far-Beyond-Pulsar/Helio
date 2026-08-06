@@ -1,5 +1,8 @@
 enable wgpu_ray_query;
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -79,7 +82,7 @@ struct LightMatrix {
 @group(0) @binding(4) var clip_stack_sampler: sampler;
 @group(0) @binding(5) var pre_aa_texture: texture_2d<f32>;
 @group(0) @binding(6) var<uniform> globals: HlfsGlobals;
-@group(0) @binding(7) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(7) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(8) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(9) var<uniform> shadow_config: ShadowConfig;
 @group(0) @binding(10) var shadow_atlas: texture_depth_2d_array;

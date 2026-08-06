@@ -65,6 +65,9 @@ struct DrawArgs {
     first_instance: u32,
 }
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct CameraUniforms {
     view:           mat4x4<f32>,   // offset   0
     proj:           mat4x4<f32>,   // offset  64
@@ -85,7 +88,7 @@ struct CameraUniforms {
 // Non-atomic now; written by cs_scan_blocks, read by cs_build_multi.
 @group(0) @binding(4)  var<storage, read_write>  emitter_alive:     array<u32>;
 @group(0) @binding(5)  var<storage, read_write>  draw_args_staging: array<DrawArgs>;
-@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(6)  var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>;
 // exclusive prefix within each 256-block (written by cs_scan_local, read by cs_scatter)
 @group(0) @binding(7)  var<storage, read_write>  prefix_buf:        array<u32>;
 // per-block alive totals (cs_scan_local) → per-block cumulative offsets (cs_scan_blocks)

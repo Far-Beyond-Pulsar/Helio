@@ -444,8 +444,8 @@ pub mod upload;
 
 // Re-export libhelio types for convenience
 pub use libhelio::{
-    DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms, GpuDrawCall,
-    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
+    CAMERA_SLOTS, DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms,
+    GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
 };
 
 pub use libhelio::sky::{SkyContext, SkyUniforms};

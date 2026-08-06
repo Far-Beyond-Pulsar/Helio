@@ -7,9 +7,12 @@
 @group(0) @binding(0) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(1) var<storage, read_write> flare_queries: array<GpuFlareQuery>;
 @group(0) @binding(2) var<storage, read_write> flare_count: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(3) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(4) var depth_tex: texture_depth_2d;
 @group(0) @binding(5) var<uniform> flare_uniforms: FlareUniforms;
+
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
 
 struct Camera {
     view:           mat4x4<f32>,

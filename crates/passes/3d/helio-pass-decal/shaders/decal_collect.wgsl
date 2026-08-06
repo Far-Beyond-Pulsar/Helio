@@ -1,5 +1,8 @@
 enable wgpu_binding_array;
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>, position_near: vec4<f32>,
@@ -23,7 +26,7 @@ const NO_TEXTURE: u32 = 0xFFFFFFFFu;
 
 struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> globals: DecalGlobals;
 @group(0) @binding(2) var<storage, read> decals: array<GpuDecal>;
 @group(0) @binding(3) var gbuf_depth: texture_depth_2d;

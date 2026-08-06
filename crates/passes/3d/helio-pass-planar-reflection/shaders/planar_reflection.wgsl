@@ -1,3 +1,6 @@
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -16,7 +19,7 @@ struct PlanarReflectionUniforms {
     _pad:               vec3<u32>,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> refl: PlanarReflectionUniforms;
 
 struct VertexOutput {

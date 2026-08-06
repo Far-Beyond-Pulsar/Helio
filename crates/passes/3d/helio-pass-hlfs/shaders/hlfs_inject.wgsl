@@ -3,6 +3,9 @@
 //! Proof-of-concept that demonstrates the injection phase.
 //! In production, this would use atomic operations or double-buffering.
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -37,7 +40,7 @@ struct LightSample {
     radiance:  vec4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
 @group(0) @binding(8) var clip_stack_level0: texture_storage_3d<rgba16float, write>;

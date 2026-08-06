@@ -177,7 +177,7 @@ struct GpuPostProcessVolume {
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
-@group(0) @binding(1)  var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(1)  var<storage, read> cameras: array<CameraUniforms, CAMERA_SLOTS>;
 @group(0) @binding(2)  var                     hdr_input:    texture_2d<f32>;
 @group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
 @group(0) @binding(4)  var                     linear_samp:  sampler;

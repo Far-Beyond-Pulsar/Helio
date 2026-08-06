@@ -5,13 +5,16 @@
 
 // Minimal camera view — only the fields we need (view_proj is at byte 128
 // of the real CameraUniform, which is larger; reading a prefix is safe).
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:      mat4x4<f32>,
     proj:      mat4x4<f32>,
     view_proj: mat4x4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

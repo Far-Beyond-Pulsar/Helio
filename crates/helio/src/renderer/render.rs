@@ -652,7 +652,8 @@ impl Renderer {
 
     /// OpenXR frame: poll session events, wait/begin the compositor frame,
     /// locate the per-eye views, upload the stereo camera into the scene's
-    /// `array<Camera, 2>` buffer, render both eyes in a single multiview pass
+    /// `array<Camera, CAMERA_SLOTS>` buffer, render both eyes in a single
+    /// multiview pass
     /// into the acquired swapchain image, then present and end the frame.
     ///
     /// # Prerequisites

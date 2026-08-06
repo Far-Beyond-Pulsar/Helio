@@ -3,6 +3,8 @@
 // Transparent pass base shader — shared shader used by the transparent pass.
 // Custom transparent templates override `radiant_eval_transparent`.
 // Camera struct matches the gbuffer's layout so position_near is correct.
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -43,7 +45,7 @@ struct GpuInstanceData {
     _pad:          u32,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform>       globals:       Globals;
 @group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 

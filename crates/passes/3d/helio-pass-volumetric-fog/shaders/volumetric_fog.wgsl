@@ -96,7 +96,7 @@ const LIGHT_SPOT:        u32 = 2u;
 
 const NO_SHADOW: u32 = 4294967295u;
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform>       fog:             FogUniforms;
 @group(0) @binding(2) var<uniform>       fog_globals:     FogGlobals;
 @group(0) @binding(3) var<storage, read> lights:          array<GpuLight>;

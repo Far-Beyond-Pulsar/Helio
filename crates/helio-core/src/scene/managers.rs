@@ -9,6 +9,7 @@ use libhelio::{
     DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDecal, GpuDrawCall, GpuInstanceAabb,
     GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
 };
+use libhelio::CAMERA_SLOTS;
 use std::sync::Arc;
 
 /// A grow-only GPU storage buffer with dirty-tracked CPU mirror.
@@ -252,10 +253,11 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
 
 // ─── Camera buffer ────────────────────────────────────────────────────────────
 
-/// Storage buffer for up to two cameras (stereo / XR).
+/// Storage buffer for up to `CAMERA_SLOTS` cameras (XR eyes + portal/sublevel
+/// views).
 ///
-/// The buffer is sized for two `GpuCameraUniforms` elements. In mono mode
-/// only the first element is written; the shader always indexes `cameras[0]`.
+/// The buffer is sized for `CAMERA_SLOTS` `GpuCameraUniforms` elements. In mono
+/// mode only slot 0 is written; the shader always indexes `cameras[0]`.
 pub struct GpuCameraBuffer {
     buf: wgpu::Buffer,
     data: GpuCameraUniforms,
@@ -266,7 +268,7 @@ impl GpuCameraBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Storage"),
-            size: (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
+            size: (std::mem::size_of::<GpuCameraUniforms>() * CAMERA_SLOTS as usize) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -303,13 +305,32 @@ impl GpuCameraBuffer {
         self.dirty = true;
     }
 
+    /// Upload a single camera into `slot` straight to GPU (portal / sublevel
+    /// view path).
+    ///
+    /// The left-eye camera in slot 0 is cached as `data` for the CPU-side
+    /// consumers (`position()`, `forward()`, ...) when `slot == 0`. `dirty` is
+    /// left untouched so a later `flush()` cannot clobber the slot with the
+    /// stale slot-0 upload.
+    pub fn update_slot(
+        &mut self,
+        queue: &wgpu::Queue,
+        slot: u32,
+        camera: &GpuCameraUniforms,
+    ) {
+        if slot == 0 {
+            self.data = *camera;
+        }
+        GpuCameraUniforms::upload_slot(queue, &self.buf, slot, camera);
+    }
+
     /// Write both eye cameras straight to GPU (XR multiview path).
     ///
     /// Unlike [`GpuCameraBuffer::update`] this uploads *both* uniforms in one
-    /// `write_buffer` (the shader array is `array<Camera, 2>`); `dirty` is left
-    /// untouched so a later `flush()` cannot clobber the right eye with a
-    /// single-element upload. The left eye is cached as `data` for the
-    /// CPU-side consumers (`position()`, `forward()`, ...).
+    /// `write_buffer` (the shader array is `array<Camera, CAMERA_SLOTS>`);
+    /// `dirty` is left untouched so a later `flush()` cannot clobber the right
+    /// eye with a single-element upload. The left eye is cached as `data` for
+    /// the CPU-side consumers (`position()`, `forward()`, ...).
     pub fn update_stereo(
         &mut self,
         queue: &wgpu::Queue,

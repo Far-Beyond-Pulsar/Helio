@@ -184,8 +184,9 @@ impl Scene {
 
     /// Upload the left/right eye camera uniforms for the OpenXR multiview path.
     ///
-    /// The GPU camera storage buffer is `array<Camera, 2>`, so both eyes are
-    /// written in a single `queue.write_buffer`. Unlike [`Scene::update_camera`]
+    /// The GPU camera storage buffer is `array<Camera, CAMERA_SLOTS>`, so both
+    /// eyes are written in a single `queue.write_buffer`. Unlike
+    /// [`Scene::update_camera`]
     /// this bypasses the dirty/flush mechanism on purpose: `flush()` would
     /// otherwise overwrite the second (right) element with a single-uniform
     /// upload. Call it immediately before `flush()` for the rest of the scene

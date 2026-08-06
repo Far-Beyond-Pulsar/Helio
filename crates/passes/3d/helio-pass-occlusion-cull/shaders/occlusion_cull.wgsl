@@ -16,6 +16,9 @@
 // Bind group 0
 // ──────────────────────────────────────────────────────────────────────────────
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:          mat4x4<f32>,   // bytes  0 – 63
     proj:          mat4x4<f32>,   // bytes 64 – 127
@@ -24,7 +27,7 @@ struct Camera {
     position_near: vec4<f32>,     // bytes 256 – 271
     direction_far: vec4<f32>,     // bytes 272 – 287
 }
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 struct CullParams {
     screen_width:         u32,

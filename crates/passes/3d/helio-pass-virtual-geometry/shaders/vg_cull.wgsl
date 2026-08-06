@@ -5,6 +5,9 @@
 // immutable meshlet span, so very large objects scale across the GPU instead of
 // serialising all their meshlets through one workgroup.
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -109,7 +112,7 @@ struct CullUniforms {
     _pad2:                 u32,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 @group(0) @binding(1) var<uniform> cull_uni: CullUniforms;
 @group(0) @binding(2) var<storage, read> meshlets: array<MeshletEntry>;
 @group(0) @binding(3) var<storage, read_write> objects: array<VgObjectData>;

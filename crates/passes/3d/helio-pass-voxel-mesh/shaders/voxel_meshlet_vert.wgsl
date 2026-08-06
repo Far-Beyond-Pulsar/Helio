@@ -2,6 +2,9 @@
 // Uses standard vertex input (Float32x4: position.xyz + material.w).
 // The indirect draw command's base_vertex offsets into the vertex pool.
 
+// must equal CAMERA_SLOTS in libhelio::camera
+const CAMERA_SLOTS: u32 = 7u;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -23,7 +26,7 @@ struct VertexInput {
     @location(0) data: vec4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, CAMERA_SLOTS>;
 
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
