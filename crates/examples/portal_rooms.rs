@@ -325,11 +325,14 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             // Off the centerline of every doorway, near a corner, so
-            // several different rooms' doorways are all in view — and none
-            // of them is seen exactly head-on, which for a pure-translation
-            // portal pair would just show the identically-shaped doorway
-            // hole again (see `portal_cube`'s own comment on this).
-            cam_pos: Vec3::new(4.0, 3.0, 4.0),
+            // several different faces are all in view — and none of them is
+            // seen exactly head-on, which for a pure-translation portal pair
+            // would just show a flat, undistorted view straight down its
+            // axis (see `portal_cube`'s own comment on this). Well outside
+            // the cube (HUB_HALF_SIZE=6) so the whole thing is in frame,
+            // since every face is now the portal itself with nothing to
+            // stand inside — see the module doc.
+            cam_pos: Vec3::new(16.0, 12.0, 16.0),
             cam_yaw: -0.785,
             cam_pitch: -0.488,
             keys: HashSet::new(),
