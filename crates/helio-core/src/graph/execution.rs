@@ -178,6 +178,17 @@ impl RenderGraph {
         self.passes.iter().position(|p| (*p).as_any().downcast_ref::<T>().is_some())
     }
 
+    /// Propagate a game/editor-mode toggle to every pass via
+    /// `RenderPass::set_editor_mode` — a plain virtual dispatch, no downcasting,
+    /// so this works without the graph (or its caller) knowing which concrete
+    /// pass types actually care. See that trait method's docs for why callers
+    /// should call this every frame rather than only on the transition.
+    pub fn set_editor_mode(&mut self, enabled: bool) {
+        for pass in &mut self.passes {
+            pass.set_editor_mode(enabled);
+        }
+    }
+
     /// Replace the pass at `index` with a new one.
     pub fn replace_pass_at(&mut self, index: usize, pass: Box<dyn RenderPass>) {
         if index < self.passes.len() {

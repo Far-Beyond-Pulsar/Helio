@@ -13,12 +13,36 @@ enable wgpu_binding_array;
 //!
 //! Vertex/material logic mirrors `helio-pass-gbuffer/shaders/gbuffer.wgsl`
 //! closely (own copy — see that file for the fuller commentary on each
-//! piece); the two differences are: (1) the extra `portal_space *` factor
-//! composed onto the instance's own coordinate-space transform, and (2) the
-//! fragment-shader world-space clip test against the portal's opening.
-//! Debug-visualization modes, lightmap sampling, and the Radiant material
-//! graph override hook are not reachable here — a portal duplicate always
-//! renders through the plain default PBR path.
+//! piece); the differences are: (1) the extra `portal_space *` factor
+//! composed onto the instance's own coordinate-space transform, (2) the
+//! fragment-shader world-space clip test against the portal's opening, and
+//! (3) the `portal_mask` screen-space gate (see below). Debug-visualization
+//! modes, lightmap sampling, and the Radiant material graph override hook are
+//! not reachable here — a portal duplicate always renders through the plain
+//! default PBR path.
+//!
+//! # Why both a world-space clip *and* a screen-space mask
+//!
+//! The world-space clip (`local.z <= 0`, `|local.xy| <= half_extent`) only
+//! bounds the duplicated content to the portal's own little box in world
+//! space — it says nothing about whether the *camera* is actually looking at
+//! that box through the portal's on-screen opening. Standing in front of the
+//! portal and looking straight through, perspective makes those two things
+//! coincide, so the clip alone looks like correct "windowing". Move the
+//! camera outside — off to the side, or anywhere the portal isn't framed
+//! dead-on — and the same world-space-bounded content, which has real
+//! physical size, projects wherever it actually sits, spilling outside the
+//! portal's silhouette.
+//!
+//! `helio-pass-portal-mask` fixes this the standard way non-recursive portal
+//! renderers do: it stamps each portal's true on-screen footprint (from the
+//! *current* camera, respecting real occluders in front of the portal) into
+//! `portal_mask`, one draw per portal, before this pass runs. A duplicated
+//! fragment here is kept only when the mask at its own screen pixel matches
+//! this draw's portal — i.e. only where the portal opening is actually
+//! visible on screen right now. The world-space clip stays as a cheap second
+//! line of defense (keeps content behind the surface, bounds it in case two
+//! portals' masks ever touch).
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -90,8 +114,9 @@ struct GpuInstanceData {
     lightmap_index: u32,
 }
 
-/// Must match libhelio::GpuPortalView (80 bytes).
+/// Must match libhelio::GpuPortalView (144 bytes).
 struct GpuPortalView {
+    transform:         mat4x4<f32>,
     inverse_transform: mat4x4<f32>,
     half_extent:       vec2<f32>,
     coordinate_space:  u32,
@@ -124,6 +149,11 @@ const PORTAL_INSTANCE_CAPACITY: u32 = 65536u;
 // same "one small uniform, rebind per draw via dynamic offset" idiom
 // `helio-pass-shadow`'s FaceIndex uses for its own per-face selection.
 @group(0) @binding(7) var<uniform> portal_draw: PortalDrawUniform;
+// Written by helio-pass-portal-mask: per-pixel `portal_view_index + 1` where
+// that portal's opening is actually visible on screen this frame, 0
+// elsewhere. See the module doc above for why this is needed alongside the
+// world-space clip test below.
+@group(0) @binding(8) var portal_mask: texture_2d<u32>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -262,9 +292,18 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
-    // Clip to the portal opening: keep only fragments inside the portal's
-    // X/Y half-extent AND on the far side of the linked surface. `local` is
-    // the mapped position in the near surface's (A's) frame: content that was
+    // Screen-space gate: only draw where `helio-pass-portal-mask` determined
+    // *this* portal's opening is actually visible from the current camera —
+    // see the module doc for why the world-space clip alone isn't enough.
+    let mask_px = vec2<i32>(input.clip_position.xy);
+    let mask_value = textureLoad(portal_mask, mask_px, 0).r;
+    if mask_value != portal_draw.portal_view_index + 1u {
+        discard;
+    }
+
+    // World-space clip: keep only fragments inside the portal's X/Y
+    // half-extent AND on the far side of the linked surface. `local` is the
+    // mapped position in the near surface's (A's) frame: content that was
     // *behind* the far surface (the only content that should duplicate) lands
     // at local.z <= 0; content that was *in front* of the far surface lands at
     // local.z > 0 and would overlap the real scene, so it's discarded.
@@ -303,15 +342,12 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
-    // Subtle forced emissive so portal content is visible regardless of scene
-    // lighting (deferred lighting may not reach the portal's mapped position).
-    let portal_emissive = emissive + vec3<f32>(0.1, 0.1, 0.1);
 
     var out: GBufferOutput;
     out.albedo = vec4<f32>(albedo.rgb, albedo.a);
     out.normal = vec4<f32>(N, specular_f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
-    out.emissive = vec4<f32>(portal_emissive, specular_f0.b);
+    out.emissive = vec4<f32>(emissive, specular_f0.b);
     out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     out.sss = vec4<f32>(0.0);
     out.extra = vec4<f32>(0.0);

@@ -47,6 +47,11 @@ pub const PORTAL_DRAW_CAPACITY: u32 = 4096;
 /// Fixed cap on instance slots considered per portal. See module docs.
 pub const PORTAL_INSTANCE_CAPACITY: u32 = 65536;
 
+/// Diagnostic probe sizes (see the readback in `execute`): how many leading
+/// indirect commands and compacted slots per portal to copy back and log.
+const PROBE_DRAWS: u64 = 8;
+const PROBE_INDICES: u64 = 32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
@@ -70,6 +75,16 @@ pub struct PortalCullPass {
     /// Per-portal compacted original instance slots. Slice `p` starts at
     /// element offset `p * PORTAL_INSTANCE_CAPACITY`.
     pub portal_compacted_indices_buf: Arc<wgpu::Buffer>,
+
+    /// Per-portal selected-instance totals, zeroed every frame by the CPU.
+    /// Diagnostic readback (see `execute`) — confirms the cull selects content.
+    portal_stats_buf: wgpu::Buffer,
+    portal_stats_staging: wgpu::Buffer,
+    /// Diagnostic: first few indirect commands + compacted slots per portal.
+    portal_probe_buf: wgpu::Buffer,
+    portal_probe_staging: wgpu::Buffer,
+    copy_pending: bool,
+    probe_pending: bool,
 
     bind_group: Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, coordinate_spaces, portal_views)
@@ -102,9 +117,38 @@ impl PortalCullPass {
         let portal_compacted_indices_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull/CompactedIndices"),
             size: (MAX_PORTAL_SLOTS as u64) * (PORTAL_INSTANCE_CAPACITY as u64) * 4,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
+        let portal_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalCull/Stats"),
+            size: (MAX_PORTAL_SLOTS as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let portal_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalCull/StatsStaging"),
+            size: (MAX_PORTAL_SLOTS as u64) * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        // Diagnostic probe: per portal, PROBE_DRAWS indirect commands then
+        // PROBE_INDICES compacted slots, laid out as
+        // `portal * (PROBE_DRAWS*20 + PROBE_INDICES*4)`.
+        let portal_probe_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalCull/Probe"),
+            size: (MAX_PORTAL_SLOTS as u64) * (PROBE_DRAWS * 20 + PROBE_INDICES * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let portal_probe_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalCull/ProbeStaging"),
+            size: (MAX_PORTAL_SLOTS as u64) * (PROBE_DRAWS * 20 + PROBE_INDICES * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalCull BGL"),
@@ -126,6 +170,7 @@ impl PortalCullPass {
                 storage_entry(5, true),  // portal_views
                 storage_entry(6, false), // portal_indirect
                 storage_entry(7, false), // portal_compacted_indices
+                storage_entry(8, false), // portal_stats
             ],
         });
 
@@ -150,6 +195,12 @@ impl PortalCullPass {
             uniform_buf,
             portal_indirect_buf,
             portal_compacted_indices_buf,
+            portal_stats_buf,
+            portal_stats_staging,
+            portal_probe_buf,
+            portal_probe_staging,
+            copy_pending: false,
+            probe_pending: false,
             bind_group: None,
             bind_group_key: None,
             draw_count: 0,
@@ -199,6 +250,14 @@ impl RenderPass for PortalCullPass {
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        // Zero the per-portal stats before this frame's dispatch so the
+        // readback reflects exactly this frame's selections.
+        let zeros = [0u32; MAX_PORTAL_SLOTS as usize];
+        ctx.queue.write_buffer(
+            &self.portal_stats_buf,
+            0,
+            bytemuck::cast_slice(&zeros),
+        );
         Ok(())
     }
 
@@ -257,6 +316,10 @@ impl RenderPass for PortalCullPass {
                         binding: 7,
                         resource: self.portal_compacted_indices_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.portal_stats_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -273,6 +336,128 @@ impl RenderPass for PortalCullPass {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_workgroups, portal_workgroups, 1);
+        drop(pass);
+
+        // ── Diagnostic readback: every 60 frames, copy the per-portal
+        // selected-instance totals off the GPU and log them on the next
+        // frame (after this encoder has been submitted). Tells us whether
+        // the cull is actually selecting anything, without touching the
+        // frame's real data flow.
+        if self.copy_pending {
+            self.copy_pending = false;
+            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let callback_completion = std::sync::Arc::clone(&completion);
+            self.portal_stats_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    *callback_completion.lock().unwrap() = Some(result);
+                });
+            ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            let result = completion.lock().unwrap().take();
+            match result {
+                Some(Ok(())) => {
+                    let data = self
+                        .portal_stats_staging
+                        .slice(..)
+                        .get_mapped_range()
+                        .expect("portal stats mapped range");
+                    let mut counts = Vec::with_capacity(MAX_PORTAL_SLOTS as usize);
+                    for chunk in data.chunks_exact(4) {
+                        counts.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                    }
+                    log::info!("[PortalCull] per-portal selected-instance counts: {counts:?}");
+                    drop(data);
+                    self.portal_stats_staging.unmap();
+                }
+                _ => log::warn!("[PortalCull] stats readback map failed"),
+            }
+            self.probe_pending = true;
+        }
+        if self.probe_pending {
+            self.probe_pending = false;
+            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let callback_completion = std::sync::Arc::clone(&completion);
+            self.portal_probe_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    *callback_completion.lock().unwrap() = Some(result);
+                });
+            ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            let result = completion.lock().unwrap().take();
+            match result {
+                Some(Ok(())) => {
+                    let data = self
+                        .portal_probe_staging
+                        .slice(..)
+                        .get_mapped_range()
+                        .expect("portal probe mapped range");
+                    let draws = PROBE_DRAWS as usize;
+                    let indices = PROBE_INDICES as usize;
+                    let portal_stride = draws * 20 + indices * 4;
+                    let portals = (self.portal_count as usize).min(MAX_PORTAL_SLOTS as usize);
+                    for p in 0..portals {
+                        let base = p * portal_stride;
+                        let mut cmd = Vec::new();
+                        for d in 0..draws {
+                            let o = base + d * 20;
+                            let read = |i: usize| u32::from_le_bytes([
+                                data[o + i * 4], data[o + i * 4 + 1], data[o + i * 4 + 2], data[o + i * 4 + 3],
+                            ]);
+                            cmd.push((read(0), read(1), read(2), read(3), read(4)));
+                        }
+                        log::info!(
+                            "[PortalCull] portal[{p}] indirect (index_count, instance_count, first_index, base_vertex, first_instance): {cmd:?}"
+                        );
+                        let mut slots = Vec::new();
+                        for i in 0..indices {
+                            let o = base + draws * 20 + i * 4;
+                            slots.push(u32::from_le_bytes([
+                                data[o], data[o + 1], data[o + 2], data[o + 3],
+                            ]));
+                        }
+                        log::info!("[PortalCull] portal[{p}] compacted slots (first {indices}): {slots:?}");
+                    }
+                    drop(data);
+                    self.portal_probe_staging.unmap();
+                }
+                _ => log::warn!("[PortalCull] probe readback map failed"),
+            }
+        }
+        if ctx.frame_num % 60 == 0 {
+            let size = (MAX_PORTAL_SLOTS as u64) * 4;
+            unsafe { &mut *ctx.encoder_ptr }
+                .copy_buffer_to_buffer(&self.portal_stats_buf, 0, &self.portal_stats_staging, 0, size);
+            self.copy_pending = true;
+        }
+        if ctx.frame_num % 60 == 0 {
+            let probes = (self.portal_count as u64).min(MAX_PORTAL_SLOTS as u64);
+            let byte_len = probes * (PROBE_DRAWS * 20 + PROBE_INDICES * 4);
+            let mut encoder = unsafe { &mut *ctx.encoder_ptr };
+            for p in 0..probes {
+                // Indirect commands: portal p's slice, first PROBE_DRAWS entries.
+                let src = p * (PORTAL_DRAW_CAPACITY as u64) * 20;
+                let dst = p * (PROBE_DRAWS * 20 + PROBE_INDICES * 4);
+                encoder.copy_buffer_to_buffer(
+                    &self.portal_indirect_buf,
+                    src,
+                    &self.portal_probe_buf,
+                    dst,
+                    PROBE_DRAWS * 20,
+                );
+                // Compacted slots: portal p's slice, first PROBE_INDICES slots.
+                let src = p * (PORTAL_INSTANCE_CAPACITY as u64) * 4;
+                let dst = p * (PROBE_DRAWS * 20 + PROBE_INDICES * 4) + PROBE_DRAWS * 20;
+                encoder.copy_buffer_to_buffer(
+                    &self.portal_compacted_indices_buf,
+                    src,
+                    &self.portal_probe_buf,
+                    dst,
+                    PROBE_INDICES * 4,
+                );
+            }
+            encoder.copy_buffer_to_buffer(&self.portal_probe_buf, 0, &self.portal_probe_staging, 0, byte_len);
+            self.probe_pending = true;
+        }
         Ok(())
     }
 }

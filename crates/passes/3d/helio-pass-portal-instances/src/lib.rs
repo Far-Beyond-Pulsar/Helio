@@ -14,9 +14,10 @@
 //! let compacted_buf = Arc::clone(&cull_pass.portal_compacted_indices_buf);
 //! graph.add_pass(Box::new(cull_pass));           // before GBufferPass
 //! // ... GBufferPass added here ...
+//! graph.add_pass(Box::new(PortalMaskPass::new(device))); // after GBufferPass, before PortalInstancePass
 //! graph.add_pass(Box::new(
 //!     PortalInstancePass::new(device, indirect_buf, compacted_buf),
-//! )); // immediately after GBufferPass, before FoliageGBufferPass/VirtualGeometryPass
+//! )); // immediately after PortalMaskPass, before FoliageGBufferPass/VirtualGeometryPass
 //! ```
 
 use std::sync::Arc;
@@ -25,6 +26,12 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_portal_cull::{MAX_PORTAL_SLOTS, PORTAL_DRAW_CAPACITY};
+
+mod mask;
+pub use mask::PortalMaskPass;
+
+mod editor_overlay;
+pub use editor_overlay::PortalEditorOverlayPass;
 
 /// Byte stride between consecutive per-portal dynamic-uniform entries.
 /// Matches `helio-pass-shadow`'s own `FACE_BUF_STRIDE` — 256 is guaranteed to
@@ -64,7 +71,7 @@ pub struct PortalInstancePass {
     portal_compacted_indices_buf: Arc<wgpu::Buffer>,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
 
@@ -118,6 +125,16 @@ impl PortalInstancePass {
                     true,
                 ), // portal_views
                 uniform_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_draw (dynamic)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }, // portal_mask — written by helio-pass-portal-mask
             ],
         });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
@@ -172,16 +189,26 @@ impl PortalInstancePass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                // Test against, but do not write, depth: this is a *duplicate*
-                // of geometry that already occupies real depth somewhere else
-                // in the scene. Writing depth here would let the duplicate
-                // incorrectly occlude real geometry drawn afterward in the
-                // same pass (foliage, virtual geometry) at the portal's
-                // screen position.
-                depth_write_enabled: Some(false),
+                // `helio-pass-portal-mask` (run immediately before this pass)
+                // already reset depth to the far plane everywhere a portal's
+                // opening is actually visible on screen, and left real depth
+                // untouched everywhere else. So a normal LessEqual+write test
+                // here does the right thing on both sides of that boundary:
+                // duplicate content behind a visible opening self-occludes
+                // correctly (nearer copies win), while any pixel the mask
+                // pass *didn't* reset (portal not visible / occluded from
+                // here) keeps real depth and would fail this test too — belt
+                // and suspenders alongside the mask discard in the shader.
+                // Writing depth lets downstream passes in the same fused
+                // pass (foliage, virtual geometry) occlude correctly against
+                // the illusion content instead of the stale real depth.
+                depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
+                    // Small nudge so adjacent duplicate copies' coplanar
+                    // seams (e.g. two segments' floors meeting end to end)
+                    // don't z-fight.
                     constant: -1,
                     slope_scale: 0.0,
                     clamp: 0.0,
@@ -249,6 +276,12 @@ impl RenderPass for PortalInstancePass {
         // draws into them, which is what makes fusion into the same physical
         // pass possible.
         builder.read("gbuffer");
+        // Written by helio-pass-portal-mask, which must run before this pass.
+        builder.read("portal_mask");
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &["gbuffer", "portal_mask"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -346,6 +379,14 @@ impl RenderPass for PortalInstancePass {
             log::info!("[PortalInstance] frame={} main_scene_available={}", ctx.frame_num, main_scene.is_some());
         }
 
+        // helio-pass-portal-mask must run before this pass every frame (see
+        // helio-default-graphs' add_pass order) — its output gates every
+        // fragment below on actual on-screen portal visibility.
+        let Some(portal_mask_view) = ctx.resource_pool.get_view("portal_mask") else {
+            log::warn!("[PortalInstance] frame={} portal_mask not available — PortalMaskPass not wired before this pass?", ctx.frame_num);
+            return Ok(());
+        };
+
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
             ctx.scene.camera as *const _ as usize,
@@ -354,6 +395,7 @@ impl RenderPass for PortalInstancePass {
             ctx.scene.portal_views as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
             &*self.portal_indirect_buf as *const _ as usize,
+            portal_mask_view as *const _ as usize,
         );
         if self.bind_group_0_key != Some(key) {
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -375,6 +417,7 @@ impl RenderPass for PortalInstancePass {
                             size: std::num::NonZeroU64::new(std::mem::size_of::<PortalDrawUniform>() as u64),
                         }),
                     },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(portal_mask_view) },
                 ],
             }));
             self.bind_group_0_key = Some(key);

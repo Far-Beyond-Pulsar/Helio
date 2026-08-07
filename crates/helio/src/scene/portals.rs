@@ -133,6 +133,7 @@ impl Scene {
         let views: Vec<libhelio::GpuPortalView> = (0..self.portals.slot_len())
             .filter_map(|slot| self.portals.get_by_slot(slot))
             .map(|record| libhelio::GpuPortalView {
+                transform: record.pair.a.transform.to_cols_array(),
                 inverse_transform: record.pair.a.transform.inverse().to_cols_array(),
                 half_extent: record.half_extent.to_array(),
                 coordinate_space: record.coordinate_space,

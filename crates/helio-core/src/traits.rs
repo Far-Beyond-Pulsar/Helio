@@ -344,6 +344,16 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &[]
     }
 
+    /// Called whenever the host application toggles game/editor mode (see
+    /// `helio::Renderer::set_editor_mode`), once per frame for every pass in
+    /// the graph. Default no-op — override for passes whose output should
+    /// differ between the two (e.g. an editor-only debug indicator that must
+    /// stay invisible in game mode). Called every frame rather than only on
+    /// the transition so a pass rebuilt mid-session (e.g. by a resize-
+    /// triggered graph rebuild) still picks up the current mode instead of
+    /// resetting to its own default.
+    fn set_editor_mode(&mut self, _enabled: bool) {}
+
     /// Executes the pass by recording GPU commands.
     ///
     /// This is the main entry point for recording work. Implementations should:

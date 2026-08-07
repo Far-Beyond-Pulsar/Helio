@@ -10,11 +10,12 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// One active portal's render data. 80 bytes.
+/// One active portal's render data. 144 bytes.
 ///
 /// # WGSL equivalent
 /// ```wgsl
 /// struct GpuPortalView {
+///     transform:         mat4x4<f32>,  // 64 bytes
 ///     inverse_transform: mat4x4<f32>,  // 64 bytes
 ///     half_extent:       vec2<f32>,    // 8 bytes
 ///     coordinate_space:  u32,          // 4 bytes
@@ -24,6 +25,11 @@ use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuPortalView {
+    /// Portal-local → world (this portal surface's own pose, `pair.a.transform`).
+    /// Used by `helio-pass-portal-mask` to place the opening quad it stamps
+    /// into the screen-space visibility mask — see that crate's docs.
+    pub transform: [f32; 16],
+
     /// World → portal-local (this portal surface's own inverse transform).
     /// Used by the fragment-shader clip test: a duplicated fragment is kept
     /// only when its world position maps within `half_extent` of local X/Y

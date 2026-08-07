@@ -315,3 +315,80 @@ mod corridor_regression {
         assert!(local.z <= 0.0, "local={local:?} — clip test discards local.z > 0");
     }
 }
+
+#[cfg(test)]
+mod infinite_tunnel_regression {
+    //! Replicates `examples/infinite_tunnel.rs`'s exact vertical-shift portal
+    //! setup (both surfaces face the same direction, `pair_map_inverse` is a
+    //! pure +Y lift) and checks the numbers the render pipeline depends on:
+    //! that continuation copies buried HIDE_OFFSET below the corridor, once
+    //! mapped through `pair_map_inverse` and read back through the near
+    //! surface's inverse, pass `gbuffer_portal.wgsl`'s clip test
+    //! (`|local.x| <= half_extent && |local.y| <= half_extent && local.z <= 0`).
+    //! This is the pipeline's "the continuation actually lands inside the
+    //! portal opening" guarantee for the infinite-tunnel demo.
+    use super::*;
+    use glam::Vec3;
+
+    const HALF_WIDTH: f32 = 2.0;
+    const HALF_HEIGHT: f32 = 1.5;
+    const HALF_LENGTH: f32 = 8.0;
+    const COPY_STRIDE: f32 = 2.0 * HALF_LENGTH;
+    const PORTAL_Z: f32 = HALF_LENGTH - 1.0;
+    const HIDE_OFFSET: f32 = 500.0;
+
+    fn portal_poses() -> (PortalPose, PortalPose) {
+        let near_a = PortalPose::from_look_at(
+            Vec3::new(0.0, HALF_HEIGHT, PORTAL_Z),
+            Vec3::new(0.0, HALF_HEIGHT, PORTAL_Z + 1.0),
+            Vec3::Y,
+        );
+        let near_b = PortalPose::from_look_at(
+            Vec3::new(0.0, HALF_HEIGHT - HIDE_OFFSET, PORTAL_Z),
+            Vec3::new(0.0, HALF_HEIGHT - HIDE_OFFSET, PORTAL_Z + 1.0),
+            Vec3::Y,
+        );
+        (near_a, near_b)
+    }
+
+    #[test]
+    fn pair_map_inverse_is_a_pure_vertical_lift() {
+        let (a, b) = portal_poses();
+        let pair = PortalPair { a, b };
+        let mapped = pair.pair_map_inverse().transform_point3(Vec3::new(1.0, 2.0, 3.0));
+        assert!((mapped - Vec3::new(1.0, 502.0, 3.0)).length() < 1e-3, "got {mapped:?}");
+    }
+
+    #[test]
+    fn mapped_continuation_passes_the_fragment_clip() {
+        let (a, b) = portal_poses();
+        let pair = PortalPair { a, b };
+        let half_extent = Vec2::new(HALF_WIDTH, HALF_HEIGHT);
+
+        for copy in 1..=10i32 {
+            // A buried copy's far-end floor vertex, in the copy's sublevel
+            // frame: segment-local (x, floor_y, ±HALF_LENGTH) then placed
+            // (0, -HIDE_OFFSET, copy*COPY_STRIDE).
+            for z_local in [HALF_LENGTH, -HALF_LENGTH] {
+                for x_local in [-1.5, 0.0, 1.5] {
+                    let buried = Vec3::new(x_local, 0.02, copy as f32 * COPY_STRIDE + z_local);
+                    let in_sublevel = Vec3::new(buried.x, buried.y - HIDE_OFFSET, buried.z);
+                    // `own_space` is identity rotation + sublevel translation;
+                    // `portal_space` is pair_map_inverse.
+                    let portal_space = pair.pair_map_inverse();
+                    let mapped = portal_space.transform_point3(in_sublevel);
+                    let local = a.transform.inverse().transform_point3(mapped);
+
+                    assert!(
+                        local.z <= 0.0,
+                        "copy={copy} buried={buried:?} -> mapped={mapped:?} local={local:?} — clip discards local.z > 0"
+                    );
+                    assert!(
+                        local.x.abs() <= half_extent.x && local.y.abs() <= half_extent.y,
+                        "copy={copy} local={local:?} — outside opening half-extent {half_extent:?}"
+                    );
+                }
+            }
+        }
+    }
+}

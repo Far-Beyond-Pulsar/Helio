@@ -15,6 +15,7 @@ pub enum ResourceFormat {
     Rgba8Unorm,
     Rg16Float,
     Depth32Float,
+    R32Uint,
 }
 
 impl ResourceFormat {
@@ -30,6 +31,7 @@ impl ResourceFormat {
             Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             Self::Rg16Float => wgpu::TextureFormat::Rg16Float,
             Self::Depth32Float => wgpu::TextureFormat::Depth32Float,
+            Self::R32Uint => wgpu::TextureFormat::R32Uint,
         }
     }
 }
@@ -47,7 +49,18 @@ impl From<wgpu::TextureFormat> for ResourceFormat {
             wgpu::TextureFormat::Rgba8Unorm => Self::Rgba8Unorm,
             wgpu::TextureFormat::Rg16Float => Self::Rg16Float,
             wgpu::TextureFormat::Depth32Float => Self::Depth32Float,
-            _ => Self::Rgba16Float,
+            wgpu::TextureFormat::R32Uint => Self::R32Uint,
+            // Any other format asked for via `write_color_raw` that this
+            // transient-resource enum doesn't (yet) have a dedicated variant
+            // for would previously have silently aliased to Rgba16Float here
+            // — surfacing as a confusing "wrong sample type" bind-group
+            // validation error far from the actual mistake. Fail loudly
+            // instead: add the missing variant above rather than guessing.
+            other => panic!(
+                "ResourceFormat::from({other:?}): no transient-resource variant for this \
+                 wgpu::TextureFormat — add one instead of letting it silently alias to \
+                 another format"
+            ),
         }
     }
 }

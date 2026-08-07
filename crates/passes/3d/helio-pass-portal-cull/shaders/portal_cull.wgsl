@@ -72,8 +72,9 @@ struct GpuDrawCall {
 // `libhelio::{coordinate_space, set_coordinate_space}`.
 @group(0) @binding(4) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
-// One active portal's render data. Must match libhelio::GpuPortalView (80 bytes).
+// One active portal's render data. Must match libhelio::GpuPortalView (144 bytes).
 struct GpuPortalView {
+    transform:         mat4x4<f32>,
     inverse_transform: mat4x4<f32>,
     half_extent:       vec2<f32>,
     coordinate_space:  u32,
@@ -96,6 +97,9 @@ struct DrawIndexedIndirect {
 // like the main scene's `compacted_indices` (survivors packed starting at
 // `dc.first_instance`).
 @group(0) @binding(7) var<storage, read_write> portal_compacted_indices: array<u32>;
+// Per-portal total selected-instance count, zeroed by the CPU every frame
+// before dispatch. Diagnostic: read back to confirm the cull selects content.
+@group(0) @binding(8) var<storage, read_write> portal_stats: array<atomic<u32>>;
 
 var<workgroup> wg_counter: atomic<u32>;
 
@@ -173,6 +177,9 @@ fn main(
         // to stay outside of (the barrier must be reached unconditionally).
         let dc2 = draw_calls[draw_idx];
         let visible_count = atomicLoad(&wg_counter);
+        if portal_idx < arrayLength(&portal_stats) {
+            atomicAdd(&portal_stats[portal_idx], visible_count);
+        }
         let indirect_base = portal_idx * cull.draw_capacity;
         let write_idx = indirect_base + draw_idx;
         if write_idx < arrayLength(&portal_indirect) {

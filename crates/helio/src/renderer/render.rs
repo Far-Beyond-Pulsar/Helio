@@ -363,6 +363,15 @@ impl Renderer {
             }
         }
 
+        // Keep every pass's `RenderPass::set_editor_mode` in sync every
+        // frame — not just once at graph construction — because a resize
+        // (even the very first one most windowing backends fire right after
+        // window creation) rebuilds the graph from scratch via
+        // `graph_rebuilder`, producing fresh pass instances that default
+        // back to game mode. Cheap: a no-op virtual call per pass for the
+        // (overwhelming) majority that don't override it.
+        self.graph.set_editor_mode(self.editor_mode);
+
         let mut texture_views = ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
         let mut samplers = ArrayVec::<&wgpu::Sampler, { crate::material::MAX_TEXTURES }>::new();
         for slot in 0..self.scene.material_binding_config().max_textures {

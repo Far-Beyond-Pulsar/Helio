@@ -25,7 +25,7 @@ use helio_pass_perf_overlay::{
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_portal_cull::PortalCullPass;
-use helio_pass_portal_instances::PortalInstancePass;
+use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
 use helio_pass_dof::DofPass;
 use helio_pass_planetary_voxel::{
     PlanetaryRenderError, PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass,
@@ -226,11 +226,18 @@ fn add_geometry_passes(
     // attachment-view match, and both foliage and VG must stay last since VG
     // binds only 7 of 8 attachments. Looks the cull pass back up by type
     // rather than threading its buffers through this function's signature.
+    //
+    // PortalMaskPass runs first: it stamps each portal's true on-screen
+    // footprint (respecting real occluders) into `portal_mask` and resets
+    // depth to far there, so PortalInstancePass's own screen-space mask
+    // check and depth self-occlusion both have something correct to test
+    // against. See helio-pass-portal-instances' shaders for why this exists.
     if config.enable_portals {
         if let Some((indirect_buf, compacted_buf)) = graph
             .find_pass::<PortalCullPass>()
             .map(|p| (Arc::clone(&p.portal_indirect_buf), Arc::clone(&p.portal_compacted_indices_buf)))
         {
+            graph.add_pass(Box::new(PortalMaskPass::new(device)));
             graph.add_pass(Box::new(PortalInstancePass::new(device, indirect_buf, compacted_buf)));
         }
     }
@@ -317,6 +324,16 @@ fn add_late_passes(
         camera_buf,
         config.surface_format,
     )));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
+
+    // Editor-only checkerboard indicator over each portal's opening —
+    // disabled (zero draws) by default; the host application flips it via
+    // `renderer.find_pass_mut::<PortalEditorOverlayPass>()` alongside its own
+    // editor/game-mode toggle. See that pass's docs for why it isn't wired to
+    // `Renderer::is_editor_mode()` automatically.
+    if config.enable_portals {
+        graph.add_pass(Box::new(PortalEditorOverlayPass::new(device, config.surface_format)));
+    }
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     graph.add_pass(Box::new(WaterSimPass::new(
