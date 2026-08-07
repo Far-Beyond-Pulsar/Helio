@@ -77,6 +77,10 @@ pub struct PortalCullPass {
 
     draw_count: u32,
     portal_count: u32,
+
+    /// TEMP DIAGNOSTIC — see `readback_buf`'s doc comment above.
+    readback_buf: wgpu::Buffer,
+    readback_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PortalCullPass {
@@ -93,10 +97,21 @@ impl PortalCullPass {
             mapped_at_creation: false,
         });
 
+        // TEMP DIAGNOSTIC: small staging buffer to periodically read back the
+        // first few DrawIndexedIndirect entries of the first two portal
+        // slices, to see whether the compute shader is finding any survivors
+        // at all. Remove once the "hallway just ends" bug is found.
+        let readback_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalCull/DiagReadback"),
+            size: 240, // 2 portals * 6 draws * 20 bytes
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let portal_indirect_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull/PortalIndirect"),
             size: (MAX_PORTAL_SLOTS as u64) * (PORTAL_DRAW_CAPACITY as u64) * 20,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let portal_compacted_indices_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -154,6 +169,8 @@ impl PortalCullPass {
             bind_group_key: None,
             draw_count: 0,
             portal_count: 0,
+            readback_buf,
+            readback_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -203,6 +220,12 @@ impl RenderPass for PortalCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
+            log::info!(
+                "[PortalCull] frame={} draw_count={} portal_count={}",
+                ctx.frame_num, self.draw_count, self.portal_count,
+            );
+        }
         if self.draw_count == 0 || self.portal_count == 0 {
             return Ok(());
         }
@@ -259,14 +282,65 @@ impl RenderPass for PortalCullPass {
         let draw_workgroups = self.draw_count.min(PORTAL_DRAW_CAPACITY);
         let portal_workgroups = self.portal_count.min(MAX_PORTAL_SLOTS);
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("PortalCull"),
-                timestamp_writes: None,
+        {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("PortalCull"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(draw_workgroups, portal_workgroups, 1);
+        }
+
+        // TEMP DIAGNOSTIC — see `readback_buf`'s doc comment. Copies the
+        // first 6 DrawIndexedIndirect entries of portal slices 0 and 1 into
+        // a small mappable staging buffer, then logs `instance_count` for
+        // each once the map completes (async — fires on a later
+        // `device.poll()`, which the normal render loop already does).
+        if ctx.frame_num % 120 == 10 && !self.readback_pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let encoder = unsafe { &mut *ctx.encoder_ptr };
+            encoder.copy_buffer_to_buffer(&self.portal_indirect_buf, 0, &self.readback_buf, 0, 120);
+            encoder.copy_buffer_to_buffer(
+                &self.portal_indirect_buf,
+                (PORTAL_DRAW_CAPACITY as u64) * 20,
+                &self.readback_buf,
+                120,
+                120,
+            );
+            let pending = std::sync::Arc::clone(&self.readback_pending);
+            let frame = ctx.frame_num;
+            // usize, not a raw pointer, so the closure stays `Send` (required
+            // by `map_async`) — cast back to `&wgpu::Buffer` inside it.
+            let readback_buf_addr = &self.readback_buf as *const wgpu::Buffer as usize;
+            self.readback_buf.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                if let Err(e) = result {
+                    log::warn!("[PortalCull] diag readback map failed: {e:?}");
+                    pending.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+                // Safety: `readback_buf` outlives this callback (owned by the
+                // still-alive PortalCullPass); only read here, never written.
+                let buf = unsafe { &*(readback_buf_addr as *const wgpu::Buffer) };
+                let Ok(data) = buf.slice(..).get_mapped_range() else {
+                    log::warn!("[PortalCull] diag readback: get_mapped_range failed");
+                    pending.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                };
+                for (portal_idx, chunk) in data.chunks(120).enumerate() {
+                    let counts: Vec<u32> = chunk
+                        .chunks(20)
+                        .map(|entry| u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]))
+                        .collect();
+                    log::info!(
+                        "[PortalCull] diag readback frame={frame} portal_slice={portal_idx} instance_counts(first 6 draws)={counts:?}"
+                    );
+                }
+                drop(data);
+                buf.unmap();
+                pending.store(false, std::sync::atomic::Ordering::SeqCst);
             });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(draw_workgroups, portal_workgroups, 1);
+        }
         Ok(())
     }
 }

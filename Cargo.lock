@@ -3237,6 +3237,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 
@@ -3249,6 +3250,7 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-portal-cull",
  "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 

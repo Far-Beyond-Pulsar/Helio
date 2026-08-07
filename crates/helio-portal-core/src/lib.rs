@@ -54,8 +54,19 @@ impl PortalPose {
 
     /// A pose at `position` looking toward `look_at` (the surface's forward).
     pub fn from_look_at(position: Vec3, look_at: Vec3, up: Vec3) -> Self {
+        // `look_at_mat4` builds a *view* matrix (world → local — the same
+        // matrix `Camera::perspective_look_at` uses directly as `Camera.view`
+        // for GPU rendering, confirmed empirically: it sends `position`
+        // itself to the local origin). Every formula below (`position()`,
+        // `forward()`, `pair_map()`) needs the opposite: a *placement*
+        // matrix (local → world, i.e. this pose's own "camera-to-world"),
+        // so its w_axis is directly this pose's world position and its
+        // z_axis is directly its world-space orientation. Inverting once
+        // here — a rigid transform, so cheap and exact — keeps every other
+        // formula in this file simple and correct instead of threading a
+        // view/placement distinction through all of them.
         Self {
-            transform: glam::camera::rh::view::look_at_mat4(position, look_at, up),
+            transform: glam::camera::rh::view::look_at_mat4(position, look_at, up).inverse(),
         }
     }
 }
@@ -230,5 +241,77 @@ mod tests {
         // Within the on-plane epsilon: counts as a crossing so the player can
         // not wedge against the surface.
         assert!(crossing_detected(prev, cur, &portal, Vec2::splat(2.0)));
+    }
+
+    /// The regression this whole fix exists for: `from_look_at` used to store
+    /// the raw view matrix `look_at_mat4` returns (world → local — confirmed
+    /// empirically by checking it sends `position` itself to the origin,
+    /// same as `Camera.view`), not its inverse. That bug was invisible in
+    /// every other test above because they either place `a` at the world
+    /// origin (where the view/placement distinction vanishes: `-R*0 = 0`
+    /// either way) or only check round-trip identities (`pair_map() *
+    /// pair_map_inverse() == I`), which hold for *any* invertible matrix
+    /// regardless of what it represents. This test uses a non-trivial,
+    /// non-axis-aligned pose and checks `position()`/`forward()` against the
+    /// values actually passed in — the one thing the others couldn't catch.
+    #[test]
+    fn position_and_forward_match_the_requested_pose_off_axis() {
+        let eye = Vec3::new(3.0, 1.0, -2.0);
+        let dir = Vec3::new(1.0, 0.0, 1.0).normalize();
+        let pose = PortalPose::from_look_at(eye, eye + dir, Vec3::Y);
+        assert!((pose.position() - eye).length() < 1e-4, "got {:?}", pose.position());
+        assert!((pose.forward() - dir).length() < 1e-4, "got {:?}", pose.forward());
+    }
+}
+
+#[cfg(test)]
+mod corridor_regression {
+    //! Reproduces `examples/portals_demo.rs`'s exact two-portal hallway setup
+    //! and checks the numbers the render pipeline actually depends on: that
+    //! content near one portal's `b` surface lands, through
+    //! `pair_map_inverse`, inside the *other* portal's clip window (the
+    //! world→local check `gbuffer_portal.wgsl`'s fragment shader performs).
+    //! A regression test for "the ends just end" — if this ever starts
+    //! failing again, that bug is back.
+    use super::*;
+    use glam::Vec3;
+
+    fn corridor_portal_poses() -> (PortalPose, PortalPose) {
+        let pose_near = PortalPose::from_look_at(
+            Vec3::new(0.0, 1.5, 17.0),
+            Vec3::new(0.0, 1.5, 18.0),
+            Vec3::Y,
+        );
+        let pose_far = PortalPose::from_look_at(
+            Vec3::new(0.0, 1.5, -17.0),
+            Vec3::new(0.0, 1.5, -18.0),
+            Vec3::Y,
+        );
+        (pose_near, pose_far)
+    }
+
+    #[test]
+    fn far_surface_maps_exactly_onto_near_surface() {
+        let (pose_near, pose_far) = corridor_portal_poses();
+        let pair = PortalPair { a: pose_near, b: pose_far };
+        let mapped = pair.pair_map_inverse().transform_point3(pose_far.position());
+        assert!((mapped - pose_near.position()).length() < 1e-4, "got {mapped:?}");
+    }
+
+    #[test]
+    fn content_just_past_far_surface_lands_inside_near_portals_clip_window() {
+        let (pose_near, pose_far) = corridor_portal_poses();
+        let pair = PortalPair { a: pose_near, b: pose_far };
+        let half_extent = (2.0f32, 1.5f32);
+
+        // A point slightly beyond pose_far, in its forward direction — the
+        // kind of geometry that should duplicate through the near portal.
+        let near_far_point = pose_far.position() + pose_far.forward() * 0.3;
+        let mapped = pair.pair_map_inverse().transform_point3(near_far_point);
+        let local = pose_near.transform.inverse().transform_point3(mapped);
+
+        assert!(local.x.abs() <= half_extent.0, "local={local:?}");
+        assert!(local.y.abs() <= half_extent.1, "local={local:?}");
+        assert!(local.z <= 0.0, "local={local:?} — clip test discards local.z > 0");
     }
 }

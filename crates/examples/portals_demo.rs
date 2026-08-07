@@ -435,8 +435,8 @@ impl AppState {
                 let (new_pos, new_fwd) = pair.teleport_ray(self.cam_pos, forward);
                 self.cam_pos = new_pos;
                 forward = new_fwd;
-                self.cam_yaw = forward.z.atan2(forward.x).mul_add(-1.0, std::f32::consts::FRAC_PI_2);
-                self.cam_yaw = (-forward.x).atan2(-forward.z);
+                // Inverse of `forward = (sin(yaw)*cos(pitch), sin(pitch), -cos(yaw)*cos(pitch))`.
+                self.cam_yaw = forward.x.atan2(-forward.z);
                 self.cam_pitch = forward.y.clamp(-1.0, 1.0).asin();
             }
         }
@@ -445,7 +445,7 @@ impl AppState {
                 let (new_pos, new_fwd) = pair.teleport_ray(self.cam_pos, forward);
                 self.cam_pos = new_pos;
                 forward = new_fwd;
-                self.cam_yaw = (-forward.x).atan2(-forward.z);
+                self.cam_yaw = forward.x.atan2(-forward.z);
                 self.cam_pitch = forward.y.clamp(-1.0, 1.0).asin();
             }
         }

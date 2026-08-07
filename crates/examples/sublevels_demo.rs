@@ -1,12 +1,13 @@
 //! Sublevels demo — a group of objects moved as a unit via one coordinate-space
 //! transform, instead of per-object updates.
 //!
-//! A static hub room holds a small floating platform (a lit disc with a
-//! pillar marker) that is registered as a *sublevel*: all of its objects keep
-//! their ordinary local transforms, and the whole platform is moved every
-//! frame with a single `Scene::update_sublevel` call — O(1) regardless of how
-//! many objects are on it. Watch it orbit smoothly and cast real shadows as
-//! it moves.
+//! A static hub room holds a small floating platform (a lit disc, a pillar
+//! marker, and 1,024 tiny cubes riding on the deck) that is registered as a
+//! *sublevel*: all of its objects keep their ordinary local transforms, and
+//! the whole platform — all 1,026 objects on it — is moved every frame with
+//! a single `Scene::update_sublevel` call. O(1) regardless of how many
+//! objects are on it: watch it orbit smoothly and cast real shadows as it
+//! moves.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -212,6 +213,41 @@ impl ApplicationHandler for App {
             0.3,
             PLATFORM_GROUP,
         );
+
+        // ── 1,024 tiny cubes riding on the deck ──────────────────────────────
+        // The point of a sublevel is that moving it costs the same whether it
+        // carries 2 objects or 2,000: watch the frame time stay flat while a
+        // thousand-plus objects orbit together on one `update_sublevel` call
+        // per frame (see `AppState::render`). All share one mesh + material,
+        // so they also batch into a single instanced draw call — this swarm
+        // costs one GPU draw, not a thousand.
+        let stud_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.022, 0.022, 0.022]))).as_mesh().unwrap();
+        let stud_mat = renderer.scene_mut().insert_material(make_material(
+            [0.85, 0.9, 1.0, 1.0],
+            0.4,
+            0.3,
+            [0.3, 0.6, 1.0],
+            0.4,
+        ));
+        const GRID: i32 = 512; // 32*32 = 1024 cubes
+        let spacing = 2.6 / GRID as f32;
+        for ix in 0..GRID {
+            for iz in 0..GRID {
+                let x = (ix as f32 - (GRID - 1) as f32 * 0.5) * spacing;
+                let z = (iz as f32 - (GRID - 1) as f32 * 0.5) * spacing;
+                // Deterministic pseudo-random height jitter — no RNG dependency needed.
+                let jitter = ((ix * 928371 + iz * 12923) as f32 * 0.0001).sin().abs();
+                let y = 0.08 + 0.022 + jitter * 0.06;
+                insert_grouped_object(
+                    &mut renderer,
+                    stud_mesh,
+                    stud_mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(x, y, z)),
+                    0.04,
+                    PLATFORM_GROUP,
+                );
+            }
+        }
 
         // Sublevel starting placement — the platform's local origin maps here
         // in world space until the first `update_sublevel` call below moves it.

@@ -11,3 +11,4 @@ helio-pass-portal-cull = { workspace = true }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+log = { workspace = true }

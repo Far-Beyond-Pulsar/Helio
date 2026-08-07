@@ -324,13 +324,23 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
+            log::info!(
+                "[PortalInstance] frame={} portal_count={} draw_count={} render_pass_open={}",
+                ctx.frame_num, self.portal_count, self.draw_count, ctx.active_render_pass_ptr().is_some(),
+            );
+        }
         if self.portal_count == 0 {
             return Ok(());
         }
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+            log::warn!("[PortalInstance] frame={} no active render pass — G-buffer chain not fused/opened", ctx.frame_num);
             return Ok(());
         };
         let main_scene = ctx.resources.main_scene.read("PortalInstance");
+        if ctx.frame_num < 3 {
+            log::info!("[PortalInstance] frame={} main_scene_available={}", ctx.frame_num, main_scene.is_some());
+        }
 
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
