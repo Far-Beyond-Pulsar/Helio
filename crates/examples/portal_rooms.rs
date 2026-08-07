@@ -1,20 +1,21 @@
 //! Portal rooms — a cube with *no walls of its own at all*. Each of its 6
 //! faces is nothing but a portal, edge to edge, no doorway cut into a wall
 //! and no frame or border around it — the face itself is the entire portal
-//! surface. Stand in the middle and every face shows a different scene
-//! filling it completely — an ember-lit room to the east, a glacier to the
-//! west, a room overhead, a room below — with nothing marking where the
-//! "wall" is, because there isn't one. That's deliberate: without a doorway
-//! shape or a frame telling you "this is the portal, right here", it's not
-//! obvious at a glance which face is solid-looking-but-isn't, which makes
-//! the illusion more disorienting (in a good way) than `portal_cube`'s
-//! framed doorways. None of it is faked: each face is a real
-//! `helio::Scene::add_portal` pairing that whole face with the real entrance
-//! of a real room built somewhere else in world space, and the engine's own
-//! portal pipeline (`helio-pass-portal-cull` / `helio-pass-portal-instances`)
-//! does the rest — the only difference from `portal_cube` is that the
-//! portal's `half_extent` covers the *entire* face instead of a doorway
-//! inset into a wall, and that wall is never built in the first place.
+//! surface. Stand outside it and every face shows a different, fully
+//! furnished scene filling it completely — a bedroom through one face, a
+//! kitchen through the next, a library, a lounge, a greenhouse, a spa — with
+//! nothing marking where the "wall" is, because there isn't one. That's
+//! deliberate: without a doorway shape or a frame telling you "this is the
+//! portal, right here", it's not obvious at a glance which face is
+//! solid-looking-but-isn't, which makes the illusion more disorienting (in a
+//! good way) than `portal_cube`'s framed doorways. None of it is faked: each
+//! face is a real `helio::Scene::add_portal` pairing that whole face with the
+//! real entrance of a real, hand-furnished room built somewhere else in world
+//! space, and the engine's own portal pipeline (`helio-pass-portal-cull` /
+//! `helio-pass-portal-instances`) does the rest — the only difference from
+//! `portal_cube` is that the portal's `half_extent` covers the *entire* face
+//! instead of a doorway inset into a wall, and that wall is never built in
+//! the first place.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -32,7 +33,7 @@ use helio::{
     RendererConfig, Scene, SceneActor,
 };
 use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, point_light};
+use v3_demo_common::{box_mesh, make_material, point_light, sphere_mesh};
 
 use winit::{
     application::ApplicationHandler,
@@ -199,12 +200,23 @@ impl ApplicationHandler for App {
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
 
-        // Single shared unit box (half-extent 1 on every axis) — every side
-        // room's shell panel and floating accent prop in this scene is this
-        // same mesh, scaled/positioned per instance via its own transform
-        // (see `insert_room_shell` below). The hub itself has no geometry —
-        // see the module doc.
+        // Two shared unit meshes (half-extent/radius 1) — every side room's
+        // shell panel, piece of furniture, and accent prop in this scene is
+        // one of these two, scaled/positioned per instance via its own
+        // transform (see `insert_room_shell`/`furnish_room` below). The hub
+        // itself has no geometry — see the module doc.
         let unit_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))).as_mesh().unwrap();
+        let unit_sphere = renderer.scene_mut().insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0))).as_mesh().unwrap();
+
+        // Shared furniture materials, reused across every room so the six
+        // spaces read as built from the same "kit" — only each room's own
+        // wall/accent colors (below) tell them apart.
+        let wood_mat = renderer.scene_mut().insert_material(make_material(
+            [0.32, 0.2, 0.11, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0,
+        ));
+        let metal_mat = renderer.scene_mut().insert_material(make_material(
+            [0.5, 0.51, 0.54, 1.0], 0.4, 0.6, [0.0, 0.0, 0.0], 0.0,
+        ));
 
         // ── The hub: one full-face portal per axis direction, no wall, no
         // doorway cutout, no frame. `up_hint` just needs to not be parallel
@@ -257,11 +269,12 @@ impl ApplicationHandler for App {
             // sits at, so there's real geometry (floor, ceiling, far wall,
             // side walls) waiting right where the doorway leads.
             insert_room_shell(&mut renderer, unit_mesh, room_wall_mat, room_center, ROOM_HALF_SIZE, WALL_T, normal);
-            // A floating accent prop at the room's center so each
-            // destination reads as visually distinct at a glance, plus a
-            // matching light so the room isn't lit solely by the hub's
-            // distant, unrelated lights.
-            insert_box_panel(&mut renderer, unit_mesh, room_accent_mat, room_center, Vec3::splat(1.4));
+            // Hand-furnish this room so each destination reads as an actual
+            // place, not just a colored box — see `furnish_room` for the
+            // per-theme layouts — plus a matching light so the room isn't
+            // lit solely by the hub's distant, unrelated lights.
+            let frame = RoomFrame { center: room_center, right, up, normal, half_size: ROOM_HALF_SIZE };
+            furnish_room(&mut renderer, unit_mesh, unit_sphere, wood_mat, metal_mat, room_wall_mat, room_accent_mat, theme.name, &frame);
             light_ids.push(
                 renderer.scene_mut()
                     .insert_actor(SceneActor::light(point_light(room_center.into(), theme.accent, 3.5, ROOM_HALF_SIZE * 1.8)))
