@@ -290,9 +290,9 @@ impl ApplicationHandler for App {
             // picture-frame effect) — solid wall content only comes into
             // view off that centerline, same as it would with two real
             // rooms and a real window between them.
-            cam_pos: if std::env::var("CUBE_CLOSEUP").is_ok() { Vec3::new(0.2, 0.2, 3.0) } else { Vec3::new(4.0, 3.0, 4.0) },
-            cam_yaw: if std::env::var("CUBE_CLOSEUP").is_ok() { std::f32::consts::PI } else { -0.785 },
-            cam_pitch: if std::env::var("CUBE_CLOSEUP").is_ok() { 0.0 } else { -0.488 },
+            cam_pos: if std::env::var("CUBE_CLOSEUP").is_ok() { Vec3::new(1.5, 1.0, 3.5) } else { Vec3::new(4.0, 3.0, 4.0) },
+            cam_yaw: if std::env::var("CUBE_CLOSEUP").is_ok() { -2.60 } else { -0.785 },
+            cam_pitch: if std::env::var("CUBE_CLOSEUP").is_ok() { -0.33 } else { -0.488 },
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
