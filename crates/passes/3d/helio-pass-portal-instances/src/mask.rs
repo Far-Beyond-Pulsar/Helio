@@ -94,10 +94,28 @@ impl PortalMaskPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                // Read-only: must not disturb the real depth GBufferPass
-                // wrote — PortalMaskReset (below) is what edits it, and only
-                // where this stamp actually lands.
-                depth_write_enabled: Some(false),
+                // Writes ARE enabled here, even though this same depth
+                // buffer holds GBufferPass's real scene depth. That real
+                // depth still isn't disturbed for anything downstream: every
+                // pixel this stamp can possibly touch is, by construction,
+                // unconditionally overwritten again a moment later by
+                // PortalMaskReset (below) to a single canonical far-plane
+                // value, so nothing after this pass ever observes whatever
+                // depth a portal quad happened to write. What the write
+                // *does* do is give multiple portals' quads correct
+                // depth-ordering against each other within this one draw
+                // call — e.g. two faces of a portal cube both filling the
+                // screen from an oblique angle, with no real wall between
+                // them to occlude the farther one via the real-depth test
+                // alone. Without this, whichever portal happened to
+                // rasterize last simply overwrote the mask at every
+                // overlapping pixel regardless of which one was actually
+                // nearer — the "z-fighting"/wrong-layering symptom. With it,
+                // ordinary depth buffering resolves overlaps correctly
+                // regardless of instance submission order: nearer-portal
+                // fragments always win, the same as any other opaque
+                // geometry.
+                depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 // The quad is meant to be flush with the portal's real

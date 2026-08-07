@@ -40,6 +40,10 @@ name = "portal_cube"
 path = "portal_cube.rs"
 
 [[bin]]
+name = "portal_rooms"
+path = "portal_rooms.rs"
+
+[[bin]]
 name = "outdoor_night"
 path = "outdoor_night.rs"
 
