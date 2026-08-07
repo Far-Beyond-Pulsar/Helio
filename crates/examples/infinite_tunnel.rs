@@ -60,7 +60,7 @@ const HALF_LENGTH: f32 = 8.0;
 /// Centre-Z of the first copy beyond each end of the central segment.
 const COPY_STRIDE: f32 = 2.0 * HALF_LENGTH;
 /// Number of sublevel copies per direction.
-const COPIES: i32 = 10;
+const COPIES: i32 = 12;
 /// Portal surfaces sit exactly at the corridor ends — flush with the real
 /// wall/floor/ceiling meshes' own endpoint. Pulling this inward (it used to
 /// be `HALF_LENGTH - 1.0`) leaves a strip of real backing geometry between
