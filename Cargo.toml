@@ -51,9 +51,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
+helio-portal-core = { path = "crates/helio-portal-core" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
+helio-pass-portal-cull = { path = "crates/passes/3d/helio-pass-portal-cull" }
+helio-pass-portal-instances = { path = "crates/passes/3d/helio-pass-portal-instances" }
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "crates/passes/3d/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }

@@ -233,6 +233,7 @@ impl Renderer {
             enable_ssr: config.enable_ssr,
             enable_foliage: config.enable_foliage,
             foliage_blades_per_m2: config.foliage_blades_per_m2,
+            enable_portals: config.enable_portals,
             enable_planar_reflections: config.enable_planar_reflections,
             enable_environment_reflections: config.enable_environment_reflections,
             debug_mode: config.debug_mode,

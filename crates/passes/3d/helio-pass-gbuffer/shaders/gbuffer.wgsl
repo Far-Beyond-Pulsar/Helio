@@ -122,6 +122,13 @@ struct LightmapAtlasRegion {
 // through this buffer before indexing `instance_data` — it no longer equals
 // the instance's real slot directly.
 @group(0) @binding(4) var<storage, read>    compacted_indices:      array<u32>;
+// Coordinate-space transforms — see `libhelio::{coordinate_space, set_coordinate_space}`.
+// Slot 0 is always identity, so an untagged instance (the common case) is
+// unaffected beyond one extra constant-buffer read + mat4x4 multiply.
+// Sublevels and portals both work by tagging instances/draws with a non-zero
+// slot here and moving the whole space with a single matrix write.
+@group(0) @binding(5) var<storage, read>    coordinate_spaces:      array<mat4x4<f32>>;
+@group(0) @binding(6) var<storage, read>    coordinate_spaces_prev: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -156,25 +163,39 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 @vertex
 fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let inst       = instance_data[compacted_indices[slot]];
-    let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
 
-    // Normals transform by the inverse-transpose (stored in normal_mat).
-    let normal_mat = mat3x3<f32>(
+    // Coordinate space: world space (slot 0, identity) for the overwhelming
+    // common case, or wherever a sublevel/portal has placed this instance.
+    // See the `coordinate_spaces` binding above.
+    let space_id   = (inst.flags >> 8u) & 0xFFu;
+    let space      = coordinate_spaces[space_id];
+    let space_prev = coordinate_spaces_prev[space_id];
+    let space_rot  = mat3x3<f32>(space[0].xyz, space[1].xyz, space[2].xyz);
+
+    let world_pos  = space * (inst.transform * vec4<f32>(v.position, 1.0));
+
+    // Normals transform by the inverse-transpose (stored in normal_mat), then
+    // by the coordinate space's rotation. Coordinate spaces are always rigid
+    // (translation + rotation, never scaled), so `space_rot` is its own
+    // inverse-transpose and needs no separate normal-matrix treatment.
+    let normal_mat = space_rot * mat3x3<f32>(
         inst.normal_mat_0.xyz,
         inst.normal_mat_1.xyz,
         inst.normal_mat_2.xyz,
     );
 
     // Tangents are NOT normals — they transform by the regular upper-3×3 of
-    // the model matrix (no inverse-transpose).  Extract it from column vectors.
-    let model_mat3 = mat3x3<f32>(
+    // the model matrix (no inverse-transpose), then the same rigid rotation.
+    let model_mat3 = space_rot * mat3x3<f32>(
         inst.transform[0].xyz,
         inst.transform[1].xyz,
         inst.transform[2].xyz,
     );
 
-    // Previous-frame clip position for velocity buffer
-    let prev_world  = inst.prev_model * vec4<f32>(v.position, 1.0);
+    // Previous-frame clip position for velocity buffer. Uses the coordinate
+    // space's own previous-frame transform so a moving sublevel/portal still
+    // produces correct motion vectors instead of a false one-frame pop.
+    let prev_world  = space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0));
     let prev_clip   = cameras[0].prev_view_proj * prev_world;
 
     var out: VertexOutput;

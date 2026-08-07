@@ -98,6 +98,12 @@ struct GpuDrawCall {
 @group(0) @binding(10) var<storage, read>       compacted_indices:   array<u32>;
 @group(0) @binding(11) var<storage, read_write> compacted_indices_2: array<u32>;
 
+// Coordinate-space transforms (current frame). Slot 0 = identity. An
+// instance's `bounds` center is authored pre-space (same frame as `model`),
+// so it must be mapped through this before any occlusion test — mirrors the
+// frustum-stage handling in indirect_dispatch.wgsl.
+@group(0) @binding(12) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
+
 // One workgroup handles one draw-call group, cooperatively Hi-Z-testing only
 // the instances that already survived frustum culling and re-compacting the
 // survivors — mirrors IndirectDispatchPass's per-instance compaction so a
@@ -161,9 +167,9 @@ fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
 // Main kernel  (64 threads × 1 × 1 workgroup)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Test a single instance against the Hi-Z pyramid.
-fn instance_hiz_occluded(inst: GpuInstanceData) -> bool {
-    let center = inst.bounds.xyz;
+/// Test a single instance against the Hi-Z pyramid. `center` is the bounds
+/// center already mapped through the instance's coordinate space (see caller).
+fn instance_hiz_occluded(inst: GpuInstanceData, center: vec3<f32>) -> bool {
     let radius = inst.bounds.w;
     if radius <= 0.0 {
         return false;
@@ -204,9 +210,9 @@ fn instance_hiz_occluded(inst: GpuInstanceData) -> bool {
     return near_z > hiz_depth + depth_bias;
 }
 
-/// Test a single instance against the static pre-baked PVS.
-fn instance_pvs_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
-    let center = inst.bounds.xyz;
+/// Test a single instance against the static pre-baked PVS. `center` is the
+/// bounds center already mapped through the instance's coordinate space.
+fn instance_pvs_occluded(inst: GpuInstanceData, center: vec3<f32>, cam_pos: vec3<f32>) -> bool {
     let cam_to_obj = center - cam_pos;
     let cam_dist = length(cam_to_obj);
     if cam_dist <= 0.001 {
@@ -237,17 +243,17 @@ fn instance_pvs_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
 
-fn instance_is_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
+fn instance_is_occluded(inst: GpuInstanceData, center: vec3<f32>, cam_pos: vec3<f32>) -> bool {
     // Per-object cull opt-out — must be honoured here as well as in the frustum stage,
     // or an object marked always-visible still vanishes behind the Hi-Z test.
     if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
         return false;
     }
-    if instance_hiz_occluded(inst) {
+    if instance_hiz_occluded(inst, center) {
         return true;
     }
     if params.static_hiz_available != 0u {
-        if instance_pvs_occluded(inst, cam_pos) {
+        if instance_pvs_occluded(inst, center, cam_pos) {
             return true;
         }
     }
@@ -279,7 +285,15 @@ fn main(
         for (var i = lid.x; i < visible_count; i += 64u) {
             let original_idx = compacted_indices[dc.first_instance + i];
             let inst = instances[original_idx];
-            if !instance_is_occluded(inst, cam_pos) {
+            // Common case (space 0, identity) stays exactly as before; only a
+            // sublevel/portal-tagged instance pays the extra matrix multiply.
+            let space_id = (inst.flags >> 8u) & 0xFFu;
+            let center = select(
+                inst.bounds.xyz,
+                (coordinate_spaces[space_id] * vec4<f32>(inst.bounds.xyz, 1.0)).xyz,
+                space_id != 0u,
+            );
+            if !instance_is_occluded(inst, center, cam_pos) {
                 let slot = atomicAdd(&wg_counter, 1u);
                 compacted_indices_2[dc.first_instance + slot] = original_idx;
             }

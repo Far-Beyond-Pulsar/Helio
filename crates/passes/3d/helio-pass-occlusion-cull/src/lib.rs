@@ -54,8 +54,9 @@ pub struct OcclusionCullPass {
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view,
-    /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2)
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
+    /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2,
+    /// coordinate_spaces)
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -245,6 +246,17 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
+                // 12: coordinate_spaces (read-only) — see occlusion_cull.wgsl
+                wgpu::BindGroupLayoutEntry {
+                    binding:    12,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -386,6 +398,7 @@ impl RenderPass for OcclusionCullPass {
             &self.cull_stats_buf   as *const _ as usize,
             ctx.scene.compacted_indices   as *const _ as usize,
             ctx.scene.compacted_indices_2 as *const _ as usize,
+            ctx.scene.coordinate_spaces   as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -439,6 +452,10 @@ impl RenderPass for OcclusionCullPass {
                     wgpu::BindGroupEntry {
                         binding:  11,
                         resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  12,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

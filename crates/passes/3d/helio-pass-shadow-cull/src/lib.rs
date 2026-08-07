@@ -71,7 +71,7 @@ pub struct ShadowCullPass {
 
     /// Lazy bind group, rebuilt when scene buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
 }
 
 impl ShadowCullPass {
@@ -197,6 +197,17 @@ impl ShadowCullPass {
                     },
                     count: None,
                 },
+                // 7: coordinate_spaces (storage read) — see shadow_cull.wgsl
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -274,7 +285,8 @@ impl RenderPass for ShadowCullPass {
         let inst_ptr = ctx.scene.instances             as *const _ as usize;
         let src_ptr  = ctx.scene.shadow_movable_indirect as *const _ as usize;
         let fd_ptr   = &*self.face_dirty_buf           as *const _ as usize;
-        let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr);
+        let cs_ptr   = ctx.scene.coordinate_spaces      as *const _ as usize;
+        let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
 
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -308,6 +320,10 @@ impl RenderPass for ShadowCullPass {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: self.face_dirty_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

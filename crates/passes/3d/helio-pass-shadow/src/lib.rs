@@ -89,7 +89,7 @@ pub struct ShadowPass {
     // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
     face_views: Box<[wgpu::TextureView]>,
     bg_0: Option<wgpu::BindGroup>,
-    bg_0_key: Option<(usize, usize)>,
+    bg_0_key: Option<(usize, usize, usize)>,
 
     // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
     static_face_views: Box<[wgpu::TextureView]>,
@@ -200,6 +200,19 @@ impl ShadowPass {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 3: coordinate_spaces — current-frame per-space transforms
+                // (sublevels/portals), slot 0 = identity. See gbuffer.wgsl for the
+                // full mechanism; shadows only need the current-frame copy.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
@@ -514,7 +527,8 @@ impl RenderPass for ShadowPass {
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
         let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
         let inst_ptr = ctx.scene.instances as *const _ as usize;
-        let key = (sm_ptr, inst_ptr);
+        let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let key = (sm_ptr, inst_ptr, cs_ptr);
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow BG 0"),
@@ -535,6 +549,10 @@ impl RenderPass for ShadowPass {
                             offset: 0,
                             size: std::num::NonZeroU64::new(16),
                         }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

@@ -75,10 +75,10 @@
 use crate::acceleration::{BlasManager, TlasManager};
 use crate::component::ComponentRegistry;
 use crate::scene::managers::{
-    GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer, GpuCompactedIndices2Buffer,
-    GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer, GpuLightBuffer,
-    GpuMaterialBuffer, GpuShadowMatrixBuffer, GpuVisibilityBuffer, GpuVoxelVolumeBuffer,
-    GpuVoxelEditRing,
+    CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer,
+    GpuCompactedIndices2Buffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
 use crate::scene::managers::GrowableBuffer;
 use crate::scene::SceneResources;
@@ -198,6 +198,13 @@ pub struct GpuScene {
     /// Written by OcclusionCullPass, consumed by GBufferPass/DepthPrepass.
     pub compacted_indices_2: GpuCompactedIndices2Buffer,
 
+    /// Coordinate-space transforms — the shared mechanism behind sublevels and
+    /// portals. Slot 0 is the permanent identity; an instance tagged with a
+    /// non-zero slot (via `libhelio::set_coordinate_space`) is drawn through
+    /// `coordinate_spaces[slot] * instance.transform` instead of its raw
+    /// transform. See `CoordinateSpaceBuffer` for the O(1) move semantics.
+    pub coordinate_spaces: CoordinateSpaceBuffer,
+
     // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
     // NOTE: Both pass kinds use `instances` (the main transforms buffer) at binding 1.
     // We only partition the INDIRECT DRAW CALL buffers so that each atlas can be
@@ -278,6 +285,13 @@ pub struct GpuScene {
     /// Reflection capture GPU storage buffer.
     pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
 
+    /// Active portals' render data (clip transform + which coordinate space
+    /// holds their content duplicate). Republished unconditionally each frame
+    /// by `helio::Scene::flush()` from its private portal registry — portal
+    /// counts are always small, so this is simpler than dirty-tracking it.
+    /// Consumed by `helio-pass-portal-cull` / `helio-pass-portal-instances`.
+    pub portal_views: GrowableBuffer<libhelio::GpuPortalView>,
+
     /// Bottom-Level Acceleration Structure manager (ray tracing).
     pub blas_manager: BlasManager,
 
@@ -327,6 +341,7 @@ impl GpuScene {
         let visibility = GpuVisibilityBuffer::new(device.clone());
         let compacted_indices = GpuCompactedIndicesBuffer::new(device.clone());
         let compacted_indices_2 = GpuCompactedIndices2Buffer::new(device.clone());
+        let coordinate_spaces = CoordinateSpaceBuffer::new(&device);
         let shadow_static_indirect = GpuIndirectBuffer::new(device.clone());
         let shadow_movable_indirect = GpuIndirectBuffer::new(device.clone());
         let voxel_volumes = GpuVoxelVolumeBuffer::new(device.clone());
@@ -357,6 +372,13 @@ impl GpuScene {
             "ReflectionCapture Buffer",
         );
 
+        let portal_views = GrowableBuffer::new(
+            device.clone(),
+            8,
+            wgpu::BufferUsages::STORAGE,
+            "Portal Views Buffer",
+        );
+
         let device_for_rt = Arc::clone(&device);
 
         Self {
@@ -381,6 +403,7 @@ impl GpuScene {
             visibility,
             compacted_indices,
             compacted_indices_2,
+            coordinate_spaces,
             shadow_static_indirect,
             shadow_movable_indirect,
             shadow_static_draw_count: 0,
@@ -403,6 +426,7 @@ impl GpuScene {
             template_registry: None,
             transparent_template_registry: None,
             reflection_captures,
+            portal_views,
             blas_manager: BlasManager::new(device_for_rt.clone()),
             tlas_manager: TlasManager::new(device_for_rt, 65536),
         }
@@ -450,6 +474,8 @@ impl GpuScene {
             visibility: self.visibility.buffer(),
             compacted_indices: self.compacted_indices.buffer(),
             compacted_indices_2: self.compacted_indices_2.buffer(),
+            coordinate_spaces: self.coordinate_spaces.buffer(),
+            coordinate_spaces_prev: self.coordinate_spaces.prev_buffer(),
             instance_count: self.instances.len() as u32,
             draw_count: self.draw_calls.len() as u32,
             light_count: self.lights.len() as u32,
@@ -480,6 +506,8 @@ impl GpuScene {
             transparent_template_registry: &self.transparent_template_registry,
             reflection_captures: self.reflection_captures.buffer(),
             reflection_capture_count: self.reflection_captures.len() as u32,
+            portal_views: self.portal_views.buffer(),
+            portal_view_count: self.portal_views.len() as u32,
             rt_available: self.tlas_manager.is_rt_available(),
         }
     }
@@ -552,15 +580,20 @@ impl GpuScene {
         self.visibility.flush(queue);
         self.compacted_indices.flush(queue);
         self.compacted_indices_2.flush(queue);
+        self.coordinate_spaces.flush(queue);
         self.shadow_static_indirect.flush(queue);
         self.shadow_movable_indirect.flush(queue);
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
         self.reflection_captures.flush(queue);
+        self.portal_views.flush(queue);
 
         // After flush, cycle prev_model = model so that next frame's velocity
         // buffer captures the movement between this frame and the next.
         self.instances.cycle_prev_models();
+        // Same reasoning for coordinate spaces: whatever slot(s) moved this
+        // frame become "previous" for next frame's velocity computation.
+        self.coordinate_spaces.cycle_prev();
     }
 
     pub fn components_mut(&mut self) -> &mut ComponentRegistry {

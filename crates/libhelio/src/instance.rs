@@ -42,6 +42,53 @@ pub const INSTANCE_FLAG_RECEIVES_SHADOW: u32 = 1 << 1;
 /// bounding spheres are tight.
 pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
 
+/// Bit offset of the coordinate-space id within [`GpuInstanceData::flags`].
+///
+/// # Coordinate spaces
+///
+/// Every instance is drawn through `coordinate_spaces[space_id] * transform`,
+/// where `coordinate_spaces` is a small GPU array of rigid transforms
+/// (`crates/helio-core/src/scene/managers.rs::CoordinateSpaceBuffer`). Slot 0
+/// is always the identity, so an untagged instance (the overwhelming common
+/// case) pays one constant-buffer read and one extra `mat4x4` multiply per
+/// vertex — no new pass, no branch, no separate pipeline.
+///
+/// Sublevels and portals are both just consumers of this one mechanism: a
+/// sublevel assigns its members a space id once and moves the whole sublevel
+/// by writing one matrix (`Scene::move_sublevel`); a portal draws a *second*,
+/// clipped copy of nearby geometry through its own space id
+/// (`Scene::add_portal`). See `docs/` for the full design.
+pub const INSTANCE_COORDINATE_SPACE_SHIFT: u32 = 8;
+
+/// Mask for the 8-bit coordinate-space id within [`GpuInstanceData::flags`].
+///
+/// 256 values are encodable; [`crate::MAX_COORDINATE_SPACES`] (32) are
+/// actually backed by GPU storage, which is enough headroom that running out
+/// is not a realistic concern.
+pub const INSTANCE_COORDINATE_SPACE_MASK: u32 = 0xFF << INSTANCE_COORDINATE_SPACE_SHIFT;
+
+/// Number of coordinate-space slots backed by GPU storage. Slot 0 is always
+/// the identity (world space). Mirrors `MAX_COORDINATE_SPACES` in
+/// `coordinate_spaces.wgsl` / every shader that binds the buffer — keep in sync.
+pub const MAX_COORDINATE_SPACES: u32 = 32;
+
+/// Packs `space` (a coordinate-space slot, see [`INSTANCE_COORDINATE_SPACE_SHIFT`])
+/// into `flags`, replacing whatever coordinate-space id was previously set.
+///
+/// # Panics
+/// Debug-asserts `space < MAX_COORDINATE_SPACES`; release builds mask silently.
+pub const fn set_coordinate_space(flags: u32, space: u32) -> u32 {
+    debug_assert!(space < MAX_COORDINATE_SPACES);
+    (flags & !INSTANCE_COORDINATE_SPACE_MASK)
+        | ((space << INSTANCE_COORDINATE_SPACE_SHIFT) & INSTANCE_COORDINATE_SPACE_MASK)
+}
+
+/// Reads the coordinate-space id packed into `flags` by [`set_coordinate_space`].
+/// `0` (world space / identity) for any instance that never had one set.
+pub const fn coordinate_space(flags: u32) -> u32 {
+    (flags & INSTANCE_COORDINATE_SPACE_MASK) >> INSTANCE_COORDINATE_SPACE_SHIFT
+}
+
 /// Per-instance data for GPU-driven rendering. 208 bytes.
 ///
 /// Uploaded once when instances change (dirty tracking), then read-only on GPU.
@@ -77,7 +124,8 @@ pub struct GpuInstanceData {
     pub mesh_id: u32,
     /// Material index into the global material table
     pub material_id: u32,
-    /// Flags (bit 0 = casts_shadow, bit 1 = receives_shadow)
+    /// Flags (bit 0 = casts_shadow, bit 1 = receives_shadow, bit 2 = always_visible,
+    /// bits 8-15 = coordinate-space id, see [`set_coordinate_space`]/[`coordinate_space`])
     pub flags: u32,
     /// Index into the lightmap atlas regions buffer (0xFFFFFFFF = no lightmap)
     pub lightmap_index: u32,

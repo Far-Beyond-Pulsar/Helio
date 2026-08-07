@@ -73,7 +73,7 @@ pub struct GBufferPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize)>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
@@ -155,6 +155,30 @@ impl GBufferPass {
                     // (IndirectDispatchPass, then OcclusionCullPass).
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 5: coordinate_spaces (storage read, VERTEX) — current-frame
+                    // per-space transforms (sublevels/portals), slot 0 = identity.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 6: coordinate_spaces_prev (storage read, VERTEX) — same
+                    // indexing, previous frame, for correct per-space motion vectors.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -427,7 +451,13 @@ impl RenderPass for GBufferPass {
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
         let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
+        let coordinate_spaces_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let key = (
+            camera_ptr,
+            instances_ptr,
+            compacted_indices_ptr,
+            coordinate_spaces_ptr,
+        );
         if self.bind_group_0_key != Some(key) {
             log::debug!("GBuffer: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -453,6 +483,14 @@ impl RenderPass for GBufferPass {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
                     },
                 ],
             }));
