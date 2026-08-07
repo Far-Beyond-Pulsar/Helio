@@ -55,9 +55,18 @@ const HUB_HALF_SIZE: f32 = 6.0;
 /// Side-room wall panel half-thickness.
 const WALL_T: f32 = 0.15;
 
-/// Each side room's own half-extent — bigger than the hub, so stepping
-/// "through" a doorway visually reads as entering a larger, different space.
-const ROOM_HALF_SIZE: f32 = 8.0;
+/// Each side room's own half-extent. Deliberately *equal* to `HUB_HALF_SIZE`
+/// — not just its depth but its cross-section (width/height) too — so the
+/// room's floor, wall, and ceiling edges land exactly on the portal's own
+/// window edges instead of continuing past them. A wider-than-the-window
+/// room isn't a bug (a window narrower than the room behind it is normal —
+/// picture a real window: you don't get to see past its frame), but it does
+/// mean the floor's side edges, traced back toward the viewer, visibly stop
+/// short of the portal's own corners instead of meeting them, which reads as
+/// "something's projected wrong" even though every vertex is real, exact 3D
+/// geometry. Equal sizing sidesteps the question entirely: every edge of the
+/// room's open face *is* an edge of the portal's own window, by construction.
+const ROOM_HALF_SIZE: f32 = HUB_HALF_SIZE;
 /// Distance from the hub's center to each side room's center, measured along
 /// that room's own axis. Rooms hang off the hub like the arms of a plus
 /// sign, one per axis direction, so — given `ROOM_SPACING - ROOM_HALF_SIZE >
@@ -577,6 +586,156 @@ fn insert_room_shell(
             continue;
         }
         insert_box_panel(renderer, unit_mesh, wall_mat, center + dir * half_size, half_extent);
+    }
+}
+
+/// A room's own local placement frame — furniture below is authored once, in
+/// this frame's `(rx, height, depth)` coordinates (`rx` left/right from the
+/// room's own centerline, `height` above its floor, `depth` into the room
+/// from its open entrance wall), and converted to world space by `point`/
+/// `extent`. That's what lets the same six-line bedroom layout, say, work
+/// unchanged regardless of whether that particular room hangs off +X or +Y —
+/// only `right`/`up`/`normal` (and thus what world axis "rx"/"height"/"depth"
+/// actually move along) differ per room.
+struct RoomFrame {
+    center: Vec3,
+    right: Vec3,
+    up: Vec3,
+    normal: Vec3,
+    half_size: f32,
+}
+
+impl RoomFrame {
+    /// World position for a piece centered at `rx` (right axis, 0 = room's
+    /// own centerline), `height` above the floor, and `depth` into the room
+    /// from its open entrance wall (0 = entrance, `2*half_size` = back wall).
+    fn point(&self, rx: f32, height: f32, depth: f32) -> Vec3 {
+        self.center
+            + self.right * rx
+            + self.up * (height - self.half_size)
+            + self.normal * (self.half_size - depth)
+    }
+
+    /// World-space half-extent for a piece whose half-size is `hr`/`hu`/`hn`
+    /// along this room's own right/up/normal axes. `abs()` is safe here
+    /// (not a general basis transform) because, for every one of this
+    /// scene's 6 cube faces, `right`/`up`/`normal` are each exactly ± one of
+    /// the world axes — see the `faces` table in `resumed`.
+    fn extent(&self, hr: f32, hu: f32, hn: f32) -> Vec3 {
+        (self.right * hr + self.up * hu + self.normal * hn).abs()
+    }
+}
+
+/// Places one furniture piece (the shared `mesh` — `unit_mesh` for boxes,
+/// `unit_sphere` for rounded pieces — scaled to `(hr, hu, hn)` and moved to
+/// `(rx, height, depth)`) in `frame`'s local coordinates. See `RoomFrame`.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    renderer: &mut Renderer,
+    mesh: helio::MeshId,
+    material: helio::MaterialId,
+    frame: &RoomFrame,
+    rx: f32,
+    height: f32,
+    depth: f32,
+    hr: f32,
+    hu: f32,
+    hn: f32,
+) {
+    insert_box_panel(renderer, mesh, material, frame.point(rx, height, depth), frame.extent(hr, hu, hn));
+}
+
+/// Hand-furnishes one side room so it reads as an actual place instead of a
+/// bare box — six different layouts, one per `RoomTheme::name`, all built
+/// from the same small kit of shared meshes/materials (`unit_mesh`/
+/// `unit_sphere` for shape, `wood_mat`/`metal_mat` for hard furniture,
+/// `base_mat`/`accent_mat` — this room's own muted/emissive theme colors —
+/// for soft furnishings and lamps/glow respectively). Every position below
+/// is authored in `frame`'s local `(rx, height, depth)` coordinates, so it
+/// reads the same regardless of which world axis this particular room's
+/// portal actually points along.
+#[allow(clippy::too_many_arguments)]
+fn furnish_room(
+    renderer: &mut Renderer,
+    unit_mesh: helio::MeshId,
+    unit_sphere: helio::MeshId,
+    wood_mat: helio::MaterialId,
+    metal_mat: helio::MaterialId,
+    base_mat: helio::MaterialId,
+    accent_mat: helio::MaterialId,
+    name: &str,
+    frame: &RoomFrame,
+) {
+    let b = |r: &mut Renderer, mat, rx, h, d, hr, hu, hn| place(r, unit_mesh, mat, frame, rx, h, d, hr, hu, hn);
+    let s = |r: &mut Renderer, mat, rx, h, d, radius: f32| place(r, unit_sphere, mat, frame, rx, h, d, radius, radius, radius);
+
+    match name {
+        "Ember" => {
+            // Bedroom: bed against the back wall, nightstand + lamp beside
+            // it, a wardrobe near the entrance, a rug underfoot.
+            b(renderer, wood_mat, -1.5, 0.7, 8.5, 2.4, 0.7, 3.0); // bed frame
+            b(renderer, base_mat, -1.5, 1.5, 8.5, 2.2, 0.3, 2.8); // mattress
+            b(renderer, base_mat, -1.5, 1.9, 10.3, 1.0, 0.25, 0.7); // pillow
+            b(renderer, wood_mat, 1.5, 0.5, 9.5, 0.6, 0.5, 0.6); // nightstand
+            s(renderer, accent_mat, 1.5, 1.4, 9.5, 0.4); // lamp
+            b(renderer, wood_mat, -4.8, 1.8, 2.2, 0.8, 1.8, 1.0); // wardrobe
+            b(renderer, base_mat, -1.0, 0.04, 6.0, 2.6, 0.04, 3.2); // rug
+        }
+        "Verdant" => {
+            // Greenhouse: a potting table, three planters with plants along
+            // the back wall, a bench near the entrance.
+            b(renderer, wood_mat, 0.0, 0.5, 5.0, 1.8, 0.5, 0.9); // potting table
+            for rx in [-2.5, 0.0, 2.5] {
+                b(renderer, wood_mat, rx, 0.5, 10.5, 0.6, 0.5, 0.6); // planter
+                s(renderer, accent_mat, rx, 1.4, 10.5, 0.55); // plant
+            }
+            b(renderer, wood_mat, -4.5, 0.4, 2.0, 0.5, 0.4, 1.8); // bench
+        }
+        "Solar" => {
+            // Kitchen: counter + stove along the back wall, a small table
+            // and two chairs, a light fixture overhead.
+            b(renderer, metal_mat, 0.0, 0.7, 10.5, 4.5, 0.7, 0.8); // counter
+            b(renderer, metal_mat, -1.5, 1.55, 10.5, 0.8, 0.15, 0.6); // stove
+            s(renderer, accent_mat, -1.8, 1.72, 10.5, 0.16); // burner
+            s(renderer, accent_mat, -1.2, 1.72, 10.5, 0.16); // burner
+            b(renderer, wood_mat, 0.0, 0.75, 5.0, 1.5, 0.1, 1.5); // table
+            b(renderer, wood_mat, -2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
+            b(renderer, wood_mat, 2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
+            s(renderer, accent_mat, 0.0, 11.0, 6.0, 0.5); // light fixture
+        }
+        "Abyssal" => {
+            // Library: a full bookshelf on the back wall with a row of
+            // colored "books", a desk, a chair, a reading lamp.
+            b(renderer, wood_mat, 0.0, 3.0, 11.3, 4.5, 3.0, 0.5); // bookshelf
+            for (i, rx) in [-3.0, -1.5, 0.0, 1.5, 3.0].into_iter().enumerate() {
+                let mat = if i % 2 == 0 { accent_mat } else { base_mat };
+                b(renderer, mat, rx, 4.2, 11.0, 0.4, 0.9, 0.15); // books
+            }
+            b(renderer, wood_mat, 0.0, 0.75, 4.5, 1.6, 0.1, 0.9); // desk
+            b(renderer, base_mat, 0.0, 0.45, 3.0, 0.5, 0.45, 0.5); // chair
+            s(renderer, accent_mat, 1.2, 1.5, 4.5, 0.3); // desk lamp
+        }
+        "Orchid" => {
+            // Lounge: sofa facing a glowing "screen" on the back wall, a
+            // coffee table, a floor lamp.
+            b(renderer, base_mat, 0.0, 0.45, 9.5, 2.6, 0.45, 1.0); // sofa base
+            b(renderer, base_mat, 0.0, 1.2, 10.4, 2.6, 0.5, 0.25); // sofa back
+            b(renderer, accent_mat, 0.0, 3.4, 11.7, 1.8, 1.0, 0.12); // screen
+            b(renderer, wood_mat, 0.0, 0.4, 6.5, 1.2, 0.15, 0.7); // coffee table
+            b(renderer, metal_mat, -4.5, 1.9, 4.5, 0.1, 1.9, 0.1); // lamp pole
+            s(renderer, accent_mat, -4.5, 4.0, 4.5, 0.5); // lamp shade
+        }
+        "Glacier" => {
+            // Spa: a tub, a sink counter with a glowing mirror above it, a
+            // stool, a couple of loose accent "ice" pieces.
+            b(renderer, metal_mat, 0.0, 0.55, 8.5, 1.8, 0.55, 1.3); // tub
+            b(renderer, metal_mat, -4.0, 0.75, 2.5, 1.0, 0.1, 0.7); // sink counter
+            b(renderer, accent_mat, -4.0, 2.0, 11.7, 0.8, 0.9, 0.12); // mirror
+            b(renderer, wood_mat, 3.0, 0.35, 3.5, 0.4, 0.35, 0.4); // stool
+            s(renderer, accent_mat, 3.5, 1.1, 7.0, 0.4); // accent
+            s(renderer, accent_mat, -3.5, 1.1, 8.0, 0.35); // accent
+        }
+        _ => {}
     }
 }
 
