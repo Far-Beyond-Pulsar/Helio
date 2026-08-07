@@ -24,6 +24,8 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
+use helio_pass_portal_cull::PortalCullPass;
+use helio_pass_portal_instances::PortalInstancePass;
 use helio_pass_dof::DofPass;
 use helio_pass_planetary_voxel::{
     PlanetaryRenderError, PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass,
@@ -166,6 +168,16 @@ fn add_common_early_passes(
     }
     graph.add_pass(Box::new(occlusion_cull));
 
+    // Same phase as the frustum/occlusion cull above, not interleaved with
+    // GBufferPass/PortalInstancePass later — a compute pass sitting between
+    // two fused render passes silently breaks their attachment-based fusion
+    // (see `add_geometry_passes`'s own comment on foliage placement for the
+    // same reasoning). PortalInstancePass looks this pass back up via
+    // `graph.find_pass::<PortalCullPass>()` to get its output buffers.
+    if config.enable_portals {
+        graph.add_pass(Box::new(PortalCullPass::new(device)));
+    }
+
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(
         &perf_overlay_shared,
@@ -209,11 +221,26 @@ fn add_geometry_passes(
 
     graph.add_pass(Box::new(GBufferPass::new(device)));
 
-    // Foliage rasterisation goes immediately after GBufferPass and before
-    // VirtualGeometry. After GBuffer because it composites into the same eight targets
-    // with LoadOp::Load; before VirtualGeometry because chain formation requires an exact
-    // attachment-view match and VG binds only seven attachments — it omits
-    // gbuffer_velocity — so anything downstream of VG can never fuse with the G-buffer.
+    // Portal-duplicate draws go immediately after GBufferPass — before
+    // foliage/VG, same reasoning as those two below: fusion requires an exact
+    // attachment-view match, and both foliage and VG must stay last since VG
+    // binds only 7 of 8 attachments. Looks the cull pass back up by type
+    // rather than threading its buffers through this function's signature.
+    if config.enable_portals {
+        if let Some((indirect_buf, compacted_buf)) = graph
+            .find_pass::<PortalCullPass>()
+            .map(|p| (Arc::clone(&p.portal_indirect_buf), Arc::clone(&p.portal_compacted_indices_buf)))
+        {
+            graph.add_pass(Box::new(PortalInstancePass::new(device, indirect_buf, compacted_buf)));
+        }
+    }
+
+    // Foliage rasterisation goes immediately after GBufferPass/PortalInstance and
+    // before VirtualGeometry. After those two because it composites into the same
+    // eight targets with LoadOp::Load (chain fusion is transitive across a linear
+    // run of exact-attachment-match passes); before VirtualGeometry because VG
+    // binds only seven attachments — it omits gbuffer_velocity — so anything
+    // downstream of VG can never fuse with the G-buffer.
     if let Some((blade_arena, tile_table, visible_blades, foliage_indirect, blades_per_tile)) =
         foliage_buffers
     {

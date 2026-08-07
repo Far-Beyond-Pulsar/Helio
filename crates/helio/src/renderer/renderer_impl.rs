@@ -93,6 +93,9 @@ pub struct Renderer {
     pub(crate) foliage_blades_per_m2: Option<f32>,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
+    /// Mirrors `RendererConfig::enable_portals` — same "persist for resize
+    /// rebuild" reasoning as `enable_foliage` above.
+    pub(crate) enable_portals: bool,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
@@ -651,6 +654,7 @@ impl Renderer {
             enable_xr: self.enable_xr,
             enable_foliage: self.enable_foliage,
             foliage_blades_per_m2: self.foliage_blades_per_m2,
+            enable_portals: self.enable_portals,
         }
     }
 

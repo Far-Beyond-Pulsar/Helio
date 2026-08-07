@@ -17,8 +17,9 @@ use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    DecalId, LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
-    SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MaterialId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId,
+    ReflectionCaptureId, SectionedInstanceId, SublevelId, TextureId, VirtualObjectId,
+    VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
@@ -27,6 +28,8 @@ use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
 use super::errors::{invalid, Result};
+use super::portals::PortalRecord;
+use super::sublevels::SublevelRecord;
 use super::types::{
     DecalRecord, LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord,
     ReflectionCaptureRecord, TextureRecord, VirtualMeshRecord, VirtualObjectRecord,
@@ -255,6 +258,26 @@ pub struct Scene {
     // ── Reflection captures ─────────────────────────────────────────────────────
     pub(in crate::scene) reflection_captures:
         DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
+
+    // ── Coordinate spaces (sublevels + portals) ──────────────────────────────────
+    // See `helio_core::CoordinateSpaceBuffer` for the GPU side. Sublevels and
+    // portals are both just consumers of the same small fixed-size slot table
+    // (slot 0 reserved, permanently identity/world-space); this free list is
+    // shared between them so neither can claim a slot the other already owns.
+    /// Free GPU coordinate-space slots available for reuse (LIFO).
+    pub(in crate::scene) coordinate_space_free: Vec<u32>,
+    /// Next never-yet-allocated coordinate-space slot. Starts at 1 (slot 0 is
+    /// the permanent world-space identity, never handed out).
+    pub(in crate::scene) coordinate_space_next: u32,
+
+    /// Sublevels: a group of objects rendered through one shared, cheaply
+    /// movable coordinate-space transform. See `scene::sublevels`.
+    pub(in crate::scene) sublevels: SparsePool<SublevelRecord, SublevelId>,
+
+    /// Portals: a pair of poses whose `pair_map_inverse` is one more
+    /// coordinate space, used to draw a clipped duplicate of nearby geometry.
+    /// See `scene::portals`.
+    pub(in crate::scene) portals: SparsePool<PortalRecord, PortalId>,
 }
 
 impl Scene {
@@ -394,11 +417,39 @@ impl Scene {
             section_to_instance: HashMap::new(),
             voxel_volumes: DenseArena::new(),
             reflection_captures: DenseArena::new(),
+            coordinate_space_free: Vec::new(),
+            coordinate_space_next: 1, // slot 0 reserved for world-space identity
+            sublevels: SparsePool::new(),
+            portals: SparsePool::new(),
         }
     }
 
     pub(crate) fn set_shadow_face_capacity(&mut self, capacity: u32) {
         self.shadow_face_capacity = capacity.clamp(1, 256);
+    }
+
+    /// Claims one GPU coordinate-space slot (see `helio_core::CoordinateSpaceBuffer`),
+    /// reusing a freed slot before minting a new one. `None` when the fixed-size
+    /// backing buffer (`libhelio::MAX_COORDINATE_SPACES` slots) is exhausted.
+    pub(in crate::scene) fn alloc_coordinate_space(&mut self) -> Option<u32> {
+        if let Some(slot) = self.coordinate_space_free.pop() {
+            return Some(slot);
+        }
+        if self.coordinate_space_next >= libhelio::MAX_COORDINATE_SPACES {
+            return None;
+        }
+        let slot = self.coordinate_space_next;
+        self.coordinate_space_next += 1;
+        Some(slot)
+    }
+
+    /// Releases a GPU coordinate-space slot for reuse and resets it to identity,
+    /// so a stale transform can never leak into whatever claims the slot next.
+    pub(in crate::scene) fn free_coordinate_space(&mut self, slot: u32) {
+        self.gpu_scene
+            .coordinate_spaces
+            .update_slot(slot, glam::Mat4::IDENTITY.to_cols_array());
+        self.coordinate_space_free.push(slot);
     }
 
     pub fn insert_voxel_volume(

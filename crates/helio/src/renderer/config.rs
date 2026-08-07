@@ -293,6 +293,19 @@ pub struct RendererConfig {
     /// create the `helio-xr` session/swapchain and hand it to the renderer via
     /// [`Renderer::set_xr_session`](crate::Renderer#method.set_xr_session).
     pub enable_xr: bool,
+
+    /// Enable the portal duplicate-draw passes (`PortalCullPass`/`PortalInstancePass`).
+    /// Default `true`.
+    ///
+    /// Sublevels have no separate pass to gate — a sublevel-tagged instance is
+    /// drawn through the *existing* GBuffer/shadow pipeline (see
+    /// `libhelio::coordinate_space`), so there is nothing here for a scene
+    /// with no sublevels to pay for. Portals are the one part of this
+    /// mechanism with real fixed GPU allocations (~10 MB, see
+    /// `helio-pass-portal-cull`'s module docs) and a per-frame dispatch, so
+    /// unlike sublevels they get an actual off switch: a scene that never
+    /// calls `Scene::add_portal` can skip paying for it by setting this `false`.
+    pub enable_portals: bool,
 }
 
 impl RendererConfig {
@@ -317,6 +330,7 @@ impl RendererConfig {
             hdr_output_mode: libhelio::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
+            enable_portals: true,
         }
     }
 

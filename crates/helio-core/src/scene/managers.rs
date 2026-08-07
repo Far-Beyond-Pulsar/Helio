@@ -329,6 +329,119 @@ impl GpuCameraBuffer {
     }
 }
 
+// ─── Coordinate space buffer ────────────────────────────────────────────────
+
+/// Column-major 4x4 identity matrix, matching [`GpuInstanceData::model`]'s layout.
+const COORDINATE_SPACE_IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+/// GPU storage for coordinate-space transforms — the mechanism sublevels and
+/// portals are both built on (see `libhelio::{coordinate_space, set_coordinate_space}`).
+///
+/// Slot 0 is always the identity (world space); every instance that never
+/// claims another slot renders exactly as before. A sublevel or portal claims
+/// one more slot at registration and moves by overwriting that single matrix
+/// with [`update_slot`](Self::update_slot) — O(1), no member instance touched.
+///
+/// Two GPU buffers back this (`buffer()` / `prev_buffer()`) so shaders can
+/// compute correct per-space motion vectors while a space animates, mirroring
+/// [`GpuInstanceBuffer::cycle_prev_models`]'s current/previous convention:
+/// [`flush`](Self::flush) uploads whatever changed this frame, and
+/// [`cycle_prev`](Self::cycle_prev) (called once per frame, after flush, by
+/// [`GpuScene::flush`](crate::GpuScene::flush)) copies current → previous in
+/// the CPU mirror so the *next* frame's `flush()` uploads the right
+/// previous-frame values before anything reads them.
+pub struct CoordinateSpaceBuffer {
+    buf: wgpu::Buffer,
+    prev_buf: wgpu::Buffer,
+    current: [[f32; 16]; libhelio::MAX_COORDINATE_SPACES as usize],
+    prev: [[f32; 16]; libhelio::MAX_COORDINATE_SPACES as usize],
+    dirty: bool,
+    prev_dirty: bool,
+}
+
+impl CoordinateSpaceBuffer {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let size = (libhelio::MAX_COORDINATE_SPACES as usize * std::mem::size_of::<[f32; 16]>())
+            as u64;
+        let make = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            buf: make("Coordinate Space Buffer"),
+            prev_buf: make("Coordinate Space Buffer (Prev)"),
+            current: [COORDINATE_SPACE_IDENTITY; libhelio::MAX_COORDINATE_SPACES as usize],
+            prev: [COORDINATE_SPACE_IDENTITY; libhelio::MAX_COORDINATE_SPACES as usize],
+            dirty: true,
+            prev_dirty: true,
+        }
+    }
+
+    /// Current-frame transforms, bound where shaders read `coordinate_spaces[space]`.
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buf
+    }
+
+    /// Previous-frame transforms, bound where shaders compute per-space velocity.
+    pub fn prev_buffer(&self) -> &wgpu::Buffer {
+        &self.prev_buf
+    }
+
+    /// Overwrites one slot's transform. O(1) — the whole point of this buffer:
+    /// moving a sublevel or updating a portal's pose is exactly one call here,
+    /// never a walk over member instances.
+    ///
+    /// Slot 0 is reserved as the permanent identity (world space); callers
+    /// allocate real slots starting at 1 and should not target slot 0.
+    pub fn update_slot(&mut self, slot: u32, matrix: [f32; 16]) {
+        let idx = slot as usize;
+        debug_assert!(
+            idx < libhelio::MAX_COORDINATE_SPACES as usize,
+            "coordinate space slot {idx} out of range"
+        );
+        let Some(dst) = self.current.get_mut(idx) else {
+            return;
+        };
+        *dst = matrix;
+        self.dirty = true;
+    }
+
+    /// Reads a slot's current transform (identity for any slot never set).
+    pub fn slot(&self, slot: u32) -> [f32; 16] {
+        self.current
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(COORDINATE_SPACE_IDENTITY)
+    }
+
+    /// Uploads whatever changed since the last call. O(1) when clean.
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        if self.dirty {
+            upload::write_buffer(queue, &self.buf, 0, bytemuck::cast_slice(&self.current));
+            self.dirty = false;
+        }
+        if self.prev_dirty {
+            upload::write_buffer(queue, &self.prev_buf, 0, bytemuck::cast_slice(&self.prev));
+            self.prev_dirty = false;
+        }
+    }
+
+    /// Copies current → previous in the CPU mirror. Call once per frame, after
+    /// `flush()`, so next frame's `flush()` uploads today's transforms as
+    /// "previous" before any pass reads them — same ordering as
+    /// [`GpuInstanceBuffer::cycle_prev_models`].
+    pub fn cycle_prev(&mut self) {
+        self.prev = self.current;
+        self.prev_dirty = true;
+    }
+}
+
 // ─── Typed manager aliases ────────────────────────────────────────────────────
 
 /// Storage buffer for per-instance data.

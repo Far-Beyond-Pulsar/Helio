@@ -49,6 +49,12 @@ struct CullUniforms {
 @group(0) @binding(4) var<storage, read_write> dst_indirect:     array<DrawIndexedIndirect>;
 @group(0) @binding(5) var<storage, read_write> face_counts:      array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read>       face_dirty:       array<u32>;
+// Coordinate-space transforms (current frame). Slot 0 = identity. See
+// indirect_dispatch.wgsl for the full mechanism; this pass tests only one
+// representative instance per draw-call group (already an approximation for
+// groups spanning multiple objects), so mapping through that instance's own
+// space is the same approximation applied one level up.
+@group(0) @binding(7) var<storage, read>       coordinate_spaces: array<mat4x4<f32>>;
 
 fn normalize_plane(p: vec4<f32>) -> vec4<f32> {
     let len = length(p.xyz);
@@ -84,7 +90,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let draw = src_indirect[draw_idx];
     let inst = instances[draw.first_instance];
-    let center = inst.bounds.xyz;
+    let space_id = (inst.flags >> 8u) & 0xFFu;
+    let center = select(
+        inst.bounds.xyz,
+        (coordinate_spaces[space_id] * vec4<f32>(inst.bounds.xyz, 1.0)).xyz,
+        space_id != 0u,
+    );
     let radius = inst.bounds.w;
     if radius <= 0.0 { return; }
 

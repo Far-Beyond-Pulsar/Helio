@@ -147,6 +147,13 @@ pub struct SceneResources<'a> {
     /// Consumers drawing through `indirect`/`draw_calls` should use this one,
     /// not `compacted_indices` (which is frustum-only, an intermediate stage).
     pub compacted_indices_2: &'a wgpu::Buffer,
+    /// Coordinate-space transforms (current frame). Slot 0 = identity. Shaders
+    /// index this with the id packed into `GpuInstanceData.flags` bits 8-15
+    /// (`libhelio::coordinate_space`) to place sublevel/portal content.
+    pub coordinate_spaces: &'a wgpu::Buffer,
+    /// Coordinate-space transforms as of the previous frame — same indexing as
+    /// `coordinate_spaces`, used to compute correct per-space motion vectors.
+    pub coordinate_spaces_prev: &'a wgpu::Buffer,
     pub instance_count: u32,
     pub draw_count: u32,
     pub light_count: u32,
@@ -215,6 +222,12 @@ pub struct SceneResources<'a> {
     pub reflection_captures: &'a wgpu::Buffer,
     /// Number of reflection captures in the buffer.
     pub reflection_capture_count: u32,
+
+    /// Active portals' render data (`libhelio::GpuPortalView`). Consumed by
+    /// `helio-pass-portal-cull` / `helio-pass-portal-instances`.
+    pub portal_views: &'a wgpu::Buffer,
+    /// Number of active portals in `portal_views`.
+    pub portal_view_count: u32,
 
     /// Whether hardware ray tracing (TLAS + ray queries) is available.
     pub rt_available: bool,

@@ -1,0 +1,13 @@
+[package]
+name = "helio-pass-portal-instances"
+version = "0.1.0"
+edition = "2021"
+description = "Draws portal-duplicated instances (from helio-pass-portal-cull) into the G-buffer, clipped to each portal's opening"
+
+[dependencies]
+helio-core = { workspace = true }
+libhelio = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }

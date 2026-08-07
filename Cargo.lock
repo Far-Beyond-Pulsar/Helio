@@ -2847,6 +2847,7 @@ dependencies = [
  "helio-foliage-core",
  "helio-pass-postprocess",
  "helio-pass-tsr",
+ "helio-portal-core",
  "helio-voxel-core",
  "helio-xr",
  "image",
@@ -2958,6 +2959,8 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
  "helio-pass-planetary-voxel",
+ "helio-pass-portal-cull",
+ "helio-pass-portal-instances",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades",
  "helio-pass-shadow",
@@ -3224,6 +3227,28 @@ dependencies = [
  "log",
  "pollster 0.4.0",
  "thiserror 2.0.19",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-portal-cull"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-portal-instances"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-gbuffer",
+ "helio-pass-portal-cull",
+ "libhelio",
  "wgpu 30.0.0",
 ]
 
@@ -3529,6 +3554,14 @@ dependencies = [
  "pollster 0.4.0",
  "thiserror 2.0.19",
  "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-portal-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
 ]
 
 [[package]]

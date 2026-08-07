@@ -32,7 +32,7 @@ pub struct IndirectDispatchPass {
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     /// Draw count uploaded in `prepare()`, used in `execute()`.
     draw_count: u32,
 }
@@ -144,6 +144,17 @@ impl IndirectDispatchPass {
                     },
                     count: None,
                 },
+                // binding 8: coordinate_spaces (read) — see indirect_dispatch.wgsl
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -218,6 +229,7 @@ impl RenderPass for IndirectDispatchPass {
             ctx.scene.indirect as *const wgpu::Buffer as usize,
             &self.cull_stats_buf as *const wgpu::Buffer as usize,
             ctx.scene.compacted_indices as *const wgpu::Buffer as usize,
+            ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -255,6 +267,10 @@ impl RenderPass for IndirectDispatchPass {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: ctx.scene.compacted_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

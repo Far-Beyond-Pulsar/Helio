@@ -41,6 +41,11 @@ struct FaceIndex {
 @group(0) @binding(1) var<storage, read> instances:       array<GpuInstanceData>;
 // Current face selection, updated each pass via dynamic offset into a pre-written buffer.
 @group(0) @binding(2) var<uniform>       face:            FaceIndex;
+// Coordinate-space transforms (current frame only — shadows have no velocity
+// buffer to feed, so the previous-frame copy isn't needed here). Slot 0 is
+// identity; a sublevel member casts a real shadow at its placed position by
+// going through this, no separate shadow path required.
+@group(0) @binding(3) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
 // ── Vertex stage ──────────────────────────────────────────────────────────────
 
@@ -49,7 +54,9 @@ fn vs_main(
     @location(0)             position: vec3<f32>,
     @builtin(instance_index) slot:     u32,
 ) -> @builtin(position) vec4<f32> {
-    let world = instances[slot].transform * vec4<f32>(position, 1.0);
+    let inst  = instances[slot];
+    let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
+    let world = space * (inst.transform * vec4<f32>(position, 1.0));
     return shadow_matrices[face.value] * world;
 }
 

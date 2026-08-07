@@ -34,6 +34,15 @@ pub enum SceneError {
         /// Human-readable description of why the operation was rejected.
         reason: &'static str,
     },
+
+    /// All GPU coordinate-space slots are in use.
+    ///
+    /// Sublevels and portals share one small fixed-size GPU buffer
+    /// (`libhelio::MAX_COORDINATE_SPACES` slots, slot 0 reserved for world
+    /// space). Remove an existing sublevel/portal before adding another once
+    /// this is hit — this is not expected to occur in normal use.
+    #[error("coordinate space capacity exceeded (all sublevel/portal slots in use)")]
+    CoordinateSpaceCapacityExceeded,
 }
 
 /// Result type for scene operations.

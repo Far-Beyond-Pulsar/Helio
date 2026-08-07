@@ -1,0 +1,11 @@
+[package]
+name = "helio-pass-portal-cull"
+version = "0.1.0"
+edition = "2021"
+description = "Per-portal GPU frustum culling: selects which instances get a duplicate draw through each active portal"
+
+[dependencies]
+helio-core = { workspace = true }
+libhelio = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }

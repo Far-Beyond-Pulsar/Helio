@@ -73,6 +73,12 @@ struct DrawIndexedIndirect {
 // culling, packed starting at each group's `first_instance` offset. Consumers
 // that draw through `indirect` must index `instances` through this buffer.
 @group(0) @binding(7) var<storage, read_write> compacted_indices: array<u32>;
+// Coordinate-space transforms (current frame). Slot 0 = identity. A
+// sublevel/portal member's `bounds` sphere center is authored in its *local*
+// (pre-space) transform, same as `model` — it must be mapped through this
+// before any frustum/subpixel test against the world-space camera, exactly
+// like the vertex shader maps `model` (see gbuffer.wgsl).
+@group(0) @binding(8) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
 // One workgroup handles one draw-call group. Its 64 lanes cooperatively test
 // every instance in the group and compact survivors via workgroup-shared
@@ -116,18 +122,67 @@ fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
 
-fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> bool {
-    // Per-object cull opt-out. Culling here is driven by one world-space bounding sphere,
-    // which is a poor fit for very large or very flat geometry (a ground plane's sphere
-    // is set by its diagonal): such objects cull almost nothing and are easy to bound
-    // wrongly in the direction that deletes visible geometry.
-    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
-        return true;
+struct TransformedAabb {
+    lo: vec3<f32>,
+    hi: vec3<f32>,
+}
+
+/// Re-derives a world-space AABB after an additional rigid transform (a
+/// coordinate space may rotate, unlike the pure-translation common case), by
+/// transforming all 8 corners of the input box and taking the new min/max.
+/// Only reached for instances tagged with a non-identity coordinate space.
+fn transform_aabb(lo: vec3<f32>, hi: vec3<f32>, m: mat4x4<f32>) -> TransformedAabb {
+    var new_lo = vec3<f32>(3.4e38);
+    var new_hi = vec3<f32>(-3.4e38);
+    for (var i = 0u; i < 8u; i++) {
+        let corner = vec3<f32>(
+            select(lo.x, hi.x, (i & 1u) != 0u),
+            select(lo.y, hi.y, (i & 2u) != 0u),
+            select(lo.z, hi.z, (i & 4u) != 0u),
+        );
+        let world = (m * vec4<f32>(corner, 1.0)).xyz;
+        new_lo = min(new_lo, world);
+        new_hi = max(new_hi, world);
     }
-    let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
+    return TransformedAabb(new_lo, new_hi);
+}
+
+struct InstanceTestResult {
+    visible:      bool,
+    world_center: vec3<f32>,  // bounds.xyz mapped through the instance's coordinate space
+}
+
+/// `inst.bounds`/`aabb` are authored in the instance's *local* (pre-space) frame,
+/// same as `inst.transform` — see `GpuInstanceData`. Slot 0 (world space,
+/// identity) is the overwhelming common case and takes the exact same path
+/// this test always has; only an instance tagged with a real sublevel/portal
+/// coordinate space (see `libhelio::coordinate_space`) pays the extra mapping.
+fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> InstanceTestResult {
+    let space_id = (inst.flags >> 8u) & 0xFFu;
     let aabb_degenerate = all(aabb.min == aabb.max);
-    let sphere_visible = sphere_in_frustum(inst.bounds.xyz, inst.bounds.w);
-    return select(sphere_visible, aabb_visible, !aabb_degenerate);
+
+    if space_id == 0u {
+        // Common case: byte-identical to the pre-coordinate-space behavior.
+        if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+            return InstanceTestResult(true, inst.bounds.xyz);
+        }
+        let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
+        let sphere_visible = sphere_in_frustum(inst.bounds.xyz, inst.bounds.w);
+        let visible = select(sphere_visible, aabb_visible, !aabb_degenerate);
+        return InstanceTestResult(visible, inst.bounds.xyz);
+    }
+
+    let space = coordinate_spaces[space_id];
+    let world_center = (space * vec4<f32>(inst.bounds.xyz, 1.0)).xyz;
+    if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
+        return InstanceTestResult(true, world_center);
+    }
+    if aabb_degenerate {
+        return InstanceTestResult(sphere_in_frustum(world_center, inst.bounds.w), world_center);
+    }
+    let world_aabb = transform_aabb(aabb.min, aabb.max, space);
+    let visible = aabb_in_frustum(world_aabb.lo, world_aabb.hi);
+    return InstanceTestResult(visible, world_center);
 }
 
 @compute @workgroup_size(64)
@@ -148,7 +203,8 @@ fn main(
         let slot_idx = dc.first_instance + i;
         let inst = instances[slot_idx];
         let aabb = aabbs[slot_idx];
-        if test_instance(inst, aabb) {
+        let result = test_instance(inst, aabb);
+        if result.visible {
             let slot = atomicAdd(&wg_counter, 1u);
             compacted_indices[dc.first_instance + slot] = slot_idx;
 
@@ -159,17 +215,18 @@ fn main(
             // below, so an instance that passes `test_instance` still disappears if it
             // fails to set this flag.
             //
-            // It is evaluated at the bounding sphere's *centre*, which is why a large
-            // object needs the opt-out: the ground plane's centre is the world origin, so
-            // as soon as the camera looks away from the origin `clip_pos.w <= 0.0`, the
-            // test is skipped, nothing sets `wg_nonsubpixel`, and the whole ground is
-            // culled as "subpixel only" — while covering the screen. Direction-dependent
-            // disappearance of large geometry is the signature of this path, not of
-            // frustum culling.
+            // It is evaluated at the bounding sphere's *centre* (mapped through the
+            // instance's coordinate space, `result.world_center` — see `test_instance`),
+            // which is why a large object needs the opt-out: the ground plane's centre is
+            // the world origin, so as soon as the camera looks away from the origin
+            // `clip_pos.w <= 0.0`, the test is skipped, nothing sets `wg_nonsubpixel`, and
+            // the whole ground is culled as "subpixel only" — while covering the screen.
+            // Direction-dependent disappearance of large geometry is the signature of this
+            // path, not of frustum culling.
             if (inst.flags & INSTANCE_FLAG_ALWAYS_VISIBLE) != 0u {
                 atomicStore(&wg_nonsubpixel, 1u);
             } else {
-                let clip_pos = cameras[0].view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
+                let clip_pos = cameras[0].view_proj * vec4<f32>(result.world_center, 1.0);
                 if clip_pos.w > 0.0 {
                     let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
                     if r_ndc >= 0.001 {
