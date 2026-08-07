@@ -1,48 +1,55 @@
 enable wgpu_binding_array;
 
 //! Portal-duplicate G-buffer write — draws the instances `helio-pass-portal-cull`
-//! selected for one active portal, mapped through that portal's coordinate
-//! space, clipped to its opening.
+//! selected, one duplicate per surviving (instance, chain) pair, mapped
+//! through that chain's *composed* transform, clipped to every portal
+//! along the chain.
 //!
 //! Fused into the same physical render pass `helio-pass-gbuffer` opened
 //! (`LoadOp::Load` on all 8 attachments — see `helio-pass-foliage-gbuffer`
 //! for the precedent this follows), so it shares the real depth buffer and
 //! composes correctly with everything already drawn: no separate camera, no
-//! compositing step. One `multi_draw_indexed_indirect` call per active
-//! portal, bound with a small dynamic-offset uniform selecting which portal.
+//! compositing step. One `multi_draw_indexed_indirect` call, same shape as
+//! the ordinary non-portal G-buffer pass — one draw per mesh/material draw
+//! group, *not* one per chain; which chain each instance belongs to is
+//! looked up per-instance from `portal_compacted_chains` (written by
+//! `helio-pass-portal-cull`), not selected via a per-draw uniform.
 //!
 //! Vertex/material logic mirrors `helio-pass-gbuffer/shaders/gbuffer.wgsl`
 //! closely (own copy — see that file for the fuller commentary on each
-//! piece); the differences are: (1) the extra `portal_space *` factor
-//! composed onto the instance's own coordinate-space transform, (2) the
-//! fragment-shader world-space clip test against the portal's opening, and
-//! (3) the `portal_mask` screen-space gate (see below). Debug-visualization
-//! modes, lightmap sampling, and the Radiant material graph override hook are
-//! not reachable here — a portal duplicate always renders through the plain
-//! default PBR path.
+//! piece); the differences are: (1) composing the instance's own coordinate
+//! space through an entire *chain* of portal spaces, deepest first, instead
+//! of world space directly, capturing each stage's intermediate position;
+//! (2) the fragment-shader world-space clip test against *every* portal in
+//! the chain, nested — content only survives if it was legitimately visible
+//! through each one, not just the outermost; and (3) the `portal_mask`
+//! screen-space gate (see below). Debug-visualization modes, lightmap
+//! sampling, and the Radiant material graph override hook are not reachable
+//! here — a portal duplicate always renders through the plain default PBR
+//! path.
 //!
-//! # Why both a world-space clip *and* a screen-space mask
+//! # Why both nested world-space clips *and* a screen-space mask
 //!
-//! The world-space clip (`local.z <= 0`, `|local.xy| <= half_extent`) only
-//! bounds the duplicated content to the portal's own little box in world
-//! space — it says nothing about whether the *camera* is actually looking at
-//! that box through the portal's on-screen opening. Standing in front of the
-//! portal and looking straight through, perspective makes those two things
-//! coincide, so the clip alone looks like correct "windowing". Move the
-//! camera outside — off to the side, or anywhere the portal isn't framed
-//! dead-on — and the same world-space-bounded content, which has real
-//! physical size, projects wherever it actually sits, spilling outside the
-//! portal's silhouette.
+//! Each stage's world-space clip (`local.z <= 0`, `|local.xy| <= half_extent`,
+//! evaluated in *that* portal's own local frame) bounds content to that
+//! portal's little box in world space — necessary (it's what makes a
+//! 3-chain [P, P, P] only show content that's legitimately behind each of
+//! the three hops), but not sufficient on its own: it says nothing about
+//! whether the *camera* is actually looking at the outermost portal's
+//! opening from here. Standing in front of a portal looking straight
+//! through, perspective makes "bounded in world space" and "visible on
+//! screen" coincide; move the camera outside that alignment and the same
+//! content, which has real size, projects wherever it actually sits.
 //!
-//! `helio-pass-portal-mask` fixes this the standard way non-recursive portal
-//! renderers do: it stamps each portal's true on-screen footprint (from the
-//! *current* camera, respecting real occluders in front of the portal) into
-//! `portal_mask`, one draw per portal, before this pass runs. A duplicated
-//! fragment here is kept only when the mask at its own screen pixel matches
-//! this draw's portal — i.e. only where the portal opening is actually
-//! visible on screen right now. The world-space clip stays as a cheap second
-//! line of defense (keeps content behind the surface, bounds it in case two
-//! portals' masks ever touch).
+//! `helio-pass-portal-mask` fixes this the standard way non-recursive
+//! portal renderers do: it stamps the *outermost* portal's true on-screen
+//! footprint (from the current camera, respecting real occluders) into
+//! `portal_mask` before this pass runs. A fragment here is kept only when
+//! the mask at its own screen pixel matches `chain.portals[0]` — i.e. only
+//! where that chain's real, physical entry point is actually visible on
+//! screen right now. Inner portals in the chain don't get their own mask
+//! stamp (they're virtual — mapped, not physically where the camera can
+//! look directly) and rely entirely on their own world-space clip stage.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -123,37 +130,33 @@ struct GpuPortalView {
     _pad:              u32,
 }
 
-struct PortalDrawUniform {
-    portal_view_index: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+/// Must match libhelio::GpuPortalChain (16 bytes at MAX_CHAIN_DEPTH=3).
+const MAX_CHAIN_DEPTH: u32 = 3u;
+struct GpuPortalChain {
+    portals: array<u32, 3>,
+    depth:   u32,
 }
-
-// Coordinate-space slots backed by GPU storage — must match
-// `libhelio::MAX_COORDINATE_SPACES` and `helio_pass_portal_cull::PORTAL_INSTANCE_CAPACITY`.
-// The latter sizes the per-portal slice stride below; kept as a const (not a
-// uniform) since it never changes at runtime.
-const PORTAL_INSTANCE_CAPACITY: u32 = 65536u;
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>       screen:  ScreenSize;
 @group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read> coordinate_spaces:      array<mat4x4<f32>>;
 @group(0) @binding(4) var<storage, read> coordinate_spaces_prev: array<mat4x4<f32>>;
-// Written by helio-pass-portal-cull: per-portal compacted original instance
-// slots, slice `portal_view_index` at `[portal_view_index * PORTAL_INSTANCE_CAPACITY, ...)`.
+// Written by helio-pass-portal-cull: shared compacted original instance
+// slots — group `g`'s draw call's `first_instance`/`instance_count` (from
+// `portal_indirect`) already point `@builtin(instance_index)` at exactly
+// this group's region, so no per-draw offset math is needed here.
 @group(0) @binding(5) var<storage, read> portal_compacted_indices: array<u32>;
 @group(0) @binding(6) var<storage, read> portal_views: array<GpuPortalView>;
-// Dynamic-offset uniform selecting which portal this draw call belongs to —
-// same "one small uniform, rebind per draw via dynamic offset" idiom
-// `helio-pass-shadow`'s FaceIndex uses for its own per-face selection.
-@group(0) @binding(7) var<uniform> portal_draw: PortalDrawUniform;
+@group(0) @binding(7) var<storage, read> portal_chains: array<GpuPortalChain>;
+// Parallel to portal_compacted_indices — which chain each compacted entry
+// was selected under.
+@group(0) @binding(8) var<storage, read> portal_compacted_chains: array<u32>;
 // Written by helio-pass-portal-mask: per-pixel `portal_view_index + 1` where
 // that portal's opening is actually visible on screen this frame, 0
 // elsewhere. See the module doc above for why this is needed alongside the
-// world-space clip test below.
-@group(0) @binding(8) var portal_mask: texture_2d<u32>;
+// per-stage world-space clip below.
+@group(0) @binding(9) var portal_mask: texture_2d<u32>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -178,6 +181,13 @@ struct VertexOutput {
     @location(4) bitangent_sign:     f32,
     @location(5) @interpolate(flat) material_id: u32,
     @location(6) prev_clip_position: vec4<f32>,
+    @location(7) @interpolate(flat) chain_idx: u32,
+    // Position after applying stage i..depth-1 (deepest-first) — what stage
+    // i's own clip test (against `portal_chains[chain_idx].portals[i]`)
+    // needs. `stage_pos_0` is always valid and equals `world_position`;
+    // `stage_pos_1`/`stage_pos_2` are only meaningful when depth >= 2/3.
+    @location(8) stage_pos_1: vec3<f32>,
+    @location(9) stage_pos_2: vec3<f32>,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -186,26 +196,53 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOutput {
-    let compacted_base = portal_draw.portal_view_index * PORTAL_INSTANCE_CAPACITY;
-    let inst = instance_data[portal_compacted_indices[compacted_base + instance_index]];
-    let portal = portal_views[portal_draw.portal_view_index];
+    let slot_idx = portal_compacted_indices[instance_index];
+    let chain_idx = portal_compacted_chains[instance_index];
+    let inst = instance_data[slot_idx];
+    let chain = portal_chains[chain_idx];
 
     // Compose the instance's own coordinate space (identity for an ordinary
-    // world-space object, or its sublevel's transform) with the portal's —
-    // duplicated content is placed exactly where it actually is, then mapped
-    // through the portal on top, same as the main pass places sublevel
-    // members and this pass additionally maps them through one more space.
+    // world-space object, or its sublevel's transform) through the whole
+    // chain, deepest portal first — see the module doc for why. Capture
+    // each stage's intermediate position for the fragment shader's nested
+    // clip test.
     let own_space_id  = (inst.flags >> 8u) & 0xFFu;
     let own_space      = coordinate_spaces[own_space_id];
     let own_space_prev = coordinate_spaces_prev[own_space_id];
-    let portal_space      = coordinate_spaces[portal.coordinate_space];
-    let portal_space_prev = coordinate_spaces_prev[portal.coordinate_space];
 
-    let own_rot    = mat3x3<f32>(own_space[0].xyz, own_space[1].xyz, own_space[2].xyz);
-    let portal_rot = mat3x3<f32>(portal_space[0].xyz, portal_space[1].xyz, portal_space[2].xyz);
-    let space_rot  = portal_rot * own_rot;
+    var pos      = own_space * (inst.transform * vec4<f32>(v.position, 1.0));
+    var pos_prev = own_space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0));
+    var space_rot = mat3x3<f32>(own_space[0].xyz, own_space[1].xyz, own_space[2].xyz);
 
-    let world_pos = portal_space * (own_space * (inst.transform * vec4<f32>(v.position, 1.0)));
+    var stage_pos_2 = vec3<f32>(0.0);
+    if chain.depth >= 3u {
+        let p2 = portal_views[chain.portals[2]];
+        let p2_space = coordinate_spaces[p2.coordinate_space];
+        let p2_space_prev = coordinate_spaces_prev[p2.coordinate_space];
+        pos = p2_space * pos;
+        pos_prev = p2_space_prev * pos_prev;
+        space_rot = mat3x3<f32>(p2_space[0].xyz, p2_space[1].xyz, p2_space[2].xyz) * space_rot;
+        stage_pos_2 = pos.xyz;
+    }
+    var stage_pos_1 = vec3<f32>(0.0);
+    if chain.depth >= 2u {
+        let p1 = portal_views[chain.portals[1]];
+        let p1_space = coordinate_spaces[p1.coordinate_space];
+        let p1_space_prev = coordinate_spaces_prev[p1.coordinate_space];
+        pos = p1_space * pos;
+        pos_prev = p1_space_prev * pos_prev;
+        space_rot = mat3x3<f32>(p1_space[0].xyz, p1_space[1].xyz, p1_space[2].xyz) * space_rot;
+        stage_pos_1 = pos.xyz;
+    }
+    // depth is always >= 1 — every chain has at least one portal.
+    let p0 = portal_views[chain.portals[0]];
+    let p0_space = coordinate_spaces[p0.coordinate_space];
+    let p0_space_prev = coordinate_spaces_prev[p0.coordinate_space];
+    pos = p0_space * pos;
+    pos_prev = p0_space_prev * pos_prev;
+    space_rot = mat3x3<f32>(p0_space[0].xyz, p0_space[1].xyz, p0_space[2].xyz) * space_rot;
+
+    let world_pos = pos;
 
     let normal_mat = space_rot * mat3x3<f32>(
         inst.normal_mat_0.xyz,
@@ -218,8 +255,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOut
         inst.transform[2].xyz,
     );
 
-    let prev_world = portal_space_prev * (own_space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0)));
-    let prev_clip  = cameras[0].prev_view_proj * prev_world;
+    let prev_clip = cameras[0].prev_view_proj * pos_prev;
 
     var out: VertexOutput;
     out.clip_position      = cameras[0].view_proj * world_pos;
@@ -230,6 +266,9 @@ fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOut
     out.tex_coords         = v.tex_coords;
     out.material_id        = inst.material_id;
     out.prev_clip_position = prev_clip;
+    out.chain_idx          = chain_idx;
+    out.stage_pos_1        = stage_pos_1;
+    out.stage_pos_2        = stage_pos_2;
     return out;
 }
 
@@ -290,27 +329,58 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
     return input.clip_position.xy - prev_pixel;
 }
 
+fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
+    return local.z > 0.0 || abs(local.x) > half_extent.x || abs(local.y) > half_extent.y;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
+    let chain = portal_chains[input.chain_idx];
+    let p0 = portal_views[chain.portals[0]];
+
     // Screen-space gate: only draw where `helio-pass-portal-mask` determined
-    // *this* portal's opening is actually visible from the current camera —
-    // see the module doc for why the world-space clip alone isn't enough.
+    // this chain's *outermost* portal is actually visible from the current
+    // camera — see the module doc for why the per-stage world-space clips
+    // below aren't enough on their own.
     let mask_px = vec2<i32>(input.clip_position.xy);
     let mask_value = textureLoad(portal_mask, mask_px, 0).r;
-    if mask_value != portal_draw.portal_view_index + 1u {
+    if mask_value != chain.portals[0] + 1u {
         discard;
     }
 
-    // World-space clip: keep only fragments inside the portal's X/Y
-    // half-extent AND on the far side of the linked surface. `local` is the
-    // mapped position in the near surface's (A's) frame: content that was
-    // *behind* the far surface (the only content that should duplicate) lands
-    // at local.z <= 0; content that was *in front* of the far surface lands at
-    // local.z > 0 and would overlap the real scene, so it's discarded.
-    let portal = portal_views[portal_draw.portal_view_index];
-    let local = (portal.inverse_transform * vec4<f32>(input.world_position, 1.0)).xyz;
-    if local.z > 0.0 || abs(local.x) > portal.half_extent.x || abs(local.y) > portal.half_extent.y {
+    // Outermost portal: the mask above is the real spatial bound (an exact
+    // screen-space silhouette of the actual opening, from the actual
+    // camera) — so only the behind-the-surface half of the world-space clip
+    // still pulls weight here. The X/Y half-extent bound is deliberately
+    // *not* applied at this stage: content behind the portal can be wider
+    // than the opening itself (a window can legitimately show a whole room
+    // beyond it, not just a tube exactly as wide as the window), and the
+    // mask already confines what's visible to the opening's true silhouette
+    // regardless. Applying the X/Y bound here too (as earlier versions of
+    // this shader did) incorrectly shrank every portal's visible depth down
+    // to a tube no wider than its own opening, which happens to be
+    // invisible for infinite_tunnel (corridor width == portal width by
+    // construction there) but clips away nearly everything for any portal
+    // whose far side is bigger than its opening.
+    let p0_local = p0.inverse_transform * vec4<f32>(input.world_position, 1.0);
+    if p0_local.z > 0.0 {
         discard;
+    }
+    // Inner stages (depth >= 2) have no screen-space mask of their own —
+    // they're virtual, not a real surface the camera can look at directly —
+    // so the world-space box *is* their only spatial bound, same as the
+    // pre-mask single-portal design.
+    if chain.depth >= 2u {
+        let p1 = portal_views[chain.portals[1]];
+        if clip_stage(p1.inverse_transform * vec4<f32>(input.stage_pos_1, 1.0), p1.half_extent) {
+            discard;
+        }
+    }
+    if chain.depth >= 3u {
+        let p2 = portal_views[chain.portals[2]];
+        if clip_stage(p2.inverse_transform * vec4<f32>(input.stage_pos_2, 1.0), p2.half_extent) {
+            discard;
+        }
     }
 
     let material = materials[input.material_id];

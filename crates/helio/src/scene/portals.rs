@@ -70,6 +70,9 @@ impl Scene {
         };
         let (id, _slot_index, _fresh) = self.portals.insert(record);
         self.republish_portal_views();
+        // Adding a portal changes which chains exist (a new leaf appears at
+        // every depth) — pose updates don't need this, only set changes.
+        self.republish_portal_chains();
         Ok(id)
     }
 
@@ -120,6 +123,7 @@ impl Scene {
             .ok_or_else(|| invalid("portal"))?;
         self.free_coordinate_space(record.coordinate_space);
         self.republish_portal_views();
+        self.republish_portal_chains();
         Ok(())
     }
 
@@ -141,6 +145,58 @@ impl Scene {
             })
             .collect();
         self.gpu_scene.portal_views.set_data(views);
+    }
+
+    /// Rebuilds every valid portal chain from scratch — this is what makes
+    /// portals reflect each other recursively with zero manual authoring.
+    /// See `libhelio::GpuPortalChain`'s docs for the shape and
+    /// `helio-pass-portal-cull`/`helio-pass-portal-instances` for how the
+    /// list gets consumed. Only called on add/remove (the set of valid
+    /// index sequences depends only on *how many* portals exist, not where
+    /// they are — pose updates don't touch this).
+    ///
+    /// Generates every sequence of active-portal indices, length
+    /// `1..=MAX_CHAIN_DEPTH`, **allowing repeats** — `[P, P, P]` (the same
+    /// portal three times over) is exactly what makes a single mirror-style
+    /// portal, or a room whose portal faces its own reflection, read as
+    /// infinite. A plain depth-first walk of the "append any portal" tree,
+    /// stopping once `MAX_PORTAL_CHAINS` is hit (see that constant's docs —
+    /// scenes are expected to stay well under it).
+    fn republish_portal_chains(&mut self) {
+        let portal_count = (0..self.portals.slot_len())
+            .filter(|&slot| self.portals.get_by_slot(slot).is_some())
+            .count() as u32;
+
+        let mut chains = Vec::new();
+        if portal_count > 0 {
+            let mut prefix = Vec::with_capacity(libhelio::MAX_CHAIN_DEPTH);
+            generate_chains(portal_count, &mut prefix, &mut chains);
+        }
+        self.gpu_scene.portal_chains.set_data(chains);
+    }
+}
+
+/// Depth-first: append `chains` with every non-empty prefix reachable by
+/// picking `0..portal_count` at each of up to `MAX_CHAIN_DEPTH` steps.
+fn generate_chains(portal_count: u32, prefix: &mut Vec<u32>, chains: &mut Vec<libhelio::GpuPortalChain>) {
+    if chains.len() >= libhelio::MAX_PORTAL_CHAINS {
+        return;
+    }
+    if !prefix.is_empty() {
+        let mut portals = [0u32; libhelio::MAX_CHAIN_DEPTH];
+        portals[..prefix.len()].copy_from_slice(prefix);
+        chains.push(libhelio::GpuPortalChain { portals, depth: prefix.len() as u32 });
+    }
+    if prefix.len() >= libhelio::MAX_CHAIN_DEPTH {
+        return;
+    }
+    for p in 0..portal_count {
+        if chains.len() >= libhelio::MAX_PORTAL_CHAINS {
+            return;
+        }
+        prefix.push(p);
+        generate_chains(portal_count, prefix, chains);
+        prefix.pop();
     }
 }
 

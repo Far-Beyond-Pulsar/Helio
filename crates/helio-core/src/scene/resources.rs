@@ -229,6 +229,19 @@ pub struct SceneResources<'a> {
     /// Number of active portals in `portal_views`.
     pub portal_view_count: u32,
 
+    /// Every valid portal *chain* (`libhelio::GpuPortalChain`) up to
+    /// `libhelio::MAX_CHAIN_DEPTH` deep — every sequence of portal indices,
+    /// including repeats, that represents "look through this portal, then
+    /// through this one, then...". This is what makes portals recursively
+    /// reflect each other automatically: content is mapped through the
+    /// *composed* transform of a whole chain, not just one portal, and each
+    /// stage is independently clip-tested against its own portal's opening.
+    /// Rebuilt whenever the portal set changes (add/remove/pose update), not
+    /// every frame — see `helio::Scene::add_portal` and neighbors.
+    pub portal_chains: &'a wgpu::Buffer,
+    /// Number of valid chains in `portal_chains`.
+    pub portal_chain_count: u32,
+
     /// Whether hardware ray tracing (TLAS + ray queries) is available.
     pub rt_available: bool,
 }

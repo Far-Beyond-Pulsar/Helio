@@ -36,6 +36,10 @@ name = "infinite_tunnel"
 path = "infinite_tunnel.rs"
 
 [[bin]]
+name = "portal_cube"
+path = "portal_cube.rs"
+
+[[bin]]
 name = "outdoor_night"
 path = "outdoor_night.rs"
 

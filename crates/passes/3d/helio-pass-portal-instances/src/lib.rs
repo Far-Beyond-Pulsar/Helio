@@ -1,10 +1,13 @@
 //! Draws the portal-duplicated instances `helio-pass-portal-cull` selected,
-//! into the G-buffer, clipped to each portal's opening.
+//! into the G-buffer, clipped to every portal along each survivor's chain.
 //!
 //! Fused into the same physical render pass `helio-pass-gbuffer` opened
 //! (`LoadOp::Load` on all 8 attachments), following `helio-pass-foliage-gbuffer`'s
 //! precedent exactly: real depth buffer, real materials, no separate camera,
-//! no compositing. One `multi_draw_indexed_indirect` call per active portal.
+//! no compositing. One `multi_draw_indexed_indirect` call, same shape as the
+//! plain non-portal G-buffer pass — one draw per mesh/material draw group,
+//! not one per chain; each instance's chain is looked up per-instance from a
+//! buffer `helio-pass-portal-cull` wrote, not chosen by a per-draw uniform.
 //!
 //! # Integration
 //!
@@ -12,20 +15,20 @@
 //! let cull_pass = PortalCullPass::new(device);
 //! let indirect_buf = Arc::clone(&cull_pass.portal_indirect_buf);
 //! let compacted_buf = Arc::clone(&cull_pass.portal_compacted_indices_buf);
+//! let compacted_chains_buf = Arc::clone(&cull_pass.portal_compacted_chains_buf);
 //! graph.add_pass(Box::new(cull_pass));           // before GBufferPass
 //! // ... GBufferPass added here ...
 //! graph.add_pass(Box::new(PortalMaskPass::new(device))); // after GBufferPass, before PortalInstancePass
 //! graph.add_pass(Box::new(
-//!     PortalInstancePass::new(device, indirect_buf, compacted_buf),
+//!     PortalInstancePass::new(device, indirect_buf, compacted_buf, compacted_chains_buf),
 //! )); // immediately after PortalMaskPass, before FoliageGBufferPass/VirtualGeometryPass
 //! ```
 
 use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_pass_portal_cull::{MAX_PORTAL_SLOTS, PORTAL_DRAW_CAPACITY};
+use helio_pass_portal_cull::PORTAL_DRAW_CAPACITY;
 
 mod mask;
 pub use mask::PortalMaskPass;
@@ -33,10 +36,7 @@ pub use mask::PortalMaskPass;
 mod editor_overlay;
 pub use editor_overlay::PortalEditorOverlayPass;
 
-/// Byte stride between consecutive per-portal dynamic-uniform entries.
-/// Matches `helio-pass-shadow`'s own `FACE_BUF_STRIDE` — 256 is guaranteed to
-/// satisfy `min_uniform_buffer_offset_alignment` on every wgpu backend.
-const PORTAL_UNIFORM_STRIDE: u64 = 256;
+use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -47,15 +47,6 @@ struct ScreenSize {
     _pad1: f32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct PortalDrawUniform {
-    portal_view_index: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-}
-
 pub struct PortalInstancePass {
     material_binding: libhelio::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
@@ -63,21 +54,18 @@ pub struct PortalInstancePass {
     bind_group_layout_1: wgpu::BindGroupLayout,
 
     screen_buf: wgpu::Buffer,
-    /// Written once at construction: slot N always selects `portal_views[N]`.
-    portal_draw_buf: wgpu::Buffer,
 
     /// Shared with `PortalCullPass` — this pass only reads them.
     portal_indirect_buf: Arc<wgpu::Buffer>,
     portal_compacted_indices_buf: Arc<wgpu::Buffer>,
+    portal_compacted_chains_buf: Arc<wgpu::Buffer>,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
 
-    portal_count: u32,
     draw_count: u32,
-    portal_draw_written: bool,
 }
 
 impl PortalInstancePass {
@@ -85,6 +73,7 @@ impl PortalInstancePass {
         device: &wgpu::Device,
         portal_indirect_buf: Arc<wgpu::Buffer>,
         portal_compacted_indices_buf: Arc<wgpu::Buffer>,
+        portal_compacted_chains_buf: Arc<wgpu::Buffer>,
     ) -> Self {
         let material_binding = libhelio::MaterialBindingConfig::for_device(device);
 
@@ -100,16 +89,6 @@ impl PortalInstancePass {
             mapped_at_creation: false,
         });
 
-        // Write-once: slot N's `portal_view_index` is always N — populated
-        // lazily on the first `prepare()` call (this constructor only
-        // receives `&wgpu::Device`, no queue).
-        let portal_draw_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PortalInstance/PortalDrawUniform"),
-            size: (MAX_PORTAL_SLOTS as u64) * PORTAL_UNIFORM_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let bind_group_layout_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalInstance BGL 0"),
             entries: &[
@@ -119,14 +98,11 @@ impl PortalInstancePass {
                 storage_entry(3, wgpu::ShaderStages::VERTEX, true),   // coordinate_spaces
                 storage_entry(4, wgpu::ShaderStages::VERTEX, true),   // coordinate_spaces_prev
                 storage_entry(5, wgpu::ShaderStages::VERTEX, true),   // portal_compacted_indices
-                storage_entry(
-                    6,
-                    wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    true,
-                ), // portal_views
-                uniform_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_draw (dynamic)
+                storage_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_views
+                storage_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_chains
+                storage_entry(8, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_compacted_chains
                 wgpu::BindGroupLayoutEntry {
-                    binding: 8,
+                    binding: 9,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Uint,
@@ -225,16 +201,14 @@ impl PortalInstancePass {
             bind_group_layout_0,
             bind_group_layout_1,
             screen_buf,
-            portal_draw_buf,
             portal_indirect_buf,
             portal_compacted_indices_buf,
+            portal_compacted_chains_buf,
             bind_group_0: None,
             bind_group_0_key: None,
             bind_group_1: None,
             bind_group_1_version: None,
-            portal_count: 0,
             draw_count: 0,
-            portal_draw_written: false,
         }
     }
 }
@@ -331,24 +305,6 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        if !self.portal_draw_written {
-            for slot in 0..MAX_PORTAL_SLOTS {
-                let data = PortalDrawUniform {
-                    portal_view_index: slot,
-                    _pad0: 0,
-                    _pad1: 0,
-                    _pad2: 0,
-                };
-                ctx.write_buffer(
-                    &self.portal_draw_buf,
-                    slot as u64 * PORTAL_UNIFORM_STRIDE,
-                    bytemuck::bytes_of(&data),
-                );
-            }
-            self.portal_draw_written = true;
-        }
-
-        self.portal_count = ctx.scene.portal_views.len() as u32;
         self.draw_count = ctx.scene.draw_calls.len() as u32;
         let screen = ScreenSize {
             width: ctx.width as f32,
@@ -363,11 +319,11 @@ impl RenderPass for PortalInstancePass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
             log::info!(
-                "[PortalInstance] frame={} portal_count={} draw_count={} render_pass_open={}",
-                ctx.frame_num, self.portal_count, self.draw_count, ctx.active_render_pass_ptr().is_some(),
+                "[PortalInstance] frame={} draw_count={} render_pass_open={}",
+                ctx.frame_num, self.draw_count, ctx.active_render_pass_ptr().is_some(),
             );
         }
-        if self.portal_count == 0 {
+        if self.draw_count == 0 {
             return Ok(());
         }
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
@@ -393,8 +349,9 @@ impl RenderPass for PortalInstancePass {
             ctx.scene.instances as *const _ as usize,
             ctx.scene.coordinate_spaces as *const _ as usize,
             ctx.scene.portal_views as *const _ as usize,
+            ctx.scene.portal_chains as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
-            &*self.portal_indirect_buf as *const _ as usize,
+            &*self.portal_compacted_chains_buf as *const _ as usize,
             portal_mask_view as *const _ as usize,
         );
         if self.bind_group_0_key != Some(key) {
@@ -409,15 +366,9 @@ impl RenderPass for PortalInstancePass {
                     wgpu::BindGroupEntry { binding: 4, resource: ctx.scene.coordinate_spaces_prev.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 5, resource: self.portal_compacted_indices_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: ctx.scene.portal_views.as_entire_binding() },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.portal_draw_buf,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(std::mem::size_of::<PortalDrawUniform>() as u64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(portal_mask_view) },
+                    wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.portal_chains.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: self.portal_compacted_chains_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(portal_mask_view) },
                 ],
             }));
             self.bind_group_0_key = Some(key);
@@ -458,24 +409,15 @@ impl RenderPass for PortalInstancePass {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
 
-        // Only the first `draw_count` entries of each portal's reserved slice
-        // were written by PortalCullPass this frame (see portal_cull.wgsl) —
-        // clamped to the fixed allocation ceiling PORTAL_DRAW_CAPACITY.
-        // Issuing exactly this many, not the full capacity, avoids submitting
-        // thousands of guaranteed-empty indirect commands per portal.
+        // One indirect command per draw group (mesh+material), same shape
+        // as the plain non-portal G-buffer pass — every chain's surviving
+        // instances for a given group are already merged into that group's
+        // single indirect command by PortalCullPass's `finalize` step.
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
-        let active_portals = self.portal_count.min(MAX_PORTAL_SLOTS);
-        for portal_idx in 0..active_portals {
-            pass.set_bind_group(
-                0,
-                self.bind_group_0.as_ref().unwrap(),
-                &[(portal_idx as u64 * PORTAL_UNIFORM_STRIDE) as u32],
-            );
-            let indirect_offset = (portal_idx as u64) * (PORTAL_DRAW_CAPACITY as u64) * 20;
-            pass.multi_draw_indexed_indirect(&self.portal_indirect_buf, indirect_offset, indirect_draw_count);
-        }
+        pass.multi_draw_indexed_indirect(&self.portal_indirect_buf, 0, indirect_draw_count);
         Ok(())
     }
 }
