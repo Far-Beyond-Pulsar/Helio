@@ -163,22 +163,25 @@ impl Scene {
     /// stopping once `MAX_PORTAL_CHAINS` is hit (see that constant's docs —
     /// scenes are expected to stay well under it).
     fn republish_portal_chains(&mut self) {
-        let portal_count = (0..self.portals.slot_len())
-            .filter(|&slot| self.portals.get_by_slot(slot).is_some())
-            .count() as u32;
+        let records: Vec<PortalRecord> = (0..self.portals.slot_len())
+            .filter_map(|slot| self.portals.get_by_slot(slot))
+            .copied()
+            .collect();
 
         let mut chains = Vec::new();
-        if portal_count > 0 {
+        if !records.is_empty() {
             let mut prefix = Vec::with_capacity(libhelio::MAX_CHAIN_DEPTH);
-            generate_chains(portal_count, &mut prefix, &mut chains);
+            generate_chains(&records, &mut prefix, &mut chains);
         }
         self.gpu_scene.portal_chains.set_data(chains);
     }
 }
 
 /// Depth-first: append `chains` with every non-empty prefix reachable by
-/// picking `0..portal_count` at each of up to `MAX_CHAIN_DEPTH` steps.
-fn generate_chains(portal_count: u32, prefix: &mut Vec<u32>, chains: &mut Vec<libhelio::GpuPortalChain>) {
+/// picking `0..records.len()` at each of up to `MAX_CHAIN_DEPTH` steps,
+/// pruned to steps where the next portal is actually reachable through the
+/// current innermost one — see `portal_reachable_through`.
+fn generate_chains(records: &[PortalRecord], prefix: &mut Vec<u32>, chains: &mut Vec<libhelio::GpuPortalChain>) {
     if chains.len() >= libhelio::MAX_PORTAL_CHAINS {
         return;
     }
@@ -190,14 +193,50 @@ fn generate_chains(portal_count: u32, prefix: &mut Vec<u32>, chains: &mut Vec<li
     if prefix.len() >= libhelio::MAX_CHAIN_DEPTH {
         return;
     }
-    for p in 0..portal_count {
+    for p in 0..records.len() as u32 {
         if chains.len() >= libhelio::MAX_PORTAL_CHAINS {
             return;
         }
+        // Only extend the chain with `p` as the new innermost portal when
+        // its own opening is plausibly reachable through whichever portal
+        // is currently innermost (`prefix`'s last entry) — i.e. `p.a` sits
+        // inside that portal's `b` window. Without this, chain generation
+        // combinatorially pairs up completely unrelated portals (any two
+        // portals leading to two unrelated, non-recursive rooms, say), and
+        // the per-instance cull/clip tests can't fully catch the result:
+        // the outermost stage is deliberately loose on X/Y (see
+        // `gbuffer_portal.wgsl`'s module doc — wide content behind a
+        // narrow opening needs to still show), so a nonsense multi-hop
+        // transform can still slip through the outer portal's mask as
+        // faint, wrongly-positioned "ghost" content. A scene where a
+        // portal genuinely IS reachable through the previous one —
+        // `portal_cube`'s opposite-wall doors, or a portal paired with
+        // itself — passes this check fine and keeps recursing exactly as
+        // before; a scene of unrelated single-hop portals (`portal_rooms`)
+        // now simply never generates the bogus deeper chains at all.
+        if let Some(&prev_idx) = prefix.last() {
+            if !portal_reachable_through(&records[prev_idx as usize], &records[p as usize]) {
+                continue;
+            }
+        }
         prefix.push(p);
-        generate_chains(portal_count, prefix, chains);
+        generate_chains(records, prefix, chains);
         prefix.pop();
     }
+}
+
+/// True when `next`'s real opening (`next.a`) plausibly sits within `prev`'s
+/// far surface (`prev.b`)'s window — i.e. composing `prev` after `next` in a
+/// chain corresponds to an actual physical adjacency, not an arbitrary
+/// pairing of unrelated portals. Position-only (orientation isn't checked):
+/// two surfaces occupying the same physical opening but facing opposite
+/// ways — exactly `prev.b` and the opposite-facing portal whose `a` sits at
+/// that same spot, as in `portal_cube` — is precisely the legitimate case
+/// this needs to keep allowing.
+fn portal_reachable_through(prev: &PortalRecord, next: &PortalRecord) -> bool {
+    let local = prev.pair.b.transform.inverse().transform_point3(next.pair.a.position());
+    let tolerance = prev.half_extent.x.max(prev.half_extent.y);
+    local.x.abs() <= prev.half_extent.x && local.y.abs() <= prev.half_extent.y && local.z.abs() <= tolerance
 }
 
 /// Placement helper: build a rigid [`PortalPose`] at `position` looking toward
