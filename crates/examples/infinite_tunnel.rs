@@ -58,8 +58,16 @@ const HALF_LENGTH: f32 = 8.0;
 const COPY_STRIDE: f32 = 2.0 * HALF_LENGTH;
 /// Number of sublevel copies per direction.
 const COPIES: i32 = 10;
-/// Portal surfaces sit just inside the corridor ends.
-const PORTAL_Z: f32 = HALF_LENGTH - 1.0;
+/// Portal surfaces sit exactly at the corridor ends — flush with the real
+/// wall/floor/ceiling meshes' own endpoint. Pulling this inward (it used to
+/// be `HALF_LENGTH - 1.0`) leaves a strip of real backing geometry between
+/// the portal plane and the tunnel's physical end; depending on view angle
+/// that strip's depth competes unpredictably with the portal's own mask
+/// stamp, which reads as a visible dark border around the opening where the
+/// mask loses that fight. Flush placement removes the competing geometry
+/// entirely, so the duplicated content lines up seamlessly with the real
+/// corridor right up to the frame.
+const PORTAL_Z: f32 = HALF_LENGTH;
 /// Copies are buried this far below the corridor so the main pass (frustum +
 /// far plane) never draws them; the portal's `b` pose is translated down by
 /// the same amount, making `pair_map_inverse` a pure +Y shift that pulls the
