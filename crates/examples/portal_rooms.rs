@@ -67,14 +67,23 @@ const WALL_T: f32 = 0.15;
 /// geometry. Equal sizing sidesteps the question entirely: every edge of the
 /// room's open face *is* an edge of the portal's own window, by construction.
 const ROOM_HALF_SIZE: f32 = HUB_HALF_SIZE;
-/// Distance from the hub's center to each side room's center, measured along
-/// that room's own axis. Rooms hang off the hub like the arms of a plus
-/// sign, one per axis direction, so — given `ROOM_SPACING - ROOM_HALF_SIZE >
-/// HUB_HALF_SIZE` — no two rooms' geometry ever overlaps in world space.
-const ROOM_SPACING: f32 = 40.0;
+/// World-space X of the *first* room's center. All six sit in a single
+/// straight row along +X from here — see the `rooms` loop in `resumed` for
+/// why: it's the plainest possible proof that nothing spatially impossible
+/// is going on. Each portal still shows its own room facing whichever
+/// direction *that* portal looks, via `pair_map_inverse`'s rotation (not
+/// just translation) — but if you fly the camera away from the hub
+/// entirely and out to where the rooms actually are, what's really there is
+/// just six ordinary, identically-oriented rooms sitting side by side, the
+/// same as any row of real rooms in a real building.
+const ROOM_LINE_START_X: f32 = 60.0;
+/// Center-to-center spacing along the row — `2*ROOM_HALF_SIZE` (the room's
+/// own width) plus a clear gap, so neighboring rooms' walls never touch.
+const ROOM_LINE_SPACING: f32 = 2.0 * ROOM_HALF_SIZE + 8.0;
 
-/// Far plane — generous enough to cover the farthest room wall
-/// (ROOM_SPACING + ROOM_HALF_SIZE) plus real flying-around margin.
+/// Far plane — generous enough to cover the farthest room in the row
+/// (`ROOM_LINE_START_X + 5*ROOM_LINE_SPACING + ROOM_HALF_SIZE`) plus real
+/// flying-around margin.
 const FAR_PLANE: f32 = 300.0;
 
 fn main() {
@@ -246,43 +255,46 @@ impl ApplicationHandler for App {
             (Vec3::NEG_Z, Vec3::Y, RoomTheme { name: "Glacier", wall_color: [0.08, 0.4, 0.45, 1.0], accent: [0.2, 0.95, 1.0] }),
         ];
 
+        // Every real room shares one fixed orientation, regardless of which
+        // cube face its own portal happens to be on — `ROOM_RIGHT`/`ROOM_UP`
+        // for its own walls and furniture, entrance facing `-ROOM_FORWARD`
+        // (the wall skipped by `insert_room_shell`'s `open_normal` below),
+        // interior extending along `+ROOM_FORWARD` from there. An ordinary
+        // room built the ordinary way — nothing about its own construction
+        // references any portal at all.
+        const ROOM_RIGHT: Vec3 = Vec3::X;
+        const ROOM_UP: Vec3 = Vec3::Y;
+        const ROOM_FORWARD: Vec3 = Vec3::Z;
+
         let mut portal_ids = Vec::new();
         let mut light_ids = Vec::new();
-        for (normal, up_hint, theme) in &faces {
+        for (i, (normal, up_hint, theme)) in faces.iter().enumerate() {
             let normal = *normal;
             let up_hint = *up_hint;
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
 
-            // The destination room for this face sits `ROOM_SPACING` units
-            // out along the *opposite* of this face's outward normal — i.e.
-            // behind the face from an outside viewer's point of view. This
-            // is what makes the portal correct for someone standing outside
-            // the cube looking in: real content needs to sit on the far
-            // side of the face plane from wherever the viewer is, and the
-            // viewer here is outside (in front of the face, along +normal),
-            // so the room goes on the -normal side. See the `a`/`b` pose
-            // comment below for why the room's own placement direction has
-            // to agree with the portal's `forward` axis, not just its
-            // `half_extent`.
-            let room_center = -normal * ROOM_SPACING;
+            // The destination room for this face is just the i'th room in
+            // the straight row — see `ROOM_LINE_START_X`'s doc for why. Its
+            // position has nothing to do with `normal` at all; only the
+            // *portal* (`a`, below) needs to know which cube face it's on.
+            let room_center = Vec3::new(ROOM_LINE_START_X + i as f32 * ROOM_LINE_SPACING, 0.0, 0.0);
             let room_wall_mat = renderer.scene_mut().insert_material(make_material(
                 theme.wall_color, 0.85, 0.0, [0.0, 0.0, 0.0], 0.0,
             ));
             let room_accent_mat = renderer.scene_mut().insert_material(make_material(
                 [theme.accent[0], theme.accent[1], theme.accent[2], 1.0], 0.3, 0.0, theme.accent, 3.0,
             ));
-            // Leave the wall facing back toward the hub (+normal, since the
-            // room now sits on the -normal side) open — that's the room's
-            // real "entrance", the same real surface the portal's far pose
-            // sits at, so there's real geometry (floor, ceiling, far wall,
-            // side walls) waiting right where the doorway leads.
-            insert_room_shell(&mut renderer, unit_mesh, room_wall_mat, room_center, ROOM_HALF_SIZE, WALL_T, normal);
+            // Leave the entrance wall (`-ROOM_FORWARD`) open — that's the
+            // room's real entrance, the same real surface the portal's far
+            // pose sits at, so there's real geometry (floor, ceiling, far
+            // wall, side walls) waiting right where the doorway leads.
+            insert_room_shell(&mut renderer, unit_mesh, room_wall_mat, room_center, ROOM_HALF_SIZE, WALL_T, -ROOM_FORWARD);
             // Hand-furnish this room so each destination reads as an actual
             // place, not just a colored box — see `furnish_room` for the
             // per-theme layouts — plus a matching light so the room isn't
             // lit solely by the hub's distant, unrelated lights.
-            let frame = RoomFrame { center: room_center, right, up, normal, half_size: ROOM_HALF_SIZE };
+            let frame = RoomFrame { center: room_center, right: ROOM_RIGHT, up: ROOM_UP, normal: -ROOM_FORWARD, half_size: ROOM_HALF_SIZE };
             furnish_room(&mut renderer, unit_mesh, unit_sphere, wood_mat, metal_mat, room_wall_mat, room_accent_mat, theme.name, &frame);
             light_ids.push(
                 renderer.scene_mut()
@@ -291,26 +303,26 @@ impl ApplicationHandler for App {
             );
             log::info!("[portal_rooms] {} room centered at {:?}", theme.name, room_center);
 
-            // Pair the hub's whole face with the real entrance of this room
-            // — the pose at the room's near wall, facing *into* the cube
-            // (`-normal`, not the face's own outward normal) — a pure "keep
-            // going straight" translation using the room's own real content.
-            // The forward direction here is what an outside viewer actually
-            // looks along to see through the face (standing in front of it,
-            // along +normal, looking toward -normal), so real content has
-            // to be placed — and clipped — on that same -normal side of the
-            // face plane, which is exactly where `room_center` was put
-            // above. Getting `forward` and the room's placement direction
-            // to agree is the entire difference from `portal_cube`, whose
-            // doorways are only ever viewed from *inside* looking outward
-            // (`+normal`) — see that demo's module doc for the base trick
-            // this still builds on. `half_extent` covers the entire face —
-            // full corner-to-corner coverage, no doorway inset — which is
-            // what makes the face itself *be* the portal instead of a hole
-            // cut into a wall.
-            let forward = -normal;
-            let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, forward, up);
-            let b = helio::portal_pose_facing(room_center + normal * ROOM_HALF_SIZE, forward, up);
+            // Pair the hub's whole face (`a`, forced to face *into* the
+            // cube from outside, same as before) with this room's real
+            // entrance (`b`, at the room's own fixed orientation — *not*
+            // rotated to match `a`). `pair_map_inverse` is a full rigid
+            // transform, not just a translation, so when `a` and `b` face
+            // different ways (true for 5 of these 6 — only the one portal
+            // whose own `-normal` happens to equal `ROOM_FORWARD` lines up
+            // by coincidence) the room is duplicated *rotated* to match
+            // what's actually on the other side of that specific face —
+            // exactly what a real portal connecting two independently-built
+            // spaces should do, and proof this was never a translation-only
+            // special case: an ordinary room, built with no reference to
+            // any portal, still shows through correctly regardless of which
+            // way its own portal happens to be facing. `half_extent` covers
+            // the entire face — full corner-to-corner coverage, no doorway
+            // inset — which is what makes the face itself *be* the portal
+            // instead of a hole cut into a wall.
+            let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, -normal, up);
+            let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
+            let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
             let portal = renderer
                 .scene_mut()
                 .add_portal(PortalDescriptor { a, b, half_extent: Vec2::new(HUB_HALF_SIZE, HUB_HALF_SIZE) })
@@ -354,9 +366,15 @@ impl ApplicationHandler for App {
             // the cube (HUB_HALF_SIZE=6) so the whole thing is in frame,
             // since every face is now the portal itself with nothing to
             // stand inside — see the module doc.
-            cam_pos: Vec3::new(16.0, 12.0, 16.0),
-            cam_yaw: -0.785,
-            cam_pitch: -0.488,
+            // `ROOMS_ROW_VIEW=1` starts looking at the real room row instead
+            // of the hub — the plain, ordinary-looking line of six rooms
+            // that every portal above actually connects to. Useful for
+            // convincing yourself nothing spatially impossible is going on:
+            // fly out here and it's just six boxes in a row, like any real
+            // building.
+            cam_pos: if std::env::var("ROOMS_ROW_VIEW").is_ok() { Vec3::new(110.0, 15.0, -50.0) } else { Vec3::new(16.0, 12.0, 16.0) },
+            cam_yaw: if std::env::var("ROOMS_ROW_VIEW").is_ok() { std::f32::consts::PI } else { -0.785 },
+            cam_pitch: if std::env::var("ROOMS_ROW_VIEW").is_ok() { -0.25 } else { -0.488 },
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
