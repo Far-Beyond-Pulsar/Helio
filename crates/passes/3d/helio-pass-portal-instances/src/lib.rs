@@ -47,13 +47,26 @@ struct ScreenSize {
     _pad1: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LevelUniform {
+    level: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 pub struct PortalInstancePass {
+    level: u32,
+
     material_binding: libhelio::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
 
     screen_buf: wgpu::Buffer,
+    level_uniform_buf: wgpu::Buffer,
+    level_uniform_written: bool,
 
     /// Shared with `PortalCullPass` — this pass only reads them.
     portal_indirect_buf: Arc<wgpu::Buffer>,
@@ -69,11 +82,15 @@ pub struct PortalInstancePass {
 }
 
 impl PortalInstancePass {
+    /// `level`: which recursion depth this pass instance draws —
+    /// `1..=libhelio::MAX_CHAIN_DEPTH`. Pair with a same-level
+    /// `PortalMaskPass` immediately before it — see that pass's docs.
     pub fn new(
         device: &wgpu::Device,
         portal_indirect_buf: Arc<wgpu::Buffer>,
         portal_compacted_indices_buf: Arc<wgpu::Buffer>,
         portal_compacted_chains_buf: Arc<wgpu::Buffer>,
+        level: u32,
     ) -> Self {
         let material_binding = libhelio::MaterialBindingConfig::for_device(device);
 
@@ -85,6 +102,12 @@ impl PortalInstancePass {
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),
             size: std::mem::size_of::<ScreenSize>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let level_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalInstance/LevelUniform"),
+            size: std::mem::size_of::<LevelUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -110,7 +133,8 @@ impl PortalInstancePass {
                         multisampled: false,
                     },
                     count: None,
-                }, // portal_mask — written by helio-pass-portal-mask
+                }, // portal_mask — written by this level's own PortalMaskPass
+                uniform_entry(10, wgpu::ShaderStages::VERTEX, false), // level_uniform
             ],
         });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
@@ -196,11 +220,14 @@ impl PortalInstancePass {
         });
 
         Self {
+            level,
             material_binding,
             pipeline,
             bind_group_layout_0,
             bind_group_layout_1,
             screen_buf,
+            level_uniform_buf,
+            level_uniform_written: false,
             portal_indirect_buf,
             portal_compacted_indices_buf,
             portal_compacted_chains_buf,
@@ -313,6 +340,11 @@ impl RenderPass for PortalInstancePass {
             _pad1: 0.0,
         };
         ctx.write_buffer(&self.screen_buf, 0, bytemuck::bytes_of(&screen));
+        if !self.level_uniform_written {
+            let data = LevelUniform { level: self.level, _pad0: 0, _pad1: 0, _pad2: 0 };
+            ctx.write_buffer(&self.level_uniform_buf, 0, bytemuck::bytes_of(&data));
+            self.level_uniform_written = true;
+        }
         Ok(())
     }
 
@@ -369,6 +401,7 @@ impl RenderPass for PortalInstancePass {
                     wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.portal_chains.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 8, resource: self.portal_compacted_chains_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(portal_mask_view) },
+                    wgpu::BindGroupEntry { binding: 10, resource: self.level_uniform_buf.as_entire_binding() },
                 ],
             }));
             self.bind_group_0_key = Some(key);

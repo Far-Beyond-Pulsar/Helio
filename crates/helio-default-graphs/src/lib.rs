@@ -227,11 +227,14 @@ fn add_geometry_passes(
     // binds only 7 of 8 attachments. Looks the cull pass back up by type
     // rather than threading its buffers through this function's signature.
     //
-    // PortalMaskPass runs first: it stamps each portal's true on-screen
-    // footprint (respecting real occluders) into `portal_mask` and resets
-    // depth to far there, so PortalInstancePass's own screen-space mask
-    // check and depth self-occlusion both have something correct to test
-    // against. See helio-pass-portal-instances' shaders for why this exists.
+    // One (PortalMaskPass, PortalInstancePass) pair *per recursion level*,
+    // interleaved — Mask(1),Draw(1),Mask(2),Draw(2),Mask(3),Draw(3) for the
+    // default MAX_CHAIN_DEPTH=3 — not one pair covering every level at once.
+    // A deeper level's mask stamp depends on the *previous* level's content
+    // having already been drawn (so occlusion between recursion levels is
+    // correct — a nearer reflection legitimately blocks a farther one, same
+    // as in a real room), so the two can't be flattened into a single pass;
+    // see helio-pass-portal-instances' shaders for the full reasoning.
     if config.enable_portals {
         if let Some((indirect_buf, compacted_buf, compacted_chains_buf)) = graph.find_pass::<PortalCullPass>().map(|p| {
             (
@@ -240,13 +243,16 @@ fn add_geometry_passes(
                 Arc::clone(&p.portal_compacted_chains_buf),
             )
         }) {
-            graph.add_pass(Box::new(PortalMaskPass::new(device)));
-            graph.add_pass(Box::new(PortalInstancePass::new(
-                device,
-                indirect_buf,
-                compacted_buf,
-                compacted_chains_buf,
-            )));
+            for level in 1..=(libhelio::MAX_CHAIN_DEPTH as u32) {
+                graph.add_pass(Box::new(PortalMaskPass::new(device, level)));
+                graph.add_pass(Box::new(PortalInstancePass::new(
+                    device,
+                    Arc::clone(&indirect_buf),
+                    Arc::clone(&compacted_buf),
+                    Arc::clone(&compacted_chains_buf),
+                    level,
+                )));
+            }
         }
     }
 

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 helio = { path = "../helio" }
 helio-core = { workspace = true }
+libhelio = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }

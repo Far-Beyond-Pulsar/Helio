@@ -2978,6 +2978,7 @@ dependencies = [
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
  "image",
+ "libhelio",
  "pollster 0.4.0",
  "wgpu 30.0.0",
 ]
