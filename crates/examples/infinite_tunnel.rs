@@ -24,6 +24,9 @@
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
+//!   Tab         — toggle editor mode (on by default): shows a checkerboard
+//!                 over each portal opening so you can see where it actually
+//!                 is; off is the seamless, invisible-portal game-mode look.
 //!   Escape      — release cursor / exit
 
 mod v3_demo_common;
@@ -389,11 +392,11 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
-        // TUNNEL_EDITOR_OVERLAY=1 shows the portal-opening checkerboard that
-        // normally only appears in editor mode (see PortalEditorOverlayPass).
-        if std::env::var("TUNNEL_EDITOR_OVERLAY").is_ok() {
-            renderer.set_editor_mode(true);
-        }
+        // Editor mode (Tab to toggle) starts on so the portal-opening
+        // checkerboard — otherwise invisible, see PortalEditorOverlayPass —
+        // is visible by default; press Tab to see the fully seamless game-
+        // mode look.
+        renderer.set_editor_mode(true);
 
         self.state = Some(AppState {
             window,
@@ -436,6 +439,20 @@ impl ApplicationHandler for App {
                 } else {
                     event_loop.exit();
                 }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Tab),
+                        repeat: false,
+                        ..
+                    },
+                ..
+            } => {
+                let enabled = !state.renderer.is_editor_mode();
+                state.renderer.set_editor_mode(enabled);
+                log::info!("[infinite_tunnel] editor mode: {}", enabled);
             }
             WindowEvent::KeyboardInput {
                 event:
