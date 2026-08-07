@@ -115,6 +115,11 @@ fn main(
     @builtin(workgroup_id) wg_id: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
+    // Explicitly initialize the workgroup counter (not guaranteed by all
+    // WGSL implementations — some leave workgroup memory uninitialized).
+    if lid.x == 0u { atomicStore(&wg_counter, 0u); }
+    workgroupBarrier();
+
     let draw_idx = wg_id.x;
     let portal_idx = wg_id.y;
     let is_active = draw_idx < cull.draw_count && portal_idx < cull.portal_count;

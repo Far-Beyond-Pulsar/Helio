@@ -260,39 +260,17 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
     return input.clip_position.xy - prev_pixel;
 }
 
-// TEMP DIAGNOSTIC (step 2) — clip test RE-ENABLED, material evaluation still
-// replaced with forced bright emissive magenta. If the clip test's own logic
-// is correct, magenta should now only appear in a small window at each
-// portal instead of covering the whole screen. The real body (full PBR
-// material evaluation) is preserved below in `fs_main_real`; swap the
-// `@fragment` attribute back once this is resolved.
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
+    // Clip to the portal opening: keep only fragments inside the portal's
+    // X/Y half-extent AND on the far side of the linked surface. `local` is
+    // the mapped position in the near surface's (A's) frame: content that was
+    // *behind* the far surface (the only content that should duplicate) lands
+    // at local.z <= 0; content that was *in front* of the far surface lands at
+    // local.z > 0 and would overlap the real scene, so it's discarded.
     let portal = portal_views[portal_draw.portal_view_index];
     let local = (portal.inverse_transform * vec4<f32>(input.world_position, 1.0)).xyz;
-    if abs(local.x) > portal.half_extent.x || abs(local.y) > portal.half_extent.y || local.z > 0.0 {
-        discard;
-    }
-    var diag_out: GBufferOutput;
-    diag_out.albedo = vec4<f32>(1.0, 0.0, 1.0, 1.0);
-    diag_out.normal = vec4<f32>(normalize(input.world_normal), 0.0);
-    diag_out.orm = vec4<f32>(1.0, 1.0, 0.0, 0.0);
-    diag_out.emissive = vec4<f32>(3.0, 0.0, 3.0, 0.0);
-    diag_out.lightmap_uv = vec2<f32>(-1.0, -1.0);
-    diag_out.sss = vec4<f32>(0.0);
-    diag_out.extra = vec4<f32>(0.0);
-    diag_out.velocity = compute_velocity(input);
-    return diag_out;
-}
-
-fn fs_main_real(input: VertexOutput) -> GBufferOutput {
-    // World-space clip test: keep only fragments inside this portal's
-    // opening and in front of its surface (see module docs for the sign
-    // convention — `PortalPose::forward()` is -Z, so "visible through" is
-    // local Z <= 0).
-    let portal = portal_views[portal_draw.portal_view_index];
-    let local = (portal.inverse_transform * vec4<f32>(input.world_position, 1.0)).xyz;
-    if abs(local.x) > portal.half_extent.x || abs(local.y) > portal.half_extent.y || local.z > 0.0 {
+    if local.z > 0.0 || abs(local.x) > portal.half_extent.x || abs(local.y) > portal.half_extent.y {
         discard;
     }
 
@@ -325,13 +303,15 @@ fn fs_main_real(input: VertexOutput) -> GBufferOutput {
     let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
+    // Subtle forced emissive so portal content is visible regardless of scene
+    // lighting (deferred lighting may not reach the portal's mapped position).
+    let portal_emissive = emissive + vec3<f32>(0.1, 0.1, 0.1);
 
     var out: GBufferOutput;
     out.albedo = vec4<f32>(albedo.rgb, albedo.a);
     out.normal = vec4<f32>(N, specular_f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
-    out.emissive = vec4<f32>(emissive, specular_f0.b);
-    // Sentinel: portal duplicates don't carry baked lightmap data.
+    out.emissive = vec4<f32>(portal_emissive, specular_f0.b);
     out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     out.sss = vec4<f32>(0.0);
     out.extra = vec4<f32>(0.0);
