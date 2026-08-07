@@ -229,7 +229,7 @@ impl ApplicationHandler for App {
             [0.3, 0.6, 1.0],
             0.4,
         ));
-        const GRID: i32 = 512; // 32*32 = 1024 cubes
+        const GRID: i32 = 128; // 128*128 = 16,384 cubes
         let spacing = 2.6 / GRID as f32;
         for ix in 0..GRID {
             for iz in 0..GRID {

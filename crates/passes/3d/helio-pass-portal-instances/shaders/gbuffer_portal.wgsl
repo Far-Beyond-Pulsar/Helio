@@ -260,8 +260,32 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
     return input.clip_position.xy - prev_pixel;
 }
 
+// TEMP DIAGNOSTIC (step 2) — clip test RE-ENABLED, material evaluation still
+// replaced with forced bright emissive magenta. If the clip test's own logic
+// is correct, magenta should now only appear in a small window at each
+// portal instead of covering the whole screen. The real body (full PBR
+// material evaluation) is preserved below in `fs_main_real`; swap the
+// `@fragment` attribute back once this is resolved.
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
+    let portal = portal_views[portal_draw.portal_view_index];
+    let local = (portal.inverse_transform * vec4<f32>(input.world_position, 1.0)).xyz;
+    if abs(local.x) > portal.half_extent.x || abs(local.y) > portal.half_extent.y || local.z > 0.0 {
+        discard;
+    }
+    var diag_out: GBufferOutput;
+    diag_out.albedo = vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    diag_out.normal = vec4<f32>(normalize(input.world_normal), 0.0);
+    diag_out.orm = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    diag_out.emissive = vec4<f32>(3.0, 0.0, 3.0, 0.0);
+    diag_out.lightmap_uv = vec2<f32>(-1.0, -1.0);
+    diag_out.sss = vec4<f32>(0.0);
+    diag_out.extra = vec4<f32>(0.0);
+    diag_out.velocity = compute_velocity(input);
+    return diag_out;
+}
+
+fn fs_main_real(input: VertexOutput) -> GBufferOutput {
     // World-space clip test: keep only fragments inside this portal's
     // opening and in front of its surface (see module docs for the sign
     // convention — `PortalPose::forward()` is -Z, so "visible through" is
