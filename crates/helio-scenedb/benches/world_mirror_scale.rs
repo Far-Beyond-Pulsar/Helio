@@ -358,6 +358,98 @@ fn flush_cost_vs_dirty_fraction() {
     }
 }
 
+// ── Scenario 6 (round 2, post-Helio#212): reservation eliminates in-batch growth ──
+
+fn reservation_eliminates_batch_growth() {
+    println!("\n=== Scenario 6 (post-#212): reserve_gpu_mirror_capacity before a known-size batch spawn ===");
+    println!("{:>10} | {:>18} | {:>18} | {:>14}", "N", "reallocs (cold)", "reallocs (reserved)", "reserved wall time");
+    for &n in &[1_000u32, 10_000, 100_000] {
+        // Cold: no reservation, same shape as scenario 1.
+        let ctx = test_context();
+        let mut store = SceneGpuStore::new(&ctx, scene_cfg());
+        BenchInstance::register_gpu_columns_growable(&mut store, 64, ctx.device());
+        let store = Arc::new(store);
+        let mut world = World::new();
+        world.attach_gpu_mirror(GpuMirrorHandle::new(Arc::clone(&store), Arc::clone(ctx.queue())));
+        let id = BenchInstance::packed_gpu_component_id();
+        let epoch_before = store.growable_epoch_for_id(id).unwrap_or(0);
+        for i in 0..n {
+            let e = world.spawn();
+            world.insert(e, sample_instance(i));
+        }
+        let cold_reallocs = store.growable_epoch_for_id(id).unwrap_or(0) - epoch_before;
+
+        // Reserved: same batch, but reserve_gpu_mirror_capacity(n) first.
+        let ctx2 = test_context();
+        let mut store2 = SceneGpuStore::new(&ctx2, scene_cfg());
+        BenchInstance::register_gpu_columns_growable(&mut store2, 64, ctx2.device());
+        let store2 = Arc::new(store2);
+        let mut world2 = World::new();
+        world2.attach_gpu_mirror(GpuMirrorHandle::new(Arc::clone(&store2), Arc::clone(ctx2.queue())));
+        world2
+            .reserve_gpu_mirror_capacity(ctx2.queue(), n)
+            .expect("mirror attached")
+            .expect("reserve succeeds");
+        let epoch_before2 = store2.growable_epoch_for_id(id).unwrap_or(0);
+        let start = Instant::now();
+        for i in 0..n {
+            let e = world2.spawn();
+            world2.insert(e, sample_instance(i));
+        }
+        let elapsed = start.elapsed();
+        let reserved_reallocs = store2.growable_epoch_for_id(id).unwrap_or(0) - epoch_before2;
+
+        println!(
+            "{:>10} | {:>18} | {:>18} | {:>14}",
+            n, cold_reallocs, reserved_reallocs, fmt_dur(elapsed),
+        );
+    }
+}
+
+// ── Scenario 7 (round 2, post-Helio#213): concurrent mark_dirty ────────────
+
+fn concurrent_mark_dirty() {
+    println!("\n=== Scenario 7 (post-#213): concurrent mark_dirty on disjoint rows, pre-reserved (fast read-lock path) ===");
+    println!("{:>10} | {:>8} | {:>14} | {:>18}", "N total", "threads", "wall time", "per-mark");
+    #[derive(SceneStore, Clone, Copy)]
+    struct ConcurrentMarkField {
+        #[gpu]
+        value: u32,
+    }
+    for &n in &[10_000u32, 100_000] {
+        for &threads in &[1u32, 4, 8, 16] {
+            let ctx = test_context();
+            let mut store = SceneGpuStore::new(&ctx, scene_cfg());
+            ConcurrentMarkField::register_gpu_columns_growable(&mut store, n, ctx.device());
+            let store = Arc::new(store);
+            let id = ConcurrentMarkField::gpu_columns()[0].field_token.id();
+            let per_thread = n / threads;
+
+            let start = Instant::now();
+            std::thread::scope(|scope| {
+                for t in 0..threads {
+                    let store = Arc::clone(&store);
+                    scope.spawn(move || {
+                        let base = t * per_thread;
+                        let value_bytes = (t).to_ne_bytes();
+                        for row in base..base + per_thread {
+                            store.mark_gpu_row_dirty(id, row, &value_bytes);
+                        }
+                    });
+                }
+            });
+            let elapsed = start.elapsed();
+            println!(
+                "{:>10} | {:>8} | {:>14} | {:>18}",
+                n,
+                threads,
+                fmt_dur(elapsed),
+                fmt_dur(elapsed / n),
+            );
+        }
+    }
+}
+
 fn main() {
     println!("Helio#211 -- World<->GPU mirror bridge AAA-scale benchmark");
     println!("(pulsar_scenedb#24 + follow-ups, real GPU device)");
@@ -366,4 +458,6 @@ fn main() {
     reallocation_latency();
     concurrent_buffer_access();
     flush_cost_vs_dirty_fraction();
+    reservation_eliminates_batch_growth();
+    concurrent_mark_dirty();
 }
