@@ -278,7 +278,6 @@ helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 rapier3d = "0.24"
-rapier_testbed3d = "0.24"
 image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
