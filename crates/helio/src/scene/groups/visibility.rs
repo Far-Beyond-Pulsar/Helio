@@ -6,6 +6,7 @@
 use crate::groups::{GroupId, GroupMask};
 
 use super::super::helpers::object_is_visible;
+use super::super::types::ObjectRecord;
 
 impl super::super::Scene {
     /// Hide all objects that belong to a group.
@@ -162,11 +163,7 @@ impl super::super::Scene {
             return;
         }
         let group_hidden = self.group_hidden;
-        let n = self.objects.dense_len();
-        for i in 0..n {
-            let Some(r) = self.objects.get_dense(i) else {
-                continue;
-            };
+        for (_, r) in self.world.query::<&ObjectRecord>() {
             let vis = if object_is_visible(r.groups, group_hidden) {
                 1u32
             } else {

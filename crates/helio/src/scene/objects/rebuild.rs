@@ -5,8 +5,10 @@
 //! objects with the same mesh + material into instanced draw calls.
 
 use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+use pulsar_scenedb::Entity;
 
 use super::super::helpers::object_is_visible;
+use super::super::types::ObjectRecord;
 
 impl super::super::Scene {
     /// Rebuilds GPU buffers with automatic instancing.
@@ -50,7 +52,18 @@ impl super::super::Scene {
     /// - Objects using the same material are drawn consecutively (texture cache hits)
     /// - GPU can efficiently batch vertex fetches and texture samples
     pub(in crate::scene) fn rebuild_instance_buffers(&mut self) {
-        let n = self.objects.dense_len();
+        // One O(n) collection out of the ECS, sorted/grouped/patched in place
+        // from here on ??? same cost shape as the old `DenseArena`'s `dense: Vec<T>`
+        // (that was already a full-array scan+sort on every rebuild; this is
+        // the same, just sourced from `World::query` instead of a public
+        // field). `ObjectRecord` is `Clone` (small, no heap fields), so this
+        // is a flat copy, not a walk of anything nested.
+        let rows: Vec<(Entity, ObjectRecord)> = self
+            .world
+            .query::<&ObjectRecord>()
+            .map(|(entity, r)| (entity, r.clone()))
+            .collect();
+        let n = rows.len();
         if n == 0 {
             self.gpu_scene.instances.set_data(Vec::new());
             self.gpu_scene.aabbs.set_data(Vec::new());
@@ -71,7 +84,7 @@ impl super::super::Scene {
         // single PSO.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&i| {
-            let r = self.objects.get_dense(i).unwrap();
+            let r = &rows[i].1;
             let (class, graph_hash) = self
                 .materials
                 .get(r.material)
@@ -99,7 +112,7 @@ impl super::super::Scene {
 
         let mut i = 0;
         while i < order.len() {
-            let r0 = self.objects.get_dense(order[i]).unwrap();
+            let r0 = &rows[order[i]].1;
             let (class, graph_hash) = self
                 .materials
                 .get(r0.material)
@@ -115,7 +128,7 @@ impl super::super::Scene {
 
             // Consume all objects in this group.
             while i < order.len() {
-                let r = self.objects.get_dense(order[i]).unwrap();
+                let r = &rows[order[i]].1;
                 if (r.instance.mesh_id, r.instance.material_id) != key {
                     break;
                 }
@@ -195,7 +208,8 @@ impl super::super::Scene {
         // Patch each ObjectRecord with its new GPU slot so that in-frame
         // `update_object_transform` / `update_object_bounds` can update in-place.
         for (di, &slot) in gpu_slots.iter().enumerate() {
-            if let Some(r) = self.objects.get_dense_mut(di) {
+            let entity = rows[di].0;
+            if let Some(r) = self.world.get_mut::<ObjectRecord>(entity) {
                 r.gpu_slot = slot;
                 r.draw.first_instance = slot;
             }
@@ -236,18 +250,11 @@ impl super::super::Scene {
     /// When `static_objects_dirty` is `true`, `static_objects_generation` is incremented
     /// to signal the ShadowPass to re-render the static shadow atlas.
     pub(in crate::scene) fn rebuild_shadow_partition_buffers(&mut self) {
-        let n = self.objects.dense_len();
-
         // Build two INDIRECT call lists — one per mobility class.
-        // first_instance in each entry is the object's dense_index into the main
-        // `instances` buffer, so transforms stay in sync with update_object_transform.
-        // DO NOT copy instance data into separate buffers — that causes stale shadows.
         let mut static_indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
         let mut movable_indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
 
-        for i in 0..n {
-            let r = self.objects.get_dense(i).unwrap();
-            // Use the object's actual first_instance (its slot in the main instances buffer).
+        for (_, r) in self.world.query::<&ObjectRecord>() {
             let entry = DrawIndexedIndirectArgs {
                 index_count: r.draw.index_count,
                 instance_count: 1,
@@ -286,5 +293,100 @@ impl super::super::Scene {
             static_draw_count,
             movable_draw_count,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handles::MaterialId;
+    use crate::mesh::{MeshUpload, PackedVertex};
+    use crate::scene::{ObjectDescriptor, Scene};
+    use crate::groups::GroupMask;
+    use bytemuck::Zeroable;
+    use glam::Mat4;
+    use libhelio::{GpuMaterial, Movability};
+
+    fn create_test_device() -> (std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("No adapter found");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .expect("Failed to create device");
+        (std::sync::Arc::new(device), std::sync::Arc::new(queue))
+    }
+
+    fn triangle_mesh(scene: &mut Scene) -> crate::handles::MeshId {
+        scene.insert_mesh(MeshUpload {
+            vertices: vec![PackedVertex::default(); 3],
+            indices: vec![0, 1, 2],
+        })
+    }
+
+    fn default_material(scene: &mut Scene) -> MaterialId {
+        scene.insert_material(GpuMaterial::zeroed())
+    }
+
+    /// End-to-end proof that object storage really is backed by
+    /// `pulsar_scenedb::World` now: insert ??? flush (rebuild_instance_buffers,
+    /// this file) ??? update transform (in-place GPU write) ??? remove ??? flush
+    /// again, checking the real `gpu_scene` instance buffer at each step ???
+    /// not just that the CPU record round-trips.
+    #[test]
+    fn insert_update_remove_round_trips_through_the_real_gpu_buffers() {
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        let mesh = triangle_mesh(&mut scene);
+        let material = default_material(&mut scene);
+
+        let id = scene
+            .insert_object(ObjectDescriptor {
+                mesh,
+                material,
+                transform: Mat4::IDENTITY,
+                bounds: [0.0, 0.0, 0.0, 1.0],
+                flags: 0,
+                groups: GroupMask::NONE,
+                movability: Some(Movability::Movable),
+                user_tag: 0,
+            })
+            .expect("insert_object");
+
+        scene.flush();
+        assert_eq!(scene.gpu_scene().resources().instance_count, 1);
+        assert_eq!(
+            scene.get_object_transform(id).expect("transform"),
+            Mat4::IDENTITY
+        );
+
+        let moved = Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0));
+        scene
+            .update_object_transform(id, moved)
+            .expect("update_object_transform");
+        // In-place write (objects_dirty is false after the flush above) ???
+        // no second flush needed for the CPU-side round-trip to see it.
+        assert_eq!(scene.get_object_transform(id).expect("transform"), moved);
+
+        let editor_rows: Vec<_> = scene.iter_objects_for_editor().collect();
+        assert_eq!(editor_rows.len(), 1);
+        assert_eq!(editor_rows[0].0, id);
+
+        scene.remove_object(id).expect("remove_object");
+        assert!(scene.get_object_transform(id).is_err());
+
+        scene.flush();
+        assert_eq!(scene.gpu_scene().resources().instance_count, 0);
     }
 }

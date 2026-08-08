@@ -7,6 +7,7 @@
 use bytemuck::Zeroable;
 use libhelio::{GpuDecal, GpuLight, GpuShadowMatrix};
 
+use crate::scene::types::LightRecord;
 use crate::scene::Scene;
 
 /// FNV-1a hash over f32 bit patterns. Used for per-caster shadow dirty tracking.
@@ -76,17 +77,22 @@ impl Scene {
         // Static/stationary lights are baked and should not contribute to real-time lighting.
         // This dramatically improves performance when scenes have many baked lights.
         {
-            let light_rec_count = self.lights.dense_len();
-            let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+            let mut movable_lights: Vec<GpuLight> = Vec::new();
             let mut gpu_idx = 0u32;
+            let mut light_rec_count = 0u32;
 
-            for i in 0..light_rec_count {
-                if let Some(record) = self.lights.get_dense_mut(i) {
-                    if record.movability.can_move() {
-                        record.gpu_index = gpu_idx;
-                        gpu_idx += 1;
-                        movable_lights.push(record.gpu);
-                    }
+            // `gpu_index` is the sole authority for a light's GPU-buffer slot
+            // (see `resources/lights.rs`'s module doc) ??? reset every static
+            // light's to the "not a resident" sentinel here too, not just at
+            // insert, so nothing can ever read a stale slot for one.
+            for (_, record) in self.world.query::<&mut LightRecord>() {
+                light_rec_count += 1;
+                if record.movability.can_move() {
+                    record.gpu_index = gpu_idx;
+                    gpu_idx += 1;
+                    movable_lights.push(record.gpu);
+                } else {
+                    record.gpu_index = u32::MAX;
                 }
             }
 
@@ -94,11 +100,11 @@ impl Scene {
             self.gpu_scene.lights.set_data(movable_lights.clone());
             self.gpu_scene.movable_light_count = movable_lights.len() as u32;
 
-            if movable_lights.len() < light_rec_count {
+            if (movable_lights.len() as u32) < light_rec_count {
                 log::trace!(
                     "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
                     movable_lights.len(),
-                    light_rec_count - movable_lights.len()
+                    light_rec_count - movable_lights.len() as u32
                 );
             }
         }

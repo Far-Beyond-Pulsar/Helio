@@ -8,6 +8,7 @@ use crate::handles::ObjectId;
 
 use super::super::errors::{invalid, Result};
 use super::super::helpers::object_is_visible;
+use super::super::types::ObjectRecord;
 
 impl super::super::Scene {
     /// Set the complete group membership mask for an object.
@@ -48,7 +49,7 @@ impl super::super::Scene {
     /// // Object is now hidden if group 0 OR group 2 is hidden
     /// ```
     pub fn set_object_groups(&mut self, id: ObjectId, mask: GroupMask) -> Result<()> {
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         record.groups = mask;
@@ -93,7 +94,7 @@ impl super::super::Scene {
     /// // Object is now in groups 0, 1, and 2 if it was in 0 and 2 before
     /// ```
     pub fn add_object_to_group(&mut self, id: ObjectId, group: GroupId) -> Result<()> {
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         let new_mask = record.groups.with(group);
@@ -139,7 +140,7 @@ impl super::super::Scene {
     /// // Object is now only in groups 0 and 2 if it was in 0, 1, and 2 before
     /// ```
     pub fn remove_object_from_group(&mut self, id: ObjectId, group: GroupId) -> Result<()> {
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         let new_mask = record.groups.without(group);
@@ -179,7 +180,7 @@ impl super::super::Scene {
     /// }
     /// ```
     pub fn object_groups(&self, id: ObjectId) -> Result<GroupMask> {
-        let Some((_, record)) = self.objects.get_with_index(id) else {
+        let Some(record) = self.world.get::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         Ok(record.groups)
