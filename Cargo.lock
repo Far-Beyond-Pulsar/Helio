@@ -1229,6 +1229,8 @@ dependencies = [
  "meshopt",
  "openxr",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "quark",
  "thiserror 2.0.19",
  "uuid",

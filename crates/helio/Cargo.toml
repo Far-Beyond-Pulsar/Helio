@@ -27,11 +27,22 @@ helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
+# CPU archetype ECS backing + GPU world-mirror bridge (Helio #210). The `gpu`
+# feature is required because Scene holds Arc<SceneGpuStore> + the GpuMirrorHandle
+# attachment. The dep's `gpu` feature is always-on; the crate's own `gpu` feature
+# gates the derive's #[cfg(feature = "gpu")] spliced code (same pattern as
+# helio-scenedb). Originally added CPU-only by draft PR #209 (scenedb-object-storage).
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
 
 [features]
-default = ["profiling"]
+default = ["profiling", "gpu"]
 profiling = ["helio-core/profiling"]
+gpu = []
 bake = ["helio-bake", "uuid"]
+
+[dev-dependencies]
+# World-mirror integration test (Helio #210) needs #[derive(SceneStore)].
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

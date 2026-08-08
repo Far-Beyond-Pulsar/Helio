@@ -27,8 +27,15 @@ use crate::scene::multi_mesh::SectionedInstanceRecord;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
+use pulsar_scenedb::gpu::{
+    EngineGpuContext, FrameDriver, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig,
+    SceneGpuStore,
+};
+use pulsar_scenedb::{SubsystemRegistry, World};
+
 use super::errors::{invalid, Result};
 use super::portals::PortalRecord;
+use super::scenedb::SceneGpuMirrorSubsystem;
 use super::sublevels::SublevelRecord;
 use super::types::{
     DecalRecord, LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord,
@@ -45,6 +52,34 @@ pub struct Scene {
 
     /// Mesh pool (shared vertex/index buffers)
     pub(in crate::scene) mesh_pool: MeshPool,
+
+    /// CPU archetype ECS World (pulsar_scenedb) — shared substrate for
+    /// object/light/material storage (draft PR #209 migration target) and
+    /// the GPU world-mirror bridge (Helio #210 foundation). Mirrored GPU
+    /// columns are flushed each frame via [`SceneGpuMirrorSubsystem`].
+    pub(in crate::scene) world: World,
+
+    /// Frame-boundary phase machine driver (SceneDB§C3). Calls `begin()`
+    /// each frame; the returned witnesses are consumed through simulate →
+    /// harvest → boundary → compact → sync.
+    pub(in crate::scene) scenedb_driver: FrameDriver,
+
+    /// Registered engine subsystems hooked into SceneDB's phase machine.
+    /// At minimum contains [`SceneGpuMirrorSubsystem`] (world-mirror flush);
+    /// future stages add lights/materials/instance bridge subsystems.
+    pub(in crate::scene) scenedb_subsystems: SubsystemRegistry,
+
+    /// Arc-wrapped SceneGpuStore shared with [`World`]'s attached
+    /// [`GpuMirrorHandle`] and the mirror subsystem's clone. World-mirror
+    /// columns (growable / dirty-tracked GPU buffers) are registered here.
+    /// Flushed via `&self` in the subsystem's boundary hook.
+    pub(in crate::scene) mirror_store: std::sync::Arc<SceneGpuStore>,
+
+    /// By-value SceneGpuStore that drives the genuine `&mut` witness chain
+    /// (`retire`, `compact`, `sync`) with empty cells each frame. The
+    /// [`RetiredPhase`] witness produced here is what gates the subsystem
+    /// boundary hook. See the two-store design in `scenedb.rs`.
+    pub(in crate::scene) phase_store: SceneGpuStore,
 
     /// Texture pool (sparse array with reference counting)
     pub(in crate::scene) textures: SparsePool<TextureRecord, TextureId>,
@@ -345,9 +380,41 @@ impl Scene {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+
+        // ── SceneDB world-mirror bridge (Helio #210 foundation) ────
+        let scenedb_ctx = EngineGpuContext::new(device.clone(), queue.clone());
+        let scenedb_cfg = SceneGpuConfig {
+            classes: vec![RegionClassConfig {
+                capacity: 64,
+                max_resident_cells: 1,
+            }],
+            tombstone_headroom: SceneGpuConfig::default_headroom(),
+            max_cells_metadata: 16,
+        };
+        let mirror_store_raw = SceneGpuStore::new(&scenedb_ctx, scenedb_cfg);
+        let mirror_store = Arc::new(mirror_store_raw);
+        let mut world = World::new();
+        world.attach_gpu_mirror(GpuMirrorHandle::new(mirror_store.clone(), queue.clone()));
+        let mut scenedb_subsystems = SubsystemRegistry::new();
+        scenedb_subsystems.register(SceneGpuMirrorSubsystem::new(mirror_store.clone(), queue.clone()));
+        let phase_store = SceneGpuStore::new(
+            &scenedb_ctx,
+            SceneGpuConfig {
+                classes: vec![],
+                tombstone_headroom: 0,
+                max_cells_metadata: 0,
+            },
+        );
+        let scenedb_driver = FrameDriver::new();
+
         Self {
             mesh_pool: MeshPool::new(device.clone()),
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
+            world,
+            scenedb_driver,
+            scenedb_subsystems,
+            mirror_store,
+            phase_store,
             textures: SparsePool::new(),
             texture_binding_version: 0,
             material_binding,

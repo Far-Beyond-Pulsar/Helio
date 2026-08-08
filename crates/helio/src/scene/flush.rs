@@ -323,6 +323,12 @@ impl Scene {
             self.gpu_scene.graph_wgsl_snippets = snippets;
         }
 
+        // ── SceneDB frame-boundary chain ──────────────────────────────────────
+        // Runs the full simulate → harvest → boundary → compact → sync pipeline
+        // before the GPU scene submit, so this frame's render passes see this
+        // frame's flushed world-mirror buffers (Helio #210).
+        self.flush_scenedb_boundary();
+
         self.gpu_scene.flush();
     }
 }

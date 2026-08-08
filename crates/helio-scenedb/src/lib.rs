@@ -1,9 +1,10 @@
 //! `helio-scenedb`: the Helio <-> SceneDB binding seam (M3-a T9, design
-//! Rev 2 S5). This is the ONE crate in the Helio workspace allowed to depend
-//! on `pulsar_scenedb` -- see `Cargo.toml`'s dependency comment for why this
-//! path-dep resolves only when Helio is vendored at `crates/renderer/helio`
-//! inside Pulsar-Native (CONTRACTS C0: SceneDB never depends on Helio; this
-//! is the inverse edge, and it lives entirely on the Helio side).
+//! Rev 2 S5). This crate owns the render-side bind-group seam
+//! ([`SceneDbBinding`]) connecting SceneDB-owned GPU buffers into Helio's
+//! render/compute passes. `crates/helio` depends on `pulsar_scenedb` directly
+//! (CPU World storage per the object-storage migration in draft PR #209, and
+//! the FrameDriver/SubsystemRegistry/GPU mirror wiring per Helio #210); this
+//! crate remains the sole home of the binding-layer seam.
 //!
 //! [`SceneDbBinding`] binds every SceneDB-owned GPU buffer relevant to
 //! rendering (instance transforms, instance info, the slot/generation
