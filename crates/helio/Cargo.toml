@@ -27,6 +27,12 @@ helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
+# CPU archetype ECS backing in-scene object storage (see
+# docs/scenedb_object_storage_migration.md). No `gpu` feature here — that
+# layer stays entirely inside `helio-core::GpuScene`/`helio-scenedb`, which
+# this crate does not touch. No rev pin, matching `helio-scenedb`'s own
+# `pulsar_scenedb` dependency (floats to SceneDB's default branch).
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
 
 [features]
 default = ["profiling"]

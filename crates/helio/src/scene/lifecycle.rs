@@ -7,6 +7,7 @@
 use glam::Mat4;
 use libhelio::sky::SkyContext;
 
+use crate::scene::types::ObjectRecord;
 use crate::scene::Scene;
 use crate::scene::SceneActorTrait;
 
@@ -22,7 +23,11 @@ impl Scene {
     /// Calls `flush()` before returning so GPU buffers are synchronised.
     pub fn clear(&mut self) {
         // Collect all handles before mutating — iterators are invalidated by removal.
-        let object_ids: Vec<_> = self.objects.iter_with_handles().map(|(id, _)| id).collect();
+        let object_ids: Vec<_> = self
+            .world
+            .query::<&ObjectRecord>()
+            .map(|(entity, _)| crate::handles::ObjectId::from_entity(entity))
+            .collect();
         let light_ids:  Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
 
         // Objects first: the cascade frees meshes, materials, and textures.
@@ -143,11 +148,7 @@ impl Scene {
         let mut static_light_count = 0;
 
         // Extract all static objects
-        for i in 0..self.objects.dense_len() {
-            let Some(object_record) = self.objects.get_dense(i) else {
-                continue;
-            };
-
+        for (_, object_record) in self.world.query::<&ObjectRecord>() {
             // Skip movable objects - only bake static and stationary geometry
             if object_record.movability == Movability::Movable {
                 continue;
