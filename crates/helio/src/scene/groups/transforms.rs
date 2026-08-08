@@ -7,6 +7,7 @@ use glam::{Mat4, Vec3};
 use crate::groups::GroupId;
 
 use super::super::helpers::{normal_matrix, sphere_to_aabb};
+use super::super::types::ObjectRecord;
 
 impl super::super::Scene {
     /// Apply a transform delta to every object in a group.
@@ -58,11 +59,7 @@ impl super::super::Scene {
     /// scene.move_group(group_enemies, Mat4::from_scale(Vec3::splat(2.0)));
     /// ```
     pub fn move_group(&mut self, group: GroupId, delta: Mat4) {
-        let n = self.objects.dense_len();
-        for i in 0..n {
-            let Some(r) = self.objects.get_dense_mut(i) else {
-                continue;
-            };
+        for (_, r) in self.world.query::<&mut ObjectRecord>() {
             if !r.groups.contains(group) {
                 continue;
             }

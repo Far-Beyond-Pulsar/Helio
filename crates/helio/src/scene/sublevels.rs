@@ -21,6 +21,7 @@ use glam::Mat4;
 use crate::groups::GroupId;
 use crate::handles::SublevelId;
 use crate::scene::errors::{invalid, Result, SceneError};
+use crate::scene::types::ObjectRecord;
 use crate::scene::Scene;
 
 /// Configuration for [`Scene::add_sublevel`].
@@ -98,11 +99,7 @@ impl Scene {
     }
 
     fn tag_group_with_coordinate_space(&mut self, group: GroupId, slot: u32) {
-        let n = self.objects.dense_len();
-        for i in 0..n {
-            let Some(r) = self.objects.get_dense_mut(i) else {
-                continue;
-            };
+        for (_, r) in self.world.query::<&mut ObjectRecord>() {
             if !r.groups.contains(group) {
                 continue;
             }
@@ -164,11 +161,7 @@ impl Scene {
             .remove(sublevel)
             .ok_or_else(|| invalid("sublevel"))?;
 
-        let n = self.objects.dense_len();
-        for i in 0..n {
-            let Some(r) = self.objects.get_dense_mut(i) else {
-                continue;
-            };
+        for (_, r) in self.world.query::<&mut ObjectRecord>() {
             if !r.groups.contains(record.group) {
                 continue;
             }

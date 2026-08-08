@@ -6,6 +6,7 @@
 use libhelio::GpuLight;
 
 use crate::handles::LightId;
+use crate::scene::types::{LightRecord, ObjectRecord};
 use crate::scene::Scene;
 
 impl Scene {
@@ -22,14 +23,14 @@ impl Scene {
 
     /// Iterate over all live lights, yielding the handle, GPU light data, and user tag.
     pub fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight, u64)> + '_ {
-        self.lights
-            .iter_with_handles()
-            .map(|(id, record)| (id, &record.gpu, record.user_tag))
+        self.world
+            .query::<&LightRecord>()
+            .map(|(entity, record)| (LightId::from_entity(entity), &record.gpu, record.user_tag))
     }
 
     /// Get the GPU light data for a single light by its handle.
     pub fn get_light(&self, id: LightId) -> Option<GpuLight> {
-        self.lights.get_with_index(id).map(|(_, record)| record.gpu)
+        self.world.get::<LightRecord>(id.entity()).map(|record| record.gpu)
     }
 
     /// Look up an object by the application-defined `user_tag` it was
@@ -76,8 +77,7 @@ impl Scene {
     pub fn drawn_mesh_stats(&self) -> (usize, usize) {
         let mut drawn_verts: usize = 0;
         let mut drawn_tris: usize = 0;
-        for i in 0..self.objects.dense_len() {
-            let Some(obj) = self.objects.get_dense(i) else { continue };
+        for (_, obj) in self.world.query::<&ObjectRecord>() {
             drawn_tris += (obj.draw.index_count / 3) as usize;
             if let Some(rec) = self.mesh_pool.get(obj.mesh) {
                 drawn_verts += rec.slice.vertex_count as usize;

@@ -155,7 +155,7 @@ impl super::Scene {
         // Spots get both cones: the outer one is where the light stops, the
         // inner one where its falloff begins, and the gap between them is the
         // fade. Points get their attenuation radius.
-        for (_, rec) in self.lights.iter_with_handles() {
+        for (_, rec) in self.world.query::<&crate::scene::types::LightRecord>() {
             let g = &rec.gpu;
             let pos = v3(&g.position_range);
             let range = g.position_range[3];

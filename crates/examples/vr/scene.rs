@@ -710,7 +710,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     let hand_mat = renderer
         .scene_mut()
         .insert_material(make_material([0.05, 0.05, 0.06, 1.0], 0.4, 0.0, [0.2, 1.0, 0.9], 8.0));
-    let mut hand_cubes = [ObjectId::from_raw(0, 0); 2];
+    let mut hand_cubes = [ObjectId::INVALID; 2];
     for (i, side) in [1.0_f32, -1.0].into_iter().enumerate() {
         let start = Vec3::new(side * 0.2, 1.4, -0.4);
         if let Ok(id) = insert_object(renderer, hand_mesh, hand_mat, Mat4::from_translation(start), 0.15) {

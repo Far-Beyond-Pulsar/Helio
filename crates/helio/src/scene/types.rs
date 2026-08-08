@@ -155,7 +155,11 @@ pub(crate) struct LightRecord {
     pub movability: libhelio::Movability,
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,
-    /// Index in the GPU lights buffer (may differ from arena dense_index after flush filtering).
+    /// This light's current slot in `gpu_scene.lights`, or `u32::MAX` if it
+    /// isn't a GPU-buffer resident right now (every static/stationary
+    /// light, always — see `resources/lights.rs`'s module doc). The sole
+    /// authority for that slot; nothing else (no CPU array position) is
+    /// trusted as a proxy for it.
     pub gpu_index: u32,
 }
 

@@ -6,6 +6,7 @@
 use crate::handles::ObjectId;
 
 use super::super::errors::{invalid, Result};
+use super::super::types::ObjectRecord;
 
 impl super::super::Scene {
     /// Remove an object from the scene.
@@ -48,16 +49,18 @@ impl super::super::Scene {
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
         // Capture handles and movability before removal.
         let (mesh_id, material_id, is_static, user_tag) = {
-            let (_, r) = self
-                .objects
-                .get_with_index(id)
+            let r = self
+                .world
+                .get::<ObjectRecord>(id.entity())
                 .ok_or_else(|| invalid("object"))?;
             (r.mesh, r.material, !r.movability.can_move(), r.user_tag)
         };
 
-        // Remove from CPU-side arena only.
+        // Remove from CPU-side ECS only.
         // GPU buffers will be rebuilt with automatic instancing on next flush.
-        self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+        if !self.world.despawn(id.entity()) {
+            return Err(invalid("object"));
+        }
 
         // Drop the tag index entry, but only if it still points at *this*
         // object — a newer object may have since claimed the same tag.

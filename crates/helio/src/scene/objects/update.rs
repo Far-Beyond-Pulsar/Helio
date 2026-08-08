@@ -9,7 +9,7 @@ use crate::handles::{MaterialId, MeshId, ObjectId};
 
 use super::super::errors::{invalid, Result};
 use super::super::helpers::{normal_matrix, sphere_to_aabb};
-use super::super::types::PickableObject;
+use super::super::types::{ObjectRecord, PickableObject};
 
 impl super::super::Scene {
     /// Update an object's world transform.
@@ -71,7 +71,7 @@ impl super::super::Scene {
     /// scene.update_object_transform(obj_id, rotation * current_transform)?;
     /// ```
     pub fn update_object_transform(&mut self, id: ObjectId, transform: Mat4) -> Result<()> {
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         // Enforce movability: Static objects cannot have transforms updated
@@ -150,7 +150,7 @@ impl super::super::Scene {
             new_material.ref_count += 1;
             slot
         };
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         let old_material_id = record.material;
@@ -204,7 +204,7 @@ impl super::super::Scene {
     /// scene.update_object_bounds(obj_id, new_bounds)?;
     /// ```
     pub fn update_object_bounds(&mut self, id: ObjectId, bounds: [f32; 4]) -> Result<()> {
-        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+        let Some(record) = self.world.get_mut::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         record.instance.bounds = bounds;
@@ -262,8 +262,7 @@ impl super::super::Scene {
         let mut updated_count = 0;
 
         // Iterate all objects and update lightmap indices for static objects.
-        // DenseArena exposes its `dense: Vec<T>` as a public field — iterate directly.
-        for record in self.objects.dense.iter_mut() {
+        for (_, record) in self.world.query::<&mut ObjectRecord>() {
             // Only non-movable objects are baked (Static + Stationary).
             // build_static_bake_scene includes both, so lightmap indices must
             // be assigned for both here to avoid a silent mismatch.
@@ -302,7 +301,7 @@ impl super::super::Scene {
     ///
     /// Returns `Err` if the handle is invalid.
     pub fn get_object_transform(&self, id: ObjectId) -> Result<Mat4> {
-        let Some((_, record)) = self.objects.get_with_index(id) else {
+        let Some(record) = self.world.get::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         Ok(Mat4::from_cols_array(&record.instance.model))
@@ -312,7 +311,7 @@ impl super::super::Scene {
     ///
     /// Returns `Err` if the handle is invalid.
     pub fn get_object_bounds(&self, id: ObjectId) -> Result<[f32; 4]> {
-        let Some((_, record)) = self.objects.get_with_index(id) else {
+        let Some(record) = self.world.get::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         Ok(record.instance.bounds)
@@ -329,9 +328,9 @@ impl super::super::Scene {
     pub fn iter_objects_for_editor(
         &self,
     ) -> impl Iterator<Item = (ObjectId, Mat4, [f32; 4], u64)> + '_ {
-        self.objects.iter_with_handles().map(|(id, rec)| {
+        self.world.query::<&ObjectRecord>().map(|(entity, rec)| {
             let transform = Mat4::from_cols_array(&rec.instance.model);
-            (id, transform, rec.instance.bounds, rec.user_tag)
+            (ObjectId::from_entity(entity), transform, rec.instance.bounds, rec.user_tag)
         })
     }
 
@@ -342,7 +341,7 @@ impl super::super::Scene {
     pub fn get_object_descriptor(&self, id: ObjectId) -> Result<crate::scene::types::ObjectDescriptor> {
         use crate::scene::types::ObjectDescriptor;
         use crate::groups::GroupMask;
-        let Some((_, record)) = self.objects.get_with_index(id) else {
+        let Some(record) = self.world.get::<ObjectRecord>(id.entity()) else {
             return Err(invalid("object"));
         };
         Ok(ObjectDescriptor {
@@ -363,8 +362,8 @@ impl super::super::Scene {
     /// are added or removed.  O(N) over live objects — call on scene change, not
     /// per frame.
     pub fn iter_pickable_objects(&self) -> impl Iterator<Item = PickableObject> + '_ {
-        self.objects.iter_with_handles().map(|(id, rec)| PickableObject {
-            id,
+        self.world.query::<&ObjectRecord>().map(|(entity, rec)| PickableObject {
+            id: ObjectId::from_entity(entity),
             mesh_id: rec.mesh,
             transform: Mat4::from_cols_array(&rec.instance.model),
             user_tag: rec.user_tag,
