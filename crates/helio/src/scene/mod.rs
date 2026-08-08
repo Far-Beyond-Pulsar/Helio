@@ -75,6 +75,7 @@ mod portals;
 mod postprocess;
 mod resources;
 mod scenedb;
+mod scenedb_components;
 mod stats;
 mod sublevels;
 mod types;

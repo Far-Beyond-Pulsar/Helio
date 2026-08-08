@@ -33,6 +33,9 @@ meshopt = "0.6.2"
 # gates the derive's #[cfg(feature = "gpu")] spliced code (same pattern as
 # helio-scenedb). Originally added CPU-only by draft PR #209 (scenedb-object-storage).
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
+# Proc-macro derive for SceneStore — needed by library types. Version matches
+# pulsar_scenedb's own pinned git rev through the workspace Cargo.lock.
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
 
 [features]
 default = ["profiling", "gpu"]

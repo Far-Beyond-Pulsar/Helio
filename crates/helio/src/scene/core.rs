@@ -36,6 +36,7 @@ use pulsar_scenedb::{SubsystemRegistry, World};
 use super::errors::{invalid, Result};
 use super::portals::PortalRecord;
 use super::scenedb::SceneGpuMirrorSubsystem;
+use super::scenedb_components::register_gpu_columns;
 use super::sublevels::SublevelRecord;
 use super::types::{
     DecalRecord, LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord,
@@ -391,7 +392,8 @@ impl Scene {
             tombstone_headroom: SceneGpuConfig::default_headroom(),
             max_cells_metadata: 16,
         };
-        let mirror_store_raw = SceneGpuStore::new(&scenedb_ctx, scenedb_cfg);
+        let mut mirror_store_raw = SceneGpuStore::new(&scenedb_ctx, scenedb_cfg);
+        register_gpu_columns(&mut mirror_store_raw, &device);
         let mirror_store = Arc::new(mirror_store_raw);
         let mut world = World::new();
         world.attach_gpu_mirror(GpuMirrorHandle::new(mirror_store.clone(), queue.clone()));
