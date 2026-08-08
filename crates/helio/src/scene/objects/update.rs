@@ -261,9 +261,7 @@ impl super::super::Scene {
 
         let mut updated_count = 0;
 
-        // Iterate all objects and update lightmap indices for static objects.
-        // DenseArena exposes its `dense: Vec<T>` as a public field — iterate directly.
-        for record in self.objects.dense.iter_mut() {
+        for (_, record) in self.world.query::<&mut ObjectRecord>() {
             // Only non-movable objects are baked (Static + Stationary).
             // build_static_bake_scene includes both, so lightmap indices must
             // be assigned for both here to avoid a silent mismatch.
