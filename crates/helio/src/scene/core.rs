@@ -31,8 +31,8 @@ use super::errors::{invalid, Result};
 use super::portals::PortalRecord;
 use super::sublevels::SublevelRecord;
 use super::types::{
-    DecalRecord, LightRecord, MaterialRecord, PostProcessVolumeRecord, ReflectionCaptureRecord,
-    TextureRecord, VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    DecalRecord, MaterialRecord, PostProcessVolumeRecord, ReflectionCaptureRecord, TextureRecord,
+    VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -74,8 +74,6 @@ pub struct Scene {
     pub(in crate::scene) decals: DenseArena<DecalRecord, DecalId>,
     pub(in crate::scene) decals_dirty: bool,
     pub(in crate::scene) decals_dirty_range: Option<(usize, usize)>,
-
-    pub(in crate::scene) lights: DenseArena<LightRecord, LightId>,
 
     /// Object storage — CPU archetype ECS (see
     /// `docs/scenedb_object_storage_migration.md`). `ObjectId` wraps the
@@ -369,7 +367,6 @@ impl Scene {
             decals: DenseArena::new(),
             decals_dirty: false,
             decals_dirty_range: None,
-            lights: DenseArena::new(),
             world: pulsar_scenedb::World::new(),
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),

@@ -7,7 +7,7 @@
 use glam::Mat4;
 use libhelio::sky::SkyContext;
 
-use crate::scene::types::ObjectRecord;
+use crate::scene::types::{LightRecord, ObjectRecord};
 use crate::scene::Scene;
 use crate::scene::SceneActorTrait;
 
@@ -28,7 +28,11 @@ impl Scene {
             .query::<&ObjectRecord>()
             .map(|(entity, _)| crate::handles::ObjectId::from_entity(entity))
             .collect();
-        let light_ids:  Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
+        let light_ids: Vec<_> = self
+            .world
+            .query::<&LightRecord>()
+            .map(|(entity, _)| crate::handles::LightId::from_entity(entity))
+            .collect();
 
         // Objects first: the cascade frees meshes, materials, and textures.
         for id in object_ids {
@@ -169,11 +173,7 @@ impl Scene {
         }
 
         // Extract all static lights
-        for i in 0..self.lights.dense_len() {
-            let Some(light_record) = self.lights.get_dense(i) else {
-                continue;
-            };
-
+        for (_, light_record) in self.world.query::<&LightRecord>() {
             // Include ALL lights in the bake regardless of movability.
             // Lights default to Movable even for static scenes; filtering them out
             // would result in a zero-light bake and an all-black lightmap.

@@ -6,7 +6,7 @@
 use libhelio::GpuLight;
 
 use crate::handles::LightId;
-use crate::scene::types::ObjectRecord;
+use crate::scene::types::{LightRecord, ObjectRecord};
 use crate::scene::Scene;
 
 impl Scene {
@@ -23,14 +23,14 @@ impl Scene {
 
     /// Iterate over all live lights, yielding the handle, GPU light data, and user tag.
     pub fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight, u64)> + '_ {
-        self.lights
-            .iter_with_handles()
-            .map(|(id, record)| (id, &record.gpu, record.user_tag))
+        self.world
+            .query::<&LightRecord>()
+            .map(|(entity, record)| (LightId::from_entity(entity), &record.gpu, record.user_tag))
     }
 
     /// Get the GPU light data for a single light by its handle.
     pub fn get_light(&self, id: LightId) -> Option<GpuLight> {
-        self.lights.get_with_index(id).map(|(_, record)| record.gpu)
+        self.world.get::<LightRecord>(id.entity()).map(|record| record.gpu)
     }
 
     /// Look up an object by the application-defined `user_tag` it was

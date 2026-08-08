@@ -87,12 +87,36 @@ impl ObjectId {
     }
 }
 
+/// Handle to a scene light, backed by `pulsar_scenedb::Entity` — see
+/// `docs/scenedb_object_storage_migration.md` and [`ObjectId`]'s doc for
+/// why (same reasoning, second record type through it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct LightId(pub(crate) pulsar_scenedb::Entity);
+
+impl LightId {
+    pub(crate) fn from_entity(entity: pulsar_scenedb::Entity) -> Self {
+        Self(entity)
+    }
+
+    pub(crate) fn entity(self) -> pulsar_scenedb::Entity {
+        self.0
+    }
+
+    pub fn slot(self) -> u32 {
+        self.0.index()
+    }
+
+    pub fn generation(self) -> u32 {
+        self.0.generation()
+    }
+}
+
 define_handle!(MeshId);
 define_handle!(MultiMeshId);
 define_handle!(SectionedInstanceId);
 define_handle!(MaterialId);
 define_handle!(TextureId);
-define_handle!(LightId);
 define_handle!(VirtualObjectId);
 define_handle!(WaterVolumeId);
 define_handle!(WaterHitboxId);
