@@ -112,11 +112,6 @@ pub struct Scene {
     pub(in crate::scene) decals_dirty: bool,
     pub(in crate::scene) decals_dirty_range: Option<(usize, usize)>,
 
-    pub(in crate::scene) lights: DenseArena<LightRecord, LightId>,
-
-    /// Object pool (dense array)
-    pub(in crate::scene) objects: DenseArena<ObjectRecord, ObjectId>,
-
     /// Reverse index: application-defined `user_tag` → handle.
     ///
     /// Lets an application find the actor it created for one of its own
@@ -433,8 +428,6 @@ impl Scene {
             decals: DenseArena::new(),
             decals_dirty: false,
             decals_dirty_range: None,
-            lights: DenseArena::new(),
-            objects: DenseArena::new(),
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),
             objects_dirty: true,             // rebuild on first flush

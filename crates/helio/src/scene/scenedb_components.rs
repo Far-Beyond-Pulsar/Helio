@@ -118,6 +118,6 @@ pub(crate) fn register_gpu_columns(
     store: &mut pulsar_scenedb::gpu::SceneGpuStore,
     device: &std::sync::Arc<wgpu::Device>,
 ) {
-    // HelioGpuInstance::register_gpu_columns_growable(store, 1024, device.clone());
-    // HelioGpuLight::register_gpu_columns_growable(store, 256, device.clone());
+    HelioGpuInstance::register_gpu_columns_growable(store, 1024, device);
+    HelioGpuLight::register_gpu_columns_growable(store, 256, device);
 }

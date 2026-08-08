@@ -47,8 +47,25 @@ define_handle!(MultiMeshId);
 define_handle!(SectionedInstanceId);
 define_handle!(MaterialId);
 define_handle!(TextureId);
+/// Handle to a scene object, backed by `pulsar_scenedb::Entity`.
+///
+/// Does **not** implement [`Handle`]: `Entity`'s constructor is private outside
+/// `pulsar_scenedb` by design, so `Handle::from_parts` cannot be implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ObjectId(pub(crate) pulsar_scenedb::Entity);
+
+impl ObjectId {
+    /// Sentinel — never a live object handle.
+    pub const INVALID: ObjectId = ObjectId(pulsar_scenedb::Entity::DANGLING);
+
+    pub(crate) fn from_entity(entity: pulsar_scenedb::Entity) -> Self { Self(entity) }
+    pub(crate) fn entity(self) -> pulsar_scenedb::Entity { self.0 }
+    pub fn slot(self) -> u32 { self.0.index() }
+    pub fn generation(self) -> u32 { self.0.generation() }
+}
+
 define_handle!(LightId);
-define_handle!(ObjectId);
 define_handle!(VirtualObjectId);
 define_handle!(WaterVolumeId);
 define_handle!(WaterHitboxId);
