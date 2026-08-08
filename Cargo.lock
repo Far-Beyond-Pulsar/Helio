@@ -198,7 +198,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -209,7 +209,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2236,7 +2236,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3574,6 +3574,7 @@ dependencies = [
  "naga 30.0.0",
  "pollster 0.4.0",
  "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu 30.0.0",
 ]
 
@@ -4652,7 +4653,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5418,7 +5419,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=cf37ed000fedb9a01424c7e575d1d6ee30db7281#cf37ed000fedb9a01424c7e575d1d6ee30db7281"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff#b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff"
 dependencies = [
  "dashmap",
  "glam 0.33.2",
@@ -5434,7 +5435,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=cf37ed000fedb9a01424c7e575d1d6ee30db7281#cf37ed000fedb9a01424c7e575d1d6ee30db7281"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff#b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff"
 dependencies = [
  "owo-colors",
  "proc-macro2",
@@ -5445,7 +5446,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB#89e21e7b81ccc0ce890dddc6f0fa100625ff81a2"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB#91c420a4ccb96a38f981d36eddf169f998c89159"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
@@ -5453,6 +5454,16 @@ dependencies = [
  "serde_json",
  "tracing",
  "wgpu 30.0.0",
+]
+
+[[package]]
+name = "pulsar_scenedb_derive"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB#91c420a4ccb96a38f981d36eddf169f998c89159"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -5892,7 +5903,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7483,7 +7494,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -5,6 +5,20 @@ edition = "2021"
 description = "Helio <-> SceneDB binding seam: SceneDbBinding binds SceneDB-owned GPU buffers into Helio's bind-group model (M3-a T9, design Rev 2 S5)"
 license = "MIT OR Apache-2.0"
 
+[features]
+# `#[derive(SceneStore)]`'s generated code (`pulsar_scenedb_derive`) wraps
+# its GPU-column methods (`register_gpu_columns_growable`,
+# `packed_gpu_component_id`, the world-mirror dispatch registration, ...)
+# in `#[cfg(feature = "gpu")]`. That `cfg` attribute, once spliced into
+# THIS crate's compilation unit by macro expansion, checks THIS crate's
+# own Cargo features -- not `pulsar_scenedb`'s -- so any crate other than
+# `pulsar_scenedb` itself that uses the derive needs its own "gpu" feature
+# of that exact name to make the generated methods compile at all. This
+# crate is unconditionally GPU-oriented (the whole point of the
+# Helio<->SceneDB seam), so "gpu" is on by default rather than opt-in.
+default = ["gpu"]
+gpu = []
+
 [dependencies]
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
 # Helio's workspace wgpu = 30 (crates.io) -- MUST resolve to the same major
@@ -31,6 +45,9 @@ bytemuck = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+# World-mirror scale benchmark (world_mirror_scale.rs, Helio#211) needs
+# #[derive(SceneStore)] to define its own bench fixture components.
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
 # naga tracks the same major as Helio's workspace wgpu (crates.io 30) — the
 # Test 3 reflection harness (`tests/binding_layout.rs`, M3-a T10) parses
 # `wgsl::SCENE_BINDINGS_WGSL` with naga's WGSL front end and reflects struct
@@ -45,4 +62,15 @@ naga = { version = "30", features = ["wgsl-in"] }
 # size/statistics and printing a table, not a criterion harness.
 [[bench]]
 name = "pass_timing"
+harness = false
+
+# Helio#211: AAA-scale measurement for the World<->GPU mirror bridge
+# (pulsar_scenedb#24 + follow-ups) -- spawn throughput, sustained churn,
+# reallocation latency, concurrent buffer access, flush cost vs. dirty
+# fraction, swept across realistic entity counts. `harness = false`, same
+# reasoning as `pass_timing`/`legacy_model_bench` upstream: this measures
+# real wall-clock cost of GPU-submitting operations, not a pure-CPU
+# microbenchmark criterion is built for.
+[[bench]]
+name = "world_mirror_scale"
 harness = false
