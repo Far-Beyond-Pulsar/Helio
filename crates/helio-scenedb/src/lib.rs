@@ -20,6 +20,7 @@
 
 pub mod cull;
 pub mod draw;
+pub mod gpu_repack;
 pub mod repack;
 pub mod wgsl;
 
