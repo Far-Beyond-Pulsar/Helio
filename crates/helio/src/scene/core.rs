@@ -7,7 +7,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use helio_core::scene::GrowableBuffer;
+use helio_core::scene::{
+    CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
+    GpuCompactedIndicesBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing, GrowableBuffer,
+};
 use helio_core::GpuScene;
 use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
