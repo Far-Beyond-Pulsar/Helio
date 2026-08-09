@@ -167,7 +167,7 @@ impl Renderer {
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
 
-        let frame_idx = self.scene.gpu_scene().frame_count;
+        let frame_idx = self.gpu_scene.frame_count;
         let (jitter_mat, jx, jy) = if self.enable_jitter {
             // Use R1/R2 plastic-ratio jitter to match TAA and TSR passes.
             let jitter = r1_r2_jitter(frame_idx);
@@ -214,16 +214,13 @@ impl Renderer {
         let draw_count = self.scene.draw_count;
         let movable_light_count = self.scene.movable_light_count;
         let movable_lights_generation = self.scene.movable_lights_generation;
-        {
-            let gs = self.scene.gpu_scene_mut();
-            gs.lights.set_data(light_data);
-            gs.instances.set_data(instance_data);
-            gs.draw_calls.set_data(draw_call_data);
-            gs.indirect.set_data(indirect_data);
-            gs.aabbs.set_data(aabb_data);
-            gs.movable_light_count = movable_light_count;
-            gs.movable_lights_generation = movable_lights_generation;
-        }
+        self.gpu_scene.lights.set_data(light_data);
+        self.gpu_scene.instances.set_data(instance_data);
+        self.gpu_scene.draw_calls.set_data(draw_call_data);
+        self.gpu_scene.indirect.set_data(indirect_data);
+        self.gpu_scene.aabbs.set_data(aabb_data);
+        self.gpu_scene.movable_light_count = movable_light_count;
+        self.gpu_scene.movable_lights_generation = movable_lights_generation;
 
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
@@ -268,8 +265,8 @@ impl Renderer {
         let depth: &wgpu::TextureView = &self.depth_view;
 
         let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
-        let light_count = self.scene.gpu_scene().lights.len();
-        let light_gen = self.scene.gpu_scene().movable_lights_generation;
+        let light_count = self.gpu_scene.lights.len();
+        let light_gen = self.gpu_scene.movable_lights_generation;
         let corona_gen = self.corona_emitter_generation;
         if self.billboard_dirty
             || light_count != self.billboard_cached_light_count
@@ -280,7 +277,7 @@ impl Renderer {
             self.billboard_scratch.clear();
             self.billboard_scratch.extend_from_slice(&self.billboard_instances);
             if !editor_hidden {
-                for light in self.scene.gpu_scene().lights.as_slice() {
+                for light in self.gpu_scene.lights.as_slice() {
                     if light.light_type == libhelio::LightType::Point as u32
                         || light.light_type == libhelio::LightType::Spot as u32
                     {
@@ -638,7 +635,7 @@ impl Renderer {
 
         let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(
-            self.scene.gpu_scene(),
+            &self.gpu_scene,
             target,
             depth,
             &frame_resources,

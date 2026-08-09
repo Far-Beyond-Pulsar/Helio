@@ -209,11 +209,14 @@ impl Renderer {
         // Captured before `scene` is moved into `Self`.
         let scene_has_sky = scene.sky_context().has_sky;
 
+        let gpu_scene = helio_core::GpuScene::new(device.clone(), queue.clone());
+
         Self {
             device,
             queue,
             graph,
             scene,
+            gpu_scene,
             depth_texture,
             depth_view,
             output_width: width,

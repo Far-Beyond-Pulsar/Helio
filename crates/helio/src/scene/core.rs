@@ -48,7 +48,9 @@ use super::types::{
 ///
 /// See the [module-level documentation](crate::scene) for architecture details and usage examples.
 pub struct Scene {
-    /// GPU scene resources (buffers, bind groups, etc.)
+    /// GPU scene resources (buffers, bind groups, etc.). Scene owns a copy
+    /// for internal operations (camera, voxels, decals); the Renderer owns a
+    /// SEPARATE copy synced from Scene's pipeline buffers for graph execution.
     pub(in crate::scene) gpu_scene: GpuScene,
 
     /// Mesh pool (shared vertex/index buffers)

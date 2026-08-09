@@ -66,6 +66,7 @@ pub struct Renderer {
     pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) graph: RenderGraph,
     pub(crate) scene: Scene,
+    pub(crate) gpu_scene: helio_core::GpuScene,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) output_width: u32,
@@ -463,7 +464,7 @@ impl Renderer {
     }
 
     pub fn camera_buffer(&self) -> &wgpu::Buffer {
-        self.scene.gpu_scene().camera.buffer()
+        self.gpu_scene.camera.buffer()
     }
 
     /// Latest frame timing state. Reading it performs no GPU polling,

@@ -11,18 +11,8 @@ use crate::scene::Scene;
 
 impl Scene {
     /// Get read-only access to the GPU scene resources.
-    ///
-    /// Returns a reference to the internal [`GpuScene`] containing all GPU buffers,
-    /// bind groups, and render state. Used by the renderer to access GPU resources.
-    ///
-    /// # Returns
-    /// A reference to the [`GpuScene`].
     pub fn gpu_scene(&self) -> &helio_core::GpuScene {
         &self.gpu_scene
-    }
-
-    pub(crate) fn gpu_scene_mut(&mut self) -> &mut helio_core::GpuScene {
-        &mut self.gpu_scene
     }
 
     /// Iterate over all live lights, yielding the handle, GPU light data, and user tag.
