@@ -65,16 +65,12 @@ impl super::super::Scene {
             .collect();
         let n = rows.len();
         if n == 0 {
-            self.gpu_scene.instances.set_data(Vec::new());
-            self.gpu_scene.aabbs.set_data(Vec::new());
-            self.gpu_scene.draw_calls.set_data(Vec::new());
-            self.gpu_scene.indirect.set_data(Vec::new());
-            self.gpu_scene.visibility.set_data(Vec::new());
-            self.gpu_scene.compacted_indices.set_data(Vec::new());
-            self.gpu_scene.compacted_indices_2.set_data(Vec::new());
-            self.gpu_scene.material_class_ranges.clear();
-            self.gpu_scene.transparent_material_class_ranges.clear();
-            self.gpu_scene.forward_material_class_ranges.clear();
+            self.instances_gpu.set_data(Vec::new());
+            self.aabbs_gpu.set_data(Vec::new());
+            self.draw_calls_gpu.set_data(Vec::new());
+            self.indirect_gpu.set_data(Vec::new());
+            self.instance_count = 0;
+            self.draw_count = 0;
             return;
         }
 
@@ -225,13 +221,17 @@ impl super::super::Scene {
         // Sized only to keep the GPU buffer's capacity in step with `instances` —
         // content is fully overwritten by IndirectDispatchPass every frame, so the
         // zeros here are never read.
-        let compacted_indices_capacity = vec![0u32; instances.len()];
-        let compacted_indices_2_capacity = vec![0u32; instances.len()];
+        let instance_count = instances.len() as u32;
+        let draw_count = draw_calls.len() as u32;
+        let compacted_indices_capacity = vec![0u32; instance_count as usize];
+        let compacted_indices_2_capacity = vec![0u32; instance_count as usize];
 
-        self.gpu_scene.instances.set_data(instances);
-        self.gpu_scene.aabbs.set_data(aabbs);
-        self.gpu_scene.draw_calls.set_data(draw_calls);
-        self.gpu_scene.indirect.set_data(indirect);
+        self.instances_gpu.set_data(instances);
+        self.aabbs_gpu.set_data(aabbs);
+        self.draw_calls_gpu.set_data(draw_calls);
+        self.indirect_gpu.set_data(indirect);
+        self.instance_count = instance_count;
+        self.draw_count = draw_count;
         self.gpu_scene.visibility.set_data(visibility);
         self.gpu_scene.compacted_indices.set_data(compacted_indices_capacity);
         self.gpu_scene.compacted_indices_2.set_data(compacted_indices_2_capacity);
@@ -365,7 +365,7 @@ mod tests {
             .expect("insert_object");
 
         scene.flush();
-        assert_eq!(scene.gpu_scene().resources().instance_count, 1);
+        assert_eq!(scene.instance_count, 1);
         assert_eq!(
             scene.get_object_transform(id).expect("transform"),
             Mat4::IDENTITY
@@ -387,6 +387,6 @@ mod tests {
         assert!(scene.get_object_transform(id).is_err());
 
         scene.flush();
-        assert_eq!(scene.gpu_scene().resources().instance_count, 0);
+        assert_eq!(scene.instance_count, 0);
     }
 }

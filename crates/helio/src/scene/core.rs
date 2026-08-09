@@ -131,6 +131,24 @@ pub struct Scene {
     /// Number of movable lights in `lights_gpu` (static/stationary excluded from runtime).
     pub(crate) movable_light_count: u32,
 
+    /// Sorted instance data buffer (mesh+material sorted, render executor-owned).
+    pub(crate) instances_gpu: helio_core::scene::GrowableBuffer<libhelio::GpuInstanceData>,
+
+    /// Draw call templates (one per unique mesh+material pair).
+    pub(crate) draw_calls_gpu: helio_core::scene::GrowableBuffer<libhelio::GpuDrawCall>,
+
+    /// Indirect draw command buffer.
+    pub(crate) indirect_gpu: helio_core::scene::GrowableBuffer<libhelio::DrawIndexedIndirectArgs>,
+
+    /// Per-instance AABB buffer (for GPU culling).
+    pub(crate) aabbs_gpu: helio_core::scene::GrowableBuffer<libhelio::GpuInstanceAabb>,
+
+    /// Number of instances in the sorted buffer.
+    pub(crate) instance_count: u32,
+
+    /// Number of draw calls in the draw call buffer.
+    pub(crate) draw_count: u32,
+
     /// True when the objects list has changed and the GPU instance/draw_call/indirect
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
@@ -414,6 +432,22 @@ impl Scene {
         );
         let scenedb_driver = FrameDriver::new();
 
+        // ── Render executor-owned pipeline buffers (Phase 3b) ────────────────
+        let instances_gpu = helio_core::scene::GrowableBuffer::new(
+            device.clone(), 1024, wgpu::BufferUsages::STORAGE, "Helio Sorted Instances",
+        );
+        let draw_calls_gpu = helio_core::scene::GrowableBuffer::new(
+            device.clone(), 512, wgpu::BufferUsages::STORAGE, "Helio Draw Calls",
+        );
+        let indirect_gpu = helio_core::scene::GrowableBuffer::new(
+            device.clone(), 512,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            "Helio Indirect Args",
+        );
+        let aabbs_gpu = helio_core::scene::GrowableBuffer::new(
+            device.clone(), 1024, wgpu::BufferUsages::STORAGE, "Helio Sorted AABBs",
+        );
+
         Self {
             mesh_pool: MeshPool::new(device.clone()),
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
@@ -422,6 +456,10 @@ impl Scene {
             scenedb_subsystems,
             mirror_store,
             phase_store,
+            instances_gpu,
+            draw_calls_gpu,
+            indirect_gpu,
+            aabbs_gpu,
             textures: SparsePool::new(),
             texture_binding_version: 0,
             material_binding,
@@ -447,6 +485,8 @@ impl Scene {
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),
             movable_light_count: 0,
+            instance_count: 0,
+            draw_count: 0,
             objects_dirty: true,             // rebuild on first flush
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet
