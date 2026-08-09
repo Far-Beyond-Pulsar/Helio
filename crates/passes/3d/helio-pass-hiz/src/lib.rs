@@ -419,14 +419,28 @@ fn mip_levels(w: u32, h: u32) -> u32 {
     (u32::BITS - max_dim.leading_zeros()).max(1)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(target_os = "windows", target_os = "linux", target_os = "android")
+))]
 fn depth_texture_buffer_copies_supported(device: &wgpu::Device) -> bool {
-    // Native Vulkan, Metal and DX12 implementations expose the WebGPU depth-copy
-    // contract. WGPU's GL compatibility backend may omit the corresponding
-    // downlevel flag, and Device does not retain the Adapter properties needed
-    // to query that flag directly. Backend identity is therefore the exact
-    // capability boundary available to an externally supplied Device.
+    // Native Vulkan and DX12 implementations expose the WebGPU depth-copy
+    // contract. WGPU's GL compatibility backend may omit it, and Device does
+    // not retain the Adapter properties needed to query the downlevel flag
+    // directly. Backend identity is therefore the exact capability boundary
+    // available to an externally supplied Device on GLES-capable targets.
     unsafe { device.as_hal::<wgpu::hal::api::Gles>() }.is_none()
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(any(target_os = "windows", target_os = "linux", target_os = "android"))
+))]
+fn depth_texture_buffer_copies_supported(_device: &wgpu::Device) -> bool {
+    // WGPU does not compile its GLES HAL on these native targets. Their native
+    // backends implement depth texture/buffer copies, so the exact copy path is
+    // available without a backend identity probe.
+    true
 }
 
 #[cfg(target_arch = "wasm32")]
