@@ -203,6 +203,18 @@ impl Renderer {
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
 
+        // Sync the compacted movable-only light buffer to GpuScene (Phase 3a).
+        // TODO(Phase 4): remove GpuScene, passes read Scene's buffer directly.
+        let movable_light_count = self.scene.movable_light_count;
+        let movable_lights_generation = self.scene.movable_lights_generation;
+        let light_data = self.scene.lights_gpu.as_slice().to_vec();
+        {
+            let gs = self.scene.gpu_scene_mut();
+            gs.lights.set_data(light_data);
+            gs.movable_light_count = movable_light_count;
+            gs.movable_lights_generation = movable_lights_generation;
+        }
+
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
         self.submit_frame(camera, target, false)?;

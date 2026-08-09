@@ -121,6 +121,16 @@ pub struct Scene {
     pub(in crate::scene) objects_by_tag: HashMap<u64, ObjectId>,
     pub(in crate::scene) lights_by_tag: HashMap<u64, LightId>,
 
+    /// GPU lights buffer (movable lights only — static/stationary are baked).
+    /// Populated by `flush()` from the SceneDB world-mirror. This is a render
+    /// executor-owned intermediate buffer (not SceneDB-owned) following the
+    /// architecture boundary: SceneDB holds per-entity HelioGpuLight, the render
+    /// executor owns the compacted movable-only buffer.
+    pub(crate) lights_gpu: helio_core::scene::GrowableBuffer<libhelio::GpuLight>,
+
+    /// Number of movable lights in `lights_gpu` (static/stationary excluded from runtime).
+    pub(crate) movable_light_count: u32,
+
     /// True when the objects list has changed and the GPU instance/draw_call/indirect
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
@@ -147,7 +157,7 @@ pub struct Scene {
 
     /// Generation counter for movable lights - increments when any Movable light's position/direction changes.
     /// Used by shadow caching to detect when Movable lights move.
-    pub(in crate::scene) movable_lights_generation: u64,
+    pub(crate) movable_lights_generation: u64,
 
     /// Number of shadow-map array layers available in the active render graph.
     /// Six consecutive layers are reserved per realtime shadow caster.
@@ -415,6 +425,12 @@ impl Scene {
             textures: SparsePool::new(),
             texture_binding_version: 0,
             material_binding,
+            lights_gpu: helio_core::scene::GrowableBuffer::new(
+                device.clone(),
+                256,
+                wgpu::BufferUsages::STORAGE,
+                "Helio Scene Lights",
+            ),
             material_textures: GrowableBuffer::new(
                 device,
                 256,
@@ -430,6 +446,7 @@ impl Scene {
             decals_dirty_range: None,
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),
+            movable_light_count: 0,
             objects_dirty: true,             // rebuild on first flush
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet

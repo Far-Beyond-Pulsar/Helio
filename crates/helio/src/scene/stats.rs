@@ -21,6 +21,10 @@ impl Scene {
         &self.gpu_scene
     }
 
+    pub(crate) fn gpu_scene_mut(&mut self) -> &mut helio_core::GpuScene {
+        &mut self.gpu_scene
+    }
+
     /// Iterate over all live lights, yielding the handle, GPU light data, and user tag.
     pub fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight, u64)> + '_ {
         self.world

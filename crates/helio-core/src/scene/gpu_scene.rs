@@ -172,7 +172,7 @@ pub struct GpuScene {
     /// Used by shadow caching to detect movement.
     pub movable_objects_generation: u64,
 
-    /// Generation counter for movable lights - increments when any Movable light moves.
+    /// Generation counter for movable lights — increments when any Movable light moves.
     /// Used by shadow caching to detect movement.
     pub movable_lights_generation: u64,
 

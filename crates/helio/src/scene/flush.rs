@@ -97,14 +97,19 @@ impl Scene {
             }
 
             // Replace the lights buffer with only movable lights
-            self.gpu_scene.lights.set_data(movable_lights.clone());
-            self.gpu_scene.movable_light_count = movable_lights.len() as u32;
+            // (SceneDB's HelioGpuLight column holds ALL lights; this compacted
+            // buffer is owned by the render executor, not SceneDB.)
+            let count = movable_lights.len() as u32;
+            if count > 0 || self.lights_gpu.len() > 0 {
+                self.lights_gpu.set_data(movable_lights);
+            }
+            self.movable_light_count = count;
 
-            if (movable_lights.len() as u32) < light_rec_count {
+            if count < light_rec_count {
                 log::trace!(
                     "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
-                    movable_lights.len(),
-                    light_rec_count - movable_lights.len() as u32
+                    count,
+                    light_rec_count - count
                 );
             }
         }
