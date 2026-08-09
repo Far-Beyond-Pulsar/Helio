@@ -203,14 +203,24 @@ impl Renderer {
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
 
-        // Sync the compacted movable-only light buffer to GpuScene (Phase 3a).
-        // TODO(Phase 4): remove GpuScene, passes read Scene's buffer directly.
+        // Sync all Scene-owned pipeline buffers to GpuScene (Phase 3a/3b).
+        // TODO(Phase 4): remove GpuScene, passes read Scene's buffers directly.
+        let light_data = self.scene.lights_gpu.as_slice().to_vec();
+        let instance_data = self.scene.instances_gpu.as_slice().to_vec();
+        let draw_call_data = self.scene.draw_calls_gpu.as_slice().to_vec();
+        let indirect_data = self.scene.indirect_gpu.as_slice().to_vec();
+        let aabb_data = self.scene.aabbs_gpu.as_slice().to_vec();
+        let instance_count = self.scene.instance_count;
+        let draw_count = self.scene.draw_count;
         let movable_light_count = self.scene.movable_light_count;
         let movable_lights_generation = self.scene.movable_lights_generation;
-        let light_data = self.scene.lights_gpu.as_slice().to_vec();
         {
             let gs = self.scene.gpu_scene_mut();
             gs.lights.set_data(light_data);
+            gs.instances.set_data(instance_data);
+            gs.draw_calls.set_data(draw_call_data);
+            gs.indirect.set_data(indirect_data);
+            gs.aabbs.set_data(aabb_data);
             gs.movable_light_count = movable_light_count;
             gs.movable_lights_generation = movable_lights_generation;
         }
