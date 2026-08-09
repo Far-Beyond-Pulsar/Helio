@@ -170,37 +170,46 @@ impl Scene {
             camera.position,
             camera.near,
             camera.far,
-            self.gpu_scene.frame_count as u32,
+            self.frame_count as u32,
             camera.jitter,
             self.prev_view_proj,
         );
-        // Store the JITTERED view_proj so next frame's motion-vector
-        // reprojection matches the previous frame's rendered NDC space.
-        // Temporal passes (TAA, TSR) rely on this for correct history UV.
         self.prev_view_proj = camera.proj * camera.view;
-        self.gpu_scene.camera.update(uniforms);
-        self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
+
+        // Write to SceneDB camera component (world-mirror handles GPU upload).
+        use crate::scene::scenedb_components::HelioGpuCamera;
+        self.world.insert(self.camera_entity, HelioGpuCamera {
+            view_proj_00: uniforms.view_proj[0],  view_proj_01: uniforms.view_proj[1],
+            view_proj_02: uniforms.view_proj[2],  view_proj_03: uniforms.view_proj[3],
+            view_proj_10: uniforms.view_proj[4],  view_proj_11: uniforms.view_proj[5],
+            view_proj_12: uniforms.view_proj[6],  view_proj_13: uniforms.view_proj[7],
+            view_proj_20: uniforms.view_proj[8],  view_proj_21: uniforms.view_proj[9],
+            view_proj_22: uniforms.view_proj[10], view_proj_23: uniforms.view_proj[11],
+            view_proj_30: uniforms.view_proj[12], view_proj_31: uniforms.view_proj[13],
+            view_proj_32: uniforms.view_proj[14], view_proj_33: uniforms.view_proj[15],
+            prev_vp_00: uniforms.prev_view_proj[0],  prev_vp_01: uniforms.prev_view_proj[1],
+            prev_vp_02: uniforms.prev_view_proj[2],  prev_vp_03: uniforms.prev_view_proj[3],
+            prev_vp_10: uniforms.prev_view_proj[4],  prev_vp_11: uniforms.prev_view_proj[5],
+            prev_vp_12: uniforms.prev_view_proj[6],  prev_vp_13: uniforms.prev_view_proj[7],
+            prev_vp_20: uniforms.prev_view_proj[8],  prev_vp_21: uniforms.prev_view_proj[9],
+            prev_vp_22: uniforms.prev_view_proj[10], prev_vp_23: uniforms.prev_view_proj[11],
+            prev_vp_30: uniforms.prev_view_proj[12], prev_vp_31: uniforms.prev_view_proj[13],
+            prev_vp_32: uniforms.prev_view_proj[14], prev_vp_33: uniforms.prev_view_proj[15],
+            pos_x: uniforms.position_near[0], pos_y: uniforms.position_near[1],
+            pos_z: uniforms.position_near[2],
+            jitter_x: uniforms.jitter_frame[0], jitter_y: uniforms.jitter_frame[1],
+        });
+        self.camera_generation = self.camera_generation.wrapping_add(1);
     }
 
     /// Upload the left/right eye camera uniforms for the OpenXR multiview path.
-    ///
-    /// The GPU camera storage buffer is `array<Camera, 2>`, so both eyes are
-    /// written in a single `queue.write_buffer`. Unlike [`Scene::update_camera`]
-    /// this bypasses the dirty/flush mechanism on purpose: `flush()` would
-    /// otherwise overwrite the second (right) element with a single-uniform
-    /// upload. Call it immediately before `flush()` for the rest of the scene
-    /// buffers.
-    ///
-    /// The left eye is also cached CPU-side (position/forward) and becomes this
-    /// frame's `prev_view_proj` for temporal effects.
     pub fn update_stereo_cameras(
         &mut self,
         left: &GpuCameraUniforms,
         right: &GpuCameraUniforms,
     ) {
-        self.gpu_scene
-            .camera
-            .update_stereo(&self.gpu_scene.queue, left, right);
+        // TODO: write to two camera entities for stereo
+        self.gpu_scene.camera.update_stereo(&self.gpu_scene.queue, left, right);
         self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
         self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
     }

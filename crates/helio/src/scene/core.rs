@@ -53,10 +53,21 @@ use super::types::{
 ///
 /// See the [module-level documentation](crate::scene) for architecture details and usage examples.
 pub struct Scene {
-    /// GPU scene resources (buffers, bind groups, etc.). Scene owns a copy
-    /// for internal operations (camera, voxels, decals); the Renderer owns a
-    /// SEPARATE copy synced from Scene's pipeline buffers for graph execution.
+    /// GPU scene resources. Being phased out — scene data moves to SceneDB
+    /// components (HelioGpuCamera, HelioGpuDecal, etc.) registered on the
+    /// mirror_store. Remaining fields migrate to direct Scene fields.
     pub(in crate::scene) gpu_scene: GpuScene,
+
+    /// SceneDB entity holding the HelioGpuCamera component. Spawned once in
+    /// Scene::new; camera.rs writes updated view-proj each frame.
+    pub(in crate::scene) camera_entity: pulsar_scenedb::Entity,
+
+    /// Frame counter, incremented each advance_frame().
+    pub(in crate::scene) frame_count: u64,
+
+    /// Camera generation — bumped on every camera update. Used by render
+    /// passes to detect camera movement for temporal effects.
+    pub(in crate::scene) camera_generation: u64,
 
     /// Mesh pool (shared vertex/index buffers)
     pub(in crate::scene) mesh_pool: MeshPool,
@@ -427,6 +438,20 @@ impl Scene {
         let mirror_store = Arc::new(mirror_store_raw);
         let mut world = World::new();
         world.attach_gpu_mirror(GpuMirrorHandle::new(mirror_store.clone(), queue.clone()));
+        // Spawn camera entity with initial HelioGpuCamera component.
+        let camera_entity = world.spawn();
+        world.insert(camera_entity, crate::scene::scenedb_components::HelioGpuCamera {
+            view_proj_00: 1.0, view_proj_01: 0.0, view_proj_02: 0.0, view_proj_03: 0.0,
+            view_proj_10: 0.0, view_proj_11: 1.0, view_proj_12: 0.0, view_proj_13: 0.0,
+            view_proj_20: 0.0, view_proj_21: 0.0, view_proj_22: 1.0, view_proj_23: 0.0,
+            view_proj_30: 0.0, view_proj_31: 0.0, view_proj_32: 0.0, view_proj_33: 1.0,
+            prev_vp_00: 1.0, prev_vp_01: 0.0, prev_vp_02: 0.0, prev_vp_03: 0.0,
+            prev_vp_10: 0.0, prev_vp_11: 1.0, prev_vp_12: 0.0, prev_vp_13: 0.0,
+            prev_vp_20: 0.0, prev_vp_21: 0.0, prev_vp_22: 1.0, prev_vp_23: 0.0,
+            prev_vp_30: 0.0, prev_vp_31: 0.0, prev_vp_32: 0.0, prev_vp_33: 1.0,
+            pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+            jitter_x: 0.0, jitter_y: 0.0,
+        });
         let mut scenedb_subsystems = SubsystemRegistry::new();
         scenedb_subsystems.register(SceneGpuMirrorSubsystem::new(mirror_store.clone(), queue.clone()));
         let phase_store = SceneGpuStore::new(
@@ -459,6 +484,9 @@ impl Scene {
             mesh_pool: MeshPool::new(device.clone()),
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
             world,
+            camera_entity,
+            frame_count: 0,
+            camera_generation: 0,
             scenedb_driver,
             scenedb_subsystems,
             mirror_store,

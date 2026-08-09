@@ -113,6 +113,99 @@ pub(crate) struct HelioCpuLight {
     pub gpu_index: u32,
 }
 
+/// GPU-facing camera data — singleton entity (index 0) in World.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, SceneStore)]
+#[gpu(layout = packed)]
+pub(crate) struct HelioGpuCamera {
+    #[gpu] pub view_proj_00: f32, #[gpu] pub view_proj_01: f32,
+    #[gpu] pub view_proj_02: f32, #[gpu] pub view_proj_03: f32,
+    #[gpu] pub view_proj_10: f32, #[gpu] pub view_proj_11: f32,
+    #[gpu] pub view_proj_12: f32, #[gpu] pub view_proj_13: f32,
+    #[gpu] pub view_proj_20: f32, #[gpu] pub view_proj_21: f32,
+    #[gpu] pub view_proj_22: f32, #[gpu] pub view_proj_23: f32,
+    #[gpu] pub view_proj_30: f32, #[gpu] pub view_proj_31: f32,
+    #[gpu] pub view_proj_32: f32, #[gpu] pub view_proj_33: f32,
+    #[gpu] pub prev_vp_00: f32, #[gpu] pub prev_vp_01: f32,
+    #[gpu] pub prev_vp_02: f32, #[gpu] pub prev_vp_03: f32,
+    #[gpu] pub prev_vp_10: f32, #[gpu] pub prev_vp_11: f32,
+    #[gpu] pub prev_vp_12: f32, #[gpu] pub prev_vp_13: f32,
+    #[gpu] pub prev_vp_20: f32, #[gpu] pub prev_vp_21: f32,
+    #[gpu] pub prev_vp_22: f32, #[gpu] pub prev_vp_23: f32,
+    #[gpu] pub prev_vp_30: f32, #[gpu] pub prev_vp_31: f32,
+    #[gpu] pub prev_vp_32: f32, #[gpu] pub prev_vp_33: f32,
+    #[gpu] pub pos_x: f32, #[gpu] pub pos_y: f32, #[gpu] pub pos_z: f32,
+    #[gpu] pub jitter_x: f32, #[gpu] pub jitter_y: f32,
+}
+
+/// GPU-facing decal data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, SceneStore)]
+#[gpu(layout = packed)]
+pub(crate) struct HelioGpuDecal {
+    #[gpu] pub transform_00: f32, #[gpu] pub transform_01: f32,
+    #[gpu] pub transform_02: f32, #[gpu] pub transform_03: f32,
+    #[gpu] pub transform_10: f32, #[gpu] pub transform_11: f32,
+    #[gpu] pub transform_12: f32, #[gpu] pub transform_13: f32,
+    #[gpu] pub transform_20: f32, #[gpu] pub transform_21: f32,
+    #[gpu] pub transform_22: f32, #[gpu] pub transform_23: f32,
+    #[gpu] pub transform_30: f32, #[gpu] pub transform_31: f32,
+    #[gpu] pub transform_32: f32, #[gpu] pub transform_33: f32,
+    #[gpu] pub color_r: f32, #[gpu] pub color_g: f32, #[gpu] pub color_b: f32, #[gpu] pub color_a: f32,
+    #[gpu] pub uv_offset_x: f32, #[gpu] pub uv_offset_y: f32,
+    #[gpu] pub uv_scale_x: f32, #[gpu] pub uv_scale_y: f32,
+    #[gpu] pub angle: f32,
+    #[gpu] pub texture_index: u32,
+    #[gpu] pub flags: u32,
+}
+
+/// GPU-facing reflection capture data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, SceneStore)]
+#[gpu(layout = packed)]
+pub(crate) struct HelioGpuReflectionCapture {
+    #[gpu] pub position_x: f32, #[gpu] pub position_y: f32,
+    #[gpu] pub position_z: f32, #[gpu] pub influence_radius: f32,
+    #[gpu] pub cubemap_index: i32,
+    #[gpu] pub blend_distance: f32,
+    #[gpu] pub intensity: f32,
+    #[gpu] pub flags: u32,
+}
+
+/// GPU-facing portal view data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, SceneStore)]
+#[gpu(layout = packed)]
+pub(crate) struct HelioGpuPortalView {
+    #[gpu] pub view_00: f32, #[gpu] pub view_01: f32,
+    #[gpu] pub view_02: f32, #[gpu] pub view_03: f32,
+    #[gpu] pub view_10: f32, #[gpu] pub view_11: f32,
+    #[gpu] pub view_12: f32, #[gpu] pub view_13: f32,
+    #[gpu] pub view_20: f32, #[gpu] pub view_21: f32,
+    #[gpu] pub view_22: f32, #[gpu] pub view_23: f32,
+    #[gpu] pub view_30: f32, #[gpu] pub view_31: f32,
+    #[gpu] pub view_32: f32, #[gpu] pub view_33: f32,
+    #[gpu] pub proj_00: f32, #[gpu] pub proj_01: f32,
+    #[gpu] pub proj_02: f32, #[gpu] pub proj_03: f32,
+    #[gpu] pub proj_10: f32, #[gpu] pub proj_11: f32,
+    #[gpu] pub proj_12: f32, #[gpu] pub proj_13: f32,
+    #[gpu] pub proj_20: f32, #[gpu] pub proj_21: f32,
+    #[gpu] pub proj_22: f32, #[gpu] pub proj_23: f32,
+    #[gpu] pub proj_30: f32, #[gpu] pub proj_31: f32,
+    #[gpu] pub proj_32: f32, #[gpu] pub proj_33: f32,
+}
+
+/// GPU-facing portal chain data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, SceneStore)]
+#[gpu(layout = packed)]
+pub(crate) struct HelioGpuPortalChain {
+    #[gpu] pub clip_plane_x: f32, #[gpu] pub clip_plane_y: f32,
+    #[gpu] pub clip_plane_z: f32, #[gpu] pub clip_plane_w: f32,
+    #[gpu] pub parent_index: u32,
+    #[gpu] pub view_count: u32,
+}
+
 /// Register every Helio component's GPU columns on the world-mirror store.
 pub(crate) fn register_gpu_columns(
     store: &mut pulsar_scenedb::gpu::SceneGpuStore,
@@ -120,4 +213,9 @@ pub(crate) fn register_gpu_columns(
 ) {
     HelioGpuInstance::register_gpu_columns_growable(store, 1024, device);
     HelioGpuLight::register_gpu_columns_growable(store, 256, device);
+    HelioGpuCamera::register_gpu_columns_growable(store, 1, device);
+    HelioGpuDecal::register_gpu_columns_growable(store, 256, device);
+    HelioGpuReflectionCapture::register_gpu_columns_growable(store, 64, device);
+    HelioGpuPortalView::register_gpu_columns_growable(store, 64, device);
+    HelioGpuPortalChain::register_gpu_columns_growable(store, 32, device);
 }
