@@ -24,7 +24,7 @@
 //! )); // immediately after PortalMaskPass, before FoliageGBufferPass/VirtualGeometryPass
 //! ```
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -47,6 +47,8 @@ struct ScreenSize {
     _pad1: f32,
 }
 
+type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize);
+
 pub struct PortalInstancePass {
     material_binding: libhelio::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
@@ -61,7 +63,7 @@ pub struct PortalInstancePass {
     portal_compacted_chains_buf: Arc<wgpu::Buffer>,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<PortalBindGroupKey>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
 
@@ -77,9 +79,11 @@ impl PortalInstancePass {
     ) -> Self {
         let material_binding = libhelio::MaterialBindingConfig::for_device(device);
 
+        let shader_source = portal_shader_source(material_binding);
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PortalInstance Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/gbuffer_portal.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source),
         });
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -213,6 +217,18 @@ impl PortalInstancePass {
     }
 }
 
+fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Cow<'static, str> {
+    let source = include_str!("../shaders/gbuffer_portal.wgsl");
+    if material_binding.uses_binding_arrays() {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(libhelio::shader::apply_webgpu_material_bindings(
+            source,
+            material_binding.max_textures,
+        ))
+    }
+}
+
 fn storage_entry(binding: u32, visibility: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -317,7 +333,7 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
+        if ctx.frame_num < 3 || ctx.frame_num.is_multiple_of(120) {
             log::info!(
                 "[PortalInstance] frame={} draw_count={} render_pass_open={}",
                 ctx.frame_num, self.draw_count, ctx.active_render_pass_ptr().is_some(),
@@ -419,5 +435,37 @@ impl RenderPass for PortalInstancePass {
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
         pass.multi_draw_indexed_indirect(&self.portal_indirect_buf, 0, indirect_draw_count);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::portal_shader_source;
+    use libhelio::{MaterialBindingConfig, MaterialBindingMode};
+
+    #[test]
+    fn expanded_tier_rewrites_the_portal_material_bindings() {
+        let source = portal_shader_source(MaterialBindingConfig {
+            mode: MaterialBindingMode::Expanded,
+            max_textures: 2,
+        });
+
+        assert!(!source.contains("wgpu_binding_array"));
+        assert!(!source.contains("binding_array<"));
+        assert!(source.contains("@group(1) @binding(2) var scene_texture_0"));
+        assert!(source.contains("@group(1) @binding(5) var scene_sampler_1"));
+        assert!(source.contains("case 1u: { return textureSampleLevel"));
+    }
+
+    #[test]
+    fn binding_array_tier_keeps_the_native_portal_shader() {
+        let source = portal_shader_source(MaterialBindingConfig {
+            mode: MaterialBindingMode::BindingArray,
+            max_textures: 256,
+        });
+
+        assert!(matches!(source, std::borrow::Cow::Borrowed(_)));
+        assert!(source.contains("enable wgpu_binding_array;"));
+        assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }
