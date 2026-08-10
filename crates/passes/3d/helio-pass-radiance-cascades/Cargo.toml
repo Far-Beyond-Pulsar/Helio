@@ -13,3 +13,4 @@ bytemuck  = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 naga = { version = "30.0.0", features = ["wgsl-in", "glsl-out"] }
+pollster = { workspace = true }

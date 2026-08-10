@@ -46,7 +46,6 @@ pub struct RadianceCascadesPass {
     rt_bgl: Option<wgpu::BindGroupLayout>,
     fb_bind_group: Option<wgpu::BindGroup>,
     fb_bg_key: Option<(usize, usize, usize)>,
-    fb_depth_sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
     static_buf: Option<wgpu::Buffer>,
     use_rt: bool,
@@ -76,10 +75,9 @@ struct Camera {
 
 @group(0) @binding(0) var cascade_out:   texture_storage_2d<rgba16float, write>;
 @group(0) @binding(1) var<uniform>  rc_dyn:      RCDynamic;
-@group(0) @binding(2) var depth_tex:    texture_depth_2d;
+@group(0) @binding(2) var depth_tex:    texture_2d<f32>;
 @group(0) @binding(3) var scene_color:  texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> cameras: array<Camera, 2>;
-@group(0) @binding(5) var depth_sampler: sampler;
 
 const PROBE_DIM:   u32 = 8u;
 const DIR_DIM:     u32 = 4u;
@@ -149,6 +147,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let delta_uv    = uv_end - uv_start;
     let delta_depth = depth_end - depth_start;
 
+    let depth_dims = textureDimensions(depth_tex);
     let scene_dims = vec2<f32>(textureDimensions(scene_color));
     var radiance = vec3<f32>(0.0);
     var hit = false;
@@ -160,10 +159,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { break; }
 
-        // Depth texture loads cannot be translated by Naga's GLSL backend.
-        // Point sampling preserves the texel semantics while remaining valid
-        // on the Vulkan, Metal, D3D, GLES, and WebGPU paths.
-        let scene_d = textureSampleLevel(depth_tex, depth_sampler, uv, 0);
+        // Hi-Z mip 0 is an R32Float copy of the previous frame's depth. Reading
+        // it as a color texture avoids the invalid combined shadow sampler that
+        // Naga emits for sampled depth textures on OpenGL/GLES.
+        let depth_coord = min(
+            vec2<i32>(uv * vec2<f32>(depth_dims)),
+            vec2<i32>(depth_dims) - vec2<i32>(1),
+        );
+        let scene_d = textureLoad(depth_tex, depth_coord, 0).x;
 
         if scene_d >= 1.0 { continue; }
 
@@ -213,17 +216,6 @@ impl RadianceCascadesPass {
             })
         });
 
-        let fb_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("RC Fallback Depth Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
         // ── Fallback BGL & pipeline ────────────────────────────────────
         let fb_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Fallback BGL"),
@@ -252,7 +244,7 @@ impl RadianceCascadesPass {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -276,12 +268,6 @@ impl RadianceCascadesPass {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -425,7 +411,6 @@ impl RadianceCascadesPass {
             rt_bgl,
             fb_bind_group: None,
             fb_bg_key: None,
-            fb_depth_sampler,
             uniform_buf,
             static_buf,
             use_rt,
@@ -439,7 +424,7 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa"]
+        &["hiz", "pre_aa"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -525,14 +510,17 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let depth_view = ctx.depth;
+        let depth_view = match ctx.resources.hiz.get() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
         let pre_aa_view = match ctx.resources.pre_aa.get() {
             Some(v) => v,
             None => return Ok(()),
         };
 
         // `rc_cascades` is a persistent resource-pool texture that only
-        // changes on resize, and depth/pre_aa views are stable for the life
+        // changes on resize, and Hi-Z/pre_aa views are stable for the life
         // of the frame graph — recreating the view + bind group every frame
         // was pure CPU/driver overhead. Cache by resource identity instead.
         let key = (
@@ -542,37 +530,32 @@ impl RadianceCascadesPass {
         );
         if self.fb_bg_key != Some(key) {
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.fb_bind_group =
-                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("RC Fallback BG"),
-                    layout: &self.fb_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: self.uniform_buf.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(depth_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(pre_aa_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: ctx.scene.camera.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&self.fb_depth_sampler),
-                        },
-                    ],
-                }));
+            self.fb_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RC Fallback BG"),
+                layout: &self.fb_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                ],
+            }));
             self.fb_bg_key = Some(key);
         }
 
@@ -685,7 +668,9 @@ impl RadianceCascadesPass {
 
 #[cfg(test)]
 mod tests {
-    use super::FALLBACK_WGSL;
+    use std::sync::Arc;
+
+    use super::{RadianceCascadesPass, FALLBACK_WGSL};
     use naga::back::glsl;
 
     #[test]
@@ -719,5 +704,52 @@ mod tests {
         .expect("Radiance Cascades fallback must emit GLES");
 
         assert!(output.contains("void main()"));
+        assert!(output.contains("texelFetch"));
+        assert!(
+            !output.contains("sampler2DShadow"),
+            "fallback depth must lower as an ordinary R32Float texture"
+        );
+    }
+
+    async fn compile_on_available_backends() -> usize {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+
+        for adapter in &adapters {
+            let info = adapter.get_info();
+            let backend = format!("{:?}", info.backend);
+            let (device, _queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Radiance Cascades Portability Test Device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend} adapter must create a device: {error}"));
+            device.on_uncaptured_error(Arc::new(move |error| {
+                panic!("Radiance Cascades {backend} validation error: {error:?}");
+            }));
+
+            let lights = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Radiance Cascades Portability Lights"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let _pass = RadianceCascadesPass::new(&device, &lights);
+        }
+
+        adapters.len()
+    }
+
+    #[test]
+    fn fallback_pipeline_compiles_on_every_available_backend() {
+        if pollster::block_on(compile_on_available_backends()) == 0 {
+            eprintln!("skipping Radiance Cascades portability test: no GPU adapter available");
+        }
     }
 }

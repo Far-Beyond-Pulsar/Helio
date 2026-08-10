@@ -1645,6 +1645,7 @@ dependencies = [
  "helio-core",
  "libhelio",
  "naga",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
