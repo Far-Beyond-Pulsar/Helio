@@ -46,6 +46,7 @@ pub struct RadianceCascadesPass {
     rt_bgl: Option<wgpu::BindGroupLayout>,
     fb_bind_group: Option<wgpu::BindGroup>,
     fb_bg_key: Option<(usize, usize, usize)>,
+    fb_depth_sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
     static_buf: Option<wgpu::Buffer>,
     use_rt: bool,
@@ -78,6 +79,7 @@ struct Camera {
 @group(0) @binding(2) var depth_tex:    texture_depth_2d;
 @group(0) @binding(3) var scene_color:  texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(5) var depth_sampler: sampler;
 
 const PROBE_DIM:   u32 = 8u;
 const DIR_DIM:     u32 = 4u;
@@ -148,8 +150,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let delta_depth = depth_end - depth_start;
 
     let scene_dims = vec2<f32>(textureDimensions(scene_color));
-    let depth_dims = vec2<f32>(textureDimensions(depth_tex));
-
     var radiance = vec3<f32>(0.0);
     var hit = false;
 
@@ -160,14 +160,20 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { break; }
 
-        let scene_d = textureLoad(depth_tex,
-            vec2<i32>(i32(uv.x * depth_dims.x), i32(uv.y * depth_dims.y)), 0);
+        // Depth texture loads cannot be translated by Naga's GLSL backend.
+        // Point sampling preserves the texel semantics while remaining valid
+        // on the Vulkan, Metal, D3D, GLES, and WebGPU paths.
+        let scene_d = textureSampleLevel(depth_tex, depth_sampler, uv, 0);
 
         if scene_d >= 1.0 { continue; }
 
         if d >= scene_d {
+            let scene_coord = min(
+                vec2<i32>(uv * scene_dims),
+                vec2<i32>(textureDimensions(scene_color)) - vec2<i32>(1),
+            );
             radiance = textureLoad(scene_color,
-                vec2<i32>(i32(uv.x * scene_dims.x), i32(uv.y * scene_dims.y)), 0).rgb;
+                scene_coord, 0).rgb;
             hit = true;
             break;
         }
@@ -205,6 +211,17 @@ impl RadianceCascadesPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
+        });
+
+        let fb_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("RC Fallback Depth Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
         });
 
         // ── Fallback BGL & pipeline ────────────────────────────────────
@@ -259,6 +276,12 @@ impl RadianceCascadesPass {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -402,6 +425,7 @@ impl RadianceCascadesPass {
             rt_bgl,
             fb_bind_group: None,
             fb_bg_key: None,
+            fb_depth_sampler,
             uniform_buf,
             static_buf,
             use_rt,
@@ -543,6 +567,10 @@ impl RadianceCascadesPass {
                             binding: 4,
                             resource: ctx.scene.camera.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&self.fb_depth_sampler),
+                        },
                     ],
                 }));
             self.fb_bg_key = Some(key);
@@ -652,5 +680,44 @@ impl RadianceCascadesPass {
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FALLBACK_WGSL;
+    use naga::back::glsl;
+
+    #[test]
+    fn fallback_shader_translates_to_gles() {
+        let module = naga::front::wgsl::parse_str(FALLBACK_WGSL)
+            .expect("Radiance Cascades fallback WGSL must parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .subgroup_stages(naga::valid::ShaderStages::all())
+        .subgroup_operations(naga::valid::SubgroupOperationSet::all())
+        .validate(&module)
+        .expect("Radiance Cascades fallback WGSL must validate");
+
+        let mut output = String::new();
+        glsl::Writer::new(
+            &mut output,
+            &module,
+            &info,
+            &glsl::Options::default(),
+            &glsl::PipelineOptions {
+                shader_stage: naga::ShaderStage::Compute,
+                entry_point: "cs_main".into(),
+                multiview: None,
+            },
+            naga::proc::BoundsCheckPolicies::default(),
+        )
+        .expect("Radiance Cascades fallback must lower to GLES")
+        .write()
+        .expect("Radiance Cascades fallback must emit GLES");
+
+        assert!(output.contains("void main()"));
     }
 }
