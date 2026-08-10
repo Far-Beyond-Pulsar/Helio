@@ -26,7 +26,10 @@ struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: DecalGlobals;
 @group(0) @binding(2) var<storage, read> decals: array<GpuDecal>;
-@group(0) @binding(3) var gbuf_depth: texture_depth_2d;
+// Hi-Z mip 0 is the graph's portable R32Float copy of scene depth. Keeping
+// decal collection on a color texture avoids the unsupported depth-texture
+// textureLoad lowering on WGPU's GL/GLES backend.
+@group(0) @binding(3) var scene_depth: texture_2d<f32>;
 @group(0) @binding(4) var gbuf_albedo: texture_2d<f32>;
 @group(0) @binding(5) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(6) var gbuf_orm: texture_2d<f32>;
@@ -89,7 +92,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let sz = textureDimensions(gbuf_albedo);
     if id.x >= u32(sz.x) || id.y >= u32(sz.y) { return; }
 
-    let depth = textureLoad(gbuf_depth, pxl, 0);
+    let depth = textureLoad(scene_depth, pxl, 0).x;
     if depth >= 1.0 { return; }
 
     let uv_scr = vec2<f32>((f32(pxl.x)+0.5)/f32(sz.x), (f32(pxl.y)+0.5)/f32(sz.y));

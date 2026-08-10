@@ -11,3 +11,7 @@ libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "30.0.0", features = ["wgsl-in", "glsl-out"] }
+pollster = { workspace = true }

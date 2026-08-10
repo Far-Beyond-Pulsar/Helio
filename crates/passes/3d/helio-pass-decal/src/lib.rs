@@ -1,6 +1,5 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -24,7 +23,6 @@ pub struct DecalPass {
     temp_normal: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_orm: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
-    device: Arc<wgpu::Device>,
     last_w: u32, last_h: u32,
 }
 
@@ -49,14 +47,14 @@ impl DecalPass {
             mapped_at_creation: false,
         });
 
-        // BGL collect: camera(0) + globals(1) + decals(2) + depth(3) + gbuf(4-7) + temp_out(8-11)
+        // BGL collect: camera(0) + globals(1) + decals(2) + Hi-Z mip 0(3) + gbuf(4-7) + temp_out(8-11)
         let bgl_collect = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Decal Collect BGL"),
             entries: &[
                 bgl_entry_buf(0, wgpu::BufferBindingType::Storage { read_only: true }),
                 bgl_entry_buf(1, wgpu::BufferBindingType::Uniform),
                 bgl_entry_buf(2, wgpu::BufferBindingType::Storage { read_only: true }),
-                bgl_entry_tex(3, wgpu::TextureSampleType::Depth),
+                bgl_entry_tex(3, wgpu::TextureSampleType::Float { filterable: false }),
                 bgl_entry_tex(4, wgpu::TextureSampleType::Float { filterable: false }),
                 bgl_entry_tex(5, wgpu::TextureSampleType::Float { filterable: false }),
                 bgl_entry_tex(6, wgpu::TextureSampleType::Float { filterable: false }),
@@ -109,7 +107,6 @@ impl DecalPass {
             bg_collect: None, bg_apply: None, bg_textures: None,
             bg_collect_key: None, bg_apply_key: None, bg_textures_version: None,
             globals_buf, temp_albedo: None, temp_normal: None, temp_orm: None, temp_emissive: None,
-            device: Arc::new(device.clone()),
             last_w: 0, last_h: 0,
         }
     }
@@ -195,7 +192,7 @@ fn bgl_entry_tex_storage(binding: u32, access: wgpu::StorageTextureAccess, forma
 
 impl RenderPass for DecalPass {
     fn name(&self) -> &'static str { "DecalApply" }
-    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.read("gbuffer"); builder.read("depth"); builder.read("main_scene"); }
+    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.read("gbuffer"); builder.read("hiz"); builder.read("main_scene"); }
     fn publish<'a>(&'a self, _: &mut libhelio::FrameResources<'a>) {}
     fn render_pass_descriptor<'a>(&'a self, _: &'a wgpu::TextureView, _: &'a wgpu::TextureView, _: &'a libhelio::FrameResources<'a>) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -206,10 +203,10 @@ impl RenderPass for DecalPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.scene.decal_count == 0 { return Ok(()); }
         let gb = match ctx.resources.gbuffer.read(self.name()) { Some(g) => g, None => return Ok(()) };
+        let depth_view = match ctx.resources.hiz.read(self.name()) { Some(v) => v, None => return Ok(()) };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
         let main_scene = match ctx.resources.main_scene.read(self.name()) { Some(m) => m, None => return Ok(()) };
-        let dv = ctx.depth;
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let decal_ptr = ctx.scene.decals as *const _ as usize;
         self.ensure_temp(ctx.width, ctx.height, ctx.device);
@@ -218,7 +215,7 @@ impl RenderPass for DecalPass {
         let (_, to) = self.temp_orm.as_ref().unwrap();
         let (_, te) = self.temp_emissive.as_ref().unwrap();
 
-        let ck = (camera_ptr, decal_ptr, dv as *const _ as usize, gb.albedo as *const _ as usize,
+        let ck = (camera_ptr, decal_ptr, depth_view as *const _ as usize, gb.albedo as *const _ as usize,
                    gb.normal as *const _ as usize, gb.orm as *const _ as usize,
                    u64::from(self.last_w) | (u64::from(self.last_h) << 32));
         if self.bg_collect_key != Some(ck) || self.bg_collect.is_none() {
@@ -226,7 +223,7 @@ impl RenderPass for DecalPass {
                 label: Some("Decal Collect BG"), layout: &self.bgl_collect,
                 entries: &[
                     bind_buf(0, ctx.scene.camera), bind_buf(1, &self.globals_buf),
-                    bind_buf(2, ctx.scene.decals), bind_tex(3, dv),
+                    bind_buf(2, ctx.scene.decals), bind_tex(3, depth_view),
                     bind_tex(4, gb.albedo), bind_tex(5, gb.normal), bind_tex(6, gb.orm), bind_tex(7, gb.emissive),
                     bind_tex(8, ta), bind_tex(9, tn), bind_tex(10, to), bind_tex(11, te),
                 ],
@@ -252,7 +249,7 @@ impl RenderPass for DecalPass {
             cp.set_pipeline(&self.collect_pipeline);
             cp.set_bind_group(0, self.bg_collect.as_ref().unwrap(), &[]);
             cp.set_bind_group(1, self.bg_textures.as_ref().unwrap(), &[]);
-            cp.dispatch_workgroups((ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
+            cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);
         }
 
         let ak = (camera_ptr, decal_ptr, ta as *const _ as usize, tn as *const _ as usize,
@@ -276,13 +273,13 @@ impl RenderPass for DecalPass {
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("DecalApply"), timestamp_writes: None });
             cp.set_pipeline(&self.apply_pipeline);
             cp.set_bind_group(0, self.bg_apply.as_ref().unwrap(), &[]);
-            cp.dispatch_workgroups((ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
+            cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);
         }
 
         Ok(())
     }
 
-    fn reads(&self) -> &'static [&'static str] { &["gbuffer", "depth", "main_scene"] }
+    fn reads(&self) -> &'static [&'static str] { &["gbuffer", "hiz", "main_scene"] }
     fn writes(&self) -> &'static [&'static str] { &["gbuffer"] }
 }
 
@@ -314,6 +311,11 @@ fn bind_tex<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEnt
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use super::DecalPass;
+    use naga::back::glsl;
+
     /// The wasm fixup rewrites the shader by matching exact source strings, so a
     /// harmless-looking edit to the binding-array declarations or the sampling
     /// call would silently leave `binding_array` in the WebGPU source and only
@@ -338,5 +340,90 @@ mod tests {
             fixed.contains("case 0u: { return textureSampleLevel(scene_texture_0"),
             "the decal sampling call was not rewritten into a per-slot switch",
         );
+    }
+
+    #[test]
+    fn collect_shader_translates_portable_depth_to_gles() {
+        let src = include_str!("../shaders/decal_collect.wgsl");
+        let src = libhelio::shader::apply_webgpu_decal_bindings(src, 1);
+        let module = naga::front::wgsl::parse_str(&src)
+            .expect("Decal Collect WGSL must parse after baseline binding expansion");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .subgroup_stages(naga::valid::ShaderStages::all())
+        .subgroup_operations(naga::valid::SubgroupOperationSet::all())
+        .validate(&module)
+        .expect("Decal Collect WGSL must validate");
+
+        let mut output = String::new();
+        glsl::Writer::new(
+            &mut output,
+            &module,
+            &info,
+            &glsl::Options::default(),
+            &glsl::PipelineOptions {
+                shader_stage: naga::ShaderStage::Compute,
+                entry_point: "cs_main".into(),
+                multiview: None,
+            },
+            naga::proc::BoundsCheckPolicies::default(),
+        )
+        .expect("Decal Collect must lower to GLES")
+        .write()
+        .expect("Decal Collect must emit GLES");
+
+        assert!(output.contains("void main()"));
+        assert!(output.contains("texelFetch"));
+        assert!(
+            !output.contains("sampler2DShadow"),
+            "decal depth must lower as an ordinary R32Float texture"
+        );
+    }
+
+    async fn compile_on_available_backends() -> usize {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+
+        for adapter in &adapters {
+            let info = adapter.get_info();
+            let backend = format!("{:?}", info.backend);
+            let required_features = adapter.features() & libhelio::BINDLESS_MATERIAL_FEATURES;
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Decal Portability Test Device"),
+                    required_features,
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend} adapter must create a device: {error}"));
+            device.on_uncaptured_error(Arc::new(move |error| {
+                panic!("Decal {backend} validation error: {error:?}");
+            }));
+
+            let decals = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Decal Portability Decals"), size: 256,
+                usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
+            });
+            let camera = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Decal Portability Camera"), size: 512,
+                usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
+            });
+            let _pass = DecalPass::new(&device, &queue, &decals, &camera, 1280, 720);
+        }
+
+        adapters.len()
+    }
+
+    #[test]
+    fn pipelines_compile_on_every_available_backend() {
+        if pollster::block_on(compile_on_available_backends()) == 0 {
+            eprintln!("skipping Decal portability test: no GPU adapter available");
+        }
     }
 }
