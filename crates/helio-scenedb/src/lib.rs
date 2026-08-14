@@ -17,10 +17,18 @@
 //! groups, a real shader, a Helio-owned output buffer, readback -- works
 //! byte-exact on the actual vendored wgpu-30 stack.
 
+pub mod components;
 pub mod cull;
 pub mod draw;
 pub mod repack;
+pub mod subsystem;
 pub mod wgsl;
+
+pub use components::{
+    LightComponent, MaterialSlot, MultiMaterialStaticMeshComponent, RenderBounds, RenderFlags,
+    RenderTransform, SdbGpuMaterial, StaticMeshComponent,
+};
+pub use subsystem::HelioRenderSubsystem;
 
 use pulsar_scenedb::gpu::{
     ClusterBuffer, MaterialRegistry, MeshRegistry, MeshletBuffer, SceneGpuStore,

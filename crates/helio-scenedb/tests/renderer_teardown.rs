@@ -582,8 +582,12 @@ fn stateless_renderer_teardown_zero_reupload_identical_hash_ssbos_alive() {
     // `PartialEq`/`Clone` impls (proxied to the underlying resource id) are
     // the sanctioned identity-comparison mechanism instead.
     assert_eq!(std::sync::Arc::as_ptr(ctx.device()), device_ptr_before, "assertion (f): device pointer changed across the window");
-    assert_eq!(store.transform_buffer(), &transform_buf_before, "assertion (f): transform buffer identity changed");
-    assert_eq!(store.instance_info_buffer(), &instance_info_buf_before, "assertion (f): instance_info buffer identity changed");
+    // `transform_buffer`/`instance_info_buffer` return an owned `wgpu::Buffer`
+    // (cheap refcounted clone), not `&wgpu::Buffer`, as of SceneDB's
+    // interior-mutable `SceneGpuStore` conversion (RwLockReadGuard can't
+    // outlive the accessor call) -- compare owned-to-owned here.
+    assert_eq!(store.transform_buffer(), transform_buf_before, "assertion (f): transform buffer identity changed");
+    assert_eq!(store.instance_info_buffer(), instance_info_buf_before, "assertion (f): instance_info buffer identity changed");
     assert_eq!(store.slot_mirror_buffer(), &slot_mirror_buf_before, "assertion (f): slot_mirror buffer identity changed");
     assert_eq!(store.generation_buffer(), &generation_buf_before, "assertion (f): generation buffer identity changed");
     assert_eq!(store.cell_metadata_buffer(), &cell_meta_buf_before, "assertion (f): cell_metadata buffer identity changed");

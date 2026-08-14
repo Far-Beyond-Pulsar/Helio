@@ -20,7 +20,35 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
+# TEMPORARY: path-pinned to a local SceneDB checkout on the `unified-GPU`
+# branch (Far-Beyond-Pulsar/SceneDB#42, not yet merged to `main`) instead of
+# the usual `git = "..."` dependency below, because this crate's World/Entity
+# render-component work needs APIs that only exist on that branch:
+# `#[gpu(buffer = "key")]` shared named buffers, `GpuSystemContext::bind`,
+# `Bundle`/`spawn_bundle`, and `World::attach_change_tracker`/
+# `SharedChangeTracker`. Revert to the `git` dependency once #42 merges to
+# `main` -- the path below is a local dev machine path, not portable.
+pulsar_scenedb = { path = "D:/GitHub/SceneDB/crates/pulsar_scenedb", features = ["gpu"] }
+# pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
+# TEMPORARY path pin -- see the matching comment on `pulsar_scenedb` above.
+# Promoted from dev-dependencies: the new RenderMaterial/RenderMesh/etc
+# render components (SceneDB<->Helio component integration, see
+# HelioRenderSubsystem) are `#[derive(SceneStore)]`d in this crate's own
+# non-test source, not just in benchmark fixtures.
+pulsar_scenedb_derive = { path = "D:/GitHub/SceneDB/crates/pulsar_scenedb_derive" }
+# pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
+helio = { workspace = true }
+libhelio = { workspace = true }
+# RenderTransform stores a glam::Mat4 directly -- ObjectDescriptor::transform
+# (helio::scene::types::ObjectDescriptor) is already a Mat4, so this avoids
+# an array round-trip at every HelioRenderSubsystem translation call.
+glam = { workspace = true }
+# MultiMaterialStaticMeshComponent::materials -- a small, usually-short list
+# of Entity references (each a MaterialSlot entity) without a heap
+# allocation for the common few-materials case. Pinned to the exact version
+# already resolved elsewhere in this workspace's Cargo.lock (transitively,
+# via wgpu/glam) so this doesn't introduce a second semver-incompatible copy.
+smallvec = "1.15"
 # Helio's workspace wgpu = 30 (crates.io) -- MUST resolve to the same major
 # as `pulsar_scenedb`'s own `gpu`-feature wgpu dep (also crates.io 30). Both
 # requirements ("30" here, "30" in pulsar_scenedb/Cargo.toml) unify to ONE
@@ -45,9 +73,6 @@ bytemuck = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
-# World-mirror scale benchmark (world_mirror_scale.rs, Helio#211) needs
-# #[derive(SceneStore)] to define its own bench fixture components.
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
 # naga tracks the same major as Helio's workspace wgpu (crates.io 30) — the
 # Test 3 reflection harness (`tests/binding_layout.rs`, M3-a T10) parses
 # `wgsl::SCENE_BINDINGS_WGSL` with naga's WGSL front end and reflects struct

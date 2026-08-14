@@ -1948,10 +1948,14 @@ name = "helio-scenedb"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.2",
+ "helio",
+ "libhelio",
  "naga",
  "pollster 0.4.0",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
+ "smallvec",
  "wgpu",
 ]
 
@@ -3407,7 +3411,6 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB#da8a0d907d1f48ff3df3fa9b4f92b9c628c59792"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
@@ -3420,7 +3423,6 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB#da8a0d907d1f48ff3df3fa9b4f92b9c628c59792"
 dependencies = [
  "proc-macro2",
  "quote",
