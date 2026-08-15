@@ -32,12 +32,38 @@
 //! rebuilds the entire light buffer every call (filters to movable-only,
 //! reassigns indices densely), so a `#[gpu(buffer=...)]` field's fixed
 //! `row = Entity::index()` would already be stale by the time anything
-//! read it. [`LightComponent`] is deliberately a plain component for this
-//! reason -- see its own doc.
+//! read it.
+//!
+//! ## No `LightComponent` here
+//!
+//! This crate deliberately does NOT define its own light component. Earlier
+//! revisions had a plain `LightComponent { light: GpuLight, movability }`
+//! shadow type that [`crate::subsystem::HelioRenderSubsystem`] watched via
+//! the change tracker -- but that only existed to give this crate something
+//! to translate from, duplicating data the real, editor-facing
+//! `helio_component::LightComponent` (rich, properties-panel-editable,
+//! already a genuine `World` value) already carries. Requiring a caller to
+//! ALSO author a second, minimal shadow component just so this crate had
+//! something to watch is exactly the kind of shim Pulsar-Native#561 exists
+//! to eliminate. This crate (`helio-scenedb`) lives in Helio's own,
+//! separate Cargo workspace (a git submodule pointing at a standalone repo)
+//! and can't depend on `helio_component` (a Pulsar-Native crate in the
+//! *outer* workspace) without pulling a large, editor-shaped dependency
+//! tree into an otherwise-standalone renderer build -- so the real
+//! `LightComponent -> GpuLight` translation
+//! (`helio_component::LightComponent::to_gpu_light`) and the dispatch that
+//! drives `Scene::insert_light_with_movability`/`update_light`/
+//! `remove_light` from it both live on the Pulsar-Native side
+//! (`engine_backend`, which already depends on both `helio` and
+//! `helio_component`), not here. `HelioRenderSubsystem` still owns
+//! materials/meshes -- those already have neutral `RenderTransform`/
+//! `RenderBounds`/`RenderFlags` shadow shapes precisely because compaction
+//! isn't in the way for them the way it is for lights, and that path is
+//! separately established and tested; this doc note is scoped to lights
+//! only.
 
 use helio::{GroupMask, MeshId, MultiMeshId, Movability};
 use libhelio::material::GpuMaterial;
-use libhelio::GpuLight;
 use pulsar_scenedb::page::Pod;
 use pulsar_scenedb::Entity;
 use pulsar_scenedb_derive::SceneStore;
@@ -153,35 +179,6 @@ pub struct MultiMaterialStaticMeshComponent {
     pub mesh: MultiMeshId,
     /// Each entry references a [`MaterialSlot`] entity, in section order.
     pub materials: SmallVec<[Entity; 4]>,
-}
-
-/// A light. Deliberately a PLAIN component, not `#[gpu(buffer=...)]`-mirrored
-/// -- see the module doc's "why some fields are `#[gpu]`" section for why:
-/// Helio's own light buffer is rebuilt (filtered to movable-only, densely
-/// reindexed) on every `Scene::flush()`, so there is no stable per-entity
-/// row for a mirrored field to write to in the first place. Instead,
-/// [`crate::subsystem::HelioRenderSubsystem`] drives
-/// `Scene::insert_light_with_movability`/`update_light`/`remove_light`
-/// directly from this component's plain fields, tagged with this entity's
-/// own [`crate::subsystem::HelioRenderSubsystem::tag_for`] value exactly
-/// like objects are -- `Scene::light_by_tag` is the reverse lookup, no
-/// separate bookkeeping needed on the SceneDB side for that part.
-///
-/// `movability` is a separate parameter on Helio's own
-/// `insert_light_with_movability` (not a `GpuLight` field), included here
-/// for the same reason `RenderFlags::movability` exists for meshes --
-/// static/stationary lights are a real, separately-meaningful case (baked
-/// lighting).
-#[derive(Clone, Copy, Debug)]
-pub struct LightComponent {
-    pub light: GpuLight,
-    pub movability: Option<Movability>,
-}
-
-impl LightComponent {
-    pub fn new(light: GpuLight) -> Self {
-        Self { light, movability: None }
-    }
 }
 
 /// World-space model matrix. Column-major, matching

@@ -3415,6 +3415,7 @@ dependencies = [
  "ahash",
  "profiling 0.1.0",
  "pulsar_reflection",
+ "pulsar_scenedb_derive",
  "serde_json",
  "tracing",
  "wgpu",

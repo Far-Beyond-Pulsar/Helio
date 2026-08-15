@@ -36,9 +36,11 @@
 //!   multi-section mesh path -- a materially different API, no bounds
 //!   update or flags/groups support at all: `insert_sectioned_object`
 //!   hardcodes `flags = 0b11, groups = NONE` internally).
-//! - [`crate::LightComponent`] -> `insert_light_with_movability`/`update_light`/
-//!   `remove_light`, tagged the same way objects are (`Scene::light_by_tag`
-//!   is the reverse lookup -- no separate map needed on the SceneDB side).
+//! - Lights are NOT handled by this subsystem -- see `crate::components`'s
+//!   "No `LightComponent` here" doc section for why. The
+//!   `helio_component::LightComponent -> Scene::insert_light_with_movability`/
+//!   `update_light`/`remove_light` bridge lives on the Pulsar-Native side
+//!   instead.
 //! - [`crate::MaterialSlot`]/[`crate::StaticMeshComponent`]'s own inline
 //!   `material` field -> `insert_material`/`update_material`/`remove_material`
 //!   (see the scope note below for why this is still a real Helio-pool
@@ -71,12 +73,11 @@ use std::collections::{HashMap, HashSet};
 use glam::Mat4;
 use helio::{GroupMask, MaterialId, MeshId, MultiMeshId, Movability, ObjectDescriptor, Scene, SectionedInstanceId};
 use libhelio::material::GpuMaterial;
-use libhelio::GpuLight;
 use pulsar_scenedb::gpu::{HarvestPhase, RetiredPhase, SceneGpuStore, SimulateA, SimulateB};
 use pulsar_scenedb::{component_id, ComponentId, Entity, Subsystem, World};
 
 use crate::components::{
-    LightComponent, MaterialSlot, MultiMaterialStaticMeshComponent, RenderBounds, RenderFlags, RenderTransform, StaticMeshComponent,
+    MaterialSlot, MultiMaterialStaticMeshComponent, RenderBounds, RenderFlags, RenderTransform, StaticMeshComponent,
 };
 
 struct StaticMeshSnapshot {
@@ -109,8 +110,6 @@ struct MultiMeshSnapshot {
 enum PendingOp {
     UpsertMaterial(Entity, GpuMaterial),
     RemoveMaterial(Entity),
-    UpsertLight(Entity, GpuLight, Option<Movability>),
-    RemoveLight(Entity),
     UpsertStaticMesh(Entity, StaticMeshSnapshot),
     RemoveObject(Entity),
     UpsertMultiMesh(Entity, MultiMeshSnapshot),
@@ -145,8 +144,6 @@ pub struct HelioRenderSubsystem {
     /// Keyed by whichever entity supplied the `GpuMaterial` -- either a
     /// bare [`MaterialSlot`] entity, or a [`StaticMeshComponent`]-bearing
     /// entity's own id (inline material, no separate material entity).
-    /// Lights don't need an equivalent map -- they're tagged the same way
-    /// objects are and resolved via `Scene::light_by_tag`.
     material_ids: HashMap<Entity, MaterialId>,
     sectioned_ids: HashMap<Entity, SectionedInstanceId>,
     pending: Vec<PendingOp>,
@@ -188,22 +185,6 @@ impl HelioRenderSubsystem {
                 PendingOp::RemoveMaterial(entity) => {
                     if let Some(id) = self.material_ids.remove(&entity) {
                         let _ = scene.remove_material(id);
-                    }
-                }
-                PendingOp::UpsertLight(entity, gpu, movability) => {
-                    let tag = Self::tag_for(entity);
-                    match scene.light_by_tag(tag) {
-                        Some(id) => {
-                            let _ = scene.update_light(id, gpu);
-                        }
-                        None => {
-                            scene.insert_light_with_movability(gpu, movability, tag);
-                        }
-                    }
-                }
-                PendingOp::RemoveLight(entity) => {
-                    if let Some(id) = scene.light_by_tag(Self::tag_for(entity)) {
-                        let _ = scene.remove_light(id);
                     }
                 }
                 PendingOp::RemoveObject(entity) => {
@@ -302,11 +283,12 @@ impl Subsystem for HelioRenderSubsystem {
 
     /// Drains this frame's `Delta` from `world`'s attached change tracker
     /// (a no-op if none is attached -- see [`Self`]'s doc) and queues
-    /// [`PendingOp`]s for [`Self::apply_to`]: materials and lights first
-    /// (so an object referencing a material added in the same frame
-    /// resolves correctly once `apply_to` runs), then removals for
-    /// despawned entities, then static-mesh and multi-material object
-    /// upserts/updates.
+    /// [`PendingOp`]s for [`Self::apply_to`]: materials first (so an object
+    /// referencing a material added in the same frame resolves correctly
+    /// once `apply_to` runs), then removals for despawned entities, then
+    /// static-mesh and multi-material object upserts/updates. Lights are not
+    /// handled here -- see `crate::components`'s "No `LightComponent` here"
+    /// doc section.
     fn simulate_b(&mut self, world: &mut World, _witness: &SimulateB) {
         let Some(tracker) = world.change_tracker().cloned() else {
             return;
@@ -316,7 +298,6 @@ impl Subsystem for HelioRenderSubsystem {
         let material_slot_cid = component_id::<MaterialSlot>();
         let static_mesh_cid = component_id::<StaticMeshComponent>();
         let multi_mesh_cid = component_id::<MultiMaterialStaticMeshComponent>();
-        let light_cid = component_id::<LightComponent>();
         let shared_cids: [ComponentId; 3] =
             [component_id::<RenderTransform>(), component_id::<RenderBounds>(), component_id::<RenderFlags>()];
 
@@ -335,18 +316,11 @@ impl Subsystem for HelioRenderSubsystem {
                     None => self.pending.push(PendingOp::RemoveMaterial(cd.entity)),
                 }
             }
-            if cd.component_type == light_cid {
-                match world.get::<LightComponent>(cd.entity) {
-                    Some(light) => self.pending.push(PendingOp::UpsertLight(cd.entity, light.light, light.movability)),
-                    None => self.pending.push(PendingOp::RemoveLight(cd.entity)),
-                }
-            }
         }
 
         // -- Despawned entities: drop whatever they owned, across every kind.
         for &entity in &delta.despawned {
             self.pending.push(PendingOp::RemoveMaterial(entity));
-            self.pending.push(PendingOp::RemoveLight(entity));
             self.pending.push(PendingOp::RemoveObject(entity));
             self.pending.push(PendingOp::RemoveSectionedObject(entity));
         }

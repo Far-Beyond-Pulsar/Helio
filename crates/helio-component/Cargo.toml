@@ -1,0 +1,71 @@
+[package]
+name = "helio_component"
+version = "0.1.0"
+edition = "2024"
+
+# This crate is a member of Helio's OWN separate Cargo workspace by directory
+# nesting (`crates/renderer/helio/Cargo.toml`'s `members = ["crates/*", ...]`
+# glob picks it up automatically) -- BUT it explicitly belongs to
+# Pulsar-Native's workspace instead, via this override. This matters for
+# correctness, not just style: `pulsar_scenedb`/`pulsar_reflection`/
+# `pulsar_world_registry` all use `inventory`-based global registration
+# (`#[register_world_component]`, `#[register_runtime_behavior]`, reflection
+# `REGISTRY` statics) -- two compiled copies of the SAME crate (e.g. one
+# pinned to a different git rev than the other) get two SEPARATE registries
+# that can't see each other's registrations, even though the code looks
+# identical. `engine_backend`/`ui_level_editor` (the live editor this crate's
+# components are registered into) are built as part of Pulsar-Native's root
+# workspace resolution, pinned to specific git revs there
+# (`pulsar_scenedb` @ `43921b0d...`, `pulsar_reflection` @ `b0d9b957...`, see
+# root Cargo.toml). For `LightComponent`/`StaticMeshComponent`/etc. registered
+# here to actually be visible to the live `World` the properties panel reads
+# and writes, this crate's own `pulsar_scenedb`/`pulsar_reflection`/
+# `pulsar_world_registry` MUST resolve to those SAME exact sources -- not
+# `helio-scenedb`'s own, separately-pinned, local-dev-path `pulsar_scenedb`
+# (a different, unmerged branch). `workspace = "../../../../.."` makes this
+# crate inherit from Pulsar-Native's root `[workspace.dependencies]` (and
+# root `[patch]` table) instead of Helio's own, so the deps below that use
+# `{ workspace = true }` resolve identically to how `engine_backend` resolves
+# them -- guaranteeing one shared copy, not two.
+workspace = "../../../../.."
+
+[dependencies]
+engine_class_derive = { workspace = true }
+# M3-alpha Task 2 (audit follow-up): `prims-gpui` is required here — this
+# crate defines its own GPUI property editors (`render_script_asset_editor`,
+# `render_mesh_asset_editor` in src/components/{script,static_mesh}_component.rs)
+# via `#[pulsar_reflection::pulsar_type(editor = ...)]`, which needs
+# `pulsar_reflection::PropertyEditorArgs`'s GPUI-typed fields and
+# `erase_property_editor_fn_ptr`. `gpui-ce`/`ui` are already unconditional
+# deps of this crate below, so this only affects `pulsar_reflection`'s own
+# feature set, not this crate's dependency tree.
+pulsar_reflection = { workspace = true, features = ["prims-gpui"] }
+pulsar_events = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_world_registry = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+glam = { workspace = true, features = ["serde"] }
+helio.workspace = true
+libhelio.workspace = true
+helio-asset-compat = { workspace = true }
+helio-planet-voxel-core = { workspace = true }
+helio-pass-planetary-voxel = { workspace = true }
+pulsar_terrain.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true
+gpui-ce.workspace = true
+ui.workspace = true
+ui_common.workspace = true
+plugin_editor_api.workspace = true
+engine_fs.workspace = true
+engine_state.workspace = true
+engine_subsystems.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+pollster = "=0.4.0"
+
+[lints]
+workspace = true

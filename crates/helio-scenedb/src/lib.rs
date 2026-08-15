@@ -25,7 +25,7 @@ pub mod subsystem;
 pub mod wgsl;
 
 pub use components::{
-    LightComponent, MaterialSlot, MultiMaterialStaticMeshComponent, RenderBounds, RenderFlags,
+    MaterialSlot, MultiMaterialStaticMeshComponent, RenderBounds, RenderFlags,
     RenderTransform, SdbGpuMaterial, StaticMeshComponent,
 };
 pub use subsystem::HelioRenderSubsystem;

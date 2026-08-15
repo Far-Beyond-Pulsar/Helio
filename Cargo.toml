@@ -25,6 +25,14 @@ exclude = [
     # the working directory, and the `crates/*` member glob would otherwise try
     # to read it as a workspace member and fail.
     "crates/bake_cache",
+    # helio_component declares `package.workspace = "../../../../.."` (belongs to
+    # Pulsar-Native's root workspace, not this one -- see its own Cargo.toml
+    # doc comment for why: inventory-based registry identity with
+    # pulsar_scenedb/pulsar_reflection requires it to share exactly
+    # Pulsar-Native's resolution, not this workspace's). A crate can't
+    # simultaneously be swept up by this workspace's `crates/*` glob AND
+    # declare a different governing workspace, so it's excluded here.
+    "crates/helio-component",
 ]
 resolver = "2"
 

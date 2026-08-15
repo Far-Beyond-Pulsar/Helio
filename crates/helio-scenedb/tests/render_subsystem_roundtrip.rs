@@ -19,7 +19,6 @@ use glam::{Mat4, Vec3};
 use helio::{GroupMask, Scene};
 use helio_scenedb::{HelioRenderSubsystem, RenderBounds, RenderFlags, RenderTransform, StaticMeshComponent};
 use libhelio::material::GpuMaterial;
-use libhelio::GpuLight;
 use pulsar_scenedb::gpu::{GpuMirrorHandle, SceneGpuStore};
 use pulsar_scenedb::{SceneDb, SharedChangeTracker};
 
@@ -127,36 +126,17 @@ fn the_very_first_entity_spawned_in_a_fresh_world_still_resolves_via_user_tag() 
     );
 }
 
-#[test]
-fn light_spawn_update_despawn_round_trips_through_helio_scene() {
-    let (mut scene_db, mut scene, _mesh_id) = setup();
-
-    let light = scene_db.world.spawn();
-    scene_db.world.insert(
-        light,
-        helio_scenedb::LightComponent::new(GpuLight {
-            color_intensity: [1.0, 1.0, 1.0, 500.0],
-            ..bytemuck::Zeroable::zeroed()
-        }),
-    );
-
-    run_frame(&mut scene_db, &mut scene);
-
-    let tag = HelioRenderSubsystem::tag_for(light);
-    let light_id = scene.light_by_tag(tag).expect("light must exist in Scene after the first frame");
-    assert_eq!(scene.get_light(light_id).unwrap().color_intensity[3], 500.0);
-
-    // -- Update: same LightId before and after (update_light, not remove+reinsert).
-    scene_db.world.get_mut::<helio_scenedb::LightComponent>(light).unwrap().light.color_intensity[3] = 900.0;
-    run_frame(&mut scene_db, &mut scene);
-
-    let light_id_after = scene.light_by_tag(tag).expect("light must still exist");
-    assert_eq!(light_id_after, light_id, "updating a light must not change its LightId");
-    assert_eq!(scene.get_light(light_id_after).unwrap().color_intensity[3], 900.0);
-
-    // -- Despawn: the light must disappear from Scene too.
-    scene_db.world.despawn(light);
-    run_frame(&mut scene_db, &mut scene);
-
-    assert!(scene.light_by_tag(tag).is_none(), "despawning the SceneDB entity must remove the Helio light");
-}
+// NOTE: there used to be a `light_spawn_update_despawn_round_trips_through_helio_scene`
+// test here, exercising a plain `helio_scenedb::LightComponent` shadow type that
+// `HelioRenderSubsystem` watched via the change tracker. That component has been
+// removed -- see `crate::components`'s "No `LightComponent` here" doc section --
+// because it only existed to give this crate something to translate from,
+// duplicating the real, editor-facing `helio_component::LightComponent` that
+// already lives in `World` on the Pulsar-Native side. The
+// `LightComponent -> GpuLight` translation and the dispatch that drives
+// `Scene::insert_light_with_movability`/`update_light`/`remove_light` from it now
+// live in `engine_backend`, which already depends on both `helio` and
+// `helio_component` -- this crate can't reach `helio_component` without pulling
+// a large, editor-shaped dependency tree into Helio's otherwise-standalone
+// workspace. `helio_component::LightComponent::to_gpu_light` is unit-tested in
+// that crate directly; there is no equivalent seam test to keep here for lights.

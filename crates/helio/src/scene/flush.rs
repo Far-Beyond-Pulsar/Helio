@@ -75,7 +75,13 @@ impl Scene {
         // ── Rebuild lights buffer to only contain movable lights ─────────────
         // Static/stationary lights are baked and should not contribute to real-time lighting.
         // This dramatically improves performance when scenes have many baked lights.
-        {
+        //
+        // Gated on `lights_dirty` (set by insert_light*/update_light/remove_light) --
+        // unlike objects_dirty/vg_objects_dirty below, this rebuild used to run
+        // unconditionally on every flush() call regardless of whether any light had
+        // actually changed, which is wasted CPU work on every single frame in the
+        // overwhelmingly common case of a static light set.
+        if self.lights_dirty {
             let light_rec_count = self.lights.dense_len();
             let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
             let mut gpu_idx = 0u32;
@@ -90,17 +96,21 @@ impl Scene {
                 }
             }
 
-            // Replace the lights buffer with only movable lights
-            self.gpu_scene.lights.set_data(movable_lights.clone());
-            self.gpu_scene.movable_light_count = movable_lights.len() as u32;
+            // Replace the lights buffer with only movable lights. `movable_lights` isn't
+            // read again after this, so move it in rather than cloning it.
+            let movable_count = movable_lights.len();
+            self.gpu_scene.lights.set_data(movable_lights);
+            self.gpu_scene.movable_light_count = movable_count as u32;
 
-            if movable_lights.len() < light_rec_count {
+            if movable_count < light_rec_count {
                 log::trace!(
                     "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
-                    movable_lights.len(),
-                    light_rec_count - movable_lights.len()
+                    movable_count,
+                    light_rec_count - movable_count
                 );
             }
+
+            self.lights_dirty = false;
         }
 
         // Assign shadow atlas slots to the highest-importance shadow-casting lights.

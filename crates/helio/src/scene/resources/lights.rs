@@ -81,6 +81,12 @@ impl super::super::Scene {
             self.bake_invalidated = true;
         }
 
+        // A newly-inserted light is pushed onto `gpu_scene.lights` as-is (including
+        // if it's static), mirroring the full dense arena 1:1 for now. The next
+        // flush() must run its movable-only filter/rebuild to correct this, so mark
+        // the buffer dirty regardless of movability.
+        self.lights_dirty = true;
+
         id
     }
 
@@ -144,6 +150,14 @@ impl super::super::Scene {
         let gpu_index = record.gpu_index as usize;
         let updated = self.gpu_scene.lights.update(gpu_index, light);
         debug_assert!(updated, "GPU light index {} out of bounds (len {}) — flush may have mis-indexed this light", gpu_index, self.gpu_scene.lights.len());
+
+        // The direct `.update()` above already patches the correct slot in the GPU
+        // buffer in place, so this doesn't strictly need a full flush-time rebuild.
+        // Still mark dirty (matching the previous unconditional-every-flush behavior
+        // for any frame that touched a light) so the movable-only filter/reindex in
+        // flush() stays exactly as authoritative as it was before this dirty-gate was
+        // introduced -- correctness over the marginal extra win of skipping it here.
+        self.lights_dirty = true;
         Ok(())
     }
 
@@ -187,6 +201,10 @@ impl super::super::Scene {
                 record.gpu_index = new_dense_index as u32;
             }
         }
+
+        // Removal changes movable-light membership/count, so the next flush() must
+        // re-run its filter/reindex pass.
+        self.lights_dirty = true;
 
         Ok(())
     }

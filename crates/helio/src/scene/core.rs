@@ -94,6 +94,11 @@ pub struct Scene {
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
 
+    /// True when a light has been inserted, updated, or removed since the last flush
+    /// and the movable-lights GPU buffer needs to be rebuilt. Set by `insert_light*`/
+    /// `update_light`/`remove_light`; cleared once `flush()` rebuilds the buffer.
+    pub(in crate::scene) lights_dirty: bool,
+
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
@@ -369,6 +374,7 @@ impl Scene {
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),
             objects_dirty: true,             // rebuild on first flush
+            lights_dirty: true,               // rebuild movable-lights buffer on first flush
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet
             prev_view_proj: glam::Mat4::IDENTITY,
