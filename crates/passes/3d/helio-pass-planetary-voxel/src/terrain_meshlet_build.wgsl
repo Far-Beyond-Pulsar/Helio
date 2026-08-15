@@ -13,7 +13,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: u32,
+    revision: u32,
 }
 
 struct GpuPageMeta {
@@ -36,8 +36,8 @@ struct GpuSurfaceState {
     transition_index_count: u32,
     regular_meshlet_count: u32,
     transition_meshlet_count: u32,
-    _pad0: u32,
-    _pad1: u32,
+    revision: u32,
+    transition_mask: u32,
 }
 
 struct GpuEmissionCounters {

@@ -103,8 +103,8 @@ fn planetary_surface_shaders_parse_and_validate() {
                 ("transition_index_count".into(), 28),
                 ("regular_meshlet_count".into(), 32),
                 ("transition_meshlet_count".into(), 36),
-                ("_pad0".into(), 40),
-                ("_pad1".into(), 44),
+                ("revision".into(), 40),
+                ("transition_mask".into(), 44),
             ],
         )
     );

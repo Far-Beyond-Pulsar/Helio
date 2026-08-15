@@ -476,7 +476,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: u32,
+    revision: u32,
 }
 
 impl GpuSurfaceJob {
@@ -485,6 +485,7 @@ impl GpuSurfaceJob {
         resident_slot: u32,
         transition_mask: u8,
         generation: u64,
+        revision: u32,
         config: PlanetaryVoxelRenderConfig,
     ) -> Self {
         Self {
@@ -499,7 +500,7 @@ impl GpuSurfaceJob {
             transition_max_indices: config.transition.max_indices,
             regular_max_meshlets: max_meshlets_for_indices(config.regular.max_indices),
             transition_max_meshlets: max_meshlets_for_indices(config.transition.max_indices),
-            _pad: 0,
+            revision,
         }
     }
 }
@@ -517,7 +518,25 @@ struct GpuSurfaceState {
     transition_index_count: u32,
     regular_meshlet_count: u32,
     transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    revision: u32,
+    transition_mask: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PublishedSurface {
+    request: PlanetarySurfaceRequest,
+    slot: u32,
+    publication_generation: u64,
+    revision: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CandidateSurface {
+    request: PlanetarySurfaceRequest,
+    slot: u32,
+    revision: u32,
+    publication_generation: Option<u64>,
+    ready: bool,
 }
 
 #[repr(C, align(16))]
@@ -592,6 +611,11 @@ pub struct PlanetaryVoxelRenderPass {
     /// Sampling-only halo pages may occupy any residency slot without
     /// consuming one of these bounded renderable allocations.
     surface_slots: BTreeMap<PlanetPageKey, u32>,
+    requested_visible: BTreeMap<PlanetPageKey, PlanetarySurfaceRequest>,
+    active_surfaces: BTreeMap<PlanetPageKey, PublishedSurface>,
+    candidate_surfaces: BTreeMap<PlanetPageKey, CandidateSurface>,
+    handoff_planet: Option<PlanetId>,
+    next_surface_revision: u32,
     prepared: bool,
     visible: BTreeMap<PlanetPageKey, u8>,
     counters: PlanetaryRenderCounters,
@@ -1118,6 +1142,11 @@ impl PlanetaryVoxelRenderPass {
             dependency_targets: BTreeMap::new(),
             invalidated_surfaces: BTreeSet::new(),
             surface_slots: BTreeMap::new(),
+            requested_visible: BTreeMap::new(),
+            active_surfaces: BTreeMap::new(),
+            candidate_surfaces: BTreeMap::new(),
+            handoff_planet: None,
+            next_surface_revision: 1,
             prepared: false,
             visible: BTreeMap::new(),
             counters: PlanetaryRenderCounters::default(),
@@ -1264,6 +1293,12 @@ impl PlanetaryVoxelRenderPass {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> PlanetaryRenderDiagnostics {
+        self.advance_diagnostics_readback(device, queue);
+        self.refresh_cpu_diagnostics();
+        self.diagnostics_cache.clone()
+    }
+
+    fn advance_diagnostics_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let _ = device.poll(wgpu::PollType::Poll);
         let mut completion = None;
         let mut disconnected = false;
@@ -1290,7 +1325,7 @@ impl PlanetaryVoxelRenderPass {
                 .expect("completed planetary diagnostics readback exists");
             match result {
                 Ok(()) => {
-                    if self.consume_diagnostics_readback(&pending.buffer) {
+                    if self.consume_diagnostics_readback(queue, &pending.buffer) {
                         self.diagnostic_available = Some(pending.buffer);
                     } else {
                         self.diagnostics_cache.readback_failures =
@@ -1304,11 +1339,9 @@ impl PlanetaryVoxelRenderPass {
                 }
             }
         }
-        self.refresh_cpu_diagnostics();
         if self.diagnostic_readback.is_none() {
             self.start_diagnostics_readback(device, queue);
         }
-        self.diagnostics_cache.clone()
     }
 
     fn diagnostics_readback_layout(&self) -> DiagnosticsReadbackLayout {
@@ -1399,7 +1432,7 @@ impl PlanetaryVoxelRenderPass {
         });
     }
 
-    fn consume_diagnostics_readback(&mut self, buffer: &wgpu::Buffer) -> bool {
+    fn consume_diagnostics_readback(&mut self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> bool {
         let layout = self.diagnostics_readback_layout();
         let mapped = match buffer.slice(..).get_mapped_range() {
             Ok(mapped) => mapped,
@@ -1418,7 +1451,8 @@ impl PlanetaryVoxelRenderPass {
         );
         let states = bytemuck::cast_slice::<u8, GpuSurfaceState>(
             &mapped[layout.state_offset as usize..layout.regular_draw_offset as usize],
-        );
+        )
+        .to_vec();
         let regular_draws = bytemuck::cast_slice::<u8, DrawIndexedIndirectArgs>(
             &mapped[layout.regular_draw_offset as usize..layout.transition_draw_offset as usize],
         );
@@ -1491,6 +1525,24 @@ impl PlanetaryVoxelRenderPass {
         self.diagnostics_cache.meshlet_invalid_candidates = cull_counters.invalid_candidates;
         drop(mapped);
         buffer.unmap();
+        for candidate in self.candidate_surfaces.values_mut() {
+            let Some(publication_generation) = candidate.publication_generation else {
+                continue;
+            };
+            let Some(state) = states.get(candidate.slot as usize) else {
+                continue;
+            };
+            let state_generation =
+                u64::from(state.generation_low) | (u64::from(state.generation_high) << 32);
+            candidate.ready = state.valid != 0
+                && state_generation == publication_generation
+                && state.revision == candidate.revision
+                && state.transition_mask == u32::from(candidate.request.transition_mask);
+        }
+        if let Err(error) = self.commit_ready_handoff(queue) {
+            log::error!("planetary surface handoff commit failed: {error}");
+            return false;
+        }
         true
     }
 
@@ -1554,11 +1606,6 @@ impl PlanetaryVoxelRenderPass {
         let outcomes = self.residency.apply_upload_batch(device, queue, uploads)?;
         let mut changed_dependencies = BTreeSet::new();
         for (key, outcome) in upload_keys.into_iter().zip(&outcomes) {
-            if let GpuUploadOutcome::Residency(UploadOutcome::Inserted { evicted, .. }) = outcome {
-                for page in evicted {
-                    self.release_surface_slot(queue, page.key);
-                }
-            }
             if matches!(
                 outcome,
                 GpuUploadOutcome::Residency(
@@ -1568,7 +1615,7 @@ impl PlanetaryVoxelRenderPass {
                 changed_dependencies.insert(key);
             }
         }
-        self.requeue_changed_dependencies(&changed_dependencies);
+        self.requeue_changed_dependencies(queue, &changed_dependencies)?;
         self.publish_draw_pages(queue)?;
         Ok(outcomes)
     }
@@ -1580,14 +1627,6 @@ impl PlanetaryVoxelRenderPass {
         evictions: Vec<PageEvict>,
     ) -> Result<Vec<EvictOutcome>, PlanetaryRenderError> {
         let outcomes = self.residency.apply_evict_batch(device, queue, evictions)?;
-        for outcome in &outcomes {
-            if let EvictOutcome::Recorded {
-                removed: Some(page),
-            } = outcome
-            {
-                self.release_surface_slot(queue, page.key);
-            }
-        }
         self.publish_draw_pages(queue)?;
         Ok(outcomes)
     }
@@ -1620,36 +1659,373 @@ impl PlanetaryVoxelRenderPass {
             // must not be able to fail after residency has accepted the set.
             request.required_pages()?;
         }
-        let candidate: BTreeMap<_, _> = set
-            .pages
+        let requested_visible = surface_requests
             .iter()
-            .map(|page| (page.key, page.transition_mask))
-            .collect();
+            .map(|request| (request.key, *request))
+            .collect::<BTreeMap<_, _>>();
+        self.validate_handoff_capacity(&requested_visible)?;
         let outcome = self.residency.apply_visible_set(queue, set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
-            let retired = self
-                .surface_slots
-                .keys()
-                .filter(|key| !candidate.contains_key(key))
-                .copied()
-                .collect::<Vec<_>>();
-            for key in retired {
-                self.release_surface_slot(queue, key);
+            let changed = self.requested_visible != requested_visible;
+            self.requested_visible = requested_visible;
+            if changed && self.handoff_target_is_stale() {
+                self.retarget_handoff(queue)?;
             }
-            for key in candidate.keys().copied() {
-                self.ensure_surface_slot(key)?;
-            }
-            self.visible = candidate;
-            for request in surface_requests {
-                if surface_request_is_current(self.surface_requests.get(&request.key), request) {
-                    continue;
-                }
-                self.register_surface_request(request)?;
-                self.invalidated_surfaces.insert(request.key);
-            }
-            self.publish_draw_pages(queue)?;
+            self.start_next_handoff(queue)?;
         }
         Ok(outcome)
+    }
+
+    fn validate_handoff_capacity(
+        &self,
+        requested: &BTreeMap<PlanetPageKey, PlanetarySurfaceRequest>,
+    ) -> Result<(), PlanetaryRenderError> {
+        let planets = self
+            .active_surfaces
+            .keys()
+            .chain(requested.keys())
+            .map(|key| key.planet)
+            .collect::<BTreeSet<_>>();
+        for planet in planets {
+            let replacement_slots = requested
+                .iter()
+                .filter(|(key, request)| {
+                    key.planet == planet
+                        && (self.invalidated_surfaces.contains(key)
+                            || !self.active_surfaces.get(key).is_some_and(|active| {
+                                surface_request_is_current(Some(&active.request), **request)
+                            }))
+                })
+                .count();
+            let required = self.active_surfaces.len().saturating_add(replacement_slots);
+            if required > self.config.max_surface_pages as usize {
+                return Err(PlanetaryRenderError::SurfaceCapacity {
+                    requested: required,
+                    maximum: self.config.max_surface_pages,
+                });
+            }
+            if replacement_slots > self.config.max_pending_surfaces as usize {
+                return Err(PlanetaryRenderError::PendingSurfaceCapacity {
+                    maximum: self.config.max_pending_surfaces,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn handoff_target_is_stale(&self) -> bool {
+        let Some(planet) = self.handoff_planet else {
+            return false;
+        };
+        let requested = self
+            .requested_visible
+            .iter()
+            .filter(|(key, _)| key.planet == planet)
+            .map(|(key, request)| (*key, *request))
+            .collect::<BTreeMap<_, _>>();
+        let candidate = self
+            .candidate_surfaces
+            .iter()
+            .map(|(key, surface)| (*key, surface.request))
+            .collect::<BTreeMap<_, _>>();
+        requested != candidate
+    }
+
+    fn retarget_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
+        let Some(planet) = self.handoff_planet else {
+            return self.start_next_handoff(queue);
+        };
+        let requested = self
+            .requested_visible
+            .iter()
+            .filter(|(key, _)| key.planet == planet)
+            .map(|(key, request)| (*key, *request))
+            .collect::<Vec<_>>();
+        let previous_candidates = core::mem::take(&mut self.candidate_surfaces);
+        let active_slots = self
+            .active_surfaces
+            .values()
+            .map(|surface| surface.slot)
+            .collect::<BTreeSet<_>>();
+        let mut used_slots = active_slots.clone();
+        let mut candidates = BTreeMap::new();
+
+        for (key, request) in &requested {
+            if self.invalidated_surfaces.contains(key) {
+                continue;
+            }
+            if let Some(candidate) = previous_candidates
+                .get(key)
+                .copied()
+                .filter(|candidate| surface_request_is_current(Some(&candidate.request), *request))
+            {
+                used_slots.insert(candidate.slot);
+                candidates.insert(*key, candidate);
+                continue;
+            }
+            if let Some(active) = self
+                .active_surfaces
+                .get(key)
+                .copied()
+                .filter(|active| surface_request_is_current(Some(&active.request), *request))
+            {
+                candidates.insert(
+                    *key,
+                    CandidateSurface {
+                        request: *request,
+                        slot: active.slot,
+                        revision: active.revision,
+                        publication_generation: Some(active.publication_generation),
+                        ready: true,
+                    },
+                );
+            }
+        }
+
+        for (key, candidate) in &previous_candidates {
+            if candidates.get(key).map(|kept| kept.slot) != Some(candidate.slot)
+                && !active_slots.contains(&candidate.slot)
+            {
+                self.clear_slot(queue, candidate.slot);
+            }
+        }
+
+        for (key, request) in requested {
+            if candidates.contains_key(&key) {
+                continue;
+            }
+            let slot = (0..self.config.max_surface_pages)
+                .find(|slot| !used_slots.contains(slot))
+                .ok_or(PlanetaryRenderError::SurfaceCapacity {
+                    requested: used_slots.len().saturating_add(1),
+                    maximum: self.config.max_surface_pages,
+                })?;
+            used_slots.insert(slot);
+            let revision = self.next_surface_revision;
+            self.next_surface_revision = self.next_surface_revision.wrapping_add(1).max(1);
+            candidates.insert(
+                key,
+                CandidateSurface {
+                    request,
+                    slot,
+                    revision,
+                    publication_generation: None,
+                    ready: false,
+                },
+            );
+        }
+
+        self.pending.retain(|pending| {
+            candidates.get(&pending.key).is_some_and(|candidate| {
+                !candidate.ready && surface_request_is_current(Some(&candidate.request), *pending)
+            })
+        });
+        let candidate_keys = candidates.keys().copied().collect::<BTreeSet<_>>();
+        for key in previous_candidates.keys().copied() {
+            if !candidate_keys.contains(&key) && !self.active_surfaces.contains_key(&key) {
+                self.surface_slots.remove(&key);
+                self.remove_surface_request(key);
+            }
+        }
+        self.candidate_surfaces = candidates;
+        let extraction = self
+            .candidate_surfaces
+            .values()
+            .filter(|candidate| {
+                !candidate.ready
+                    && !self
+                        .pending
+                        .iter()
+                        .any(|pending| pending.key == candidate.request.key)
+            })
+            .map(|candidate| candidate.request)
+            .collect::<Vec<_>>();
+        for request in extraction {
+            self.surface_slots
+                .insert(request.key, self.candidate_surfaces[&request.key].slot);
+            self.register_surface_request(request)?;
+            self.invalidated_surfaces.insert(request.key);
+        }
+        self.drain_invalidated_surfaces();
+        self.commit_ready_handoff(queue)
+    }
+
+    fn start_next_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
+        if self.handoff_planet.is_some() {
+            return Ok(());
+        }
+        let planets = self
+            .active_surfaces
+            .keys()
+            .chain(self.requested_visible.keys())
+            .map(|key| key.planet)
+            .collect::<BTreeSet<_>>();
+        let Some(planet) = planets.into_iter().find(|planet| {
+            let active = self
+                .active_surfaces
+                .iter()
+                .filter(|(key, _)| key.planet == *planet)
+                .map(|(key, surface)| (*key, surface.request))
+                .collect::<BTreeMap<_, _>>();
+            let requested = self
+                .requested_visible
+                .iter()
+                .filter(|(key, _)| key.planet == *planet)
+                .map(|(key, request)| (*key, *request))
+                .collect::<BTreeMap<_, _>>();
+            active != requested
+                || self
+                    .invalidated_surfaces
+                    .iter()
+                    .any(|key| key.planet == *planet && requested.contains_key(key))
+        }) else {
+            return Ok(());
+        };
+
+        let requested = self
+            .requested_visible
+            .iter()
+            .filter(|(key, _)| key.planet == planet)
+            .map(|(key, request)| (*key, *request))
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            self.retire_active_planet(queue, planet);
+            return self.start_next_handoff(queue);
+        }
+
+        let mut used_slots = self
+            .active_surfaces
+            .values()
+            .map(|surface| surface.slot)
+            .collect::<BTreeSet<_>>();
+        let mut candidates = BTreeMap::new();
+        for (key, request) in requested {
+            if let Some(active) = self.active_surfaces.get(&key).copied().filter(|active| {
+                !self.invalidated_surfaces.contains(&key)
+                    && surface_request_is_current(Some(&active.request), request)
+            }) {
+                candidates.insert(
+                    key,
+                    CandidateSurface {
+                        request,
+                        slot: active.slot,
+                        revision: active.revision,
+                        publication_generation: Some(active.publication_generation),
+                        ready: true,
+                    },
+                );
+                continue;
+            }
+            let slot = (0..self.config.max_surface_pages)
+                .find(|slot| !used_slots.contains(slot))
+                .ok_or(PlanetaryRenderError::SurfaceCapacity {
+                    requested: used_slots.len().saturating_add(1),
+                    maximum: self.config.max_surface_pages,
+                })?;
+            used_slots.insert(slot);
+            let revision = self.next_surface_revision;
+            self.next_surface_revision = self.next_surface_revision.wrapping_add(1).max(1);
+            candidates.insert(
+                key,
+                CandidateSurface {
+                    request,
+                    slot,
+                    revision,
+                    publication_generation: None,
+                    ready: false,
+                },
+            );
+        }
+
+        self.handoff_planet = Some(planet);
+        self.candidate_surfaces = candidates;
+        let extraction = self
+            .candidate_surfaces
+            .values()
+            .filter(|candidate| !candidate.ready)
+            .map(|candidate| candidate.request)
+            .collect::<Vec<_>>();
+        for request in extraction {
+            self.surface_slots
+                .insert(request.key, self.candidate_surfaces[&request.key].slot);
+            self.register_surface_request(request)?;
+            self.invalidated_surfaces.insert(request.key);
+        }
+        self.drain_invalidated_surfaces();
+        self.commit_ready_handoff(queue)?;
+        Ok(())
+    }
+
+    fn retire_active_planet(&mut self, queue: &wgpu::Queue, planet: PlanetId) {
+        let retired = self
+            .active_surfaces
+            .keys()
+            .filter(|key| key.planet == planet)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in retired {
+            if let Some(surface) = self.active_surfaces.remove(&key) {
+                self.clear_slot(queue, surface.slot);
+            }
+            self.visible.remove(&key);
+            self.surface_slots.remove(&key);
+            self.remove_surface_request(key);
+        }
+        let _ = self.publish_draw_pages(queue);
+    }
+
+    fn commit_ready_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
+        let Some(planet) = self.handoff_planet else {
+            return Ok(());
+        };
+        if self
+            .candidate_surfaces
+            .values()
+            .any(|surface| !surface.ready)
+        {
+            return Ok(());
+        }
+        let previous = self
+            .active_surfaces
+            .iter()
+            .filter(|(key, _)| key.planet == planet)
+            .map(|(key, surface)| (*key, *surface))
+            .collect::<BTreeMap<_, _>>();
+        let candidates = core::mem::take(&mut self.candidate_surfaces);
+        let retained_slots = candidates
+            .values()
+            .map(|candidate| candidate.slot)
+            .collect::<BTreeSet<_>>();
+        for (key, surface) in previous {
+            self.active_surfaces.remove(&key);
+            if !retained_slots.contains(&surface.slot) {
+                self.clear_slot(queue, surface.slot);
+            }
+            if !candidates.contains_key(&key) {
+                self.surface_slots.remove(&key);
+                self.remove_surface_request(key);
+            }
+            self.visible.remove(&key);
+        }
+        for (key, candidate) in candidates {
+            let publication_generation = candidate
+                .publication_generation
+                .expect("ready candidate has a publication generation");
+            self.surface_slots.insert(key, candidate.slot);
+            self.visible.insert(key, candidate.request.transition_mask);
+            self.active_surfaces.insert(
+                key,
+                PublishedSurface {
+                    request: candidate.request,
+                    slot: candidate.slot,
+                    publication_generation,
+                    revision: candidate.revision,
+                },
+            );
+        }
+        self.handoff_planet = None;
+        self.publish_draw_pages(queue)?;
+        self.start_next_handoff(queue)
     }
 
     pub fn queue_surface(
@@ -1703,21 +2079,21 @@ impl PlanetaryVoxelRenderPass {
         if let Some(slot) = self.surface_slots.get(&key).copied() {
             return Ok(slot);
         }
+        let used_slots = self
+            .active_surfaces
+            .values()
+            .map(|surface| surface.slot)
+            .chain(self.candidate_surfaces.values().map(|surface| surface.slot))
+            .chain(self.surface_slots.values().copied())
+            .collect::<BTreeSet<_>>();
         let slot = (0..self.config.max_surface_pages)
-            .find(|slot| !self.surface_slots.values().any(|occupied| occupied == slot))
+            .find(|slot| !used_slots.contains(slot))
             .ok_or(PlanetaryRenderError::SurfaceCapacity {
-                requested: self.surface_slots.len().saturating_add(1),
+                requested: used_slots.len().saturating_add(1),
                 maximum: self.config.max_surface_pages,
             })?;
         self.surface_slots.insert(key, slot);
         Ok(slot)
-    }
-
-    fn release_surface_slot(&mut self, queue: &wgpu::Queue, key: PlanetPageKey) {
-        self.remove_surface_request(key);
-        if let Some(slot) = self.surface_slots.remove(&key) {
-            self.clear_slot(queue, slot);
-        }
     }
 
     fn register_surface_request(
@@ -1774,7 +2150,11 @@ impl PlanetaryVoxelRenderPass {
         self.pending.retain(|request| request.key != target);
     }
 
-    fn requeue_changed_dependencies(&mut self, changed: &BTreeSet<PlanetPageKey>) {
+    fn requeue_changed_dependencies(
+        &mut self,
+        queue: &wgpu::Queue,
+        changed: &BTreeSet<PlanetPageKey>,
+    ) -> Result<(), PlanetaryRenderError> {
         let mut targets = BTreeSet::new();
         for dependency in changed {
             let current_generation = self
@@ -1797,14 +2177,22 @@ impl PlanetaryVoxelRenderPass {
             }
         }
         self.invalidated_surfaces.extend(targets);
+        self.start_next_handoff(queue)?;
         self.drain_invalidated_surfaces();
+        Ok(())
     }
 
     fn drain_invalidated_surfaces(&mut self) {
+        let candidate_requests = self
+            .candidate_surfaces
+            .iter()
+            .filter(|(_, candidate)| !candidate.ready)
+            .map(|(key, candidate)| (*key, candidate.request))
+            .collect::<BTreeMap<_, _>>();
         drain_invalidated_surface_requests(
             &mut self.invalidated_surfaces,
             &mut self.pending,
-            &self.surface_requests,
+            &candidate_requests,
             self.config.max_pending_surfaces as usize,
             |target| {
                 self.residency
@@ -1848,10 +2236,7 @@ impl PlanetaryVoxelRenderPass {
 
     fn publish_draw_pages(&self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
         let mut pages = vec![GpuDrawPage::default(); self.config.max_surface_pages as usize];
-        for (key, surface_slot) in &self.surface_slots {
-            let Some(resident) = self.residency.cache().resident(*key) else {
-                continue;
-            };
+        for (key, surface) in &self.active_surfaces {
             let frame = self
                 .residency
                 .planet_frame(key.planet)
@@ -1859,19 +2244,19 @@ impl PlanetaryVoxelRenderPass {
             let meta = GpuPageMeta::new(
                 key.page,
                 frame.frame_origin_lod0_cell(),
-                resident.slot,
-                resident.publication_generation,
+                surface.slot,
+                surface.publication_generation,
                 0,
             )?;
-            pages[*surface_slot as usize] = GpuDrawPage {
+            pages[surface.slot as usize] = GpuDrawPage {
                 relative_lod0_cell_min: meta.relative_lod0_cell_min,
                 lod: meta.lod,
                 camera_relative_m: frame.camera_relative_m,
                 lod0_cell_size_m: frame.lod0_cell_size_m,
-                generation_low: resident.publication_generation as u32,
-                generation_high: (resident.publication_generation >> 32) as u32,
-                transition_mask: u32::from(self.visible.get(key).copied().unwrap_or(0)),
-                visible: u32::from(self.visible.contains_key(key)),
+                generation_low: surface.publication_generation as u32,
+                generation_high: (surface.publication_generation >> 32) as u32,
+                transition_mask: u32::from(surface.request.transition_mask),
+                visible: 1,
             };
         }
         queue.write_buffer(&self.draw_page_buffer, 0, bytemuck::cast_slice(&pages));
@@ -1894,6 +2279,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.prepared = false;
+        self.advance_diagnostics_readback(ctx.device, ctx.queue);
         self.drain_invalidated_surfaces();
         let queued = self.pending.len();
         for _ in 0..queued {
@@ -1916,6 +2302,11 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     self.counters.stale_surface_rejections.saturating_add(1);
                 continue;
             };
+            let revision = self
+                .candidate_surfaces
+                .get(&front.key)
+                .filter(|candidate| surface_request_is_current(Some(&candidate.request), front))
+                .map_or(0, |candidate| candidate.revision);
             let dependencies = match front.required_pages() {
                 Ok(dependencies) => dependencies,
                 Err(error) => {
@@ -1952,8 +2343,15 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 resident.slot,
                 front.transition_mask,
                 resident.publication_generation,
+                revision,
                 self.config,
             );
+            if let Some(candidate) = self.candidate_surfaces.get_mut(&front.key) {
+                if candidate.revision == revision {
+                    candidate.publication_generation = Some(resident.publication_generation);
+                    candidate.ready = false;
+                }
+            }
             ctx.write_buffer(&self.job_buffer, 0, bytemuck::bytes_of(&job));
             self.surface_sampler.prepare(
                 ctx.queue,
@@ -2692,18 +3090,143 @@ mod tests {
             };
             pass.apply_visible_set(&queue, visible(1, 0)).unwrap();
             assert_eq!(pass.surface_requests.len(), 1);
-            assert_eq!(pass.invalidated_surfaces, BTreeSet::from([key]));
+            assert!(pass.invalidated_surfaces.is_empty());
+            assert_eq!(
+                pass.pending
+                    .iter()
+                    .map(|request| request.key)
+                    .collect::<Vec<_>>(),
+                vec![key]
+            );
+            let first_revision = pass.candidate_surfaces[&key].revision;
 
-            pass.invalidated_surfaces.clear();
             pass.apply_visible_set(&queue, visible(2, 0)).unwrap();
             assert!(
                 pass.invalidated_surfaces.is_empty(),
                 "an unchanged frontier must not re-extract every frame"
             );
+            assert_eq!(pass.pending.len(), 1);
+            assert_eq!(pass.candidate_surfaces[&key].revision, first_revision);
 
             pass.apply_visible_set(&queue, visible(3, 1)).unwrap();
-            assert_eq!(pass.invalidated_surfaces, BTreeSet::from([key]));
+            assert!(pass.invalidated_surfaces.is_empty());
+            assert_eq!(pass.pending.len(), 1);
+            assert_ne!(pass.candidate_surfaces[&key].revision, first_revision);
+            assert_eq!(pass.pending.front().unwrap().transition_mask, 1);
             assert_eq!(pass.surface_requests[&key].transition_mask, 1);
+        });
+    }
+
+    #[test]
+    fn replacement_frontier_keeps_parent_active_until_child_surface_is_ready() {
+        pollster::block_on(async {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let Ok(adapter) = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                    apply_limit_buckets: false,
+                })
+                .await
+            else {
+                eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Planetary atomic frontier handoff test device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let mut pass = PlanetaryVoxelRenderPass::new(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                PlanetaryVoxelRenderConfig::validation_demo(),
+            )
+            .unwrap();
+            let planet = PlanetId([0x51; 16]);
+            let parent = PlanetPageKey::new(planet, PageKey::new(2, [0, 0, 0]));
+            let child = PlanetPageKey::new(planet, PageKey::new(1, [0, 0, 0]));
+            let generation = SourceGeneration::new(7, 1);
+            pass.set_planet_frame(
+                &queue,
+                PlanetFrameUniform::from_camera(planet, PlanetPosition::from_lod0_cell([0; 3]), 1),
+            )
+            .unwrap();
+            pass.apply_upload_batch(
+                &device,
+                &queue,
+                vec![
+                    PageUpload::new(parent, generation, vec![CellWord::AIR; PAGE_CELL_COUNT])
+                        .unwrap(),
+                    PageUpload::new(child, generation, vec![CellWord::AIR; PAGE_CELL_COUNT])
+                        .unwrap(),
+                ],
+            )
+            .unwrap();
+            let parent_publication = pass
+                .residency
+                .cache()
+                .resident(parent)
+                .unwrap()
+                .publication_generation;
+            let parent_request = PlanetarySurfaceRequest {
+                key: parent,
+                generation,
+                transition_mask: 0,
+                dirty_microbricks: u64::MAX,
+            };
+            pass.active_surfaces.insert(
+                parent,
+                PublishedSurface {
+                    request: parent_request,
+                    slot: 0,
+                    publication_generation: parent_publication,
+                    revision: 1,
+                },
+            );
+            pass.surface_slots.insert(parent, 0);
+            pass.visible.insert(parent, 0);
+            pass.requested_visible.insert(parent, parent_request);
+
+            pass.apply_visible_set(
+                &queue,
+                VisiblePageSet {
+                    frame_index: 2,
+                    pages: vec![VisiblePage {
+                        key: child,
+                        generation,
+                        transition_mask: 0,
+                    }],
+                },
+            )
+            .unwrap();
+
+            assert!(pass.active_surfaces.contains_key(&parent));
+            assert!(!pass.active_surfaces.contains_key(&child));
+            assert!(pass.visible.contains_key(&parent));
+            assert_eq!(pass.handoff_planet, Some(planet));
+            let child_publication = pass
+                .residency
+                .cache()
+                .resident(child)
+                .unwrap()
+                .publication_generation;
+            let candidate = pass.candidate_surfaces.get_mut(&child).unwrap();
+            candidate.publication_generation = Some(child_publication);
+            candidate.ready = true;
+            pass.commit_ready_handoff(&queue).unwrap();
+
+            assert!(!pass.active_surfaces.contains_key(&parent));
+            assert!(pass.active_surfaces.contains_key(&child));
+            assert!(!pass.visible.contains_key(&parent));
+            assert!(pass.visible.contains_key(&child));
         });
     }
 }

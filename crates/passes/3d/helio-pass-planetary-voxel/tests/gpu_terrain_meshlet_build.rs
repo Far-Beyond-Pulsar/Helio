@@ -21,7 +21,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: u32,
+    revision: u32,
 }
 
 #[repr(C, align(16))]
@@ -37,7 +37,8 @@ struct GpuSurfaceState {
     transition_index_count: u32,
     regular_meshlet_count: u32,
     transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    revision: u32,
+    transition_mask: u32,
 }
 
 #[test]

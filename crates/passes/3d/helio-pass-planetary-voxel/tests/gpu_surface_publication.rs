@@ -22,7 +22,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: u32,
+    revision: u32,
 }
 
 #[repr(C, align(16))]
@@ -38,7 +38,8 @@ struct GpuSurfaceState {
     transition_index_count: u32,
     regular_meshlet_count: u32,
     transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    revision: u32,
+    transition_mask: u32,
 }
 
 #[repr(C, align(16))]
@@ -222,10 +223,18 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             regular_max_indices: 64,
             transition_max_vertices: 16,
             transition_max_indices: 48,
+            revision: 17,
+            transition_mask: 0b00_1011,
             ..Default::default()
         };
-        let metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), [0, 0, 0], 0, 42, 0)
-            .expect("validation metadata is valid");
+        let metadata = GpuPageMeta::new(
+            PageKey::new(0, [0, 0, 0]),
+            [0, 0, 0],
+            job.resident_slot,
+            42,
+            0,
+        )
+        .expect("validation metadata is valid");
         let regular_success = GpuTransvoxelEmissionCounters {
             emitted_vertices: 19,
             emitted_indices: 27,
@@ -378,8 +387,14 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             }
         );
 
-        let current_metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), [0, 0, 0], 0, 43, 0)
-            .expect("validation metadata is valid");
+        let current_metadata = GpuPageMeta::new(
+            PageKey::new(0, [0, 0, 0]),
+            [0, 0, 0],
+            job.resident_slot,
+            43,
+            0,
+        )
+        .expect("validation metadata is valid");
         let overflow = GpuTransvoxelEmissionCounters {
             vertex_overflow: 1,
             ..regular_success
@@ -448,6 +463,8 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
                 transition_index_count: 21,
                 regular_meshlet_count: 1,
                 transition_meshlet_count: 1,
+                revision: 17,
+                transition_mask: 0b00_1011,
                 ..Default::default()
             }
         );

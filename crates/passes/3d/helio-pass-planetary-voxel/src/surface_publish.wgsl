@@ -10,7 +10,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: u32,
+    revision: u32,
 }
 
 struct GpuPageMeta {
@@ -66,8 +66,8 @@ struct GpuSurfaceState {
     transition_index_count: u32,
     regular_meshlet_count: u32,
     transition_meshlet_count: u32,
-    _pad0: u32,
-    _pad1: u32,
+    revision: u32,
+    transition_mask: u32,
 }
 
 struct GpuDrawPage {
@@ -197,8 +197,8 @@ fn publish_surface() {
         transition_counters.emitted_indices,
         (regular_counters.emitted_indices + 62u) / 63u,
         (transition_counters.emitted_indices + 62u) / 63u,
-        0u,
-        0u,
+        job.revision,
+        job.transition_mask,
     );
     let regular_bank = job.slot * 2u + next_bank;
     regular_draws[job.slot] = DrawIndexedIndirectArgs(
