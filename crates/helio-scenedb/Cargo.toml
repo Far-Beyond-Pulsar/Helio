@@ -20,23 +20,18 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
-# TEMPORARY: path-pinned to a local SceneDB checkout on the `unified-GPU`
-# branch (Far-Beyond-Pulsar/SceneDB#42, not yet merged to `main`) instead of
-# the usual `git = "..."` dependency below, because this crate's World/Entity
-# render-component work needs APIs that only exist on that branch:
-# `#[gpu(buffer = "key")]` shared named buffers, `GpuSystemContext::bind`,
-# `Bundle`/`spawn_bundle`, and `World::attach_change_tracker`/
-# `SharedChangeTracker`. Revert to the `git` dependency once #42 merges to
-# `main` -- the path below is a local dev machine path, not portable.
-pulsar_scenedb = { path = "D:/GitHub/SceneDB/crates/pulsar_scenedb", features = ["gpu"] }
-# pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", features = ["gpu"] }
-# TEMPORARY path pin -- see the matching comment on `pulsar_scenedb` above.
+# `unified-GPU` (Far-Beyond-Pulsar/SceneDB#42) merged to `main` 2026-08-15
+# (Pulsar-Native#561 Phase D) -- this crate's World/Entity render-component
+# work needed APIs that only existed on that branch: `#[gpu(buffer = "key")]`
+# shared named buffers, `GpuSystemContext::bind`, `Bundle`/`spawn_bundle`, and
+# `World::attach_change_tracker`/`SharedChangeTracker`. All now on `main`, so
+# this is a real, CI-safe `git`+`rev` pin again, not a local dev-machine path.
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "4895d047a7c70d64814036a099eebe41b9d49c18", features = ["gpu"] }
 # Promoted from dev-dependencies: the new RenderMaterial/RenderMesh/etc
 # render components (SceneDB<->Helio component integration, see
 # HelioRenderSubsystem) are `#[derive(SceneStore)]`d in this crate's own
 # non-test source, not just in benchmark fixtures.
-pulsar_scenedb_derive = { path = "D:/GitHub/SceneDB/crates/pulsar_scenedb_derive" }
-# pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB" }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "4895d047a7c70d64814036a099eebe41b9d49c18" }
 helio = { workspace = true }
 libhelio = { workspace = true }
 # RenderTransform stores a glam::Mat4 directly -- ObjectDescriptor::transform
