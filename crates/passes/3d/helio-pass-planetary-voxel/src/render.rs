@@ -2435,6 +2435,9 @@ pub enum PlanetaryRenderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helio_planet_voxel_core::{
+        CellWord, PageKey, PlanetPosition, VisiblePage, PAGE_CELL_COUNT,
+    };
 
     #[test]
     fn validation_config_is_bounded_and_below_its_declared_budget() {
@@ -2602,5 +2605,87 @@ mod tests {
                 ..request
             }
         ));
+    }
+
+    #[test]
+    fn accepted_visibility_registers_durable_surface_work_once() {
+        pollster::block_on(async {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let mut adapter = None;
+            for force_fallback_adapter in [false, true] {
+                if let Ok(found) = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter,
+                        apply_limit_buckets: false,
+                    })
+                    .await
+                {
+                    adapter = Some(found);
+                    break;
+                }
+            }
+            let Some(adapter) = adapter else {
+                eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER");
+                return;
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("Planetary visible-surface scheduling test device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let mut pass = PlanetaryVoxelRenderPass::new(
+                &device,
+                &queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                PlanetaryVoxelRenderConfig::validation_demo(),
+            )
+            .unwrap();
+            let planet = PlanetId([0x31; 16]);
+            let key = PlanetPageKey::new(planet, PageKey::new(1, [0, 0, 0]));
+            let generation = SourceGeneration::new(1, 1);
+            pass.set_planet_frame(
+                &queue,
+                PlanetFrameUniform::from_camera(planet, PlanetPosition::from_lod0_cell([0; 3]), 1),
+            )
+            .unwrap();
+            pass.apply_upload_batch(
+                &device,
+                &queue,
+                vec![
+                    PageUpload::new(key, generation, vec![CellWord::AIR; PAGE_CELL_COUNT]).unwrap(),
+                ],
+            )
+            .unwrap();
+
+            let visible = |frame_index, transition_mask| VisiblePageSet {
+                frame_index,
+                pages: vec![VisiblePage {
+                    key,
+                    generation,
+                    transition_mask,
+                }],
+            };
+            pass.apply_visible_set(&queue, visible(1, 0)).unwrap();
+            assert_eq!(pass.surface_requests.len(), 1);
+            assert_eq!(pass.invalidated_surfaces, BTreeSet::from([key]));
+
+            pass.invalidated_surfaces.clear();
+            pass.apply_visible_set(&queue, visible(2, 0)).unwrap();
+            assert!(
+                pass.invalidated_surfaces.is_empty(),
+                "an unchanged frontier must not re-extract every frame"
+            );
+
+            pass.apply_visible_set(&queue, visible(3, 1)).unwrap();
+            assert_eq!(pass.invalidated_surfaces, BTreeSet::from([key]));
+            assert_eq!(pass.surface_requests[&key].transition_mask, 1);
+        });
     }
 }
