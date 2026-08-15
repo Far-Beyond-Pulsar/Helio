@@ -11,6 +11,7 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
@@ -20,7 +21,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: [u32; 2],
+    _pad: u32,
 }
 
 #[repr(C, align(16))]
@@ -89,6 +90,8 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
         });
 
         let job = GpuSurfaceJob {
+            slot: 0,
+            resident_slot: 3,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
             regular_max_vertices: vertices.len() as u32,
@@ -100,7 +103,7 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             ..Default::default()
         };
         let page = GpuPageMeta {
-            slot: 0,
+            slot: job.resident_slot,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
             ..Default::default()
@@ -122,7 +125,9 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
         };
 
         let job_buffer = initialized(&device, "Meshlet Job", bytemuck::bytes_of(&job), true);
-        let page_buffer = initialized(&device, "Meshlet Page", bytemuck::bytes_of(&page), false);
+        let mut pages = [GpuPageMeta::default(); 4];
+        pages[job.resident_slot as usize] = page;
+        let page_buffer = initialized(&device, "Meshlet Page", bytemuck::cast_slice(&pages), false);
         let state_buffer = initialized(&device, "Meshlet State", bytemuck::bytes_of(&state), false);
         let counter_buffer = initialized(
             &device,

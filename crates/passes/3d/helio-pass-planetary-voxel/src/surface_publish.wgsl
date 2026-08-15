@@ -1,5 +1,6 @@
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
@@ -9,8 +10,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad0: u32,
-    _pad1: u32,
+    _pad: u32,
 }
 
 struct GpuPageMeta {
@@ -104,8 +104,8 @@ struct DrawIndexedIndirectArgs {
 @group(0) @binding(1) var<storage, read> page_metadata: array<GpuPageMeta>;
 
 fn metadata_is_current() -> bool {
-    let page_meta = page_metadata[job.slot];
-    return page_meta.slot == job.slot &&
+    let page_meta = page_metadata[job.resident_slot];
+    return page_meta.slot == job.resident_slot &&
         page_meta.generation_low == job.generation_low &&
         page_meta.generation_high == job.generation_high;
 }

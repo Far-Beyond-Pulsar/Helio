@@ -3,6 +3,7 @@ const CONE_EPSILON: f32 = 0.0001;
 
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
@@ -12,8 +13,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad0: u32,
-    _pad1: u32,
+    _pad: u32,
 }
 
 struct GpuPageMeta {
@@ -114,8 +114,8 @@ struct MeshletBuild {
 @group(0) @binding(12) var<storage, read_write> transition_bounds: array<GpuTerrainMeshletBounds>;
 
 fn metadata_is_current() -> bool {
-    let page = page_metadata[job.slot];
-    return page.slot == job.slot &&
+    let page = page_metadata[job.resident_slot];
+    return page.slot == job.resident_slot &&
         page.generation_low == job.generation_low &&
         page.generation_high == job.generation_high;
 }

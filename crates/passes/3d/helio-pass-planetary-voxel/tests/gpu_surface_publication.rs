@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
@@ -21,7 +22,7 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: [u32; 2],
+    _pad: u32,
 }
 
 #[repr(C, align(16))]
@@ -215,6 +216,7 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
 
         let job = GpuSurfaceJob {
             slot: 0,
+            resident_slot: 3,
             generation_low: 43,
             regular_max_vertices: 32,
             regular_max_indices: 64,
@@ -272,10 +274,12 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             bytemuck::bytes_of(&job),
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        let mut metadata_pages = [GpuPageMeta::default(); 4];
+        metadata_pages[job.resident_slot as usize] = metadata;
         let metadata_buffer = initialized_buffer(
             &device,
             "Surface Publication Metadata",
-            bytemuck::bytes_of(&metadata),
+            bytemuck::cast_slice(&metadata_pages),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let regular_counters = initialized_buffer(
@@ -380,7 +384,11 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             vertex_overflow: 1,
             ..regular_success
         };
-        queue.write_buffer(&metadata_buffer, 0, bytemuck::bytes_of(&current_metadata));
+        queue.write_buffer(
+            &metadata_buffer,
+            u64::from(job.resident_slot) * core::mem::size_of::<GpuPageMeta>() as u64,
+            bytemuck::bytes_of(&current_metadata),
+        );
         queue.write_buffer(&regular_counters, 0, bytemuck::bytes_of(&overflow));
         dispatch(&device, &queue, &publish_pipeline, &publish_bind_group);
         assert_eq!(

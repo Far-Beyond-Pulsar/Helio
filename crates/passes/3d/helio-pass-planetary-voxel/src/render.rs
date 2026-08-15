@@ -87,8 +87,8 @@ struct GpuTerrainDebugUniform {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanetaryVoxelRenderConfig {
     pub residency: PlanetaryVoxelGpuConfig,
-    /// Resident slots that may own extracted surface arenas. Remaining
-    /// residency slots are sampling-only support pages.
+    /// Independent extracted-surface arenas. Residency slots remain free to
+    /// hold either renderable pages or sampling-only support pages.
     pub max_surface_pages: u32,
     pub max_pending_surfaces: u32,
     pub regular: TransvoxelGpuExtractorConfig,
@@ -163,7 +163,6 @@ impl PlanetaryVoxelRenderConfig {
         if self.max_pending_surfaces == 0 {
             return Err(PlanetaryRenderError::ZeroPendingSurfaces);
         }
-        let resident_pages = u64::from(self.residency.max_resident_pages);
         let surface_pages = u64::from(self.max_surface_pages);
         let banks = u64::from(SURFACE_BANKS);
         let regular_vertex_bytes = checked_product(&[
@@ -216,14 +215,14 @@ impl PlanetaryVoxelRenderConfig {
             u64::from(transition_meshlets),
             core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
         ])?;
-        let state_bytes = resident_pages
+        let state_bytes = surface_pages
             .checked_mul(core::mem::size_of::<GpuSurfaceState>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let draw_page_bytes = resident_pages
+        let draw_page_bytes = surface_pages
             .checked_mul(core::mem::size_of::<GpuDrawPage>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
         let feedback_bytes = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
-        let indirect_bytes = resident_pages
+        let indirect_bytes = surface_pages
             .checked_mul(DRAW_ARGS_BYTES)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
         let regular_meshlet_draw_capacity = surface_pages
@@ -467,6 +466,7 @@ pub struct PlanetaryRenderDiagnostics {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
@@ -476,18 +476,20 @@ struct GpuSurfaceJob {
     transition_max_indices: u32,
     regular_max_meshlets: u32,
     transition_max_meshlets: u32,
-    _pad: [u32; 2],
+    _pad: u32,
 }
 
 impl GpuSurfaceJob {
     fn new(
         slot: u32,
+        resident_slot: u32,
         transition_mask: u8,
         generation: u64,
         config: PlanetaryVoxelRenderConfig,
     ) -> Self {
         Self {
             slot,
+            resident_slot,
             transition_mask: u32::from(transition_mask),
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
@@ -497,7 +499,7 @@ impl GpuSurfaceJob {
             transition_max_indices: config.transition.max_indices,
             regular_max_meshlets: max_meshlets_for_indices(config.regular.max_indices),
             transition_max_meshlets: max_meshlets_for_indices(config.transition.max_indices),
-            _pad: [0; 2],
+            _pad: 0,
         }
     }
 }
@@ -586,6 +588,10 @@ pub struct PlanetaryVoxelRenderPass {
         BTreeMap<PlanetPageKey, BTreeMap<PlanetPageKey, SourceGeneration>>,
     dependency_targets: BTreeMap<PlanetPageKey, BTreeSet<PlanetPageKey>>,
     invalidated_surfaces: BTreeSet<PlanetPageKey>,
+    /// Surface arenas are intentionally independent from residency slots.
+    /// Sampling-only halo pages may occupy any residency slot without
+    /// consuming one of these bounded renderable allocations.
+    surface_slots: BTreeMap<PlanetPageKey, u32>,
     prepared: bool,
     visible: BTreeMap<PlanetPageKey, u8>,
     counters: PlanetaryRenderCounters,
@@ -748,7 +754,7 @@ impl PlanetaryVoxelRenderPass {
         let state_buffer = create_zeroed_buffer::<GpuSurfaceState>(
             device,
             "Planetary Surface States",
-            config.residency.max_resident_pages,
+            config.max_surface_pages,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
@@ -756,7 +762,7 @@ impl PlanetaryVoxelRenderPass {
         let draw_page_buffer = create_zeroed_buffer::<GpuDrawPage>(
             device,
             "Planetary Draw Pages",
-            config.residency.max_resident_pages,
+            config.max_surface_pages,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let feedback_buffer = create_zeroed_buffer::<GpuSurfaceFeedback>(
@@ -1111,6 +1117,7 @@ impl PlanetaryVoxelRenderPass {
             surface_dependency_generations: BTreeMap::new(),
             dependency_targets: BTreeMap::new(),
             invalidated_surfaces: BTreeSet::new(),
+            surface_slots: BTreeMap::new(),
             prepared: false,
             visible: BTreeMap::new(),
             counters: PlanetaryRenderCounters::default(),
@@ -1305,7 +1312,7 @@ impl PlanetaryVoxelRenderPass {
     }
 
     fn diagnostics_readback_layout(&self) -> DiagnosticsReadbackLayout {
-        let pages = u64::from(self.config.residency.max_resident_pages);
+        let pages = u64::from(self.config.max_surface_pages);
         let gather_counter_offset = core::mem::size_of::<GpuSurfaceFeedback>() as u64;
         let cull_counter_offset =
             gather_counter_offset + core::mem::size_of::<GpuSurfaceGatherCounters>() as u64;
@@ -1549,8 +1556,7 @@ impl PlanetaryVoxelRenderPass {
         for (key, outcome) in upload_keys.into_iter().zip(&outcomes) {
             if let GpuUploadOutcome::Residency(UploadOutcome::Inserted { evicted, .. }) = outcome {
                 for page in evicted {
-                    self.clear_slot(queue, page.slot);
-                    self.remove_surface_request(page.key);
+                    self.release_surface_slot(queue, page.key);
                 }
             }
             if matches!(
@@ -1579,8 +1585,7 @@ impl PlanetaryVoxelRenderPass {
                 removed: Some(page),
             } = outcome
             {
-                self.clear_slot(queue, page.slot);
-                self.remove_surface_request(page.key);
+                self.release_surface_slot(queue, page.key);
             }
         }
         self.publish_draw_pages(queue)?;
@@ -1592,6 +1597,12 @@ impl PlanetaryVoxelRenderPass {
         queue: &wgpu::Queue,
         set: VisiblePageSet,
     ) -> Result<VisibilityOutcome, PlanetaryRenderError> {
+        if set.pages.len() > self.config.max_surface_pages as usize {
+            return Err(PlanetaryRenderError::SurfaceCapacity {
+                requested: set.pages.len(),
+                maximum: self.config.max_surface_pages,
+            });
+        }
         let surface_requests = set
             .pages
             .iter()
@@ -1614,13 +1625,20 @@ impl PlanetaryVoxelRenderPass {
             .iter()
             .map(|page| (page.key, page.transition_mask))
             .collect();
-        for page in &set.pages {
-            if let Some(resident) = self.residency.cache().resident(page.key) {
-                self.validate_surface_slot(page.key, resident.slot)?;
-            }
-        }
         let outcome = self.residency.apply_visible_set(queue, set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
+            let retired = self
+                .surface_slots
+                .keys()
+                .filter(|key| !candidate.contains_key(key))
+                .copied()
+                .collect::<Vec<_>>();
+            for key in retired {
+                self.release_surface_slot(queue, key);
+            }
+            for key in candidate.keys().copied() {
+                self.ensure_surface_slot(key)?;
+            }
             self.visible = candidate;
             for request in surface_requests {
                 if surface_request_is_current(self.surface_requests.get(&request.key), request) {
@@ -1639,6 +1657,7 @@ impl PlanetaryVoxelRenderPass {
         request: PlanetarySurfaceRequest,
     ) -> Result<(), PlanetaryRenderError> {
         request.validate()?;
+        request.required_pages()?;
         let resident = self
             .residency
             .cache()
@@ -1653,7 +1672,6 @@ impl PlanetaryVoxelRenderPass {
                 actual: request.generation,
             });
         }
-        self.validate_surface_slot(request.key, resident.slot)?;
         if let Some(index) = self
             .pending
             .iter()
@@ -1675,24 +1693,31 @@ impl PlanetaryVoxelRenderPass {
                 maximum: self.config.max_pending_surfaces,
             });
         }
+        self.ensure_surface_slot(request.key)?;
         self.register_surface_request(request)?;
         self.pending.push_back(request);
         Ok(())
     }
 
-    fn validate_surface_slot(
-        &self,
-        key: PlanetPageKey,
-        slot: u32,
-    ) -> Result<(), PlanetaryRenderError> {
-        if slot >= self.config.max_surface_pages {
-            return Err(PlanetaryRenderError::SurfaceSlotCapacity {
-                key,
-                slot,
-                maximum: self.config.max_surface_pages,
-            });
+    fn ensure_surface_slot(&mut self, key: PlanetPageKey) -> Result<u32, PlanetaryRenderError> {
+        if let Some(slot) = self.surface_slots.get(&key).copied() {
+            return Ok(slot);
         }
-        Ok(())
+        let slot = (0..self.config.max_surface_pages)
+            .find(|slot| !self.surface_slots.values().any(|occupied| occupied == slot))
+            .ok_or(PlanetaryRenderError::SurfaceCapacity {
+                requested: self.surface_slots.len().saturating_add(1),
+                maximum: self.config.max_surface_pages,
+            })?;
+        self.surface_slots.insert(key, slot);
+        Ok(slot)
+    }
+
+    fn release_surface_slot(&mut self, queue: &wgpu::Queue, key: PlanetPageKey) {
+        self.remove_surface_request(key);
+        if let Some(slot) = self.surface_slots.remove(&key) {
+            self.clear_slot(queue, slot);
+        }
     }
 
     fn register_surface_request(
@@ -1818,19 +1843,15 @@ impl PlanetaryVoxelRenderPass {
         let offset = u64::from(slot) * DRAW_ARGS_BYTES;
         queue.write_buffer(&self.regular_indirect, offset, &zero_draw);
         queue.write_buffer(&self.transition_indirect, offset, &zero_draw);
-        self.pending.retain(|pending| {
-            self.residency
-                .cache()
-                .resident(pending.key)
-                .is_some_and(|page| page.slot != slot)
-        });
         self.counters.cleared_slots = self.counters.cleared_slots.saturating_add(1);
     }
 
     fn publish_draw_pages(&self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
-        let mut pages =
-            vec![GpuDrawPage::default(); self.config.residency.max_resident_pages as usize];
-        for (key, resident) in self.residency.cache().resident_pages() {
+        let mut pages = vec![GpuDrawPage::default(); self.config.max_surface_pages as usize];
+        for (key, surface_slot) in &self.surface_slots {
+            let Some(resident) = self.residency.cache().resident(*key) else {
+                continue;
+            };
             let frame = self
                 .residency
                 .planet_frame(key.planet)
@@ -1842,15 +1863,15 @@ impl PlanetaryVoxelRenderPass {
                 resident.publication_generation,
                 0,
             )?;
-            pages[resident.slot as usize] = GpuDrawPage {
+            pages[*surface_slot as usize] = GpuDrawPage {
                 relative_lod0_cell_min: meta.relative_lod0_cell_min,
                 lod: meta.lod,
                 camera_relative_m: frame.camera_relative_m,
                 lod0_cell_size_m: frame.lod0_cell_size_m,
                 generation_low: resident.publication_generation as u32,
                 generation_high: (resident.publication_generation >> 32) as u32,
-                transition_mask: u32::from(self.visible.get(&key).copied().unwrap_or(0)),
-                visible: u32::from(self.visible.contains_key(&key)),
+                transition_mask: u32::from(self.visible.get(key).copied().unwrap_or(0)),
+                visible: u32::from(self.visible.contains_key(key)),
             };
         }
         queue.write_buffer(&self.draw_page_buffer, 0, bytemuck::cast_slice(&pages));
@@ -1890,6 +1911,11 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     self.counters.stale_surface_rejections.saturating_add(1);
                 continue;
             }
+            let Some(surface_slot) = self.surface_slots.get(&front.key).copied() else {
+                self.counters.stale_surface_rejections =
+                    self.counters.stale_surface_rejections.saturating_add(1);
+                continue;
+            };
             let dependencies = match front.required_pages() {
                 Ok(dependencies) => dependencies,
                 Err(error) => {
@@ -1922,6 +1948,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 }
             };
             let job = GpuSurfaceJob::new(
+                surface_slot,
                 resident.slot,
                 front.transition_mask,
                 resident.publication_generation,
@@ -2021,10 +2048,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             compute,
             &self.visibility_pipeline,
             &self.visibility_bind_group,
-            self.config
-                .residency
-                .max_resident_pages
-                .div_ceil(COPY_WORKGROUP_SIZE),
+            self.config.max_surface_pages.div_ceil(COPY_WORKGROUP_SIZE),
             "Planetary Surface Visibility",
         );
 
@@ -2142,7 +2166,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 draw_indirect_range(
                     render,
                     &self.regular_indirect,
-                    self.config.residency.max_resident_pages,
+                    self.config.max_surface_pages,
                 );
             }
             PlanetaryDrawPath::Meshlets if self.use_count_indirect => {
@@ -2182,7 +2206,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 draw_indirect_range(
                     render,
                     &self.transition_indirect,
-                    self.config.residency.max_resident_pages,
+                    self.config.max_surface_pages,
                 );
             }
             PlanetaryDrawPath::Meshlets if self.use_count_indirect => {
@@ -2410,14 +2434,8 @@ pub enum PlanetaryRenderError {
     StorageBindingLimit { required: u32, available: u32 },
     #[error("surface page {0:?} is not resident")]
     SurfacePageNotResident(PlanetPageKey),
-    #[error(
-        "surface page {key:?} occupies sampling-only slot {slot}; renderable slots are 0..{maximum}"
-    )]
-    SurfaceSlotCapacity {
-        key: PlanetPageKey,
-        slot: u32,
-        maximum: u32,
-    },
+    #[error("planetary visible set requests {requested} surfaces; capacity is {maximum}")]
+    SurfaceCapacity { requested: usize, maximum: u32 },
     #[error("surface generation for {key:?} is {actual:?}; resident source is {expected:?}")]
     SurfaceGeneration {
         key: PlanetPageKey,
@@ -2446,7 +2464,7 @@ mod tests {
         assert!(plan.total_bytes <= config.max_surface_bytes);
         assert_eq!(config.residency.max_resident_pages, 32);
         assert_eq!(config.max_surface_pages, 5);
-        assert_eq!(plan.indirect_bytes, 32 * DRAW_ARGS_BYTES);
+        assert_eq!(plan.indirect_bytes, 5 * DRAW_ARGS_BYTES);
         assert_eq!(plan.feedback_bytes, 32);
         assert_eq!(
             plan.diagnostic_readback_bytes,
@@ -2475,7 +2493,7 @@ mod tests {
         assert_eq!(config.residency.max_resident_pages, 320);
         assert_eq!(config.max_surface_pages, 64);
         assert_eq!(config.max_pending_surfaces, 64);
-        assert_eq!(plan.indirect_bytes, 320 * DRAW_ARGS_BYTES);
+        assert_eq!(plan.indirect_bytes, 64 * DRAW_ARGS_BYTES);
     }
 
     #[test]
@@ -2487,7 +2505,7 @@ mod tests {
         assert_eq!(config.max_surface_pages, 384);
         assert_eq!(config.residency.max_batch_pages, 192);
         assert_eq!(config.max_pending_surfaces, 192);
-        assert_eq!(plan.indirect_bytes, 480 * DRAW_ARGS_BYTES);
+        assert_eq!(plan.indirect_bytes, 384 * DRAW_ARGS_BYTES);
     }
 
     #[test]
