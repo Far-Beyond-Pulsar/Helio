@@ -675,6 +675,16 @@ fn drain_invalidated_surface_requests(
     }
 }
 
+fn surface_request_is_current(
+    current: Option<&PlanetarySurfaceRequest>,
+    requested: PlanetarySurfaceRequest,
+) -> bool {
+    current.is_some_and(|current| {
+        current.generation == requested.generation
+            && current.transition_mask == requested.transition_mask
+    })
+}
+
 impl PlanetaryVoxelRenderPass {
     pub const fn config(&self) -> PlanetaryVoxelRenderConfig {
         self.config
@@ -1582,6 +1592,23 @@ impl PlanetaryVoxelRenderPass {
         queue: &wgpu::Queue,
         set: VisiblePageSet,
     ) -> Result<VisibilityOutcome, PlanetaryRenderError> {
+        let surface_requests = set
+            .pages
+            .iter()
+            .map(|page| PlanetarySurfaceRequest {
+                key: page.key,
+                generation: page.generation,
+                transition_mask: page.transition_mask,
+                dirty_microbricks: u64::MAX,
+            })
+            .collect::<Vec<_>>();
+        for request in &surface_requests {
+            request.validate()?;
+            // Validate the complete sampling neighborhood before mutating the
+            // visible frontier. Registration repeats this calculation, but it
+            // must not be able to fail after residency has accepted the set.
+            request.required_pages()?;
+        }
         let candidate: BTreeMap<_, _> = set
             .pages
             .iter()
@@ -1595,6 +1622,13 @@ impl PlanetaryVoxelRenderPass {
         let outcome = self.residency.apply_visible_set(queue, set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             self.visible = candidate;
+            for request in surface_requests {
+                if surface_request_is_current(self.surface_requests.get(&request.key), request) {
+                    continue;
+                }
+                self.register_surface_request(request)?;
+                self.invalidated_surfaces.insert(request.key);
+            }
             self.publish_draw_pages(queue)?;
         }
         Ok(outcome)
@@ -2537,5 +2571,36 @@ mod tests {
         });
         assert!(pending.is_empty());
         assert!(invalidated.is_empty());
+    }
+
+    #[test]
+    fn visible_surface_requests_only_refresh_for_generation_or_topology_changes() {
+        let key = PlanetPageKey::new(
+            PlanetId([0x52; 16]),
+            helio_planet_voxel_core::PageKey::new(4, [-7, 3, 11]),
+        );
+        let request = PlanetarySurfaceRequest {
+            key,
+            generation: SourceGeneration::new(5, 9),
+            transition_mask: 0b00_0101,
+            dirty_microbricks: u64::MAX,
+        };
+
+        assert!(!surface_request_is_current(None, request));
+        assert!(surface_request_is_current(Some(&request), request));
+        assert!(!surface_request_is_current(
+            Some(&request),
+            PlanetarySurfaceRequest {
+                generation: SourceGeneration::new(5, 10),
+                ..request
+            }
+        ));
+        assert!(!surface_request_is_current(
+            Some(&request),
+            PlanetarySurfaceRequest {
+                transition_mask: 0b00_0110,
+                ..request
+            }
+        ));
     }
 }
