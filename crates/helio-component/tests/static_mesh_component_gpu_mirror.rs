@@ -158,3 +158,57 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
     assert_eq!(stored.vertices.len(), 1);
     assert_eq!(stored.mesh_asset.as_str(), "meshes/primitives/SM_Sphere.fbx");
 }
+
+/// The full chain, not just SceneGpuStore's own bookkeeping: registers
+/// StaticMeshComponent's pools (same as `renderer.rs`'s lazy-init block
+/// does), rebinds a real `helio::Scene`'s mesh storage onto them (same
+/// `Scene::rebind_static_mesh_pools` call), writes a component's mesh data
+/// through `World::insert`, then reads it back through Helio's OWN
+/// draw-time accessor (`Scene::mesh_buffers()`) -- proving there is no
+/// daylight between "SceneDB mirrored this field" and "Helio's renderer
+/// would actually draw it", the entire point of Pulsar-Native#561 Phase D.
+#[test]
+fn scene_mesh_buffers_reads_back_data_written_through_a_rebound_static_mesh_component() {
+    let ctx = test_context();
+    let mut store = SceneGpuStore::new(&ctx, scene_cfg());
+    StaticMeshComponent::register_gpu_columns_growable(&mut store, 16, ctx.device());
+    let store = Arc::new(store);
+
+    let vertex_pool = store
+        .var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
+        .expect("registered above");
+    let index_pool = store
+        .var_len_pool::<u32>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::indices"))
+        .expect("registered above");
+
+    let mut scene = helio::Scene::new(Arc::clone(ctx.device()), Arc::clone(ctx.queue()));
+    scene.rebind_static_mesh_pools(vertex_pool, index_pool);
+
+    let mut world = World::new();
+    world.attach_gpu_mirror(GpuMirrorHandle::new(Arc::clone(&store), Arc::clone(ctx.queue())));
+
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        StaticMeshComponent {
+            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
+            vertices: vec![v(11.0), v(22.0), v(33.0)],
+            indices: vec![0, 1, 2],
+        },
+    );
+    world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
+
+    // Read through Scene's own draw-time accessor -- the exact call a real
+    // render pass makes -- not the raw pool directly.
+    let buffers = scene.mesh_buffers();
+    let vertex_bytes = readback(&ctx, &*buffers.vertices, 3 * std::mem::size_of::<PackedVertex>() as u64);
+    let got_x: Vec<f32> = vertex_bytes
+        .chunks(std::mem::size_of::<PackedVertex>())
+        .map(|c| f32::from_ne_bytes(c[0..4].try_into().unwrap()))
+        .collect();
+    assert_eq!(got_x, vec![11.0, 22.0, 33.0], "Scene::mesh_buffers() must read the component's own data, not an empty self-constructed pool");
+
+    let index_bytes = readback(&ctx, &*buffers.indices, 3 * 4);
+    let got_indices: Vec<u32> = index_bytes.chunks(4).map(|c| u32::from_ne_bytes(c.try_into().unwrap())).collect();
+    assert_eq!(got_indices, vec![0, 1, 2]);
+}
