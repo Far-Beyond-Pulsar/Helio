@@ -15,13 +15,14 @@ struct GpuSurfaceJob {
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
     revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
+    _pad: [u32; 4],
 }
 
 #[repr(C, align(16))]
@@ -29,16 +30,22 @@ struct GpuSurfaceJob {
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
-    regular_vertex_count: u32,
-    regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
-    regular_meshlet_count: u32,
-    transition_meshlet_count: u32,
     revision: u32,
+    regular_first_vertex: u32,
+    regular_vertex_count: u32,
+    regular_first_index: u32,
+    regular_index_count: u32,
+    regular_first_meshlet: u32,
+    regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
+    transition_meshlet_count: u32,
     transition_mask: u32,
+    _pad: [u32; 3],
 }
 
 #[test]
@@ -95,12 +102,6 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             resident_slot: 3,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
-            regular_max_vertices: vertices.len() as u32,
-            regular_max_indices: indices.len() as u32,
-            transition_max_vertices: 1,
-            transition_max_indices: 3,
-            regular_max_meshlets: expected.len() as u32,
-            transition_max_meshlets: 1,
             ..Default::default()
         };
         let page = GpuPageMeta {
@@ -109,10 +110,7 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             generation_high: (generation >> 32) as u32,
             ..Default::default()
         };
-        // Active bank 1 means the builder targets bank 0, where this fixture
-        // places the newly copied extraction output.
         let state = GpuSurfaceState {
-            active_bank: 1,
             valid: 1,
             ..Default::default()
         };
