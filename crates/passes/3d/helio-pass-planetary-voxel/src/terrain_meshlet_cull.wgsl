@@ -10,7 +10,7 @@ struct Camera {
 }
 
 struct GpuTerrainCullUniforms {
-    max_meshlets_per_bank: u32,
+    meshlet_capacity: u32,
     draw_capacity: u32,
     surface_kind: u32,
     _pad: u32,
@@ -19,16 +19,24 @@ struct GpuTerrainCullUniforms {
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
-    regular_vertex_count: u32,
-    regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
-    regular_meshlet_count: u32,
-    transition_meshlet_count: u32,
     revision: u32,
+    regular_first_vertex: u32,
+    regular_vertex_count: u32,
+    regular_first_index: u32,
+    regular_index_count: u32,
+    regular_first_meshlet: u32,
+    regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
+    transition_meshlet_count: u32,
     transition_mask: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuDrawPage {
@@ -155,11 +163,12 @@ fn page_local_to_world(page: GpuDrawPage, position: vec3<f32>) -> vec3<f32> {
 
 @compute @workgroup_size(64)
 fn cull_meshlets(@builtin(global_invocation_id) id: vec3<u32>) {
-    if cull.max_meshlets_per_bank == 0u {
+    if id.x >= cull.meshlet_capacity || id.x >= arrayLength(&meshlets) {
         return;
     }
-    let page_slot = id.x / cull.max_meshlets_per_bank;
-    let local_meshlet = id.x % cull.max_meshlets_per_bank;
+    let meshlet_index = id.x;
+    let meshlet = meshlets[meshlet_index];
+    let page_slot = meshlet.flags;
     if page_slot >= arrayLength(&surface_states) ||
         page_slot >= arrayLength(&draw_pages) {
         return;
@@ -171,23 +180,19 @@ fn cull_meshlets(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&counters[6], 1u);
         return;
     }
+    let first_meshlet = select(
+        state.regular_first_meshlet,
+        state.transition_first_meshlet,
+        cull.surface_kind != 0u,
+    );
     let meshlet_count = select(
         state.regular_meshlet_count,
         state.transition_meshlet_count,
         cull.surface_kind != 0u,
     );
-    if local_meshlet >= meshlet_count {
+    if meshlet_index < first_meshlet || meshlet_index >= first_meshlet + meshlet_count {
         return;
     }
-
-    let bank = page_slot * 2u + min(state.active_bank, 1u);
-    let meshlet_index =
-        bank * cull.max_meshlets_per_bank + local_meshlet;
-    if meshlet_index >= arrayLength(&meshlets) {
-        atomicAdd(&counters[2], 1u);
-        return;
-    }
-    let meshlet = meshlets[meshlet_index];
     if meshlet.bounds_offset >= arrayLength(&meshlet_bounds) ||
         meshlet.generation_low != state.generation_low ||
         meshlet.generation_high != state.generation_high ||

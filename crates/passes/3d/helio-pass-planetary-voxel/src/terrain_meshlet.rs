@@ -32,7 +32,7 @@ pub struct GpuTerrainDraw {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuTerrainCullUniforms {
-    pub max_meshlets_per_bank: u32,
+    pub meshlet_capacity: u32,
     pub draw_capacity: u32,
     pub surface_kind: u32,
     pub _pad: u32,
@@ -201,12 +201,7 @@ fn compute_bounds(vertices: &[GpuTerrainVertex], indices: &[u32]) -> GpuTerrainM
             normalize(cross(sub(b, a), sub(c, a)))
         })
         .collect();
-    let Some(axis) = normalize(
-        normals
-            .iter()
-            .copied()
-            .fold([0.0; 3], add),
-    ) else {
+    let Some(axis) = normalize(normals.iter().copied().fold([0.0; 3], add)) else {
         return disabled_bounds(center, radius);
     };
     let min_dot = normals

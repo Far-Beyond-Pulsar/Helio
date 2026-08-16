@@ -1,12 +1,15 @@
 use crate::{
-    max_meshlets_for_indices, FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters,
-    GpuSurfaceGatherJob, GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms,
-    GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuUploadOutcome,
-    PlanetarySurfaceRequest, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
-    SurfaceSamplingError, TransvoxelGpuError, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
-    TransvoxelGpuTransitionExtractor, TransvoxelGpuTransitionExtractorConfig,
-    TransvoxelTransitionGpuError, REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL,
-    TERRAIN_MESHLET_CULL_WGSL, TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
+    BoundedExtractionPublisher, ExtractionError, ExtractionLimits, ExtractionReservation,
+    FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters, GpuSurfaceGatherJob,
+    GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms, GpuTerrainDraw,
+    GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTransvoxelEmissionCounters,
+    GpuTransvoxelTransitionCounters, GpuUploadOutcome, PlanetarySurfaceRequest,
+    PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, PublicationOutcome, ReservationOutcome,
+    SurfaceCounts, SurfaceSamplingError, TransvoxelGpuError, TransvoxelGpuExtractor,
+    TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
+    TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionGpuError,
+    REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL, TERRAIN_MESHLET_CULL_WGSL,
+    TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
@@ -26,7 +29,6 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-const SURFACE_BANKS: u32 = 2;
 const COPY_WORKGROUP_SIZE: u32 = 64;
 const DRAW_ARGS_BYTES: u64 = 20;
 const TERRAIN_DRAW_BYTES: u64 = core::mem::size_of::<GpuTerrainDraw>() as u64;
@@ -91,8 +93,17 @@ pub struct PlanetaryVoxelRenderConfig {
     /// hold either renderable pages or sampling-only support pages.
     pub max_surface_pages: u32,
     pub max_pending_surfaces: u32,
+    /// Worst-case scratch output for one regular page extraction. Scratch is
+    /// reused serially and is not multiplied by the number of resident pages.
     pub regular: TransvoxelGpuExtractorConfig,
+    /// Worst-case scratch output for one transition extraction.
     pub transition: TransvoxelGpuTransitionExtractorConfig,
+    /// Aggregate compact regular-surface arena shared by all current and
+    /// transactional replacement pages.
+    pub regular_arena: ExtractionLimits,
+    /// Aggregate compact transition-surface arena shared by all current and
+    /// transactional replacement pages.
+    pub transition_arena: ExtractionLimits,
     pub max_surface_bytes: u64,
 }
 
@@ -103,10 +114,12 @@ impl PlanetaryVoxelRenderConfig {
                 .expect("validation residency configuration is valid"),
             max_surface_pages: 5,
             max_pending_surfaces: 8,
-            regular: TransvoxelGpuExtractorConfig::new(65_536, 131_072)
-                .expect("validation regular extraction configuration is valid"),
-            transition: TransvoxelGpuTransitionExtractorConfig::new(49_152, 147_456)
-                .expect("validation transition extraction configuration is valid"),
+            regular: TransvoxelGpuExtractorConfig::default(),
+            transition: TransvoxelGpuTransitionExtractorConfig::default(),
+            regular_arena: ExtractionLimits::new(5, 5, 327_680, 655_360, 10_405)
+                .expect("validation regular arena configuration is valid"),
+            transition_arena: ExtractionLimits::new(5, 5, 245_760, 737_280, 11_705)
+                .expect("validation transition arena configuration is valid"),
             max_surface_bytes: 128 * 1024 * 1024,
         }
     }
@@ -122,10 +135,12 @@ impl PlanetaryVoxelRenderConfig {
                 .expect("benchmark residency configuration is valid"),
             max_surface_pages: 64,
             max_pending_surfaces: 64,
-            regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
-                .expect("benchmark regular extraction configuration is valid"),
-            transition: TransvoxelGpuTransitionExtractorConfig::new(2_048, 6_144)
-                .expect("benchmark transition extraction configuration is valid"),
+            regular: TransvoxelGpuExtractorConfig::default(),
+            transition: TransvoxelGpuTransitionExtractorConfig::default(),
+            regular_arena: ExtractionLimits::new(64, 64, 524_288, 1_048_576, 16_704)
+                .expect("benchmark regular arena configuration is valid"),
+            transition_arena: ExtractionLimits::new(64, 64, 131_072, 393_216, 6_272)
+                .expect("benchmark transition arena configuration is valid"),
             max_surface_bytes: 128 * 1024 * 1024,
         }
     }
@@ -142,10 +157,12 @@ impl PlanetaryVoxelRenderConfig {
                 .expect("horizon residency configuration is valid"),
             max_surface_pages: 384,
             max_pending_surfaces: 192,
-            regular: TransvoxelGpuExtractorConfig::new(8_192, 16_384)
-                .expect("horizon regular extraction configuration is valid"),
-            transition: TransvoxelGpuTransitionExtractorConfig::new(2_048, 6_144)
-                .expect("horizon transition extraction configuration is valid"),
+            regular: TransvoxelGpuExtractorConfig::default(),
+            transition: TransvoxelGpuTransitionExtractorConfig::default(),
+            regular_arena: ExtractionLimits::new(384, 192, 6_291_456, 12_582_912, 199_729)
+                .expect("horizon regular arena configuration is valid"),
+            transition_arena: ExtractionLimits::new(384, 192, 786_432, 2_359_296, 37_632)
+                .expect("horizon transition arena configuration is valid"),
             max_surface_bytes: 512 * 1024 * 1024,
         }
     }
@@ -163,55 +180,45 @@ impl PlanetaryVoxelRenderConfig {
         if self.max_pending_surfaces == 0 {
             return Err(PlanetaryRenderError::ZeroPendingSurfaces);
         }
+        if self.regular_arena.max_page_slots != self.max_surface_pages
+            || self.transition_arena.max_page_slots != self.max_surface_pages
+            || self.regular_arena.max_pending_pages < self.max_pending_surfaces
+            || self.transition_arena.max_pending_pages < self.max_pending_surfaces
+        {
+            return Err(PlanetaryRenderError::SurfaceArenaContract);
+        }
         let surface_pages = u64::from(self.max_surface_pages);
-        let banks = u64::from(SURFACE_BANKS);
         let regular_vertex_bytes = checked_product(&[
-            surface_pages,
-            banks,
-            u64::from(self.regular.max_vertices),
+            u64::from(self.regular_arena.max_vertices),
             core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
         ])?;
         let regular_index_bytes = checked_product(&[
-            surface_pages,
-            banks,
-            u64::from(self.regular.max_indices),
+            u64::from(self.regular_arena.max_indices),
             core::mem::size_of::<u32>() as u64,
         ])?;
         let transition_vertex_bytes = checked_product(&[
-            surface_pages,
-            banks,
-            u64::from(self.transition.max_vertices),
+            u64::from(self.transition_arena.max_vertices),
             core::mem::size_of::<crate::GpuTerrainVertex>() as u64,
         ])?;
         let transition_index_bytes = checked_product(&[
-            surface_pages,
-            banks,
-            u64::from(self.transition.max_indices),
+            u64::from(self.transition_arena.max_indices),
             core::mem::size_of::<u32>() as u64,
         ])?;
-        let regular_meshlets = max_meshlets_for_indices(self.regular.max_indices);
-        let transition_meshlets = max_meshlets_for_indices(self.transition.max_indices);
+        let regular_meshlets = self.regular_arena.max_meshlets;
+        let transition_meshlets = self.transition_arena.max_meshlets;
         let regular_meshlet_bytes = checked_product(&[
-            surface_pages,
-            banks,
             u64::from(regular_meshlets),
             core::mem::size_of::<GpuTerrainMeshlet>() as u64,
         ])?;
         let regular_meshlet_bounds_bytes = checked_product(&[
-            surface_pages,
-            banks,
             u64::from(regular_meshlets),
             core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
         ])?;
         let transition_meshlet_bytes = checked_product(&[
-            surface_pages,
-            banks,
             u64::from(transition_meshlets),
             core::mem::size_of::<GpuTerrainMeshlet>() as u64,
         ])?;
         let transition_meshlet_bounds_bytes = checked_product(&[
-            surface_pages,
-            banks,
             u64::from(transition_meshlets),
             core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
         ])?;
@@ -225,12 +232,8 @@ impl PlanetaryVoxelRenderConfig {
         let indirect_bytes = surface_pages
             .checked_mul(DRAW_ARGS_BYTES)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let regular_meshlet_draw_capacity = surface_pages
-            .checked_mul(u64::from(regular_meshlets))
-            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
-        let transition_meshlet_draw_capacity = surface_pages
-            .checked_mul(u64::from(transition_meshlets))
-            .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
+        let regular_meshlet_draw_capacity = u64::from(regular_meshlets);
+        let transition_meshlet_draw_capacity = u64::from(transition_meshlets);
         let regular_meshlet_indirect_bytes = regular_meshlet_draw_capacity
             .checked_mul(DRAW_ARGS_BYTES)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
@@ -319,6 +322,8 @@ impl PlanetaryVoxelRenderConfig {
     }
 
     fn validate_device(self, limits: &wgpu::Limits) -> Result<(), PlanetaryRenderError> {
+        self.regular_arena.validate_device(limits)?;
+        self.transition_arena.validate_device(limits)?;
         let plan = self.allocation_plan()?;
         for (name, bytes, storage) in [
             ("regular vertex arena", plan.regular_vertex_bytes, true),
@@ -478,13 +483,14 @@ struct GpuSurfaceJob {
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
     revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
+    _pad: [u32; 2],
 }
 
 impl GpuSurfaceJob {
@@ -494,7 +500,8 @@ impl GpuSurfaceJob {
         transition_mask: u8,
         generation: u64,
         revision: u32,
-        config: PlanetaryVoxelRenderConfig,
+        regular: ExtractionReservation,
+        transition: ExtractionReservation,
     ) -> Self {
         Self {
             slot,
@@ -502,13 +509,14 @@ impl GpuSurfaceJob {
             transition_mask: u32::from(transition_mask),
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
-            regular_max_vertices: config.regular.max_vertices,
-            regular_max_indices: config.regular.max_indices,
-            transition_max_vertices: config.transition.max_vertices,
-            transition_max_indices: config.transition.max_indices,
-            regular_max_meshlets: max_meshlets_for_indices(config.regular.max_indices),
-            transition_max_meshlets: max_meshlets_for_indices(config.transition.max_indices),
             revision,
+            regular_first_vertex: regular.allocation.vertices.first,
+            regular_first_index: regular.allocation.indices.first,
+            regular_first_meshlet: regular.allocation.meshlets.first,
+            transition_first_vertex: transition.allocation.vertices.first,
+            transition_first_index: transition.allocation.indices.first,
+            transition_first_meshlet: transition.allocation.meshlets.first,
+            _pad: [0; 2],
         }
     }
 }
@@ -518,16 +526,22 @@ impl GpuSurfaceJob {
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
-    regular_vertex_count: u32,
-    regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
-    regular_meshlet_count: u32,
-    transition_meshlet_count: u32,
     revision: u32,
+    regular_first_vertex: u32,
+    regular_vertex_count: u32,
+    regular_first_index: u32,
+    regular_index_count: u32,
+    regular_first_meshlet: u32,
+    regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
+    transition_meshlet_count: u32,
     transition_mask: u32,
+    _pad: [u32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,6 +558,8 @@ struct CandidateSurface {
     slot: u32,
     revision: u32,
     publication_generation: Option<u64>,
+    regular_reservation: Option<ExtractionReservation>,
+    transition_reservation: Option<ExtractionReservation>,
     ready: bool,
 }
 
@@ -586,6 +602,28 @@ struct PendingDiagnosticsReadback {
     receiver: Mutex<Receiver<Result<(), wgpu::BufferAsyncError>>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PreparedExtraction {
+    request: PlanetarySurfaceRequest,
+    slot: u32,
+    resident_slot: u32,
+    publication_generation: u64,
+    revision: u32,
+}
+
+struct PendingExtractionReadback {
+    buffer: wgpu::Buffer,
+    receiver: Mutex<Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    extraction: PreparedExtraction,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreparedPublication {
+    extraction: PreparedExtraction,
+    regular: ExtractionReservation,
+    transition: ExtractionReservation,
+}
+
 #[derive(Clone, Copy)]
 struct DiagnosticsReadbackLayout {
     gather_counter_offset: u64,
@@ -624,7 +662,12 @@ pub struct PlanetaryVoxelRenderPass {
     candidate_surfaces: BTreeMap<PlanetPageKey, CandidateSurface>,
     handoff_planet: Option<PlanetId>,
     next_surface_revision: u32,
-    prepared: bool,
+    prepared_extraction: Option<PreparedExtraction>,
+    prepared_publication: Option<PreparedPublication>,
+    extraction_readback: Option<PendingExtractionReadback>,
+    extraction_available: Option<wgpu::Buffer>,
+    regular_publisher: BoundedExtractionPublisher,
+    transition_publisher: BoundedExtractionPublisher,
     visible: BTreeMap<PlanetPageKey, u8>,
     counters: PlanetaryRenderCounters,
     job_buffer: wgpu::Buffer,
@@ -926,7 +969,7 @@ impl PlanetaryVoxelRenderPass {
         let regular_cull_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Planetary Regular Meshlet Cull Uniform"),
             contents: bytemuck::bytes_of(&GpuTerrainCullUniforms {
-                max_meshlets_per_bank: max_meshlets_for_indices(config.regular.max_indices),
+                meshlet_capacity: config.regular_arena.max_meshlets,
                 draw_capacity: plan.regular_meshlet_draw_capacity,
                 surface_kind: 0,
                 _pad: 0,
@@ -937,7 +980,7 @@ impl PlanetaryVoxelRenderPass {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Planetary Transition Meshlet Cull Uniform"),
                 contents: bytemuck::bytes_of(&GpuTerrainCullUniforms {
-                    max_meshlets_per_bank: max_meshlets_for_indices(config.transition.max_indices),
+                    meshlet_capacity: config.transition_arena.max_meshlets,
                     draw_capacity: plan.transition_meshlet_draw_capacity,
                     surface_kind: 1,
                     _pad: 0,
@@ -1178,7 +1221,12 @@ impl PlanetaryVoxelRenderPass {
             candidate_surfaces: BTreeMap::new(),
             handoff_planet: None,
             next_surface_revision: 1,
-            prepared: false,
+            prepared_extraction: None,
+            prepared_publication: None,
+            extraction_readback: None,
+            extraction_available: None,
+            regular_publisher: BoundedExtractionPublisher::new(config.regular_arena),
+            transition_publisher: BoundedExtractionPublisher::new(config.transition_arena),
             visible: BTreeMap::new(),
             counters: PlanetaryRenderCounters::default(),
             job_buffer,
@@ -1848,6 +1896,8 @@ impl PlanetaryVoxelRenderPass {
                         slot: active.slot,
                         revision: active.revision,
                         publication_generation: Some(active.publication_generation),
+                        regular_reservation: None,
+                        transition_reservation: None,
                         ready: true,
                     },
                 );
@@ -1859,6 +1909,7 @@ impl PlanetaryVoxelRenderPass {
                 && !active_slots.contains(&candidate.slot)
             {
                 self.clear_slot(queue, candidate.slot);
+                self.cancel_candidate_reservations(*candidate);
             }
         }
 
@@ -1882,6 +1933,8 @@ impl PlanetaryVoxelRenderPass {
                     slot,
                     revision,
                     publication_generation: None,
+                    regular_reservation: None,
+                    transition_reservation: None,
                     ready: false,
                 },
             );
@@ -1983,6 +2036,8 @@ impl PlanetaryVoxelRenderPass {
                         slot: active.slot,
                         revision: active.revision,
                         publication_generation: Some(active.publication_generation),
+                        regular_reservation: None,
+                        transition_reservation: None,
                         ready: true,
                     },
                 );
@@ -2004,6 +2059,8 @@ impl PlanetaryVoxelRenderPass {
                     slot,
                     revision,
                     publication_generation: None,
+                    regular_reservation: None,
+                    transition_reservation: None,
                     ready: false,
                 },
             );
@@ -2038,6 +2095,12 @@ impl PlanetaryVoxelRenderPass {
         for key in retired {
             if let Some(surface) = self.active_surfaces.remove(&key) {
                 self.clear_slot(queue, surface.slot);
+                let _ = self
+                    .regular_publisher
+                    .evict(key, u64::from(surface.revision));
+                let _ = self
+                    .transition_publisher
+                    .evict(key, u64::from(surface.revision));
             }
             self.visible.remove(&key);
             self.surface_slots.remove(&key);
@@ -2064,6 +2127,37 @@ impl PlanetaryVoxelRenderPass {
             .map(|(key, surface)| (*key, *surface))
             .collect::<BTreeMap<_, _>>();
         let candidates = core::mem::take(&mut self.candidate_surfaces);
+        for candidate in candidates.values() {
+            match (
+                candidate.regular_reservation,
+                candidate.transition_reservation,
+            ) {
+                (Some(regular), Some(transition)) => {
+                    match self.regular_publisher.publish(regular)? {
+                        PublicationOutcome::Published { .. } => {}
+                        PublicationOutcome::Stale { .. } => {
+                            return Err(PlanetaryRenderError::StaleSurfaceAllocation(
+                                candidate.request.key,
+                            ));
+                        }
+                    }
+                    match self.transition_publisher.publish(transition)? {
+                        PublicationOutcome::Published { .. } => {}
+                        PublicationOutcome::Stale { .. } => {
+                            return Err(PlanetaryRenderError::StaleSurfaceAllocation(
+                                candidate.request.key,
+                            ));
+                        }
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(PlanetaryRenderError::IncompleteSurfaceAllocation(
+                        candidate.request.key,
+                    ))
+                }
+            }
+        }
         let retained_slots = candidates
             .values()
             .map(|candidate| candidate.slot)
@@ -2074,6 +2168,12 @@ impl PlanetaryVoxelRenderPass {
                 self.clear_slot(queue, surface.slot);
             }
             if !candidates.contains_key(&key) {
+                let _ = self
+                    .regular_publisher
+                    .evict(key, u64::from(surface.revision));
+                let _ = self
+                    .transition_publisher
+                    .evict(key, u64::from(surface.revision));
                 self.surface_slots.remove(&key);
                 self.remove_surface_request(key);
             }
@@ -2098,6 +2198,20 @@ impl PlanetaryVoxelRenderPass {
         self.handoff_planet = None;
         self.publish_draw_pages(queue)?;
         self.start_next_handoff(queue)
+    }
+
+    fn cancel_candidate_reservations(&mut self, candidate: CandidateSurface) {
+        let generation = u64::from(candidate.revision);
+        if candidate.regular_reservation.is_some() {
+            let _ = self
+                .regular_publisher
+                .cancel_pending(candidate.request.key, generation);
+        }
+        if candidate.transition_reservation.is_some() {
+            let _ = self
+                .transition_publisher
+                .cancel_pending(candidate.request.key, generation);
+        }
     }
 
     pub fn queue_surface(
@@ -2334,6 +2448,207 @@ impl PlanetaryVoxelRenderPass {
         queue.write_buffer(&self.draw_page_buffer, 0, bytemuck::cast_slice(&pages));
         Ok(())
     }
+
+    fn advance_extraction_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let _ = device.poll(wgpu::PollType::Poll);
+        let completion = self.extraction_readback.as_ref().and_then(|pending| {
+            match pending
+                .receiver
+                .lock()
+                .expect("planetary extraction receiver mutex is not poisoned")
+                .try_recv()
+            {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(wgpu::BufferAsyncError)),
+            }
+        });
+        let Some(completion) = completion else {
+            return;
+        };
+        let pending = self
+            .extraction_readback
+            .take()
+            .expect("completed planetary extraction readback exists");
+        if let Err(error) = completion {
+            log::error!("planetary extraction counter readback failed: {error:?}");
+            self.invalidated_surfaces
+                .insert(pending.extraction.request.key);
+            self.drain_invalidated_surfaces();
+            return;
+        }
+        let mapped = match pending.buffer.slice(..).get_mapped_range() {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                log::error!("planetary extraction counters unavailable: {error:?}");
+                self.invalidated_surfaces
+                    .insert(pending.extraction.request.key);
+                self.drain_invalidated_surfaces();
+                return;
+            }
+        };
+        let regular_bytes = core::mem::size_of::<GpuTransvoxelEmissionCounters>();
+        let regular =
+            *bytemuck::from_bytes::<GpuTransvoxelEmissionCounters>(&mapped[..regular_bytes]);
+        let transition =
+            *bytemuck::from_bytes::<GpuTransvoxelTransitionCounters>(&mapped[regular_bytes..]);
+        drop(mapped);
+        pending.buffer.unmap();
+        self.extraction_available = Some(pending.buffer);
+
+        let extraction = pending.extraction;
+        let candidate_is_current = self
+            .candidate_surfaces
+            .get(&extraction.request.key)
+            .is_some_and(|candidate| {
+                candidate.revision == extraction.revision
+                    && surface_request_is_current(Some(&candidate.request), extraction.request)
+            });
+        let resident_is_current = self
+            .residency
+            .cache()
+            .resident(extraction.request.key)
+            .is_some_and(|resident| {
+                resident.slot == extraction.resident_slot
+                    && resident.publication_generation == extraction.publication_generation
+            });
+        if !candidate_is_current || !resident_is_current {
+            return;
+        }
+        if regular.completed == 0
+            || transition.completed == 0
+            || regular.vertex_overflow != 0
+            || regular.index_overflow != 0
+            || transition.vertex_overflow != 0
+            || transition.index_overflow != 0
+        {
+            log::error!(
+                "planetary worst-case scratch extraction overflowed: regular {}/{} transition {}/{}",
+                regular.required_vertices,
+                regular.required_indices,
+                transition.required_vertices,
+                transition.required_indices,
+            );
+            self.invalidated_surfaces.insert(extraction.request.key);
+            self.drain_invalidated_surfaces();
+            return;
+        }
+        let regular_counts = SurfaceCounts {
+            vertices: regular.emitted_vertices,
+            indices: regular.emitted_indices,
+            meshlets: max_meshlets_for_indices(regular.emitted_indices),
+        };
+        let transition_counts = SurfaceCounts {
+            vertices: transition.emitted_vertices,
+            indices: transition.emitted_indices,
+            meshlets: max_meshlets_for_indices(transition.emitted_indices),
+        };
+        let allocation_generation = u64::from(extraction.revision);
+        let regular_reservation = match self.regular_publisher.reserve(
+            extraction.request.key,
+            allocation_generation,
+            regular_counts,
+        ) {
+            Ok(
+                ReservationOutcome::Reserved(reservation)
+                | ReservationOutcome::DuplicatePending(reservation),
+            ) => reservation,
+            Ok(ReservationOutcome::Current(_)) | Ok(ReservationOutcome::Stale { .. }) => return,
+            Err(error) => {
+                log::error!("planetary regular surface arena backpressure: {error}");
+                self.invalidated_surfaces.insert(extraction.request.key);
+                self.drain_invalidated_surfaces();
+                return;
+            }
+        };
+        let transition_reservation = match self.transition_publisher.reserve(
+            extraction.request.key,
+            allocation_generation,
+            transition_counts,
+        ) {
+            Ok(
+                ReservationOutcome::Reserved(reservation)
+                | ReservationOutcome::DuplicatePending(reservation),
+            ) => reservation,
+            Ok(ReservationOutcome::Current(_)) | Ok(ReservationOutcome::Stale { .. }) => {
+                let _ = self
+                    .regular_publisher
+                    .cancel_pending(extraction.request.key, allocation_generation);
+                return;
+            }
+            Err(error) => {
+                let _ = self
+                    .regular_publisher
+                    .cancel_pending(extraction.request.key, allocation_generation);
+                log::error!("planetary transition surface arena backpressure: {error}");
+                self.invalidated_surfaces.insert(extraction.request.key);
+                self.drain_invalidated_surfaces();
+                return;
+            }
+        };
+        if let Some(candidate) = self.candidate_surfaces.get_mut(&extraction.request.key) {
+            candidate.regular_reservation = Some(regular_reservation);
+            candidate.transition_reservation = Some(transition_reservation);
+        }
+        let job = GpuSurfaceJob::new(
+            extraction.slot,
+            extraction.resident_slot,
+            extraction.request.transition_mask,
+            extraction.publication_generation,
+            extraction.revision,
+            regular_reservation,
+            transition_reservation,
+        );
+        queue.write_buffer(&self.job_buffer, 0, bytemuck::bytes_of(&job));
+        self.prepared_publication = Some(PreparedPublication {
+            extraction,
+            regular: regular_reservation,
+            transition: transition_reservation,
+        });
+    }
+
+    fn begin_extraction_readback(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        extraction: PreparedExtraction,
+    ) {
+        let regular_bytes = core::mem::size_of::<GpuTransvoxelEmissionCounters>() as u64;
+        let transition_bytes = core::mem::size_of::<GpuTransvoxelTransitionCounters>() as u64;
+        let readback = self.extraction_available.take().unwrap_or_else(|| {
+            create_buffer(
+                device,
+                "Planetary Extraction Counter Readback",
+                regular_bytes + transition_bytes,
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            )
+        });
+        encoder.copy_buffer_to_buffer(
+            self.regular_extractor.counters_buffer(),
+            0,
+            &readback,
+            0,
+            regular_bytes,
+        );
+        encoder.copy_buffer_to_buffer(
+            self.transition_extractor.counters_buffer(),
+            0,
+            &readback,
+            regular_bytes,
+            transition_bytes,
+        );
+        let (sender, receiver) = mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        self.extraction_readback = Some(PendingExtractionReadback {
+            buffer: readback,
+            receiver: Mutex::new(receiver),
+            extraction,
+        });
+    }
 }
 
 impl RenderPass for PlanetaryVoxelRenderPass {
@@ -2350,9 +2665,15 @@ impl RenderPass for PlanetaryVoxelRenderPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.prepared = false;
+        self.advance_extraction_readback(ctx.device, ctx.queue);
         self.advance_diagnostics_readback(ctx.device, ctx.queue);
         self.drain_invalidated_surfaces();
+        if self.prepared_publication.is_some()
+            || self.prepared_extraction.is_some()
+            || self.extraction_readback.is_some()
+        {
+            return Ok(());
+        }
         let queued = self.pending.len();
         for _ in 0..queued {
             let front = self
@@ -2410,21 +2731,6 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     continue;
                 }
             };
-            let job = GpuSurfaceJob::new(
-                surface_slot,
-                resident.slot,
-                front.transition_mask,
-                resident.publication_generation,
-                revision,
-                self.config,
-            );
-            if let Some(candidate) = self.candidate_surfaces.get_mut(&front.key) {
-                if candidate.revision == revision {
-                    candidate.publication_generation = Some(resident.publication_generation);
-                    candidate.ready = false;
-                }
-            }
-            ctx.write_buffer(&self.job_buffer, 0, bytemuck::bytes_of(&job));
             self.surface_sampler.prepare(
                 ctx.queue,
                 GpuSurfaceGatherJob::new(front, metadata, self.residency.publication_epoch()),
@@ -2444,8 +2750,13 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 continue;
             }
             self.refresh_surface_dependency_generations(front.key);
-            self.pending.push_front(front);
-            self.prepared = true;
+            self.prepared_extraction = Some(PreparedExtraction {
+                request: front,
+                slot: surface_slot,
+                resident_slot: resident.slot,
+                publication_generation: resident.publication_generation,
+                revision,
+            });
             break;
         }
         Ok(())
@@ -2453,7 +2764,61 @@ impl RenderPass for PlanetaryVoxelRenderPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let compute = unsafe { &mut *ctx.compute_encoder_ptr };
-        if self.prepared {
+        if let Some(publication) = self.prepared_publication.take() {
+            let regular_counts = publication.regular.allocation.counts();
+            let transition_counts = publication.transition.allocation.counts();
+            dispatch_compute(
+                compute,
+                &self.regular_copy_pipeline,
+                &self.regular_copy_bind_group,
+                regular_counts
+                    .vertices
+                    .max(regular_counts.indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Regular Surface Copy",
+            );
+            dispatch_compute(
+                compute,
+                &self.transition_copy_pipeline,
+                &self.transition_copy_bind_group,
+                transition_counts
+                    .vertices
+                    .max(transition_counts.indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Transition Surface Copy",
+            );
+            dispatch_compute(
+                compute,
+                &self.regular_meshlet_build_pipeline,
+                &self.regular_meshlet_build_bind_group,
+                regular_counts.meshlets.div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Regular Meshlet Build",
+            );
+            dispatch_compute(
+                compute,
+                &self.transition_meshlet_build_pipeline,
+                &self.transition_meshlet_build_bind_group,
+                transition_counts.meshlets.div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Transition Meshlet Build",
+            );
+            dispatch_compute(
+                compute,
+                &self.publish_pipeline,
+                &self.publish_bind_group,
+                1,
+                "Planetary Surface Publish",
+            );
+            if let Some(candidate) = self
+                .candidate_surfaces
+                .get_mut(&publication.extraction.request.key)
+                .filter(|candidate| candidate.revision == publication.extraction.revision)
+            {
+                candidate.publication_generation =
+                    Some(publication.extraction.publication_generation);
+                candidate.ready = false;
+            }
+            self.counters.submitted_jobs = self.counters.submitted_jobs.saturating_add(1);
+        } else if let Some(extraction) = self.prepared_extraction.take() {
             self.surface_sampler.encode(compute);
             self.regular_extractor.encode_indirect(
                 compute,
@@ -2465,54 +2830,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 self.surface_sampler.indirect_buffer(),
                 TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
             );
-            dispatch_compute(
-                compute,
-                &self.regular_copy_pipeline,
-                &self.regular_copy_bind_group,
-                self.config
-                    .regular
-                    .max_vertices
-                    .max(self.config.regular.max_indices)
-                    .div_ceil(COPY_WORKGROUP_SIZE),
-                "Planetary Regular Surface Copy",
-            );
-            dispatch_compute(
-                compute,
-                &self.transition_copy_pipeline,
-                &self.transition_copy_bind_group,
-                self.config
-                    .transition
-                    .max_vertices
-                    .max(self.config.transition.max_indices)
-                    .div_ceil(COPY_WORKGROUP_SIZE),
-                "Planetary Transition Surface Copy",
-            );
-            dispatch_compute(
-                compute,
-                &self.regular_meshlet_build_pipeline,
-                &self.regular_meshlet_build_bind_group,
-                max_meshlets_for_indices(self.config.regular.max_indices)
-                    .div_ceil(COPY_WORKGROUP_SIZE),
-                "Planetary Regular Meshlet Build",
-            );
-            dispatch_compute(
-                compute,
-                &self.transition_meshlet_build_pipeline,
-                &self.transition_meshlet_build_bind_group,
-                max_meshlets_for_indices(self.config.transition.max_indices)
-                    .div_ceil(COPY_WORKGROUP_SIZE),
-                "Planetary Transition Meshlet Build",
-            );
-            dispatch_compute(
-                compute,
-                &self.publish_pipeline,
-                &self.publish_bind_group,
-                1,
-                "Planetary Surface Publish",
-            );
-            self.pending.pop_front();
-            self.counters.submitted_jobs = self.counters.submitted_jobs.saturating_add(1);
-            self.prepared = false;
+            self.begin_extraction_readback(ctx.device, compute, extraction);
         }
         dispatch_compute(
             compute,
@@ -2881,6 +3199,14 @@ pub enum PlanetaryRenderError {
     SurfaceSampling(#[from] SurfaceSamplingError),
     #[error("planetary render queue must have at least one pending-surface slot")]
     ZeroPendingSurfaces,
+    #[error("planetary surface arenas must match the page and pending publication contract")]
+    SurfaceArenaContract,
+    #[error("planetary surface allocation for {0:?} became stale before handoff commit")]
+    StaleSurfaceAllocation(PlanetPageKey),
+    #[error("planetary surface allocation for {0:?} is only partially reserved")]
+    IncompleteSurfaceAllocation(PlanetPageKey),
+    #[error(transparent)]
+    Extraction(#[from] ExtractionError),
     #[error("planetary render allocation must reserve at least one surface page")]
     ZeroSurfacePages,
     #[error(
@@ -2941,6 +3267,8 @@ mod tests {
             slot: 5,
             revision: 19,
             publication_generation: Some(43),
+            regular_reservation: None,
+            transition_reservation: None,
             ready: false,
         };
         let current = GpuSurfaceState {
