@@ -145,11 +145,12 @@ impl TerrainLodTopology {
     }
 }
 
-/// Deterministic bounded mixed-LOD fixture for `planet_voxel_demo`.
+/// Deterministic bounded mixed-LOD fixture used by renderer topology tests.
 ///
 /// This is a renderer validation source, not Helio-owned production demand.
 /// It refines the camera's canonical ground cell to LOD0, balances adjacent
 /// tangent leaves to 2:1, and retains coarse coverage out to the root extent.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HorizonLodFixturePlan {
     root: PageKey,
@@ -157,6 +158,7 @@ pub struct HorizonLodFixturePlan {
     topology: TerrainLodTopology,
 }
 
+#[cfg(test)]
 impl HorizonLodFixturePlan {
     pub fn build(
         focus_lod0_cell: [i64; 3],
@@ -285,6 +287,7 @@ impl PageBounds {
     }
 }
 
+#[cfg(test)]
 fn tangent_children(parent: PageKey) -> Result<[PageKey; 4], TerrainLodTopologyError> {
     let lod = parent
         .lod
@@ -304,6 +307,7 @@ fn tangent_children(parent: PageKey) -> Result<[PageKey; 4], TerrainLodTopologyE
     ])
 }
 
+#[cfg(test)]
 fn balance_tangent_leaves(
     leaves: &mut BTreeSet<PageKey>,
     max_pages: usize,
@@ -345,6 +349,7 @@ fn balance_tangent_leaves(
     }
 }
 
+#[cfg(test)]
 fn tangent_shared_edge(left: PageBounds, right: PageBounds) -> bool {
     TANGENT_AXES.into_iter().any(|axis| {
         let other_axis = if axis == TANGENT_AXES[0] {

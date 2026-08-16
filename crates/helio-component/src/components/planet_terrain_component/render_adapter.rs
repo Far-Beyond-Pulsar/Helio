@@ -13,9 +13,9 @@ use helio_pass_planetary_voxel::{
     PlanetaryVoxelResidency,
 };
 use helio_planet_voxel_core::{
-    AddressError, ContractError, EvictOutcome, EvictedPage, LOD0_CELL_SIZE_METERS, PAGE_EDGE_CELLS,
-    PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration,
-    UploadOutcome, VisibilityOutcome, VisiblePage, VisiblePageSet,
+    AddressError, ContractError, EvictOutcome, EvictedPage, PageEvict, PageKey, PageUpload,
+    PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome,
+    VisibilityOutcome, VisiblePage, VisiblePageSet, PAGE_EDGE_CELLS,
 };
 use pulsar_terrain::{
     PlanetFramePayload, TerrainPageEvict, TerrainPageUpload, TerrainPlanetEvict,
@@ -58,8 +58,8 @@ pub enum PlanetaryTerrainRenderError {
     Residency(#[from] GpuResidencyError),
     #[error("planet frame contains non-finite camera-relative coordinates")]
     NonFiniteFrame,
-    #[error("planet frame LOD0 cell size {actual} does not match Helio's {expected}")]
-    CellSizeMismatch { actual: f32, expected: f32 },
+    #[error("planet frame LOD0 cell size must be finite and positive, got {0}")]
+    InvalidCellSize(f32),
     #[error("planet frame page edge {actual} does not match Helio's {expected}")]
     PageEdgeMismatch { actual: u32, expected: u32 },
     #[error("planet eviction for {planet:?} contains a page owned by {page_planet:?}")]
@@ -444,12 +444,10 @@ pub fn translate_frame(
     {
         return Err(PlanetaryTerrainRenderError::NonFiniteFrame);
     }
-    let expected_cell_size = LOD0_CELL_SIZE_METERS as f32;
-    if frame.lod0_cell_size_m() != expected_cell_size {
-        return Err(PlanetaryTerrainRenderError::CellSizeMismatch {
-            actual: frame.lod0_cell_size_m(),
-            expected: expected_cell_size,
-        });
+    if !frame.lod0_cell_size_m().is_finite() || frame.lod0_cell_size_m() <= 0.0 {
+        return Err(PlanetaryTerrainRenderError::InvalidCellSize(
+            frame.lod0_cell_size_m(),
+        ));
     }
     let expected_page_edge = PAGE_EDGE_CELLS as u32;
     if frame.page_edge_cells() != expected_page_edge {
@@ -541,12 +539,12 @@ mod tests {
     use super::*;
     use helio_pass_planetary_voxel::PlanetaryVoxelGpuConfig;
     use helio_planet_voxel_core::{
-        PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK, UploadOutcome,
+        UploadOutcome, PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK,
     };
     use pulsar_terrain::{
-        CELL_COUNT, CellWord as TerrainCellWord, LOD0_CELL_SIZE_METERS as TERRAIN_CELL_SIZE_METERS,
-        PAGE_EDGE, PageKey as TerrainPageKey, PlanetFrame, PlanetId as TerrainId, PlanetPosition,
-        TERRAIN_TRANSITION_FACE_MASK, TerrainRenderDeltaCounters, TerrainVisiblePage,
+        CellWord as TerrainCellWord, PageKey as TerrainPageKey, PlanetFrame, PlanetId as TerrainId,
+        PlanetPosition, TerrainRenderDeltaCounters, TerrainVisiblePage, CELL_COUNT, PAGE_EDGE,
+        TERRAIN_TRANSITION_FACE_MASK,
     };
 
     fn terrain_upload(
@@ -593,8 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn pulsar_and_helio_share_the_same_voxel_protocol_constants() {
-        assert_eq!(TERRAIN_CELL_SIZE_METERS, LOD0_CELL_SIZE_METERS);
+    fn pulsar_and_helio_share_the_same_voxel_protocol_layout() {
         assert_eq!(PAGE_EDGE, HELIO_PAGE_EDGE);
         assert_eq!(CELL_COUNT, PAGE_CELL_COUNT);
         assert_eq!(TERRAIN_TRANSITION_FACE_MASK, TRANSITION_FACE_MASK);
@@ -721,7 +718,7 @@ mod tests {
     fn frame_translation_is_field_exact_at_signed_planet_scale() {
         let terrain = PlanetFrame::new(
             TerrainId([0x91; 16]),
-            PlanetPosition::new([-63_710_017, 63_710_033, -1], [0.025, 0.075, 0.099]).unwrap(),
+            PlanetPosition::new([-63_710_017, 63_710_033, -1], [0.025, 0.075, 0.099], 100).unwrap(),
             u64::MAX - 2,
         );
         let payload = terrain.renderer_payload();
@@ -793,8 +790,12 @@ mod tests {
                 .set_planet_frame(
                     &queue,
                     translate_frame(
-                        PlanetFrame::new(planet, PlanetPosition::from_lod0_cell([0; 3]), 1)
-                            .renderer_payload(),
+                        PlanetFrame::new(
+                            planet,
+                            PlanetPosition::from_lod0_cell([0; 3], 100).unwrap(),
+                            1,
+                        )
+                        .renderer_payload(),
                     )
                     .unwrap(),
                 )

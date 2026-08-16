@@ -145,24 +145,24 @@ impl PlanetaryVoxelRenderConfig {
         }
     }
 
-    /// Atomic active/pending residency for the horizon-scale validation trace.
+    /// Atomic active/pending residency for the live planetary SDF path.
     ///
-    /// The deterministic LOD0..LOD10 tangent plan is capped at 192 pages. The
-    /// doubled resident budget keeps the previous complete plan visible while
-    /// a worst-case teleport replacement is uploaded and extracted. The
-    /// allocation remains independent of planet size.
-    pub fn horizon_demo() -> Self {
+    /// The bounded active frontier is capped at 192 pages. The doubled surface
+    /// budget keeps the previous complete frontier visible while its
+    /// replacement is uploaded and extracted. Allocation remains independent
+    /// of logical planet size.
+    pub fn production_planet() -> Self {
         Self {
             residency: PlanetaryVoxelGpuConfig::new(480, 1_024, 64, 192, 480)
-                .expect("horizon residency configuration is valid"),
+                .expect("production planet residency configuration is valid"),
             max_surface_pages: 384,
             max_pending_surfaces: 192,
             regular: TransvoxelGpuExtractorConfig::default(),
             transition: TransvoxelGpuTransitionExtractorConfig::default(),
             regular_arena: ExtractionLimits::new(384, 192, 6_291_456, 12_582_912, 199_729)
-                .expect("horizon regular arena configuration is valid"),
+                .expect("production planet regular arena configuration is valid"),
             transition_arena: ExtractionLimits::new(384, 192, 786_432, 2_359_296, 37_632)
-                .expect("horizon transition arena configuration is valid"),
+                .expect("production planet transition arena configuration is valid"),
             max_surface_bytes: 512 * 1024 * 1024,
         }
     }
@@ -3349,8 +3349,8 @@ mod tests {
     }
 
     #[test]
-    fn horizon_config_holds_two_complete_bounded_plans() {
-        let config = PlanetaryVoxelRenderConfig::horizon_demo();
+    fn production_planet_config_holds_two_complete_bounded_frontiers() {
+        let config = PlanetaryVoxelRenderConfig::production_planet();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
         assert_eq!(config.residency.max_resident_pages, 480);

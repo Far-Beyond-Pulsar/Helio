@@ -204,10 +204,6 @@ name = "voxel_demo_raymarch"
 path = "voxel/raymarch_demo.rs"
 
 [[bin]]
-name = "planet_voxel_demo"
-path = "planet_voxel_demo.rs"
-
-[[bin]]
 name = "radiant_demo"
 path = "radiant_demo.rs"
 

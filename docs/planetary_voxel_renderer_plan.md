@@ -16,7 +16,9 @@ The new path does not increase their constants, reuse their fixed pools, change 
 
 - `helio-planet-voxel-core`: renderer-facing page keys, upload/eviction messages, GPU POD layouts, limits, and validators.
 - `helio-pass-planetary-voxel`: bounded resident page buffers, GPU extraction, meshlet output, culling, G-buffer/depth/shadow drawing, and profiling.
-- `planet_voxel_demo`: standalone validation from a 10 cm interaction patch to an Earth-radius horizon.
+- Live validation is driven by Pulsar's `PlanetTerrainComponent` using canonical
+  3D SDF pages. Helio does not own a procedural planet or a standalone terrain
+  source.
 
 Pulsar remains authoritative for generation, edits, hierarchy, persistence, networking, physics, and canonical coordinates. Helio accepts versioned page deltas and may evict/rebuild them at any time.
 

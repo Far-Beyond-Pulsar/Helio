@@ -1,5 +1,8 @@
 use engine_class_derive::engine_class;
-use pulsar_terrain::{PlanetDefinition, PlanetId, PlanetIdParseError, TerrainRuntimeError};
+use pulsar_terrain::{
+    PlanetDefinition, PlanetId, PlanetIdParseError, PlanetSdfConfig, PlanetSdfConfigError,
+    TerrainRuntimeError,
+};
 use thiserror::Error;
 
 pub const PLANET_TERRAIN_CLASS_NAME: &str = "PlanetTerrainComponent";
@@ -20,9 +23,14 @@ pub struct PlanetTerrainComponent {
     pub center_cell_y: i64,
     #[property]
     pub center_cell_z: i64,
-    /// Canonical radius in 10 cm LOD0 cells.
+    /// Canonical radius in this planet's LOD0 cells.
     #[property]
     pub radius_cells: u64,
+    /// Physical size of one smooth SDF sample cell in millimeters.
+    #[property]
+    pub lod0_cell_size_mm: u64,
+    #[property]
+    pub terrain_seed: u64,
     #[property]
     pub material: u64,
     #[property]
@@ -39,7 +47,9 @@ impl Default for PlanetTerrainComponent {
             center_cell_x: 0,
             center_cell_y: 0,
             center_cell_z: 0,
-            radius_cells: 63_710_000,
+            radius_cells: 6_371_000,
+            lod0_cell_size_mm: 1_000,
+            terrain_seed: 0x5eed,
             material: 1,
             root_lod: 22,
             max_resident_pages: 8_192,
@@ -52,6 +62,10 @@ impl PlanetTerrainComponent {
         if self.radius_cells == 0 {
             return Err(ComponentError::ZeroRadius);
         }
+        let lod0_cell_size_mm = u32::try_from(self.lod0_cell_size_mm)
+            .ok()
+            .filter(|size| *size != 0)
+            .ok_or(ComponentError::CellSize(self.lod0_cell_size_mm))?;
         let material = u8::try_from(self.material)
             .ok()
             .filter(|material| *material != 0)
@@ -75,6 +89,8 @@ impl PlanetTerrainComponent {
             center_cell: [self.center_cell_x, self.center_cell_y, self.center_cell_z],
             radius_cells: self.radius_cells,
             material,
+            lod0_cell_size_mm,
+            sdf: PlanetSdfConfig::earthlike(self.terrain_seed, lod0_cell_size_mm)?,
             root_lod,
             max_resident_pages,
         };
@@ -91,6 +107,10 @@ pub enum ComponentError {
     PlanetId(#[from] PlanetIdParseError),
     #[error("radius_cells must be greater than zero")]
     ZeroRadius,
+    #[error("lod0_cell_size_mm must fit u32 and be greater than zero, got {0}")]
+    CellSize(u64),
+    #[error(transparent)]
+    Sdf(#[from] PlanetSdfConfigError),
     #[error("material must be in 1..=255, got {0}")]
     Material(u64),
     #[error("root_lod must be in 1..=62, got {0}")]
@@ -119,7 +139,7 @@ mod tests {
             PlanetTerrainComponent::class_name(),
             PLANET_TERRAIN_CLASS_NAME
         );
-        assert_eq!(component.get_properties().len(), 9);
+        assert_eq!(component.get_properties().len(), 11);
     }
 
     #[test]

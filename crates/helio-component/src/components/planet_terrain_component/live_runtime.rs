@@ -5,10 +5,11 @@ use helio_pass_planetary_voxel::PlanetaryVoxelRenderConfig;
 use helio_planet_voxel_core::VisibilityOutcome;
 use pulsar_reflection::LiveKeySet;
 use pulsar_terrain::{
-    CELL_COUNT, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
+    PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
     TerrainControllerError, TerrainPlanningConfig, TerrainRefinementConfig,
     TerrainRenderDeltaConfig, TerrainRuntimeConfig, TerrainRuntimeError, TerrainRuntimeHandle,
     TerrainStreamingConfig, TerrainStreamingController, TerrainStreamingError, TerrainSubsystem,
+    CELL_COUNT,
 };
 use thiserror::Error;
 
@@ -135,7 +136,7 @@ impl PlanetTerrainRuntime {
     }
 
     pub fn renderer_config() -> PlanetaryVoxelRenderConfig {
-        PlanetaryVoxelRenderConfig::horizon_demo()
+        PlanetaryVoxelRenderConfig::production_planet()
     }
 
     pub fn component_context_mut(
@@ -179,18 +180,22 @@ impl PlanetTerrainRuntime {
         }
 
         self.subsystem.on_frame(input.delta_time_s);
-        let camera = PlanetPosition::from_meters(input.camera_m)?;
-        let view = PlanetView::new(
-            camera,
-            input.forward,
-            input.up,
-            input.vertical_fov_radians,
-            input.viewport_px,
-            input.near_m,
-            input.far_m,
-            input.velocity_mps,
-        )?;
         for planet_id in self.component_cache.active_planets() {
+            let definition = self
+                .runtime
+                .planet_definition(planet_id)
+                .ok_or(TerrainRuntimeError::PlanetMissing(planet_id))?;
+            let camera = PlanetPosition::from_meters(input.camera_m, definition.lod0_cell_size_mm)?;
+            let view = PlanetView::new(
+                camera,
+                input.forward,
+                input.up,
+                input.vertical_fov_radians,
+                input.viewport_px,
+                input.near_m,
+                input.far_m,
+                input.velocity_mps,
+            )?;
             self.controller.submit_view(planet_id, view)?;
         }
 
