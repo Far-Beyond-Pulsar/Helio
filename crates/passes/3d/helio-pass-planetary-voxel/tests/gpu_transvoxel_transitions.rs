@@ -137,11 +137,16 @@ fn headless_gpu_transition_emission_matches_cpu_on_all_six_faces() {
             );
             for transition_vertex in &expected.coarse_interior_vertices {
                 let position = actual_vertices[*transition_vertex as usize].position;
+                let closest = regular_vertices.iter().min_by(|left, right| {
+                    squared_distance(left.position, position)
+                        .total_cmp(&squared_distance(right.position, position))
+                });
                 assert!(
                     regular_vertices
                         .iter()
                         .any(|regular| positions_close(regular.position, position)),
-                    "case {case_number} transition coarse vertex {position:?} has no identical regular secondary vertex"
+                    "case {case_number} transition coarse vertex {position:?} has no identical regular secondary vertex; closest={:?}",
+                    closest.map(|vertex| vertex.position),
                 );
             }
 
@@ -443,6 +448,13 @@ fn positions_close(left: [f32; 3], right: [f32; 3]) -> bool {
     left.into_iter()
         .zip(right)
         .all(|(left, right)| (left - right).abs() <= 1.0e-5)
+}
+
+fn squared_distance(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| (left - right).powi(2))
+        .sum()
 }
 
 fn fixtures_and_slabs(

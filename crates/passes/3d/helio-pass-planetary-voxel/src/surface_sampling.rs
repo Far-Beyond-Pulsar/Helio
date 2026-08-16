@@ -1,7 +1,6 @@
 use crate::{
     transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE, TRANSITION_FACE_SLAB_EDGE,
-    TRANSITION_FACE_SLAB_LAYERS,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{
@@ -37,7 +36,7 @@ impl PlanetarySurfaceRequest {
         Ok(())
     }
 
-    /// Exact page dependencies for the regular 34^3 halo and every enabled
+    /// Exact page dependencies for the regular symmetric 35^3 halo and every enabled
     /// fine-side 69x69x5 transition slab. This returns page identities only;
     /// no renderer-specific scalar arrays are constructed on the CPU.
     pub fn required_pages(self) -> Result<BTreeSet<PlanetPageKey>, SurfaceSamplingError> {
@@ -49,7 +48,7 @@ impl PlanetarySurfaceRequest {
             .checked_shl(u32::from(page.lod))
             .ok_or(AddressError::CoordinateOverflow)?;
         let regular_min = page_min.map(|value| value - coarse_scale);
-        let regular_max = page_min.map(|value| value + PAGE_EDGE as i64 * coarse_scale);
+        let regular_max = page_min.map(|value| value + (PAGE_EDGE as i64 + 1) * coarse_scale);
         insert_page_box(
             self.key.planet,
             page.lod,
@@ -475,6 +474,7 @@ pub enum SurfaceSamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{TRANSITION_FACE_SLAB_EDGE, TRANSITION_FACE_SLAB_LAYERS};
     use helio_planet_voxel_core::{
         CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
     };
@@ -534,7 +534,7 @@ mod tests {
         let expanded_sample_bytes = (EXTRACTION_SAMPLE_COUNT
             + TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT)
             * core::mem::size_of::<CellWord>();
-        assert_eq!(expanded_sample_bytes, 728_536);
+        assert_eq!(expanded_sample_bytes, 742_820);
         assert_eq!(core::mem::size_of::<PlanetarySurfaceRequest>(), 80);
         assert!(
             expanded_sample_bytes
@@ -683,10 +683,11 @@ mod tests {
                 read_buffer::<CellWord>(&device, &queue, &regular_samples, EXTRACTION_SAMPLE_COUNT);
             let page_min = key.page.lod0_cell_min().unwrap();
             let scale = 1_i64 << key.page.lod;
-            for z in 0..34_i64 {
-                for y in 0..34_i64 {
-                    for x in 0..34_i64 {
-                        let index = (x + y * 34 + z * 34 * 34) as usize;
+            for z in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                for y in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                    for x in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                        let edge = crate::EXTRACTION_SAMPLE_EDGE as i64;
+                        let index = (x + y * edge + z * edge * edge) as usize;
                         let position = [
                             page_min[0] + (x - 1) * scale,
                             page_min[1] + (y - 1) * scale,

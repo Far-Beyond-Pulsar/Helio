@@ -113,7 +113,7 @@ impl PlanetaryVoxelRenderConfig {
             residency: PlanetaryVoxelGpuConfig::new(32, 128, 16, 32, 64)
                 .expect("validation residency configuration is valid"),
             max_surface_pages: 5,
-            max_pending_surfaces: 8,
+            max_pending_surfaces: 5,
             regular: TransvoxelGpuExtractorConfig::default(),
             transition: TransvoxelGpuTransitionExtractorConfig::default(),
             regular_arena: ExtractionLimits::new(5, 5, 327_680, 655_360, 10_405)
@@ -2721,10 +2721,10 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 self.pending.push_back(front);
                 continue;
             }
-            let Some(frame) = self.residency.planet_frame(front.key.planet) else {
+            if self.residency.planet_frame(front.key.planet).is_none() {
                 self.pending.push_back(front);
                 continue;
-            };
+            }
             let resident_slot = resident.slot;
             let publication_generation = resident.publication_generation;
             let metadata = match GpuPageMeta::new(
@@ -3315,6 +3315,7 @@ mod tests {
         assert!(plan.total_bytes <= config.max_surface_bytes);
         assert_eq!(config.residency.max_resident_pages, 32);
         assert_eq!(config.max_surface_pages, 5);
+        assert_eq!(config.max_pending_surfaces, 5);
         assert_eq!(plan.indirect_bytes, 5 * DRAW_ARGS_BYTES);
         assert_eq!(plan.feedback_bytes, 32);
         assert_eq!(
@@ -3564,6 +3565,25 @@ mod tests {
             pass.apply_visible_set(&queue, visible(3, 1)).unwrap();
             assert!(pass.invalidated_surfaces.is_empty());
             assert_eq!(pass.pending.len(), 1);
+            assert_eq!(
+                pass.candidate_surfaces[&key].revision, first_revision,
+                "the first complete coarse frontier must survive target churn"
+            );
+            assert_eq!(pass.pending.front().unwrap().transition_mask, 0);
+            assert_eq!(pass.surface_requests[&key].transition_mask, 0);
+            assert_eq!(pass.requested_visible[&key].transition_mask, 1);
+
+            // Model completion of the first extraction. Committing it must
+            // immediately schedule the remembered topology as a second atomic
+            // handoff instead of losing that target or exposing a black frame.
+            let candidate = pass.candidate_surfaces.get_mut(&key).unwrap();
+            candidate.publication_generation = Some(1);
+            candidate.ready = true;
+            pass.pending.clear();
+            pass.invalidated_surfaces.clear();
+            pass.commit_ready_handoff(&queue).unwrap();
+
+            assert_eq!(pass.active_surfaces[&key].request.transition_mask, 0);
             assert_ne!(pass.candidate_surfaces[&key].revision, first_revision);
             assert_eq!(pass.pending.front().unwrap().transition_mask, 1);
             assert_eq!(pass.surface_requests[&key].transition_mask, 1);

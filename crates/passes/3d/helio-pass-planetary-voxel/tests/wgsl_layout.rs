@@ -116,7 +116,7 @@ fn planetary_surface_shaders_parse_and_validate() {
             ],
         )
     );
-    assert_eq!(wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuDrawPage").0, 48);
+    assert_eq!(wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuDrawPage").0, 64);
     assert_eq!(
         wgsl_struct_in(SURFACE_PUBLISH_WGSL, "DrawIndexedIndirectArgs").0,
         20

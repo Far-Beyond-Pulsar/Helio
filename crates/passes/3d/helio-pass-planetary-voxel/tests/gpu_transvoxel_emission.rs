@@ -1,9 +1,9 @@
 use bytemuck::Pod;
 use helio_pass_planetary_voxel::{
     regular_case_from_fixture, ExtractionFixture, ExtractionFixtureKind, GpuTerrainVertex,
-    GpuTransvoxelCellOffset, GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock,
-    TransitionFace, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
-    TRANSVOXEL_REGULAR_CORNERS, TRANSVOXEL_SCAN_WORKGROUP_SIZE,
+    GpuTransvoxelCellOffset, GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock, TransitionFace,
+    TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TRANSVOXEL_REGULAR_CORNERS,
+    TRANSVOXEL_SCAN_WORKGROUP_SIZE,
 };
 use helio_planet_voxel_core::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
 use std::sync::mpsc;
@@ -39,7 +39,7 @@ fn headless_transvoxel_emission_matches_cpu_geometry_and_overflow_contract() {
         let mut extractor =
             TransvoxelGpuExtractor::new(&device, TransvoxelGpuExtractorConfig::default()).unwrap();
         assert_eq!(extractor.resource_stats().buffers, 12);
-        assert_eq!(extractor.resource_stats().allocated_bytes, 15_771_264);
+        assert_eq!(extractor.resource_stats().allocated_bytes, 15_785_548);
         let resources = extractor.resource_stats();
         extractor.resize(3840, 2160);
         assert_eq!(extractor.resource_stats(), resources);

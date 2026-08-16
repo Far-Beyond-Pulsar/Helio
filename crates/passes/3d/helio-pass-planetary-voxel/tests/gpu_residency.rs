@@ -225,7 +225,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         );
         assert_eq!(metadata[0].slot, 0);
         assert_eq!(metadata[0].generation(), 1);
-        assert_eq!(metadata[0].lod0_cell_min(), [-64, 0, -96]);
+        assert_eq!(metadata[0].lod0_cell_min(), [-64, 32, -96]);
         assert_eq!(metadata[0].transition_mask, 0b10_0101);
         let counters: Vec<GpuResidencyCounters> = read_buffer_range(
             &device,

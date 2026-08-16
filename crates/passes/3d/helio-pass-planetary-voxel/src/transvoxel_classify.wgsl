@@ -1,5 +1,5 @@
 const PAGE_EDGE: u32 = 32u;
-const SAMPLE_EDGE: u32 = 34u;
+const SAMPLE_EDGE: u32 = 35u;
 const PAGE_CELL_COUNT: u32 = 32768u;
 
 struct GpuTransvoxelDispatch {
