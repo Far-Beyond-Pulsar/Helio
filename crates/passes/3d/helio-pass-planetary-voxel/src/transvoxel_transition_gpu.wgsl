@@ -2,9 +2,9 @@ const FACE_COUNT: u32 = 6u;
 const FACE_CELL_EDGE: u32 = 32u;
 const CELLS_PER_FACE: u32 = 1024u;
 const CELL_COUNT: u32 = 6144u;
-const SLAB_EDGE: u32 = 67u;
-const SLAB_LAYER_STRIDE: u32 = 4489u;
-const SLAB_FACE_STRIDE: u32 = 13467u;
+const SLAB_EDGE: u32 = 69u;
+const SLAB_LAYER_STRIDE: u32 = 4761u;
+const SLAB_FACE_STRIDE: u32 = 23805u;
 const SCAN_WORKGROUP_SIZE: u32 = 256u;
 
 const CLASS_TABLE_OFFSET: u32 = 0u;
@@ -190,7 +190,7 @@ fn classify_transition_cells(@builtin(global_invocation_id) global_id: vec3<u32>
     var case_index = 0u;
     for (var sample = 0u; sample < 9u; sample += 1u) {
         let uv = FULL_SAMPLE_UV[sample];
-        let word = sample_word(face, cell_u * 2u + uv.x + 1u, cell_v * 2u + uv.y + 1u, 1u);
+        let word = sample_word(face, cell_u * 2u + uv.x + 2u, cell_v * 2u + uv.y + 2u, 2u);
         if is_solid(word) {
             case_index |= CASE_WEIGHTS[sample];
         }
@@ -320,13 +320,13 @@ fn corner_depth(corner: u32) -> f32 {
     return select(1.0, 0.0, corner < 9u);
 }
 
-fn sample_gradient(face: u32, u: u32, v: u32) -> vec3<f32> {
-    let du = density(sample_word(face, u + 1u, v, 1u))
-        - density(sample_word(face, u - 1u, v, 1u));
-    let dv = density(sample_word(face, u, v + 1u, 1u))
-        - density(sample_word(face, u, v - 1u, 1u));
-    let outward = density(sample_word(face, u, v, 2u))
-        - density(sample_word(face, u, v, 0u));
+fn sample_gradient(face: u32, u: u32, v: u32, step: u32) -> vec3<f32> {
+    let du = density(sample_word(face, u + step, v, 2u))
+        - density(sample_word(face, u - step, v, 2u));
+    let dv = density(sample_word(face, u, v + step, 2u))
+        - density(sample_word(face, u, v - step, 2u));
+    let outward = density(sample_word(face, u, v, 2u + step))
+        - density(sample_word(face, u, v, 2u - step));
     return FACE_U_AXES[face] * du
         + FACE_V_AXES[face] * dv
         + FACE_OUTWARD_AXES[face] * outward;
@@ -387,12 +387,12 @@ fn emit_transition_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let second_full = full_corner(second_corner);
         let first_uv = FULL_SAMPLE_UV[first_full];
         let second_uv = FULL_SAMPLE_UV[second_full];
-        let first_u = cell_u * 2u + first_uv.x + 1u;
-        let first_v = cell_v * 2u + first_uv.y + 1u;
-        let second_u = cell_u * 2u + second_uv.x + 1u;
-        let second_v = cell_v * 2u + second_uv.y + 1u;
-        let first_word = sample_word(face, first_u, first_v, 1u);
-        let second_word = sample_word(face, second_u, second_v, 1u);
+        let first_u = cell_u * 2u + first_uv.x + 2u;
+        let first_v = cell_v * 2u + first_uv.y + 2u;
+        let second_u = cell_u * 2u + second_uv.x + 2u;
+        let second_v = cell_v * 2u + second_uv.y + 2u;
+        let first_word = sample_word(face, first_u, first_v, 2u);
+        let second_word = sample_word(face, second_u, second_v, 2u);
         let first_density = density(first_word);
         let second_density = density(second_word);
         let denominator = first_density - second_density;
@@ -411,8 +411,8 @@ fn emit_transition_cells(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
         let normal = normalized_or_outward(
             mix(
-                sample_gradient(face, first_u, first_v),
-                sample_gradient(face, second_u, second_v),
+                sample_gradient(face, first_u, first_v, select(2u, 1u, first_corner < 9u)),
+                sample_gradient(face, second_u, second_v, select(2u, 1u, second_corner < 9u)),
                 interpolation,
             ),
             outward_axis,

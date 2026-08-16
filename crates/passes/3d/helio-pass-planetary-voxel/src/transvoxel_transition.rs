@@ -17,8 +17,13 @@ pub const TRANSITION_FACE_CELL_EDGE: usize = PAGE_EDGE;
 pub const TRANSITION_FACE_SAMPLE_EDGE: usize = PAGE_EDGE * 2 + 1;
 pub const TRANSITION_FACE_SAMPLE_COUNT: usize =
     TRANSITION_FACE_SAMPLE_EDGE * TRANSITION_FACE_SAMPLE_EDGE;
-pub const TRANSITION_FACE_SLAB_EDGE: usize = TRANSITION_FACE_SAMPLE_EDGE + 2;
-pub const TRANSITION_FACE_SLAB_LAYERS: usize = 3;
+/// Two fine-grid halo samples are required on every side. Transition vertices
+/// on the half-resolution face must use the exact same coarse-spacing central
+/// difference as the adjoining regular coarse mesh; a one-sample halo can
+/// only produce the fine-spacing gradient and makes the two meshes disagree
+/// after Transvoxel's secondary-position displacement.
+pub const TRANSITION_FACE_SLAB_EDGE: usize = TRANSITION_FACE_SAMPLE_EDGE + 4;
+pub const TRANSITION_FACE_SLAB_LAYERS: usize = 5;
 pub const TRANSITION_FACE_SLAB_SAMPLE_COUNT: usize =
     TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_LAYERS;
 pub const TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT: usize = TRANSITION_FACE_SLAB_SAMPLE_COUNT * 6;
@@ -141,7 +146,10 @@ impl TransvoxelTransitionCell {
                 });
             }
         }
-        Ok(Self::from_full_resolution(full))
+        let mut samples = [TransvoxelTransitionSample::default(); 13];
+        samples[..9].copy_from_slice(&full);
+        samples[9..].copy_from_slice(&half);
+        Ok(Self { samples })
     }
 
     pub const fn samples(&self) -> &[TransvoxelTransitionSample; 13] {
@@ -324,19 +332,20 @@ impl TransvoxelTransitionFaceFixture {
             self.canonical_position([i32::from(face_sample[0]), i32::from(face_sample[1])], 0);
         Some(TransvoxelTransitionSample {
             cell: self.kind.sample_canonical(position),
-            gradient: self.gradient(position),
+            gradient: self.gradient(position, self.fine_scale),
         })
     }
 
     /// Returns one face-local scalar slab in `(u, v, outward)` order. The
-    /// logical face grid occupies coordinates 1..=65 in u/v and layer 1;
-    /// the surrounding samples are the central-difference halo consumed by
-    /// the GPU transition extractor.
+    /// logical face grid occupies coordinates 2..=66 in u/v and layer 2.
+    /// The two-sample halo lets the GPU reproduce both fine-spacing gradients
+    /// on the full-resolution face and coarse-spacing gradients on the
+    /// half-resolution face.
     pub fn slab_samples(&self) -> Box<[CellWord]> {
         let mut samples = Vec::with_capacity(TRANSITION_FACE_SLAB_SAMPLE_COUNT);
-        for outward in -1..=1 {
-            for v in -1..=TRANSITION_FACE_SAMPLE_EDGE as i32 {
-                for u in -1..=TRANSITION_FACE_SAMPLE_EDGE as i32 {
+        for outward in -2..=2 {
+            for v in -2..=TRANSITION_FACE_SAMPLE_EDGE as i32 + 1 {
+                for u in -2..=TRANSITION_FACE_SAMPLE_EDGE as i32 + 1 {
                     samples.push(
                         self.kind
                             .sample_canonical(self.canonical_position([u, v], outward)),
@@ -360,7 +369,18 @@ impl TransvoxelTransitionFaceFixture {
             full[sample] = self
                 .full_resolution_sample([cell_uv[0] * 2 + offset[0], cell_uv[1] * 2 + offset[1]])?;
         }
-        Some(TransvoxelTransitionCell::from_full_resolution(full))
+        let half_uv = [[0_u8, 0_u8], [2, 0], [0, 2], [2, 2]];
+        let mut half = [TransvoxelTransitionSample::default(); 4];
+        for (sample, offset) in half_uv.into_iter().enumerate() {
+            let face_sample = [cell_uv[0] * 2 + offset[0], cell_uv[1] * 2 + offset[1]];
+            let position =
+                self.canonical_position([i32::from(face_sample[0]), i32::from(face_sample[1])], 0);
+            half[sample] = TransvoxelTransitionSample {
+                cell: self.kind.sample_canonical(position),
+                gradient: self.gradient(position, self.coarse_scale),
+            };
+        }
+        TransvoxelTransitionCell::new(full, half).ok()
     }
 
     pub fn extract(&self) -> TransvoxelTransitionFaceMesh {
@@ -409,13 +429,13 @@ impl TransvoxelTransitionFaceFixture {
         position
     }
 
-    fn gradient(&self, position: [i64; 3]) -> [f32; 3] {
+    fn gradient(&self, position: [i64; 3], sample_scale: i64) -> [f32; 3] {
         let mut gradient = [0.0; 3];
         for axis in 0..3 {
             let mut lower = position;
             let mut upper = position;
-            lower[axis] -= self.fine_scale;
-            upper[axis] += self.fine_scale;
+            lower[axis] -= sample_scale;
+            upper[axis] += sample_scale;
             gradient[axis] = (f32::from(self.kind.sample_canonical(upper).density())
                 - f32::from(self.kind.sample_canonical(lower).density()))
                 * 0.5;
@@ -585,7 +605,13 @@ mod tests {
     fn transition_cell_rejects_nonidentical_duplicate_corners() {
         let full = [sample(-1, [1.0, 0.0, 0.0]); 9];
         let mut half = [full[0], full[2], full[6], full[8]];
-        assert!(TransvoxelTransitionCell::new(full, half).is_ok());
+        half[0].gradient = [0.0, 1.0, 0.0];
+        let cell = TransvoxelTransitionCell::new(full, half).unwrap();
+        assert_eq!(
+            cell.sample(9).unwrap().gradient,
+            half[0].gradient,
+            "the coarse duplicate keeps its coarse-spacing gradient"
+        );
         half[2].cell = CellWord::AIR;
         assert_eq!(
             TransvoxelTransitionCell::new(full, half),
@@ -638,9 +664,9 @@ mod tests {
         assert_eq!(slab.len(), TRANSITION_FACE_SLAB_SAMPLE_COUNT);
         for v in 0..TRANSITION_FACE_SAMPLE_EDGE as u8 {
             for u in 0..TRANSITION_FACE_SAMPLE_EDGE as u8 {
-                let slab_index = usize::from(u + 1)
-                    + usize::from(v + 1) * TRANSITION_FACE_SLAB_EDGE
-                    + TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE;
+                let slab_index = usize::from(u + 2)
+                    + usize::from(v + 2) * TRANSITION_FACE_SLAB_EDGE
+                    + 2 * TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE;
                 assert_eq!(
                     slab[slab_index],
                     fixture.full_resolution_sample([u, v]).unwrap().cell

@@ -1,10 +1,11 @@
 use bytemuck::Pod;
 use helio_pass_planetary_voxel::{
-    transition_case, ExtractionFixtureKind, GpuTerrainVertex, GpuTransvoxelCellOffset,
-    GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
-    TransitionFace, TransvoxelGpuTransitionExtractor, TransvoxelGpuTransitionExtractorConfig,
-    TransvoxelTransitionFaceFixture, TransvoxelTransitionGpuError,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SLAB_EDGE,
+    transition_case, ExtractionFixture, ExtractionFixtureKind, GpuTerrainVertex,
+    GpuTransvoxelCellOffset, GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock,
+    GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters, TransitionFace,
+    TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
+    TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionFaceFixture,
+    TransvoxelTransitionGpuError, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SLAB_EDGE,
     TRANSITION_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FULL_SAMPLE_UV,
     TRANSVOXEL_TRANSITION_CASE_WEIGHTS, TRANSVOXEL_TRANSITION_CELLS_PER_FACE,
     TRANSVOXEL_TRANSITION_CELL_COUNT, TRANSVOXEL_TRANSITION_SCAN_BLOCKS,
@@ -46,10 +47,12 @@ fn headless_gpu_transition_emission_matches_cpu_on_all_six_faces() {
         )
         .unwrap();
         assert_eq!(extractor.resource_stats().buffers, 9);
-        assert_eq!(extractor.resource_stats().allocated_bytes, 3_799_224);
+        assert_eq!(extractor.resource_stats().allocated_bytes, 4_047_336);
         let resources = extractor.resource_stats();
         extractor.resize(3840, 2160);
         assert_eq!(extractor.resource_stats(), resources);
+        let regular_extractor =
+            TransvoxelGpuExtractor::new(&device, TransvoxelGpuExtractorConfig::default()).unwrap();
 
         let cases = [
             (
@@ -107,6 +110,40 @@ fn headless_gpu_transition_emission_matches_cpu_on_all_six_faces() {
                 actual_indices, expected.indices,
                 "case {case_number} indices"
             );
+
+            let regular_fixture = ExtractionFixture::new(kind, page).unwrap();
+            regular_extractor
+                .dispatch(
+                    &device,
+                    &queue,
+                    regular_fixture.samples(),
+                    generation,
+                    u64::MAX,
+                    mask,
+                )
+                .unwrap();
+            let regular_counters = read_one::<GpuTransvoxelEmissionCounters>(
+                &device,
+                &queue,
+                regular_extractor.counters_buffer(),
+            );
+            assert!(regular_counters.completed != 0, "case {case_number}");
+            assert!(!regular_counters.overflowed(), "case {case_number}");
+            let regular_vertices: Vec<GpuTerrainVertex> = read_buffer(
+                &device,
+                &queue,
+                regular_extractor.vertices_buffer(),
+                u64::from(regular_counters.emitted_vertices) * size_of::<GpuTerrainVertex>() as u64,
+            );
+            for transition_vertex in &expected.coarse_interior_vertices {
+                let position = actual_vertices[*transition_vertex as usize].position;
+                assert!(
+                    regular_vertices
+                        .iter()
+                        .any(|regular| positions_close(regular.position, position)),
+                    "case {case_number} transition coarse vertex {position:?} has no identical regular secondary vertex"
+                );
+            }
 
             let actual_cells: Vec<GpuTransvoxelTransitionCell> = read_buffer(
                 &device,
@@ -319,12 +356,12 @@ fn exhaustive_case_slabs() -> Vec<CellWord> {
     for case_index in 0..512_u16 {
         let (face, cell_u, cell_v) = sweep_case_location(case_index);
         for (sample, uv) in TRANSITION_FULL_SAMPLE_UV.into_iter().enumerate() {
-            let slab_u = usize::from(cell_u) * 2 + usize::from(uv[0]) + 1;
-            let slab_v = usize::from(cell_v) * 2 + usize::from(uv[1]) + 1;
+            let slab_u = usize::from(cell_u) * 2 + usize::from(uv[0]) + 2;
+            let slab_v = usize::from(cell_v) * 2 + usize::from(uv[1]) + 2;
             let index = usize::from(face) * TRANSITION_FACE_SLAB_SAMPLE_COUNT
                 + slab_u
                 + slab_v * TRANSITION_FACE_SLAB_EDGE
-                + TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE;
+                + 2 * TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE;
             slabs[index] = if case_index & TRANSVOXEL_TRANSITION_CASE_WEIGHTS[sample] != 0 {
                 solid
             } else {
@@ -346,6 +383,7 @@ struct ExpectedMesh {
     indices: Vec<u32>,
     cell_offsets: Vec<Option<(u32, u32)>>,
     active_cells: u32,
+    coarse_interior_vertices: Vec<u32>,
 }
 
 fn expected_mesh(fixtures: &[TransvoxelTransitionFaceFixture; 6], mask: u8) -> ExpectedMesh {
@@ -354,6 +392,7 @@ fn expected_mesh(fixtures: &[TransvoxelTransitionFaceFixture; 6], mask: u8) -> E
         indices: Vec::new(),
         cell_offsets: vec![None; TRANSVOXEL_TRANSITION_CELL_COUNT as usize],
         active_cells: 0,
+        coarse_interior_vertices: Vec::new(),
     };
     for face in TransitionFace::ALL {
         if mask & face.bit() == 0 {
@@ -363,6 +402,20 @@ fn expected_mesh(fixtures: &[TransvoxelTransitionFaceFixture; 6], mask: u8) -> E
         let face_mesh = fixture.extract();
         let base_vertex = expected.vertices.len() as u32;
         let base_index = expected.indices.len() as u32;
+        expected.coarse_interior_vertices.extend(
+            face_mesh
+                .vertices
+                .iter()
+                .enumerate()
+                .filter(|(_, vertex)| {
+                    vertex.depth_fraction == 1.0
+                        && vertex
+                            .face_uv
+                            .into_iter()
+                            .all(|axis| (1.0..31.0).contains(&axis))
+                })
+                .map(|(index, _)| base_vertex + index as u32),
+        );
         for (face_cell, range) in face_mesh.cell_ranges.into_iter().enumerate() {
             let range = range.unwrap();
             let linear = usize::from(face.index()) * TRANSVOXEL_TRANSITION_CELLS_PER_FACE as usize
@@ -384,6 +437,12 @@ fn expected_mesh(fixtures: &[TransvoxelTransitionFaceFixture; 6], mask: u8) -> E
         );
     }
     expected
+}
+
+fn positions_close(left: [f32; 3], right: [f32; 3]) -> bool {
+    left.into_iter()
+        .zip(right)
+        .all(|(left, right)| (left - right).abs() <= 1.0e-5)
 }
 
 fn fixtures_and_slabs(

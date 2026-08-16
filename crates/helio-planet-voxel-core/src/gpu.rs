@@ -122,14 +122,12 @@ impl GpuPageMeta {
     ) -> [f32; 3] {
         let page_min = self.lod0_cell_min();
         let origin = frame.frame_origin_lod0_cell();
-        [
-            ((page_min[0] - origin[0]) as f32 + local_lod0_cell[0]) * frame.lod0_cell_size_m
-                - frame.camera_relative_m[0],
-            ((page_min[1] - origin[1]) as f32 + local_lod0_cell[1]) * frame.lod0_cell_size_m
-                - frame.camera_relative_m[1],
-            ((page_min[2] - origin[2]) as f32 + local_lod0_cell[2]) * frame.lod0_cell_size_m
-                - frame.camera_relative_m[2],
-        ]
+        core::array::from_fn(|axis| {
+            let whole = local_lod0_cell[axis].floor();
+            let relative_integer = page_min[axis] - origin[axis] + whole as i64;
+            (relative_integer as f32 + (local_lod0_cell[axis] - whole)) * frame.lod0_cell_size_m
+                - frame.camera_relative_m[axis]
+        })
     }
 }
 
@@ -202,6 +200,18 @@ mod tests {
         assert_eq!(
             left.camera_local_position_m(uniform, [32.0, 7.5, 3.25]),
             right.camera_local_position_m(uniform, [0.0, 7.5, 3.25])
+        );
+
+        let far_camera = PlanetPosition::from_lod0_cell([
+            i64::from(i32::MAX) + 1_000_000,
+            -i64::from(i32::MAX),
+            0,
+        ]);
+        let far_uniform = PlanetFrameUniform::from_camera(PlanetId([9; 16]), far_camera, 5);
+        assert_eq!(
+            left.camera_local_position_m(far_uniform, [32.0, 7.5, 3.25]),
+            right.camera_local_position_m(far_uniform, [0.0, 7.5, 3.25]),
+            "shared page vertices stay bit-identical at astronomical distances"
         );
     }
 }

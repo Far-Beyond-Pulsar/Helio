@@ -33,6 +33,38 @@ fn i64_words_to_f32(value: vec2<u32>) -> f32 {
     return -(f32(magnitude_high) * 4294967296.0 + f32(magnitude_low));
 }
 
+fn add_i64_words(left: vec2<u32>, right: vec2<u32>) -> vec2<u32> {
+    let low = left.x + right.x;
+    let carry = select(0u, 1u, low < left.x);
+    return vec2<u32>(low, left.y + right.y + carry);
+}
+
+fn shifted_i32_to_i64_words(value: i32, shift: u32) -> vec2<u32> {
+    let negative = value < 0;
+    let magnitude = select(u32(value), u32(-value), negative);
+    var shifted = vec2<u32>(0u);
+    if shift < 32u {
+        shifted.x = magnitude << shift;
+        if shift != 0u {
+            shifted.y = magnitude >> (32u - shift);
+        }
+    } else {
+        shifted.y = magnitude << (shift - 32u);
+    }
+    if negative {
+        shifted.x = ~shifted.x + 1u;
+        shifted.y = ~shifted.y + select(0u, 1u, shifted.x == 0u);
+    }
+    return shifted;
+}
+
+fn exact_relative_axis(page_min: vec2<u32>, local: f32, lod: u32) -> f32 {
+    let whole = i32(floor(local));
+    let fraction = local - f32(whole);
+    let integer_position = add_i64_words(page_min, shifted_i32_to_i64_words(whole, lod));
+    return i64_words_to_f32(integer_position) + fraction * exp2(f32(lod));
+}
+
 fn page_relative_min(page: GpuDrawPage) -> vec3<f32> {
     return vec3<f32>(
         i64_words_to_f32(page.relative_lod0_cell_min_x),
@@ -88,8 +120,11 @@ fn transform_vertex(
     surface_kind: u32,
 ) -> VertexOutput {
     let page = pages[page_slot];
-    let lod_scale = exp2(f32(page.lod));
-    let relative_cell = page_relative_min(page) + input.position * lod_scale;
+    let relative_cell = vec3<f32>(
+        exact_relative_axis(page.relative_lod0_cell_min_x, input.position.x, page.lod),
+        exact_relative_axis(page.relative_lod0_cell_min_y, input.position.y, page.lod),
+        exact_relative_axis(page.relative_lod0_cell_min_z, input.position.z, page.lod),
+    );
     let world = relative_cell * page.lod0_cell_size_m - page.camera_relative_m;
     var output: VertexOutput;
     // Keep view and projection split. This is the stable D3D12 contract used

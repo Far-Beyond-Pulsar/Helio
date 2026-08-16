@@ -174,6 +174,34 @@ fn gpu_matches_canonical_frames_at_planet_scale_and_across_rebases() {
         let far_frame = PlanetRenderFrame::new(planet, far_camera, 100);
         let (far_page, far_local) =
             PageKey::address_lod0_cell(0, planet_point.lod0_cell()).unwrap();
+        let far_right_page = PageKey::new(
+            0,
+            [
+                far_page.page_xyz[0] + 1,
+                far_page.page_xyz[1],
+                far_page.page_xyz[2],
+            ],
+        );
+        let far_boundary_outputs = dispatch(
+            &device,
+            &queue,
+            &[
+                GpuParityInput {
+                    frame: PlanetFrameUniform::from_render_frame(far_frame),
+                    page: GpuPageMeta::new(far_page, 0, 1, 0).unwrap(),
+                    local_lod0_cell: [32.0, 13.25, 6.75, 0.0],
+                },
+                GpuParityInput {
+                    frame: PlanetFrameUniform::from_render_frame(far_frame),
+                    page: GpuPageMeta::new(far_right_page, 1, 1, 0).unwrap(),
+                    local_lod0_cell: [0.0, 13.25, 6.75, 0.0],
+                },
+            ],
+        );
+        assert_eq!(
+            far_boundary_outputs[0].camera_local_m, far_boundary_outputs[1].camera_local_m,
+            "far adjacent pages must reconstruct their shared boundary bit-identically"
+        );
         let far_output = dispatch(
             &device,
             &queue,

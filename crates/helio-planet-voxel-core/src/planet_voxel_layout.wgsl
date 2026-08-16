@@ -50,6 +50,16 @@ fn subtract_i64_words(left: vec2<u32>, right: vec2<u32>) -> vec2<u32> {
     return vec2<u32>(low, left.y - right.y - borrow);
 }
 
+fn add_i64_words(left: vec2<u32>, right: vec2<u32>) -> vec2<u32> {
+    let low = left.x + right.x;
+    let carry = select(0u, 1u, low < left.x);
+    return vec2<u32>(low, left.y + right.y + carry);
+}
+
+fn i32_to_i64_words(value: i32) -> vec2<u32> {
+    return vec2<u32>(bitcast<u32>(value), select(0u, 0xffffffffu, value < 0));
+}
+
 fn i64_words_to_f32(value: vec2<u32>) -> f32 {
     let negative = (value.y & 0x80000000u) != 0u;
     if !negative {
@@ -69,12 +79,26 @@ fn planet_camera_local_position_m(
     page: GpuPageMeta,
     local_lod0_cell: vec3<f32>,
 ) -> vec3<f32> {
+    // Form the shared integer vertex address before converting to f32. If the
+    // page origin is rounded first, two adjacent pages can map their identical
+    // boundary to different floats once the camera is millions of cells away.
+    let local_integer = vec3<i32>(floor(local_lod0_cell));
+    let local_fraction = local_lod0_cell - vec3<f32>(local_integer);
     let relative = vec3<f32>(
-        i64_words_to_f32(subtract_i64_words(page.lod0_cell_min_x, frame.origin_x)),
-        i64_words_to_f32(subtract_i64_words(page.lod0_cell_min_y, frame.origin_y)),
-        i64_words_to_f32(subtract_i64_words(page.lod0_cell_min_z, frame.origin_z)),
+        i64_words_to_f32(subtract_i64_words(
+            add_i64_words(page.lod0_cell_min_x, i32_to_i64_words(local_integer.x)),
+            frame.origin_x,
+        )),
+        i64_words_to_f32(subtract_i64_words(
+            add_i64_words(page.lod0_cell_min_y, i32_to_i64_words(local_integer.y)),
+            frame.origin_y,
+        )),
+        i64_words_to_f32(subtract_i64_words(
+            add_i64_words(page.lod0_cell_min_z, i32_to_i64_words(local_integer.z)),
+            frame.origin_z,
+        )),
     );
-    return (relative + local_lod0_cell)
+    return (relative + local_fraction)
         * frame.lod0_cell_size_m
         - frame.camera_relative_m;
 }

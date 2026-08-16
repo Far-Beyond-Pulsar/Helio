@@ -2,10 +2,10 @@ const PAGE_EDGE: u32 = 32u;
 const REGULAR_SAMPLE_EDGE: u32 = 34u;
 const REGULAR_SAMPLE_COUNT: u32 = 39304u;
 const TRANSITION_FACE_COUNT: u32 = 6u;
-const TRANSITION_SLAB_EDGE: u32 = 67u;
-const TRANSITION_SLAB_LAYERS: u32 = 3u;
-const TRANSITION_FACE_STRIDE: u32 = 13467u;
-const TRANSITION_SAMPLE_COUNT: u32 = 80802u;
+const TRANSITION_SLAB_EDGE: u32 = 69u;
+const TRANSITION_SLAB_LAYERS: u32 = 5u;
+const TRANSITION_FACE_STRIDE: u32 = 23805u;
+const TRANSITION_SAMPLE_COUNT: u32 = 142830u;
 const PAGE_TABLE_EMPTY: u32 = 0u;
 const PAGE_TABLE_OCCUPIED: u32 = 1u;
 
@@ -251,9 +251,9 @@ fn gather_transition(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let fine_scale = i32(1u << (job.lod - 1u));
     let coarse_span = i32(PAGE_EDGE) * fine_scale * 2;
     let target_offset = FACE_ORIGIN[face] * coarse_span
-        + FACE_U[face] * (i32(u) - 1) * fine_scale
-        + FACE_V[face] * (i32(v) - 1) * fine_scale
-        + FACE_OUTWARD[face] * (i32(layer) - 1) * fine_scale;
+        + FACE_U[face] * (i32(u) - 2) * fine_scale
+        + FACE_V[face] * (i32(v) - 2) * fine_scale
+        + FACE_OUTWARD[face] * (i32(layer) - 2) * fine_scale;
     transition_samples[linear] = gather_sample(target_offset, job.lod - 1u);
     atomicAdd(&counters.transition_samples, 1u);
 }

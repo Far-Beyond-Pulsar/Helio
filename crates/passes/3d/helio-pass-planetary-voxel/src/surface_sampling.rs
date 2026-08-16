@@ -1,6 +1,7 @@
 use crate::{
     transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE, TRANSITION_FACE_SLAB_EDGE,
+    TRANSITION_FACE_SLAB_LAYERS,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{
@@ -37,7 +38,7 @@ impl PlanetarySurfaceRequest {
     }
 
     /// Exact page dependencies for the regular 34^3 halo and every enabled
-    /// fine-side 67x67x3 transition slab. This returns page identities only;
+    /// fine-side 69x69x5 transition slab. This returns page identities only;
     /// no renderer-specific scalar arrays are constructed on the CPU.
     pub fn required_pages(self) -> Result<BTreeSet<PlanetPageKey>, SurfaceSamplingError> {
         self.validate()?;
@@ -70,9 +71,9 @@ impl PlanetarySurfaceRequest {
             let basis = transition_face_integer_basis(face);
             let mut minimum = [i64::MAX; 3];
             let mut maximum = [i64::MIN; 3];
-            for u in [-1_i64, TRANSITION_FACE_SAMPLE_EDGE as i64] {
-                for v in [-1_i64, TRANSITION_FACE_SAMPLE_EDGE as i64] {
-                    for outward in [-1_i64, 1] {
+            for u in [-2_i64, TRANSITION_FACE_SAMPLE_EDGE as i64 + 1] {
+                for v in [-2_i64, TRANSITION_FACE_SAMPLE_EDGE as i64 + 1] {
+                    for outward in [-2_i64, 2] {
                         let mut position = page_min;
                         for axis in 0..3 {
                             position[axis] = position[axis]
@@ -533,7 +534,7 @@ mod tests {
         let expanded_sample_bytes = (EXTRACTION_SAMPLE_COUNT
             + TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT)
             * core::mem::size_of::<CellWord>();
-        assert_eq!(expanded_sample_bytes, 480_424);
+        assert_eq!(expanded_sample_bytes, 728_536);
         assert_eq!(core::mem::size_of::<PlanetarySurfaceRequest>(), 80);
         assert!(
             expanded_sample_bytes
@@ -706,20 +707,25 @@ mod tests {
             let coarse_span = PAGE_EDGE as i64 * scale;
             for face in TransitionFace::ALL {
                 let basis = transition_face_integer_basis(face);
-                let face_offset = usize::from(face.index()) * 67 * 67 * 3;
-                for layer in 0..3_i64 {
-                    for v in 0..67_i64 {
-                        for u in 0..67_i64 {
+                let face_offset = usize::from(face.index())
+                    * TRANSITION_FACE_SLAB_EDGE
+                    * TRANSITION_FACE_SLAB_EDGE
+                    * TRANSITION_FACE_SLAB_LAYERS;
+                for layer in 0..TRANSITION_FACE_SLAB_LAYERS as i64 {
+                    for v in 0..TRANSITION_FACE_SLAB_EDGE as i64 {
+                        for u in 0..TRANSITION_FACE_SLAB_EDGE as i64 {
                             let mut position = page_min;
                             for (axis, coordinate) in position.iter_mut().enumerate() {
                                 *coordinate += i64::from(basis.origin[axis]) * coarse_span
-                                    + i64::from(basis.u_axis[axis]) * (u - 1) * fine_scale
-                                    + i64::from(basis.v_axis[axis]) * (v - 1) * fine_scale
-                                    + i64::from(basis.outward[axis]) * (layer - 1) * fine_scale;
+                                    + i64::from(basis.u_axis[axis]) * (u - 2) * fine_scale
+                                    + i64::from(basis.v_axis[axis]) * (v - 2) * fine_scale
+                                    + i64::from(basis.outward[axis]) * (layer - 2) * fine_scale;
                             }
                             let index = face_offset
-                                + (layer as usize * 67 * 67)
-                                + (v as usize * 67)
+                                + (layer as usize
+                                    * TRANSITION_FACE_SLAB_EDGE
+                                    * TRANSITION_FACE_SLAB_EDGE)
+                                + (v as usize * TRANSITION_FACE_SLAB_EDGE)
                                 + u as usize;
                             assert_eq!(transition[index], canonical_cell(position));
                         }
