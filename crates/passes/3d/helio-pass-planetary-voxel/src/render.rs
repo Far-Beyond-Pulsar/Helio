@@ -1,8 +1,8 @@
 use crate::{
-    BoundedExtractionPublisher, ExtractionError, ExtractionLimits, ExtractionReservation,
-    FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters, GpuSurfaceGatherJob,
-    GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms, GpuTerrainDraw,
-    GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTransvoxelEmissionCounters,
+    max_meshlets_for_indices, BoundedExtractionPublisher, ExtractionError, ExtractionLimits,
+    ExtractionReservation, FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters,
+    GpuSurfaceGatherJob, GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms,
+    GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTransvoxelEmissionCounters,
     GpuTransvoxelTransitionCounters, GpuUploadOutcome, PlanetarySurfaceRequest,
     PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, PublicationOutcome, ReservationOutcome,
     SurfaceCounts, SurfaceSamplingError, TransvoxelGpuError, TransvoxelGpuExtractor,
@@ -83,7 +83,7 @@ impl PlanetaryDebugView {
 struct GpuTerrainDebugUniform {
     mode: u32,
     draw_path: u32,
-    _pad: [u32; 2],
+    _pad: [u32; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,7 +516,7 @@ impl GpuSurfaceJob {
             transition_first_vertex: transition.allocation.vertices.first,
             transition_first_index: transition.allocation.indices.first,
             transition_first_meshlet: transition.allocation.meshlets.first,
-            _pad: [0; 2],
+            _pad: [0; 4],
         }
     }
 }
@@ -2718,11 +2718,13 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 self.pending.push_back(front);
                 continue;
             };
+            let resident_slot = resident.slot;
+            let publication_generation = resident.publication_generation;
             let metadata = match GpuPageMeta::new(
                 front.key.page,
                 frame.frame_origin_lod0_cell(),
-                resident.slot,
-                resident.publication_generation,
+                resident_slot,
+                publication_generation,
                 front.transition_mask,
             ) {
                 Ok(metadata) => metadata,
@@ -2753,8 +2755,8 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             self.prepared_extraction = Some(PreparedExtraction {
                 request: front,
                 slot: surface_slot,
-                resident_slot: resident.slot,
-                publication_generation: resident.publication_generation,
+                resident_slot,
+                publication_generation,
                 revision,
             });
             break;
