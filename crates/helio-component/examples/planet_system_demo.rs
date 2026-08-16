@@ -455,16 +455,20 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => match (key_state, key, repeat) {
-                (ElementState::Pressed, KeyCode::F2, false) => state
-                    .renderer
-                    .find_pass_mut::<PlanetaryVoxelRenderPass>()
-                    .expect("production planetary pass")
-                    .toggle_draw_path(&state.queue),
-                (ElementState::Pressed, KeyCode::F3, false) => state
-                    .renderer
-                    .find_pass_mut::<PlanetaryVoxelRenderPass>()
-                    .expect("production planetary pass")
-                    .cycle_debug_view(&state.queue),
+                (ElementState::Pressed, KeyCode::F2, false) => {
+                    state
+                        .renderer
+                        .find_pass_mut::<PlanetaryVoxelRenderPass>()
+                        .expect("production planetary pass")
+                        .toggle_draw_path(&state.queue);
+                }
+                (ElementState::Pressed, KeyCode::F3, false) => {
+                    state
+                        .renderer
+                        .find_pass_mut::<PlanetaryVoxelRenderPass>()
+                        .expect("production planetary pass")
+                        .cycle_debug_view(&state.queue);
+                }
                 (ElementState::Pressed, KeyCode::F6, false) => {
                     state.cycle_validation_position();
                 }
