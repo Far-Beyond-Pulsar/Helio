@@ -44,7 +44,7 @@ meshopt = "0.6.2"
 # `VarLenGpuPool<PackedVertex>` a DIFFERENT type than the one a
 # `#[gpu] Vec<PackedVertex>` component field resolves to elsewhere,
 # defeating the whole point of sharing one pool.
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd", features = ["gpu"] }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "3d4a94163b159c8a33d267039b226bb03096d4f2", features = ["gpu"] }
 
 [features]
 default = ["profiling"]

@@ -38,7 +38,7 @@ gpu = []
 # shared named buffers, `GpuSystemContext::bind`, `Bundle`/`spawn_bundle`, and
 # `World::attach_change_tracker`/`SharedChangeTracker`. All now on `main`, so
 # this is a real, CI-safe `git`+`rev` pin again, not a local dev-machine path.
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd", features = ["gpu"] }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "3d4a94163b159c8a33d267039b226bb03096d4f2", features = ["gpu"] }
 # Promoted from dev-dependencies: the new RenderMaterial/RenderMesh/etc
 # render components (SceneDB<->Helio component integration, see
 # HelioRenderSubsystem) are `#[derive(SceneStore)]`d in this crate's own
@@ -51,7 +51,7 @@ pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "
 # own separate `inventory::submit!` registry, breaking the GPU-mirror seam
 # between this crate and `engine_backend` (see 27b5f01: variable-length
 # `#[gpu]` fields).
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd" }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "3d4a94163b159c8a33d267039b226bb03096d4f2" }
 helio = { workspace = true }
 libhelio = { workspace = true }
 # RenderTransform stores a glam::Mat4 directly -- ObjectDescriptor::transform
