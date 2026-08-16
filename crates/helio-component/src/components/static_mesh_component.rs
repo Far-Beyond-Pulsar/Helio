@@ -372,6 +372,12 @@ fn hydrate_static_mesh_component(
                 let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
                 match load_mesh_upload(&abs_path) {
                     Some(upload) => {
+                        tracing::info!(
+                            "StaticMeshComponent hydrate: loaded '{}' ({} vertices, {} indices)",
+                            abs_path.display(),
+                            upload.vertices.len(),
+                            upload.indices.len()
+                        );
                         parsed.vertices = upload.vertices;
                         parsed.indices = upload.indices;
                     }
