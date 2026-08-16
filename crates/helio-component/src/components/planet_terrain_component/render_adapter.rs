@@ -9,13 +9,13 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use helio_pass_planetary_voxel::{
-    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelRenderPass,
-    PlanetaryVoxelResidency,
+    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryRenderError,
+    PlanetaryVoxelRenderPass, PlanetaryVoxelResidency,
 };
 use helio_planet_voxel_core::{
-    AddressError, ContractError, EvictOutcome, EvictedPage, PageEvict, PageKey, PageUpload,
-    PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome,
-    VisibilityOutcome, VisiblePage, VisiblePageSet, PAGE_EDGE_CELLS,
+    AddressError, ContractError, EvictOutcome, EvictedPage, PAGE_EDGE_CELLS, PageEvict, PageKey,
+    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome,
+    VisibilityOutcome, VisiblePage, VisiblePageSet,
 };
 use pulsar_terrain::{
     PlanetFramePayload, TerrainPageEvict, TerrainPageUpload, TerrainPlanetEvict,
@@ -56,6 +56,8 @@ pub enum PlanetaryTerrainRenderError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Residency(#[from] GpuResidencyError),
+    #[error(transparent)]
+    Render(#[from] PlanetaryRenderError),
     #[error("planet frame contains non-finite camera-relative coordinates")]
     NonFiniteFrame,
     #[error("planet frame LOD0 cell size must be finite and positive, got {0}")]
@@ -101,13 +103,12 @@ impl PlanetTerrainComponentRenderAdapter {
             .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
     }
 
-    pub fn residency_mut<'a>(
+    fn pass_mut<'a>(
         &self,
         renderer: &'a mut helio::Renderer,
-    ) -> Result<&'a mut PlanetaryVoxelResidency, PlanetaryTerrainRenderError> {
+    ) -> Result<&'a mut PlanetaryVoxelRenderPass, PlanetaryTerrainRenderError> {
         renderer
             .find_pass_mut::<PlanetaryVoxelRenderPass>()
-            .map(PlanetaryVoxelRenderPass::residency_mut)
             .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
     }
 
@@ -118,7 +119,7 @@ impl PlanetTerrainComponentRenderAdapter {
         frame: PlanetFramePayload,
     ) -> Result<FrameUpdateOutcome, PlanetaryTerrainRenderError> {
         Ok(self
-            .residency_mut(renderer)?
+            .pass_mut(renderer)?
             .set_planet_frame(queue, translate_frame(frame)?)?)
     }
 
@@ -146,7 +147,7 @@ impl PlanetTerrainComponentRenderAdapter {
         queue: &wgpu::Queue,
         batch: HelioTerrainRenderBatch,
     ) -> Result<TerrainRenderApplyReport, PlanetaryTerrainRenderError> {
-        apply_batch_to_residency(self.residency_mut(renderer)?, device, queue, batch)
+        apply_batch_to_pass(self.pass_mut(renderer)?, device, queue, batch)
     }
 
     pub fn apply_visible_sets(
@@ -157,9 +158,7 @@ impl PlanetTerrainComponentRenderAdapter {
         sets: Vec<TerrainVisiblePageSet>,
     ) -> Result<VisibilityOutcome, PlanetaryTerrainRenderError> {
         let set = translate_visible_sets(frame_index, sets)?;
-        Ok(self
-            .residency_mut(renderer)?
-            .apply_visible_set(queue, set)?)
+        Ok(self.pass_mut(renderer)?.apply_visible_set(queue, set)?)
     }
 
     pub fn recreate_gpu_resources(
@@ -169,11 +168,52 @@ impl PlanetTerrainComponentRenderAdapter {
         queue: &wgpu::Queue,
     ) -> Result<(), PlanetaryTerrainRenderError> {
         Ok(self
-            .residency_mut(renderer)?
+            .pass_mut(renderer)?
             .recreate_gpu_resources(device, queue)?)
     }
 }
 
+fn apply_batch_to_pass(
+    pass: &mut PlanetaryVoxelRenderPass,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    batch: HelioTerrainRenderBatch,
+) -> Result<TerrainRenderApplyReport, PlanetaryTerrainRenderError> {
+    let chunk_size = pass.residency().config().max_batch_pages as usize;
+    let mut report = TerrainRenderApplyReport::default();
+    let mut uploads = VecDeque::from(batch.uploads);
+    while !uploads.is_empty() {
+        let count = uploads.len().min(chunk_size);
+        let chunk = uploads.drain(..count).collect();
+        report
+            .uploads
+            .extend(pass.apply_upload_batch(device, queue, chunk)?);
+    }
+
+    let mut evictions = VecDeque::from(batch.evictions);
+    while !evictions.is_empty() {
+        let count = evictions.len().min(chunk_size);
+        let chunk = evictions.drain(..count).collect();
+        report
+            .evictions
+            .extend(pass.apply_evict_batch(device, queue, chunk)?);
+    }
+
+    for planet in batch.retired_planets {
+        let retirement = match pass.remove_planet_frame(queue, planet) {
+            Ok(true) => PlanetFrameRetirement::Removed(planet),
+            Ok(false) => PlanetFrameRetirement::AlreadyAbsent(planet),
+            Err(PlanetaryRenderError::Residency(GpuResidencyError::PlanetFrameInUse(_))) => {
+                PlanetFrameRetirement::RetainedInUse(planet)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        report.frame_retirements.push(retirement);
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
 fn apply_batch_to_residency(
     residency: &mut PlanetaryVoxelResidency,
     device: &wgpu::Device,
@@ -539,12 +579,12 @@ mod tests {
     use super::*;
     use helio_pass_planetary_voxel::PlanetaryVoxelGpuConfig;
     use helio_planet_voxel_core::{
-        UploadOutcome, PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK,
+        PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK, UploadOutcome,
     };
     use pulsar_terrain::{
-        CellWord as TerrainCellWord, PageKey as TerrainPageKey, PlanetFrame, PlanetId as TerrainId,
-        PlanetPosition, TerrainRenderDeltaCounters, TerrainVisiblePage, CELL_COUNT, PAGE_EDGE,
-        TERRAIN_TRANSITION_FACE_MASK,
+        CELL_COUNT, CellWord as TerrainCellWord, PAGE_EDGE, PageKey as TerrainPageKey, PlanetFrame,
+        PlanetId as TerrainId, PlanetPosition, TERRAIN_TRANSITION_FACE_MASK,
+        TerrainRenderDeltaCounters, TerrainVisiblePage,
     };
 
     fn terrain_upload(

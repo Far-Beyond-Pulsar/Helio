@@ -1,30 +1,30 @@
 use crate::{
-    max_meshlets_for_indices, BoundedExtractionPublisher, ExtractionError, ExtractionLimits,
-    ExtractionReservation, FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters,
-    GpuSurfaceGatherJob, GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms,
-    GpuTerrainDraw, GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTransvoxelEmissionCounters,
+    BoundedExtractionPublisher, ExtractionError, ExtractionLimits, ExtractionReservation,
+    FrameUpdateOutcome, GpuResidencyError, GpuSurfaceGatherCounters, GpuSurfaceGatherJob,
+    GpuSurfaceSampler, GpuTerrainCullCounters, GpuTerrainCullUniforms, GpuTerrainDraw,
+    GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTransvoxelEmissionCounters,
     GpuTransvoxelTransitionCounters, GpuUploadOutcome, PlanetarySurfaceRequest,
-    PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, PublicationOutcome, ReservationOutcome,
-    SurfaceCounts, SurfaceSamplingError, TransvoxelGpuError, TransvoxelGpuExtractor,
-    TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
-    TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionGpuError,
-    REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL, TERRAIN_MESHLET_CULL_WGSL,
-    TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
+    PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency, PublicationOutcome,
+    REGULAR_EXTRACTION_INDIRECT_OFFSETS, ReservationOutcome, SurfaceCounts, SurfaceSamplingError,
+    TERRAIN_MESHLET_BUILD_WGSL, TERRAIN_MESHLET_CULL_WGSL, TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
+    TransvoxelGpuError, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
+    TransvoxelGpuTransitionExtractor, TransvoxelGpuTransitionExtractorConfig,
+    TransvoxelTransitionGpuError, max_meshlets_for_indices,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
-    graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
+    graph::{ResourceBuilder, ResourceSize},
 };
 use helio_planet_voxel_core::{
-    split_i64, ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
+    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet, split_i64,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
-        mpsc::{self, Receiver, TryRecvError},
         Mutex,
+        mpsc::{self, Receiver, TryRecvError},
     },
 };
 use wgpu::util::DeviceExt;
@@ -1732,9 +1732,41 @@ impl PlanetaryVoxelRenderPass {
         queue: &wgpu::Queue,
         evictions: Vec<PageEvict>,
     ) -> Result<Vec<EvictOutcome>, PlanetaryRenderError> {
+        let eviction_keys = evictions
+            .iter()
+            .map(|eviction| eviction.key)
+            .collect::<Vec<_>>();
         let outcomes = self.residency.apply_evict_batch(device, queue, evictions)?;
+        let changed_dependencies = eviction_keys
+            .into_iter()
+            .zip(&outcomes)
+            .filter_map(|(key, outcome)| {
+                matches!(outcome, EvictOutcome::Recorded { removed: Some(_) }).then_some(key)
+            })
+            .collect::<BTreeSet<_>>();
+        self.requeue_changed_dependencies(queue, &changed_dependencies)?;
         self.publish_draw_pages(queue)?;
         Ok(outcomes)
+    }
+
+    pub fn remove_planet_frame(
+        &mut self,
+        queue: &wgpu::Queue,
+        planet: PlanetId,
+    ) -> Result<bool, PlanetaryRenderError> {
+        let removed = self.residency.remove_planet_frame(planet)?;
+        self.retire_planet_surface_state(queue, planet)?;
+        Ok(removed)
+    }
+
+    pub fn recreate_gpu_resources(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), PlanetaryRenderError> {
+        self.residency.recreate_gpu_resources(device, queue)?;
+        self.publish_draw_pages(queue)?;
+        Ok(())
     }
 
     pub fn apply_visible_set(
@@ -2013,7 +2045,7 @@ impl PlanetaryVoxelRenderPass {
             .map(|(key, request)| (*key, *request))
             .collect::<Vec<_>>();
         if requested.is_empty() {
-            self.retire_active_planet(queue, planet);
+            self.retire_active_planet(queue, planet)?;
             return self.start_next_handoff(queue);
         }
 
@@ -2084,7 +2116,41 @@ impl PlanetaryVoxelRenderPass {
         Ok(())
     }
 
-    fn retire_active_planet(&mut self, queue: &wgpu::Queue, planet: PlanetId) {
+    fn retire_planet_surface_state(
+        &mut self,
+        queue: &wgpu::Queue,
+        planet: PlanetId,
+    ) -> Result<(), PlanetaryRenderError> {
+        self.requested_visible.retain(|key, _| key.planet != planet);
+        if self.handoff_planet == Some(planet) {
+            self.handoff_planet = None;
+            for (key, candidate) in core::mem::take(&mut self.candidate_surfaces) {
+                self.clear_slot(queue, candidate.slot);
+                self.cancel_candidate_reservations(candidate);
+                self.surface_slots.remove(&key);
+                self.remove_surface_request(key);
+            }
+        }
+        let requests = self
+            .surface_requests
+            .keys()
+            .filter(|key| key.planet == planet)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in requests {
+            self.remove_surface_request(key);
+        }
+        self.pending.retain(|request| request.key.planet != planet);
+        self.invalidated_surfaces.retain(|key| key.planet != planet);
+        self.retire_active_planet(queue, planet)?;
+        self.start_next_handoff(queue)
+    }
+
+    fn retire_active_planet(
+        &mut self,
+        queue: &wgpu::Queue,
+        planet: PlanetId,
+    ) -> Result<(), PlanetaryRenderError> {
         let retired = self
             .active_surfaces
             .keys()
@@ -2105,7 +2171,7 @@ impl PlanetaryVoxelRenderPass {
             self.surface_slots.remove(&key);
             self.remove_surface_request(key);
         }
-        let _ = self.publish_draw_pages(queue);
+        self.publish_draw_pages(queue)
     }
 
     fn commit_ready_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
@@ -2153,7 +2219,7 @@ impl PlanetaryVoxelRenderPass {
                 _ => {
                     return Err(PlanetaryRenderError::IncompleteSurfaceAllocation(
                         candidate.request.key,
-                    ))
+                    ));
                 }
             }
         }
@@ -3258,7 +3324,7 @@ pub enum PlanetaryRenderError {
 mod tests {
     use super::*;
     use helio_planet_voxel_core::{
-        CellWord, PageKey, PlanetPosition, VisiblePage, PAGE_CELL_COUNT,
+        CellWord, PAGE_CELL_COUNT, PageKey, PlanetPosition, VisiblePage,
     };
 
     #[test]
