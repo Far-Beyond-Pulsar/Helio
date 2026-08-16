@@ -33,17 +33,6 @@ exclude = [
     # simultaneously be swept up by this workspace's `crates/*` glob AND
     # declare a different governing workspace, so it's excluded here.
     "crates/helio-component",
-    # Same reasoning and same `package.workspace = "../../../../.."`
-    # override as `helio-component` immediately above -- this one was
-    # missing from this list (a pre-existing gap, not introduced by the
-    # change that added the doc comment right below it), which broke any
-    # `cargo` invocation rooted at THIS workspace once `helio-scenedb`
-    # existed on disk ("package is a member of the wrong workspace").
-    # Harmless for Pulsar-Native's own builds (which never resolve through
-    # this workspace root at all -- `helio`/`libhelio`/etc. are consumed as
-    # git dependencies there, not path members of this workspace), but real
-    # for anyone building Helio standalone from this directory.
-    "crates/helio-scenedb",
 ]
 resolver = "2"
 

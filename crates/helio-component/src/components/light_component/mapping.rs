@@ -9,12 +9,10 @@ impl LightComponent {
     ///
     /// Single source of truth for the `LightComponent` -> `GpuLight` mapping --
     /// factored out of what used to be inline logic in `runtime.rs`'s
-    /// `sync_component` so that path and any future SceneDB-driven bridge (the
-    /// Pulsar-Native#561 "set us up" step -- see `helio_scenedb::components::
-    /// LightComponent`'s doc for why lights can't be a simple `#[gpu(buffer=...)]`
-    /// mirrored field, and `helio_scenedb::HelioRenderSubsystem` for the seam this
-    /// is meant to eventually feed) call the exact same code and can never
-    /// silently drift apart.
+    /// `sync_component` so that path and any future SceneDB-driven bridge
+    /// (the same `#[gpu]`-mirrored-field pattern `StaticMeshComponent`
+    /// already uses, Pulsar-Native#561 Phase D) call the exact same code
+    /// and can never silently drift apart.
     ///
     /// Returns `None` when the light is disabled (`general.enabled == false`) --
     /// the caller is responsible for removing any previously-inserted Helio light
