@@ -959,17 +959,14 @@ mod tests {
                 ))],
                 counters: TerrainRenderDeltaCounters::default(),
             };
+            let repopulated =
+                apply_delta_to_test_residency(&mut residency, &device, &queue, after_retirement)
+                    .unwrap();
             assert!(matches!(
-                apply_delta_to_test_residency(
-                    &mut residency,
-                    &device,
-                    &queue,
-                    after_retirement,
-                ),
-                Err(PlanetaryTerrainRenderError::Residency(
-                    GpuResidencyError::MissingPlanetFrame(PlanetId(id))
-                )) if id == [7; 16]
+                repopulated.uploads.as_slice(),
+                [GpuUploadOutcome::Residency(UploadOutcome::Inserted { .. })]
             ));
+            assert_eq!(residency.planet_frame_count(), 0);
         });
     }
 }
