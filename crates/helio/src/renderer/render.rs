@@ -440,10 +440,22 @@ impl Renderer {
         frame_resources.main_scene.write(
             libhelio::MainSceneResources {
                 mesh_buffers: libhelio::MeshBuffers {
-                    vertices: mesh_buffers.vertices,
-                    indices: mesh_buffers.indices,
-                    dynamic_vertices: dynamic_mesh_buffers.vertices,
-                    dynamic_indices: dynamic_mesh_buffers.indices,
+                    // `mesh_buffers`/`dynamic_mesh_buffers` (locals a few
+                    // lines up, from `self.scene.mesh_buffers()`/
+                    // `dynamic_mesh_buffers()`) now hold `VarLenBufferRef`
+                    // read-lock guards, not bare `&wgpu::Buffer`s (Pulsar-
+                    // Native#561 Phase D: MeshPool's storage moved to
+                    // `pulsar_scenedb::gpu::VarLenGpuPool`). Deref through
+                    // them explicitly -- `libhelio::MeshBuffers<'a>` itself
+                    // is unchanged, still plain `&'a wgpu::Buffer` fields.
+                    // The guards stay alive in their owning locals for the
+                    // rest of this function (never dropped early), so this
+                    // borrow is valid for exactly as long as `frame_resources`
+                    // needs it.
+                    vertices: &*mesh_buffers.vertices,
+                    indices: &*mesh_buffers.indices,
+                    dynamic_vertices: &*dynamic_mesh_buffers.vertices,
+                    dynamic_indices: &*dynamic_mesh_buffers.indices,
                 },
                 material_textures: libhelio::MaterialTextureBindings {
                     material_textures: self.scene.material_texture_buffer(),
@@ -652,9 +664,19 @@ impl Renderer {
         }
 
         // Release the texture/sampler view borrows on the scene before advancing
-        // (which mutates it).
+        // (which mutates it). `mesh_buffers`/`dynamic_mesh_buffers` join this
+        // list as of Pulsar-Native#561 Phase D: they now hold `VarLenBufferRef`
+        // read-lock guards (MeshPool's storage moved to a `pulsar_scenedb::gpu::
+        // VarLenGpuPool`), not plain `&wgpu::Buffer`s -- since the guard type
+        // has a non-trivial `Drop` (unlocking the `RwLock`), the borrow checker
+        // keeps `self.scene`'s immutable borrow alive until they're actually
+        // dropped, not just until their last read. `frame_resources` (which
+        // borrows through them via `libhelio::MeshBuffers`) is done being read
+        // by `execute_with_frame_resources` above, so this is the right place.
         drop(texture_views);
         drop(samplers);
+        drop(mesh_buffers);
+        drop(dynamic_mesh_buffers);
         self.scene.advance_frame();
         Ok(())
     }

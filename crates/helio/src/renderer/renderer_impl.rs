@@ -588,7 +588,7 @@ impl Renderer {
 
     #[cfg(feature = "bake")]
     pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
-        let scene = self.scene.build_static_bake_scene();
+        let scene = self.scene.build_static_bake_scene(&self.device, &self.queue);
         self.configure_bake(helio_bake::BakeRequest { scene, config });
     }
 

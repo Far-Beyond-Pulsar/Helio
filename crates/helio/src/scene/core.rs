@@ -351,7 +351,7 @@ impl Scene {
             ..Default::default()
         });
         Self {
-            mesh_pool: MeshPool::new(device.clone()),
+            mesh_pool: MeshPool::new(device.clone(), queue.clone()),
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
             textures: SparsePool::new(),
             texture_binding_version: 0,

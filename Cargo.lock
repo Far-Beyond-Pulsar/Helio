@@ -1229,6 +1229,7 @@ dependencies = [
  "meshopt",
  "openxr",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "quark",
  "thiserror 2.0.19",
  "uuid",
@@ -1941,22 +1942,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.2",
-]
-
-[[package]]
-name = "helio-scenedb"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.2",
- "helio",
- "libhelio",
- "naga",
- "pollster 0.4.0",
- "pulsar_scenedb",
- "pulsar_scenedb_derive",
- "smallvec",
- "wgpu",
 ]
 
 [[package]]
@@ -3411,7 +3396,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=4895d047a7c70d64814036a099eebe41b9d49c18#4895d047a7c70d64814036a099eebe41b9d49c18"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=2ec4929aaa24eec440826c8b731f9c10d768fdfd#2ec4929aaa24eec440826c8b731f9c10d768fdfd"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
@@ -3425,7 +3410,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=4895d047a7c70d64814036a099eebe41b9d49c18#4895d047a7c70d64814036a099eebe41b9d49c18"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=2ec4929aaa24eec440826c8b731f9c10d768fdfd#2ec4929aaa24eec440826c8b731f9c10d768fdfd"
 dependencies = [
  "proc-macro2",
  "quote",

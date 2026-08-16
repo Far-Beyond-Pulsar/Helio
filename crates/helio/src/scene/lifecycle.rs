@@ -127,14 +127,22 @@ impl Scene {
     /// # Example
     /// ```ignore
     /// // After building your scene normally...
-    /// let bake_scene = scene.build_static_bake_scene();
+    /// let bake_scene = scene.build_static_bake_scene(&device, &queue);
     /// renderer.configure_bake(BakeRequest {
     ///     scene: bake_scene,
     ///     config: BakeConfig::fast("my_scene"),
     /// });
     /// ```
+    ///
+    /// Takes `device`/`queue` (added Pulsar-Native#561 Phase D): mesh data
+    /// now lives in a `VarLenGpuPool` with no CPU mirror (see
+    /// `MeshPool::extract_mesh_data`'s doc), so pulling a static object's
+    /// vertices/indices back out for baking needs a real GPU readback,
+    /// which `Scene` itself doesn't keep a device/queue handle to do on its
+    /// own. `Renderer::auto_bake` (this method's one call site) already has
+    /// both.
     #[cfg(feature = "bake")]
-    pub fn build_static_bake_scene(&mut self) -> helio_bake::SceneGeometry {
+    pub fn build_static_bake_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> helio_bake::SceneGeometry {
         use helio_bake::{LightSource, LightSourceKind, SceneGeometry};
         use libhelio::{LightType, Movability};
 
@@ -154,7 +162,7 @@ impl Scene {
             }
 
             // Extract mesh data from the pool
-            let Some(mesh_upload) = self.mesh_pool.extract_mesh_data(object_record.mesh) else {
+            let Some(mesh_upload) = self.mesh_pool.extract_mesh_data(device, queue, object_record.mesh) else {
                 continue;
             };
 

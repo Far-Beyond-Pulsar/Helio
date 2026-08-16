@@ -27,6 +27,24 @@ helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
+# MeshPool's vertex/index storage delegates to `VarLenGpuPool` (a growable
+# GPU pool + freelist suballocator) instead of hand-rolling its own —
+# `helio`'s own `GrowableBuffer`/`FreeListAllocator` (mesh.rs) were an
+# independent reimplementation of exactly this. A direct git+rev pin, NOT
+# `{ workspace = true }`: this crate stays a normal member of Helio's own
+# nested workspace (unlike `helio-scenedb`/`helio-component`, which
+# redirect their whole `package.workspace` to Pulsar-Native's root for
+# `inventory`-registry identity reasons that don't apply here — MeshPool
+# only uses `VarLenGpuPool` as a plain library type, no derive, no
+# registry). Must stay byte-for-byte identical to every other direct
+# `pulsar_scenedb`/`pulsar_scenedb_derive` rev pin in the Pulsar-Native
+# tree (root `Cargo.toml`, `helio-scenedb/Cargo.toml`) so Cargo's
+# project-wide resolution unifies them to one compiled instance — a
+# mismatched rev here would make `helio::mesh::PackedVertex`'s
+# `VarLenGpuPool<PackedVertex>` a DIFFERENT type than the one a
+# `#[gpu] Vec<PackedVertex>` component field resolves to elsewhere,
+# defeating the whole point of sharing one pool.
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd", features = ["gpu"] }
 
 [features]
 default = ["profiling"]
