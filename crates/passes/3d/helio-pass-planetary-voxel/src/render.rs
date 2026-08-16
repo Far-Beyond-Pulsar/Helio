@@ -738,6 +738,14 @@ fn observe_candidate_surface_state(candidate: &mut CandidateSurface, state: &Gpu
         && state.transition_mask == u32::from(candidate.request.transition_mask);
 }
 
+const fn should_retarget_handoff(
+    target_changed: bool,
+    target_is_stale: bool,
+    has_published_coverage: bool,
+) -> bool {
+    target_changed && target_is_stale && has_published_coverage
+}
+
 impl PlanetaryVoxelRenderPass {
     pub const fn config(&self) -> PlanetaryVoxelRenderConfig {
         self.config
@@ -1719,7 +1727,15 @@ impl PlanetaryVoxelRenderPass {
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             let changed = self.requested_visible != requested_visible;
             self.requested_visible = requested_visible;
-            if changed && self.handoff_target_is_stale() {
+            // Never let a stream of progressively finer targets cancel the
+            // first complete coarse frontier. Without published coverage the
+            // renderer has nothing to preserve, so refinement can otherwise
+            // outrun extraction forever and leave a permanently black frame.
+            if should_retarget_handoff(
+                changed,
+                self.handoff_target_is_stale(),
+                self.handoff_planet_has_published_coverage(),
+            ) {
                 self.retarget_handoff(queue)?;
             }
             self.start_next_handoff(queue)?;
@@ -1780,6 +1796,11 @@ impl PlanetaryVoxelRenderPass {
             .map(|(key, surface)| (*key, surface.request))
             .collect::<BTreeMap<_, _>>();
         requested != candidate
+    }
+
+    fn handoff_planet_has_published_coverage(&self) -> bool {
+        self.handoff_planet
+            .is_some_and(|planet| self.active_surfaces.keys().any(|key| key.planet == planet))
     }
 
     fn retarget_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
@@ -2941,6 +2962,14 @@ mod tests {
         };
         observe_candidate_surface_state(&mut candidate, &stale);
         assert!(candidate.ready);
+    }
+
+    #[test]
+    fn initial_coarse_handoff_cannot_be_retargeted_before_first_publication() {
+        assert!(!should_retarget_handoff(true, true, false));
+        assert!(should_retarget_handoff(true, true, true));
+        assert!(!should_retarget_handoff(false, true, true));
+        assert!(!should_retarget_handoff(true, false, true));
     }
 
     #[test]
