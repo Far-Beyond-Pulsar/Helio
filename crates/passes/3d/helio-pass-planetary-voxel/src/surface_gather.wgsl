@@ -21,7 +21,9 @@ struct GpuSurfaceGatherJob {
     target_slot: u32,
     residency_epoch_low: u32,
     residency_epoch_high: u32,
-    _pad: array<u32, 3>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct GpuResidencyUniform {

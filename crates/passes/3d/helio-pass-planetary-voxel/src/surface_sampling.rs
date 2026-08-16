@@ -136,7 +136,9 @@ pub struct GpuSurfaceGatherJob {
     pub target_slot: u32,
     pub residency_epoch_low: u32,
     pub residency_epoch_high: u32,
-    pub _pad: [u32; 3],
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 impl GpuSurfaceGatherJob {
@@ -164,7 +166,9 @@ impl GpuSurfaceGatherJob {
             target_slot: metadata.slot,
             residency_epoch_low: residency_epoch as u32,
             residency_epoch_high: (residency_epoch >> 32) as u32,
-            _pad: [0; 3],
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         }
     }
 }

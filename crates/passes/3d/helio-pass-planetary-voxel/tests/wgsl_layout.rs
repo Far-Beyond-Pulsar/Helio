@@ -462,7 +462,9 @@ fn surface_gather_layouts_match_wgsl_exactly() {
                 ("target_slot".into(), 56),
                 ("residency_epoch_low".into(), 60),
                 ("residency_epoch_high".into(), 64),
-                ("_pad".into(), 68),
+                ("_pad0".into(), 68),
+                ("_pad1".into(), 72),
+                ("_pad2".into(), 76),
             ],
         )
     );
