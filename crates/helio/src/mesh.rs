@@ -337,6 +337,53 @@ impl MeshPool {
         Arc::clone(&self.dynamic_sub.vertices)
     }
 
+    /// Mints a `MeshId` pointing at data that's ALREADY written into the
+    /// static sub-pool -- no allocation, no `queue.write_buffer` call, just
+    /// bookkeeping. For a `#[gpu] Vec<PackedVertex>`/`Vec<u32>` field (e.g.
+    /// `StaticMeshComponent`'s own `vertices`/`indices`) whose SceneDB
+    /// mirror dispatch already wrote the data directly into this SAME pool
+    /// (see [`Self::rebind_static_pools`]) -- `vertex_handle`/`index_handle`
+    /// come from that field's derive-generated `..._gpu_handle(store, row)`
+    /// accessor. This is the whole point of sharing the pool at all:
+    /// rendering an entity's own mesh data with zero copy between "SceneDB
+    /// mirrored it" and "Helio draws it".
+    ///
+    /// # Ownership
+    ///
+    /// The returned `MeshId` does NOT own its vertex/index range the way
+    /// [`Self::insert`]'s does. [`Self::remove`] must never be called on
+    /// it -- freeing is the owning entity's field's own responsibility (its
+    /// next `write_var_len_field_at_row` call frees the old handle before
+    /// writing the new one; entity despawn frees it directly), and calling
+    /// `remove` here would free the SAME range a second time, corrupting
+    /// the pool's freelist. Use [`Self::forget_adopted_slice`] instead when
+    /// the caller is done referencing this `MeshId` (e.g. the entity's
+    /// object was removed from the scene) -- it drops the bookkeeping
+    /// without touching the pool.
+    pub fn adopt_static_slice(&mut self, vertex_handle: VarLenHandle, index_handle: VarLenHandle) -> MeshId {
+        let slice = MeshSlice {
+            first_vertex: vertex_handle.offset,
+            vertex_count: vertex_handle.count,
+            first_index: index_handle.offset,
+            index_count: index_handle.count,
+        };
+        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0, kind: MeshKind::Static });
+        self.static_sub.live_vertex_count += vertex_handle.count as usize;
+        self.static_sub.live_index_count += index_handle.count as usize;
+        id
+    }
+
+    /// Drops an [`Self::adopt_static_slice`]-minted `MeshId`'s bookkeeping
+    /// WITHOUT freeing its pool range -- see that method's `# Ownership`
+    /// doc for why [`Self::remove`] would be wrong here. No-op (not an
+    /// error) if `id` isn't a currently-live mesh; the caller doesn't need
+    /// to track whether it already called this once.
+    pub fn forget_adopted_slice(&mut self, id: MeshId) {
+        let Some((_, record)) = self.meshes.remove(id) else { return };
+        self.static_sub.live_vertex_count = self.static_sub.live_vertex_count.saturating_sub(record.slice.vertex_count as usize);
+        self.static_sub.live_index_count = self.static_sub.live_index_count.saturating_sub(record.slice.index_count as usize);
+    }
+
     pub fn insert(&mut self, mesh: MeshUpload) -> MeshId {
         self.insert_with_kind(mesh, MeshKind::Static)
     }
@@ -634,5 +681,48 @@ mod tests {
         assert_eq!(s0.first_vertex, s1.first_vertex, "both sections must share the same vertex range");
         assert_eq!(s0.vertex_count, s1.vertex_count);
         assert_ne!(s0.first_index, s1.first_index, "each section must have its own index range");
+    }
+
+    #[test]
+    fn adopt_static_slice_reads_back_data_written_directly_into_the_pool_no_copy() {
+        let (device, queue) = test_device();
+        let mut pool = MeshPool::new(device.clone(), queue.clone());
+
+        // Simulates a SceneDB mirror dispatch writing straight into the
+        // pool -- exactly what happens for real via `write_var_len_field_at_row`,
+        // just called directly here since this test doesn't need a whole
+        // SceneGpuStore to prove MeshPool's own half of the contract.
+        let vhandle = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(5.0), v(6.0)]).unwrap();
+        let ihandle = pool.index_pool().write_var_row(&queue, VarLenHandle::default(), &[0, 1]).unwrap();
+
+        let id = pool.adopt_static_slice(vhandle, ihandle);
+        let record = pool.get(id).expect("adopted mesh must be reachable");
+        assert_eq!(record.slice.first_vertex, vhandle.offset);
+        assert_eq!(record.slice.vertex_count, vhandle.count);
+        assert_eq!(record.slice.first_index, ihandle.offset);
+        assert_eq!(record.slice.index_count, ihandle.count);
+
+        let got = readback_var_len::<PackedVertex>(&device, &queue, &pool.vertex_pool(), record.slice.first_vertex, record.slice.vertex_count);
+        assert_eq!(got.iter().map(|p| p.position[0]).collect::<Vec<_>>(), vec![5.0, 6.0]);
+    }
+
+    #[test]
+    fn forget_adopted_slice_drops_bookkeeping_without_freeing_the_pool_range() {
+        let (device, queue) = test_device();
+        let mut pool = MeshPool::new(device.clone(), queue.clone());
+
+        let vhandle = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(1.0)]).unwrap();
+        let ihandle = pool.index_pool().write_var_row(&queue, VarLenHandle::default(), &[0]).unwrap();
+        let id = pool.adopt_static_slice(vhandle, ihandle);
+
+        pool.forget_adopted_slice(id);
+        assert!(pool.get(id).is_none(), "the MeshId must no longer be reachable");
+
+        // The pool range itself must NOT have been freed -- a fresh
+        // write_var_row for unrelated data must NOT reuse offset 0, which
+        // is still "live" as far as the pool's own freelist is concerned
+        // (only the owning field's own next write, or despawn, frees it).
+        let other = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(99.0)]).unwrap();
+        assert_ne!(other.offset, vhandle.offset, "forget_adopted_slice must not have freed vhandle's range");
     }
 }

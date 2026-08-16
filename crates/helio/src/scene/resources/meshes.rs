@@ -36,6 +36,24 @@ impl super::super::Scene {
         self.mesh_pool.rebind_static_pools(vertices, indices);
     }
 
+    /// See [`crate::mesh::MeshPool::adopt_static_slice`] -- mints a
+    /// `MeshId` for data a `#[gpu] Vec<T>` field already wrote into the
+    /// (rebound) static pool, no copy. Read that method's `# Ownership`
+    /// doc before calling: the returned `MeshId` must go through
+    /// [`Self::forget_adopted_mesh_slice`], never [`Self::remove_mesh`].
+    pub fn adopt_static_mesh_slice(
+        &mut self,
+        vertex_handle: pulsar_scenedb::gpu::VarLenHandle,
+        index_handle: pulsar_scenedb::gpu::VarLenHandle,
+    ) -> MeshId {
+        self.mesh_pool.adopt_static_slice(vertex_handle, index_handle)
+    }
+
+    /// See [`crate::mesh::MeshPool::forget_adopted_slice`].
+    pub fn forget_adopted_mesh_slice(&mut self, id: MeshId) {
+        self.mesh_pool.forget_adopted_slice(id);
+    }
+
     /// Insert a mesh into the scene's mesh pool.
     ///
     /// Uploads vertex and index data to GPU memory and returns a handle that can be
