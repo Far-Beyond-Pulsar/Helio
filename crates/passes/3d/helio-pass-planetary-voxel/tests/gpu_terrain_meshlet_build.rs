@@ -25,29 +25,6 @@ struct GpuSurfaceJob {
     _pad: [u32; 4],
 }
 
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
-struct GpuSurfaceState {
-    generation_low: u32,
-    generation_high: u32,
-    valid: u32,
-    revision: u32,
-    regular_first_vertex: u32,
-    regular_vertex_count: u32,
-    regular_first_index: u32,
-    regular_index_count: u32,
-    regular_first_meshlet: u32,
-    regular_meshlet_count: u32,
-    transition_first_vertex: u32,
-    transition_vertex_count: u32,
-    transition_first_index: u32,
-    transition_index_count: u32,
-    transition_first_meshlet: u32,
-    transition_meshlet_count: u32,
-    transition_mask: u32,
-    _pad: [u32; 3],
-}
-
 #[test]
 fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
     pollster::block_on(async {
@@ -110,10 +87,6 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             generation_high: (generation >> 32) as u32,
             ..Default::default()
         };
-        let state = GpuSurfaceState {
-            valid: 1,
-            ..Default::default()
-        };
         let counters = GpuTransvoxelEmissionCounters {
             required_vertices: vertices.len() as u32,
             required_indices: indices.len() as u32,
@@ -127,7 +100,6 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
         let mut pages = [GpuPageMeta::default(); 4];
         pages[job.resident_slot as usize] = page;
         let page_buffer = initialized(&device, "Meshlet Page", bytemuck::cast_slice(&pages), false);
-        let state_buffer = initialized(&device, "Meshlet State", bytemuck::bytes_of(&state), false);
         let counter_buffer = initialized(
             &device,
             "Meshlet Counters",
@@ -156,7 +128,6 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             entries: &[
                 entry(0, &job_buffer),
                 entry(1, &page_buffer),
-                entry(2, &state_buffer),
                 entry(3, &counter_buffer),
                 entry(4, &vertex_buffer),
                 entry(5, &index_buffer),

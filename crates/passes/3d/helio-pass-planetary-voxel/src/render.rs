@@ -613,7 +613,7 @@ struct PreparedExtraction {
 
 struct PendingExtractionReadback {
     buffer: wgpu::Buffer,
-    receiver: Mutex<Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    receiver: Option<Mutex<Receiver<Result<(), wgpu::BufferAsyncError>>>>,
     extraction: PreparedExtraction,
 }
 
@@ -1030,7 +1030,6 @@ impl PlanetaryVoxelRenderPass {
                 buffer_entry(2, regular_extractor.counters_buffer()),
                 buffer_entry(3, regular_extractor.vertices_buffer()),
                 buffer_entry(4, regular_extractor.indices_buffer()),
-                buffer_entry(5, &state_buffer),
                 buffer_entry(6, &regular_vertex_arena),
                 buffer_entry(7, &regular_index_arena),
             ],
@@ -1041,7 +1040,6 @@ impl PlanetaryVoxelRenderPass {
             entries: &[
                 buffer_entry(0, &job_buffer),
                 buffer_entry(1, residency.metadata_buffer()),
-                buffer_entry(5, &state_buffer),
                 buffer_entry(8, transition_extractor.counters_buffer()),
                 buffer_entry(9, transition_extractor.vertices_buffer()),
                 buffer_entry(10, transition_extractor.indices_buffer()),
@@ -1056,7 +1054,6 @@ impl PlanetaryVoxelRenderPass {
                 entries: &[
                     buffer_entry(0, &job_buffer),
                     buffer_entry(1, residency.metadata_buffer()),
-                    buffer_entry(2, &state_buffer),
                     buffer_entry(3, regular_extractor.counters_buffer()),
                     buffer_entry(4, &regular_vertex_arena),
                     buffer_entry(5, &regular_index_arena),
@@ -1071,7 +1068,6 @@ impl PlanetaryVoxelRenderPass {
                 entries: &[
                     buffer_entry(0, &job_buffer),
                     buffer_entry(1, residency.metadata_buffer()),
-                    buffer_entry(2, &state_buffer),
                     buffer_entry(8, transition_extractor.counters_buffer()),
                     buffer_entry(9, &transition_vertex_arena),
                     buffer_entry(10, &transition_index_arena),
@@ -2450,10 +2446,24 @@ impl PlanetaryVoxelRenderPass {
     }
 
     fn advance_extraction_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if let Some(pending) = self
+            .extraction_readback
+            .as_mut()
+            .filter(|pending| pending.receiver.is_none())
+        {
+            let (sender, receiver) = mpsc::channel();
+            pending
+                .buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = sender.send(result);
+                });
+            pending.receiver = Some(Mutex::new(receiver));
+        }
         let _ = device.poll(wgpu::PollType::Poll);
         let completion = self.extraction_readback.as_ref().and_then(|pending| {
-            match pending
-                .receiver
+            let receiver = pending.receiver.as_ref()?;
+            match receiver
                 .lock()
                 .expect("planetary extraction receiver mutex is not poisoned")
                 .try_recv()
@@ -2637,15 +2647,9 @@ impl PlanetaryVoxelRenderPass {
             regular_bytes,
             transition_bytes,
         );
-        let (sender, receiver) = mpsc::channel();
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
         self.extraction_readback = Some(PendingExtractionReadback {
             buffer: readback,
-            receiver: Mutex::new(receiver),
+            receiver: None,
             extraction,
         });
     }
