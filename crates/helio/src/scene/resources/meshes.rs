@@ -3,12 +3,39 @@
 //! Meshes are stored in a shared `MeshPool` and reference-counted. Multiple objects
 //! can reference the same mesh. Meshes cannot be removed while objects are using them.
 
+use std::sync::Arc;
+
 use crate::handles::MeshId;
 use crate::mesh::{MeshBuffers, MeshUpload, PackedVertex};
 
 use super::super::errors::{invalid, Result, SceneError};
 
 impl super::super::Scene {
+    /// See [`crate::mesh::MeshPool::vertex_pool`] -- the static sub-pool's
+    /// shared vertex storage, `Arc`-cloned so an external owner (a
+    /// `SceneGpuStore`, Pulsar-Native#561 Phase D) can register it, or a
+    /// caller can compare identity against a pool it holds elsewhere.
+    pub fn mesh_vertex_pool(&self) -> Arc<pulsar_scenedb::gpu::VarLenGpuPool<PackedVertex>> {
+        self.mesh_pool.vertex_pool()
+    }
+
+    /// See [`crate::mesh::MeshPool::index_pool`] -- the index half of
+    /// [`Self::mesh_vertex_pool`].
+    pub fn mesh_index_pool(&self) -> Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>> {
+        self.mesh_pool.index_pool()
+    }
+
+    /// See [`crate::mesh::MeshPool::rebind_static_pools`] -- points the
+    /// scene's static mesh storage at externally-owned pools instead of the
+    /// ones it constructed for itself.
+    pub fn rebind_static_mesh_pools(
+        &mut self,
+        vertices: Arc<pulsar_scenedb::gpu::VarLenGpuPool<PackedVertex>>,
+        indices: Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>>,
+    ) {
+        self.mesh_pool.rebind_static_pools(vertices, indices);
+    }
+
     /// Insert a mesh into the scene's mesh pool.
     ///
     /// Uploads vertex and index data to GPU memory and returns a handle that can be

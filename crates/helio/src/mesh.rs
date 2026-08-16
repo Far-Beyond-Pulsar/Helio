@@ -305,6 +305,28 @@ impl MeshPool {
         Arc::clone(&self.static_sub.indices)
     }
 
+    /// Swaps the static sub-pool's storage for externally-owned pools --
+    /// the seam that makes [`Self::vertex_pool`]/[`Self::index_pool`]'s doc
+    /// promise real (Pulsar-Native#561 Phase D): a `SceneGpuStore` owns the
+    /// canonical `"StaticMeshComponent::vertices"`/`"...::indices"` pools
+    /// (registered generically, driven by that component's own `#[gpu]`
+    /// fields -- no Helio-specific "mesh pool" concept involved in who
+    /// OWNS the buffer), and this is how Helio's `MeshPool` gets pointed at
+    /// them instead of the pools it constructed for itself at `new()` time.
+    ///
+    /// Must be called before any real mesh data is inserted into the
+    /// static sub-pool -- the pools `MeshPool::new` built are simply
+    /// discarded here, along with anything already written into them (no
+    /// data migration). In practice this is called once, immediately after
+    /// `SceneGpuStore` is constructed, before any `insert()`/
+    /// `insert_sectioned()` call has had a chance to write real data --
+    /// callers that violate this ordering will see their earlier inserts'
+    /// `MeshSlice` offsets silently stop matching the new pool's contents.
+    pub fn rebind_static_pools(&mut self, vertices: Arc<VarLenGpuPool<PackedVertex>>, indices: Arc<VarLenGpuPool<u32>>) {
+        self.static_sub.vertices = vertices;
+        self.static_sub.indices = indices;
+    }
+
     /// Test-only: reach the DYNAMIC sub-pool's vertex storage for a readback
     /// assertion. Not part of the public surface -- unlike the static pool
     /// (shared with `StaticMeshComponent`, see [`Self::vertex_pool`]),
