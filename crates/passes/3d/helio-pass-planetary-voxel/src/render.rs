@@ -83,7 +83,7 @@ impl PlanetaryDebugView {
 struct GpuTerrainDebugUniform {
     mode: u32,
     draw_path: u32,
-    _pad: [u32; 4],
+    _pad: [u32; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -490,7 +490,7 @@ struct GpuSurfaceJob {
     transition_first_vertex: u32,
     transition_first_index: u32,
     transition_first_meshlet: u32,
-    _pad: [u32; 2],
+    _pad: [u32; 4],
 }
 
 impl GpuSurfaceJob {
