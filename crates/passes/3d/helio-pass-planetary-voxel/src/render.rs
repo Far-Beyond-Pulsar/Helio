@@ -430,6 +430,14 @@ pub struct PlanetaryRenderCounters {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlanetaryRenderDiagnostics {
+    pub active_surface_pages: u32,
+    pub candidate_surface_pages: u32,
+    pub ready_candidate_surface_pages: u32,
+    pub candidate_without_publication: u32,
+    pub candidate_invalid_state: u32,
+    pub candidate_generation_mismatches: u32,
+    pub candidate_revision_mismatches: u32,
+    pub candidate_transition_mismatches: u32,
     pub gpu_submitted_jobs: u32,
     pub gpu_published_jobs: u32,
     pub gpu_stale_rejections: u32,
@@ -713,6 +721,21 @@ fn surface_request_is_current(
         current.generation == requested.generation
             && current.transition_mask == requested.transition_mask
     })
+}
+
+fn observe_candidate_surface_state(candidate: &mut CandidateSurface, state: &GpuSurfaceState) {
+    let Some(publication_generation) = candidate.publication_generation else {
+        return;
+    };
+    let state_generation =
+        u64::from(state.generation_low) | (u64::from(state.generation_high) << 32);
+    // Readbacks are asynchronous snapshots. Once this exact immutable
+    // candidate revision has been observed on the GPU, a later stale snapshot
+    // must not make the transaction incomplete again.
+    candidate.ready |= state.valid != 0
+        && state_generation == publication_generation
+        && state.revision == candidate.revision
+        && state.transition_mask == u32::from(candidate.request.transition_mask);
 }
 
 impl PlanetaryVoxelRenderPass {
@@ -1525,20 +1548,41 @@ impl PlanetaryVoxelRenderPass {
         self.diagnostics_cache.meshlet_invalid_candidates = cull_counters.invalid_candidates;
         drop(mapped);
         buffer.unmap();
+        let mut without_publication = 0_u32;
+        let mut invalid_state = 0_u32;
+        let mut generation_mismatches = 0_u32;
+        let mut revision_mismatches = 0_u32;
+        let mut transition_mismatches = 0_u32;
         for candidate in self.candidate_surfaces.values_mut() {
             let Some(publication_generation) = candidate.publication_generation else {
+                without_publication = without_publication.saturating_add(1);
                 continue;
             };
             let Some(state) = states.get(candidate.slot as usize) else {
+                invalid_state = invalid_state.saturating_add(1);
                 continue;
             };
             let state_generation =
                 u64::from(state.generation_low) | (u64::from(state.generation_high) << 32);
-            candidate.ready = state.valid != 0
-                && state_generation == publication_generation
-                && state.revision == candidate.revision
-                && state.transition_mask == u32::from(candidate.request.transition_mask);
+            if state.valid == 0 {
+                invalid_state = invalid_state.saturating_add(1);
+            }
+            if state_generation != publication_generation {
+                generation_mismatches = generation_mismatches.saturating_add(1);
+            }
+            if state.revision != candidate.revision {
+                revision_mismatches = revision_mismatches.saturating_add(1);
+            }
+            if state.transition_mask != u32::from(candidate.request.transition_mask) {
+                transition_mismatches = transition_mismatches.saturating_add(1);
+            }
+            observe_candidate_surface_state(candidate, state);
         }
+        self.diagnostics_cache.candidate_without_publication = without_publication;
+        self.diagnostics_cache.candidate_invalid_state = invalid_state;
+        self.diagnostics_cache.candidate_generation_mismatches = generation_mismatches;
+        self.diagnostics_cache.candidate_revision_mismatches = revision_mismatches;
+        self.diagnostics_cache.candidate_transition_mismatches = transition_mismatches;
         if let Err(error) = self.commit_ready_handoff(queue) {
             log::error!("planetary surface handoff commit failed: {error}");
             return false;
@@ -1547,6 +1591,13 @@ impl PlanetaryVoxelRenderPass {
     }
 
     fn refresh_cpu_diagnostics(&mut self) {
+        self.diagnostics_cache.active_surface_pages = self.active_surfaces.len() as u32;
+        self.diagnostics_cache.candidate_surface_pages = self.candidate_surfaces.len() as u32;
+        self.diagnostics_cache.ready_candidate_surface_pages = self
+            .candidate_surfaces
+            .values()
+            .filter(|candidate| candidate.ready)
+            .count() as u32;
         let mut lods = Vec::new();
         let mut source_min = None;
         let mut source_max = None;
@@ -2854,6 +2905,43 @@ mod tests {
     use helio_planet_voxel_core::{
         CellWord, PageKey, PlanetPosition, VisiblePage, PAGE_CELL_COUNT,
     };
+
+    #[test]
+    fn candidate_readiness_is_monotonic_across_asynchronous_snapshots() {
+        let key = PlanetPageKey::new(PlanetId([0x4d; 16]), PageKey::new(3, [2, -1, 4]));
+        let request = PlanetarySurfaceRequest {
+            key,
+            generation: SourceGeneration::new(7, 2),
+            transition_mask: 0b00_1011,
+            dirty_microbricks: u64::MAX,
+        };
+        let mut candidate = CandidateSurface {
+            request,
+            slot: 5,
+            revision: 19,
+            publication_generation: Some(43),
+            ready: false,
+        };
+        let current = GpuSurfaceState {
+            generation_low: 43,
+            valid: 1,
+            revision: 19,
+            transition_mask: 0b00_1011,
+            ..Default::default()
+        };
+        observe_candidate_surface_state(&mut candidate, &current);
+        assert!(candidate.ready);
+
+        let stale = GpuSurfaceState {
+            generation_low: 42,
+            valid: 1,
+            revision: 18,
+            transition_mask: 0,
+            ..Default::default()
+        };
+        observe_candidate_surface_state(&mut candidate, &stale);
+        assert!(candidate.ready);
+    }
 
     #[test]
     fn validation_config_is_bounded_and_below_its_declared_budget() {
