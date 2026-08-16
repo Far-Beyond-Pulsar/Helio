@@ -63,8 +63,11 @@ struct GpuSurfaceFeedback {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 struct GpuDrawPage {
-    relative_lod0_cell_min: [i32; 3],
+    relative_lod0_cell_min_x: [u32; 2],
+    relative_lod0_cell_min_y: [u32; 2],
+    relative_lod0_cell_min_z: [u32; 2],
     lod: u32,
+    _pad0: u32,
     camera_relative_m: [f32; 3],
     lod0_cell_size_m: f32,
     generation_low: u32,
@@ -236,14 +239,8 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             transition_mask: 0b00_1011,
             ..Default::default()
         };
-        let metadata = GpuPageMeta::new(
-            PageKey::new(0, [0, 0, 0]),
-            [0, 0, 0],
-            job.resident_slot,
-            42,
-            0,
-        )
-        .expect("validation metadata is valid");
+        let metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), job.resident_slot, 42, 0)
+            .expect("validation metadata is valid");
         let regular_success = GpuTransvoxelEmissionCounters {
             emitted_vertices: 19,
             emitted_indices: 27,
@@ -399,14 +396,9 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             }
         );
 
-        let current_metadata = GpuPageMeta::new(
-            PageKey::new(0, [0, 0, 0]),
-            [0, 0, 0],
-            job.resident_slot,
-            43,
-            0,
-        )
-        .expect("validation metadata is valid");
+        let current_metadata =
+            GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), job.resident_slot, 43, 0)
+                .expect("validation metadata is valid");
         let overflow = GpuTransvoxelEmissionCounters {
             vertex_overflow: 1,
             ..regular_success

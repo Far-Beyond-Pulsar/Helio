@@ -1,11 +1,11 @@
 use crate::{
-    EXTRACTION_SAMPLE_COUNT, PlanetaryVoxelResidency, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
-    TRANSITION_FACE_SAMPLE_EDGE, transition_face_integer_basis,
+    transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{
-    AddressError, GpuPageMeta, PAGE_EDGE, PageKey, PlanetId, PlanetPageKey, SourceGeneration,
-    TRANSITION_FACE_MASK, TransitionFace,
+    AddressError, GpuPageMeta, PageKey, PlanetId, PlanetPageKey, SourceGeneration, TransitionFace,
+    PAGE_EDGE, TRANSITION_FACE_MASK,
 };
 use std::collections::BTreeSet;
 
@@ -126,7 +126,9 @@ fn insert_page_box(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuSurfaceGatherJob {
     pub planet_id: [u32; 4],
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
     pub generation_low: u32,
     pub generation_high: u32,
@@ -134,7 +136,7 @@ pub struct GpuSurfaceGatherJob {
     pub target_slot: u32,
     pub residency_epoch_low: u32,
     pub residency_epoch_high: u32,
-    pub _pad: [u32; 2],
+    pub _pad: [u32; 3],
 }
 
 impl GpuSurfaceGatherJob {
@@ -152,7 +154,9 @@ impl GpuSurfaceGatherJob {
         }
         Self {
             planet_id,
-            relative_lod0_cell_min: metadata.relative_lod0_cell_min,
+            lod0_cell_min_x: metadata.lod0_cell_min_x,
+            lod0_cell_min_y: metadata.lod0_cell_min_y,
+            lod0_cell_min_z: metadata.lod0_cell_min_z,
             lod: metadata.lod,
             generation_low: metadata.generation_low,
             generation_high: metadata.generation_high,
@@ -160,7 +164,7 @@ impl GpuSurfaceGatherJob {
             target_slot: metadata.slot,
             residency_epoch_low: residency_epoch as u32,
             residency_epoch_high: (residency_epoch >> 32) as u32,
-            _pad: [0; 2],
+            _pad: [0; 3],
         }
     }
 }
@@ -467,7 +471,7 @@ pub enum SurfaceSamplingError {
 mod tests {
     use super::*;
     use helio_planet_voxel_core::{
-        CellWord, PAGE_CELL_COUNT, PageUpload, PlanetFrameUniform, PlanetPosition,
+        CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
     };
     use std::sync::mpsc;
 
@@ -613,7 +617,7 @@ mod tests {
                 key.page
                     .relative_lod0_cell_min(frame.frame_origin_lod0_cell())
                     .unwrap()[0]
-                    .rem_euclid(key.page.lod0_cell_span().unwrap() as i32),
+                    .rem_euclid(key.page.lod0_cell_span().unwrap()),
                 0,
                 "the regression requires an LOD0-snapped frame that is not coarse-page aligned"
             );
@@ -655,7 +659,6 @@ mod tests {
             let resident = residency.cache().resident(key).unwrap();
             let metadata = GpuPageMeta::new(
                 key.page,
-                frame.frame_origin_lod0_cell(),
                 resident.slot,
                 resident.publication_generation,
                 request.transition_mask,

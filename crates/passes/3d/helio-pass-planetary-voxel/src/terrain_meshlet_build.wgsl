@@ -21,12 +21,15 @@ struct GpuSurfaceJob {
 }
 
 struct GpuPageMeta {
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     slot: u32,
     generation_low: u32,
     generation_high: u32,
     transition_mask: u32,
+    _pad: u32,
 }
 
 struct GpuSurfaceState {

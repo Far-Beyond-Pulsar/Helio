@@ -10,14 +10,35 @@ struct Camera {
 }
 
 struct GpuDrawPage {
-    relative_lod0_cell_min: vec3<i32>,
+    relative_lod0_cell_min_x: vec2<u32>,
+    relative_lod0_cell_min_y: vec2<u32>,
+    relative_lod0_cell_min_z: vec2<u32>,
     lod: u32,
+    _pad0: u32,
     camera_relative_m: vec3<f32>,
     lod0_cell_size_m: f32,
     generation_low: u32,
     generation_high: u32,
     transition_mask: u32,
     visible: u32,
+}
+
+fn i64_words_to_f32(value: vec2<u32>) -> f32 {
+    if (value.y & 0x80000000u) == 0u {
+        return f32(value.y) * 4294967296.0 + f32(value.x);
+    }
+    let magnitude_low = ~value.x + 1u;
+    let carry = select(0u, 1u, magnitude_low == 0u);
+    let magnitude_high = ~value.y + carry;
+    return -(f32(magnitude_high) * 4294967296.0 + f32(magnitude_low));
+}
+
+fn page_relative_min(page: GpuDrawPage) -> vec3<f32> {
+    return vec3<f32>(
+        i64_words_to_f32(page.relative_lod0_cell_min_x),
+        i64_words_to_f32(page.relative_lod0_cell_min_y),
+        i64_words_to_f32(page.relative_lod0_cell_min_z),
+    );
 }
 
 struct GpuTerrainDraw {
@@ -68,8 +89,7 @@ fn transform_vertex(
 ) -> VertexOutput {
     let page = pages[page_slot];
     let lod_scale = exp2(f32(page.lod));
-    let relative_cell =
-        vec3<f32>(page.relative_lod0_cell_min) + input.position * lod_scale;
+    let relative_cell = page_relative_min(page) + input.position * lod_scale;
     let world = relative_cell * page.lod0_cell_size_m - page.camera_relative_m;
     var output: VertexOutput;
     // Keep view and projection split. This is the stable D3D12 contract used

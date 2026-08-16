@@ -34,8 +34,11 @@ struct GpuSurfaceState {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct GpuDrawPage {
-    relative_lod0_cell_min: [i32; 3],
+    relative_lod0_cell_min_x: [u32; 2],
+    relative_lod0_cell_min_y: [u32; 2],
+    relative_lod0_cell_min_z: [u32; 2],
     lod: u32,
+    _pad0: u32,
     camera_relative_m: [f32; 3],
     lod0_cell_size_m: f32,
     generation_low: u32,

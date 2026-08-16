@@ -17,8 +17,8 @@ use helio_core::{
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_planet_voxel_core::{
-    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+    split_i64, ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform,
+    PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -577,8 +577,11 @@ struct GpuSurfaceFeedback {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 struct GpuDrawPage {
-    relative_lod0_cell_min: [i32; 3],
+    relative_lod0_cell_min_x: [u32; 2],
+    relative_lod0_cell_min_y: [u32; 2],
+    relative_lod0_cell_min_z: [u32; 2],
     lod: u32,
+    _pad0: u32,
     camera_relative_m: [f32; 3],
     lod0_cell_size_m: f32,
     generation_low: u32,
@@ -2423,16 +2426,16 @@ impl PlanetaryVoxelRenderPass {
                 .residency
                 .planet_frame(key.planet)
                 .ok_or(PlanetaryRenderError::MissingPlanetFrame(key.planet))?;
-            let meta = GpuPageMeta::new(
-                key.page,
-                frame.frame_origin_lod0_cell(),
-                surface.slot,
-                surface.publication_generation,
-                0,
-            )?;
+            let meta = GpuPageMeta::new(key.page, surface.slot, surface.publication_generation, 0)?;
+            let relative_min = key
+                .page
+                .relative_lod0_cell_min(frame.frame_origin_lod0_cell())?;
             pages[surface.slot as usize] = GpuDrawPage {
-                relative_lod0_cell_min: meta.relative_lod0_cell_min,
+                relative_lod0_cell_min_x: split_i64(relative_min[0]),
+                relative_lod0_cell_min_y: split_i64(relative_min[1]),
+                relative_lod0_cell_min_z: split_i64(relative_min[2]),
                 lod: meta.lod,
+                _pad0: 0,
                 camera_relative_m: frame.camera_relative_m,
                 lod0_cell_size_m: frame.lod0_cell_size_m,
                 generation_low: surface.publication_generation as u32,
@@ -2726,7 +2729,6 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             let publication_generation = resident.publication_generation;
             let metadata = match GpuPageMeta::new(
                 front.key.page,
-                frame.frame_origin_lod0_cell(),
                 resident_slot,
                 publication_generation,
                 front.transition_mask,

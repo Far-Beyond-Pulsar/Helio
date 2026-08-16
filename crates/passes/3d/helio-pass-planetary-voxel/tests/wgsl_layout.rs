@@ -266,19 +266,27 @@ fn residency_shader_parses_and_validates() {
 #[test]
 fn page_table_entry_matches_wgsl_exactly() {
     assert_eq!(align_of::<GpuPageTableEntry>(), 16);
-    assert_eq!(size_of::<GpuPageTableEntry>(), 48);
+    assert_eq!(size_of::<GpuPageTableEntry>(), 64);
     assert_eq!(
         wgsl_struct("GpuPageTableEntry"),
         (
-            48,
+            64,
             vec![
                 (
                     "planet_id".into(),
                     offset_of!(GpuPageTableEntry, planet_id) as u32
                 ),
                 (
-                    "relative_lod0_cell_min".into(),
-                    offset_of!(GpuPageTableEntry, relative_lod0_cell_min) as u32,
+                    "lod0_cell_min_x".into(),
+                    offset_of!(GpuPageTableEntry, lod0_cell_min_x) as u32
+                ),
+                (
+                    "lod0_cell_min_y".into(),
+                    offset_of!(GpuPageTableEntry, lod0_cell_min_y) as u32
+                ),
+                (
+                    "lod0_cell_min_z".into(),
+                    offset_of!(GpuPageTableEntry, lod0_cell_min_z) as u32
                 ),
                 ("lod".into(), offset_of!(GpuPageTableEntry, lod) as u32),
                 ("slot".into(), offset_of!(GpuPageTableEntry, slot) as u32),
@@ -291,6 +299,7 @@ fn page_table_entry_matches_wgsl_exactly() {
                     offset_of!(GpuPageTableEntry, generation_high) as u32,
                 ),
                 ("state".into(), offset_of!(GpuPageTableEntry, state) as u32),
+                ("_pad".into(), offset_of!(GpuPageTableEntry, _pad) as u32),
             ],
         )
     );
@@ -342,21 +351,30 @@ fn uniform_query_and_result_match_wgsl_exactly() {
     );
 
     assert_eq!(align_of::<GpuLookupQuery>(), 16);
-    assert_eq!(size_of::<GpuLookupQuery>(), 32);
+    assert_eq!(size_of::<GpuLookupQuery>(), 48);
     assert_eq!(
         wgsl_struct("GpuLookupQuery"),
         (
-            32,
+            48,
             vec![
                 (
                     "planet_id".into(),
                     offset_of!(GpuLookupQuery, planet_id) as u32
                 ),
                 (
-                    "relative_lod0_cell_min".into(),
-                    offset_of!(GpuLookupQuery, relative_lod0_cell_min) as u32,
+                    "lod0_cell_min_x".into(),
+                    offset_of!(GpuLookupQuery, lod0_cell_min_x) as u32
+                ),
+                (
+                    "lod0_cell_min_y".into(),
+                    offset_of!(GpuLookupQuery, lod0_cell_min_y) as u32
+                ),
+                (
+                    "lod0_cell_min_z".into(),
+                    offset_of!(GpuLookupQuery, lod0_cell_min_z) as u32
                 ),
                 ("lod".into(), offset_of!(GpuLookupQuery, lod) as u32),
+                ("_pad".into(), offset_of!(GpuLookupQuery, _pad) as u32),
             ],
         )
     );
@@ -427,22 +445,24 @@ fn counters_are_explicitly_padded_and_pod_sized() {
 #[test]
 fn surface_gather_layouts_match_wgsl_exactly() {
     assert_eq!(align_of::<GpuSurfaceGatherJob>(), 16);
-    assert_eq!(size_of::<GpuSurfaceGatherJob>(), 64);
+    assert_eq!(size_of::<GpuSurfaceGatherJob>(), 80);
     assert_eq!(
         wgsl_struct_in(SURFACE_GATHER_WGSL, "GpuSurfaceGatherJob"),
         (
-            64,
+            80,
             vec![
                 ("planet_id".into(), 0),
-                ("relative_lod0_cell_min".into(), 16),
-                ("lod".into(), 28),
-                ("generation_low".into(), 32),
-                ("generation_high".into(), 36),
-                ("transition_mask".into(), 40),
-                ("target_slot".into(), 44),
-                ("residency_epoch_low".into(), 48),
-                ("residency_epoch_high".into(), 52),
-                ("_pad".into(), 56),
+                ("lod0_cell_min_x".into(), 16),
+                ("lod0_cell_min_y".into(), 24),
+                ("lod0_cell_min_z".into(), 32),
+                ("lod".into(), 40),
+                ("generation_low".into(), 44),
+                ("generation_high".into(), 48),
+                ("transition_mask".into(), 52),
+                ("target_slot".into(), 56),
+                ("residency_epoch_low".into(), 60),
+                ("residency_epoch_high".into(), 64),
+                ("_pad".into(), 68),
             ],
         )
     );

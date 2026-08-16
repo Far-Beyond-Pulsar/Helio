@@ -143,7 +143,7 @@ impl PlanetaryVoxelResidency {
 
     pub fn set_planet_frame(
         &mut self,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         frame: PlanetFrameUniform,
     ) -> Result<FrameUpdateOutcome, GpuResidencyError> {
         let planet = frame.planet_id();
@@ -172,16 +172,7 @@ impl PlanetaryVoxelResidency {
         }
 
         let previous_frame = self.frames.get(&planet).map(|value| value.frame_number());
-        let mut candidate_frames = self.frames.clone();
-        candidate_frames.insert(planet, frame);
-        let candidate_table = self.build_table(&candidate_frames)?;
-        let candidate_metadata = self.build_metadata(&candidate_frames)?;
-        self.frames = candidate_frames;
-        self.table = candidate_table;
-        self.advance_publication_epoch();
-        self.publish_metadata(queue, &candidate_metadata, false);
-        self.publish_table(queue, false);
-        self.refresh_and_publish_counters(queue);
+        self.frames.insert(planet, frame);
         Ok(FrameUpdateOutcome::Applied { previous_frame })
     }
 
@@ -293,7 +284,7 @@ impl PlanetaryVoxelResidency {
         if !dirty_slots.is_empty() {
             self.advance_publication_epoch();
         }
-        let metadata = self.build_metadata(&self.frames)?;
+        let metadata = self.build_metadata()?;
         self.publish_metadata(queue, &metadata, false);
         self.publish_table(queue, false);
         self.refresh_and_publish_counters(queue);
@@ -346,7 +337,7 @@ impl PlanetaryVoxelResidency {
         if !dirty_slots.is_empty() {
             self.advance_publication_epoch();
         }
-        let metadata = self.build_metadata(&self.frames)?;
+        let metadata = self.build_metadata()?;
         self.publish_metadata(queue, &metadata, false);
         self.publish_table(queue, false);
         self.refresh_and_publish_counters(queue);
@@ -367,7 +358,7 @@ impl PlanetaryVoxelResidency {
         let outcome = self.cache.apply_visible_set(set)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             self.visible = canonical;
-            let metadata = self.build_metadata(&self.frames)?;
+            let metadata = self.build_metadata()?;
             self.publish_metadata(queue, &metadata, false);
         }
         self.refresh_and_publish_counters(queue);
@@ -414,7 +405,7 @@ impl PlanetaryVoxelResidency {
             self.publish_dirty_slots(queue, &dirty_slots)?;
         }
         self.counters.device_rebuilds = self.counters.device_rebuilds.saturating_add(1);
-        let metadata = self.build_metadata(&self.frames)?;
+        let metadata = self.build_metadata()?;
         self.publish_metadata(queue, &metadata, true);
         self.publish_table(queue, true);
         self.refresh_and_publish_counters(queue);
@@ -432,44 +423,12 @@ impl PlanetaryVoxelResidency {
     }
 
     fn lookup_key(&self, key: PlanetPageKey) -> Result<GpuLookupKey, GpuResidencyError> {
-        let frame = self
-            .frames
-            .get(&key.planet)
-            .ok_or(GpuResidencyError::MissingPlanetFrame(key.planet))?;
-        Ok(GpuLookupKey::from_planet_page(
-            key,
-            frame.frame_origin_lod0_cell(),
-        )?)
+        Ok(GpuLookupKey::from_planet_page(key)?)
     }
 
-    fn build_table(
-        &self,
-        frames: &BTreeMap<PlanetId, PlanetFrameUniform>,
-    ) -> Result<PageTable, GpuResidencyError> {
-        let mut table = PageTable::new(self.config.table_capacity, self.config.max_probe)?;
-        for (key, page) in self.cache.resident_pages() {
-            let frame = frames
-                .get(&key.planet)
-                .ok_or(GpuResidencyError::MissingPlanetFrame(key.planet))?;
-            let lookup = GpuLookupKey::from_planet_page(key, frame.frame_origin_lod0_cell())?;
-            table.insert(GpuPageTableEntry::occupied(
-                lookup,
-                page.slot,
-                page.publication_generation,
-            ))?;
-        }
-        Ok(table)
-    }
-
-    fn build_metadata(
-        &self,
-        frames: &BTreeMap<PlanetId, PlanetFrameUniform>,
-    ) -> Result<Vec<GpuPageMeta>, GpuResidencyError> {
+    fn build_metadata(&self) -> Result<Vec<GpuPageMeta>, GpuResidencyError> {
         let mut metadata = vec![GpuPageMeta::default(); self.config.max_resident_pages as usize];
         for (key, page) in self.cache.resident_pages() {
-            let frame = frames
-                .get(&key.planet)
-                .ok_or(GpuResidencyError::MissingPlanetFrame(key.planet))?;
             let transition_mask = self
                 .visible
                 .get(&key)
@@ -477,7 +436,6 @@ impl PlanetaryVoxelResidency {
                 .map_or(0, |(_, mask)| *mask);
             metadata[page.slot as usize] = GpuPageMeta::new(
                 key.page,
-                frame.frame_origin_lod0_cell(),
                 page.slot,
                 page.publication_generation,
                 transition_mask,
@@ -550,7 +508,7 @@ impl PlanetaryVoxelResidency {
         queue: &wgpu::Queue,
         force_all: bool,
     ) -> Result<(), GpuResidencyError> {
-        let metadata = self.build_metadata(&self.frames)?;
+        let metadata = self.build_metadata()?;
         self.publish_metadata(queue, &metadata, force_all);
         self.publish_table(queue, force_all);
         self.refresh_and_publish_counters(queue);
@@ -761,8 +719,6 @@ pub enum GpuResidencyError {
     Address(#[from] AddressError),
     #[error(transparent)]
     Metadata(#[from] GpuPageMetaError),
-    #[error("planet {0:?} has no registered camera-local frame")]
-    MissingPlanetFrame(PlanetId),
     #[error("planet-frame registry reached its bounded capacity of {maximum}")]
     PlanetFrameCapacity { maximum: u32 },
     #[error("planet frame {0:?} is still referenced by resident or visible pages")]

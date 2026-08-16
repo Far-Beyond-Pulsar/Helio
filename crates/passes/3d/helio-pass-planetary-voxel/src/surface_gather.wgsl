@@ -11,7 +11,9 @@ const PAGE_TABLE_OCCUPIED: u32 = 1u;
 
 struct GpuSurfaceGatherJob {
     planet_id: vec4<u32>,
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     generation_low: u32,
     generation_high: u32,
@@ -19,7 +21,7 @@ struct GpuSurfaceGatherJob {
     target_slot: u32,
     residency_epoch_low: u32,
     residency_epoch_high: u32,
-    _pad: vec2<u32>,
+    _pad: array<u32, 3>,
 };
 
 struct GpuResidencyUniform {
@@ -35,12 +37,15 @@ struct GpuResidencyUniform {
 
 struct GpuPageTableEntry {
     planet_id: vec4<u32>,
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     slot: u32,
     generation_low: u32,
     generation_high: u32,
     state: u32,
+    _pad: u32,
 };
 
 struct GpuLookupResult {
@@ -103,26 +108,42 @@ fn mix_hash(hash: u32, value: u32) -> u32 {
     return mixed ^ (mixed >> 16u);
 }
 
-fn page_hash(relative_min: vec3<i32>, lod: u32) -> u32 {
+fn page_hash(min_x: vec2<u32>, min_y: vec2<u32>, min_z: vec2<u32>, lod: u32) -> u32 {
     var hash = 0x811c9dc5u;
     hash = mix_hash(hash, job.planet_id.x);
     hash = mix_hash(hash, job.planet_id.y);
     hash = mix_hash(hash, job.planet_id.z);
     hash = mix_hash(hash, job.planet_id.w);
-    hash = mix_hash(hash, bitcast<u32>(relative_min.x));
-    hash = mix_hash(hash, bitcast<u32>(relative_min.y));
-    hash = mix_hash(hash, bitcast<u32>(relative_min.z));
+    hash = mix_hash(hash, min_x.x);
+    hash = mix_hash(hash, min_x.y);
+    hash = mix_hash(hash, min_y.x);
+    hash = mix_hash(hash, min_y.y);
+    hash = mix_hash(hash, min_z.x);
+    hash = mix_hash(hash, min_z.y);
     return mix_hash(hash, lod);
 }
 
-fn keys_equal(entry: GpuPageTableEntry, relative_min: vec3<i32>, lod: u32) -> bool {
+fn keys_equal(
+    entry: GpuPageTableEntry,
+    min_x: vec2<u32>,
+    min_y: vec2<u32>,
+    min_z: vec2<u32>,
+    lod: u32,
+) -> bool {
     return all(entry.planet_id == job.planet_id)
-        && all(entry.relative_lod0_cell_min == relative_min)
+        && all(entry.lod0_cell_min_x == min_x)
+        && all(entry.lod0_cell_min_y == min_y)
+        && all(entry.lod0_cell_min_z == min_z)
         && entry.lod == lod;
 }
 
-fn lookup_page(relative_min: vec3<i32>, lod: u32) -> GpuLookupResult {
-    let start = page_hash(relative_min, lod) & residency.table_mask;
+fn lookup_page(
+    min_x: vec2<u32>,
+    min_y: vec2<u32>,
+    min_z: vec2<u32>,
+    lod: u32,
+) -> GpuLookupResult {
+    let start = page_hash(min_x, min_y, min_z, lod) & residency.table_mask;
     var probe = 0u;
     loop {
         if probe >= residency.max_probe {
@@ -132,7 +153,7 @@ fn lookup_page(relative_min: vec3<i32>, lod: u32) -> GpuLookupResult {
         if entry.state == PAGE_TABLE_EMPTY {
             return GpuLookupResult(0u, 0u, 0u, probe + 1u, 0u);
         }
-        if entry.state == PAGE_TABLE_OCCUPIED && keys_equal(entry, relative_min, lod) {
+        if entry.state == PAGE_TABLE_OCCUPIED && keys_equal(entry, min_x, min_y, min_z, lod) {
             return GpuLookupResult(
                 entry.slot,
                 entry.generation_low,
@@ -154,6 +175,14 @@ fn floor_div(value: i32, divisor: i32) -> i32 {
     return quotient;
 }
 
+fn add_i32_to_i64_words(value: vec2<u32>, delta: i32) -> vec2<u32> {
+    let delta_low = bitcast<u32>(delta);
+    let low = value.x + delta_low;
+    let carry = select(0u, 1u, low < value.x);
+    let sign_extension = select(0u, 0xffffffffu, delta < 0);
+    return vec2<u32>(low, value.y + sign_extension + carry);
+}
+
 fn slot_origin(slot: u32) -> vec3<u32> {
     let x = slot % residency.atlas_tiles_x;
     let y = (slot / residency.atlas_tiles_x) % residency.atlas_tiles_y;
@@ -161,26 +190,24 @@ fn slot_origin(slot: u32) -> vec3<u32> {
     return vec3<u32>(x, y, z) * PAGE_EDGE;
 }
 
-fn gather_sample(relative_position: vec3<i32>, lod: u32) -> u32 {
+fn gather_sample(target_offset: vec3<i32>, lod: u32) -> u32 {
     let scale = i32(1u << lod);
     let span = i32(PAGE_EDGE) * scale;
-    // Camera-relative zero is snapped to an LOD0 page, not necessarily to
-    // this coarser LOD. The target page minimum is aligned to its own LOD and
-    // every finer transition LOD, so it is the stable grid anchor for both
-    // regular and transition samples.
-    let target_offset = relative_position - job.relative_lod0_cell_min;
-    let relative_min = job.relative_lod0_cell_min + vec3<i32>(
+    let page_offset = vec3<i32>(
         floor_div(target_offset.x, span) * span,
         floor_div(target_offset.y, span) * span,
         floor_div(target_offset.z, span) * span,
     );
-    let lookup = lookup_page(relative_min, lod);
+    let min_x = add_i32_to_i64_words(job.lod0_cell_min_x, page_offset.x);
+    let min_y = add_i32_to_i64_words(job.lod0_cell_min_y, page_offset.y);
+    let min_z = add_i32_to_i64_words(job.lod0_cell_min_z, page_offset.z);
+    let lookup = lookup_page(min_x, min_y, min_z, lod);
     atomicAdd(&counters.table_probes, lookup.probes);
     if lookup.found == 0u {
         atomicAdd(&counters.page_misses, 1u);
         return 0x00007fffu;
     }
-    let local = vec3<u32>((relative_position - relative_min) / scale);
+    let local = vec3<u32>((target_offset - page_offset) / scale);
     return textureLoad(atlas, vec3<i32>(slot_origin(lookup.slot) + local), 0).x;
 }
 
@@ -200,7 +227,7 @@ fn gather_regular(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let z = linear / (REGULAR_SAMPLE_EDGE * REGULAR_SAMPLE_EDGE);
     let local = vec3<i32>(i32(x) - 1, i32(y) - 1, i32(z) - 1);
     let scale = i32(1u << job.lod);
-    regular_samples[linear] = gather_sample(job.relative_lod0_cell_min + local * scale, job.lod);
+    regular_samples[linear] = gather_sample(local * scale, job.lod);
     atomicAdd(&counters.regular_samples, 1u);
 }
 
@@ -221,12 +248,11 @@ fn gather_transition(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let u = layer_linear % TRANSITION_SLAB_EDGE;
     let fine_scale = i32(1u << (job.lod - 1u));
     let coarse_span = i32(PAGE_EDGE) * fine_scale * 2;
-    let relative_position = job.relative_lod0_cell_min
-        + FACE_ORIGIN[face] * coarse_span
+    let target_offset = FACE_ORIGIN[face] * coarse_span
         + FACE_U[face] * (i32(u) - 1) * fine_scale
         + FACE_V[face] * (i32(v) - 1) * fine_scale
         + FACE_OUTWARD[face] * (i32(layer) - 1) * fine_scale;
-    transition_samples[linear] = gather_sample(relative_position, job.lod - 1u);
+    transition_samples[linear] = gather_sample(target_offset, job.lod - 1u);
     atomicAdd(&counters.transition_samples, 1u);
 }
 
@@ -236,7 +262,12 @@ fn set_indirect(index: u32, x: u32) {
 
 @compute @workgroup_size(1, 1, 1)
 fn finalize_gather() {
-    let target_lookup = lookup_page(job.relative_lod0_cell_min, job.lod);
+    let target_lookup = lookup_page(
+        job.lod0_cell_min_x,
+        job.lod0_cell_min_y,
+        job.lod0_cell_min_z,
+        job.lod,
+    );
     atomicAdd(&counters.table_probes, target_lookup.probes);
     let target_current = target_lookup.found != 0u
         && target_lookup.slot == job.target_slot

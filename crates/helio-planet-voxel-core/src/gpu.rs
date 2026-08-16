@@ -66,18 +66,20 @@ impl PlanetFrameUniform {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuPageMeta {
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
     pub slot: u32,
     pub generation_low: u32,
     pub generation_high: u32,
     pub transition_mask: u32,
+    pub _pad: u32,
 }
 
 impl GpuPageMeta {
     pub fn new(
         page: PageKey,
-        frame_origin_lod0_cell: [i64; 3],
         slot: u32,
         generation: u64,
         transition_mask: u8,
@@ -86,16 +88,26 @@ impl GpuPageMeta {
             return Err(GpuPageMetaError::TransitionMask(transition_mask));
         }
         let generation = split_u64(generation);
+        let lod0_cell_min = page.lod0_cell_min().map_err(GpuPageMetaError::Address)?;
         Ok(Self {
-            relative_lod0_cell_min: page
-                .relative_lod0_cell_min(frame_origin_lod0_cell)
-                .map_err(GpuPageMetaError::Address)?,
+            lod0_cell_min_x: split_i64(lod0_cell_min[0]),
+            lod0_cell_min_y: split_i64(lod0_cell_min[1]),
+            lod0_cell_min_z: split_i64(lod0_cell_min[2]),
             lod: u32::from(page.lod),
             slot,
             generation_low: generation[0],
             generation_high: generation[1],
             transition_mask: u32::from(transition_mask),
+            _pad: 0,
         })
+    }
+
+    pub const fn lod0_cell_min(self) -> [i64; 3] {
+        [
+            join_i64(self.lod0_cell_min_x),
+            join_i64(self.lod0_cell_min_y),
+            join_i64(self.lod0_cell_min_z),
+        ]
     }
 
     pub const fn generation(self) -> u64 {
@@ -108,12 +120,14 @@ impl GpuPageMeta {
         frame: PlanetFrameUniform,
         local_lod0_cell: [f32; 3],
     ) -> [f32; 3] {
+        let page_min = self.lod0_cell_min();
+        let origin = frame.frame_origin_lod0_cell();
         [
-            (self.relative_lod0_cell_min[0] as f32 + local_lod0_cell[0]) * frame.lod0_cell_size_m
+            ((page_min[0] - origin[0]) as f32 + local_lod0_cell[0]) * frame.lod0_cell_size_m
                 - frame.camera_relative_m[0],
-            (self.relative_lod0_cell_min[1] as f32 + local_lod0_cell[1]) * frame.lod0_cell_size_m
+            ((page_min[1] - origin[1]) as f32 + local_lod0_cell[1]) * frame.lod0_cell_size_m
                 - frame.camera_relative_m[1],
-            (self.relative_lod0_cell_min[2] as f32 + local_lod0_cell[2]) * frame.lod0_cell_size_m
+            ((page_min[2] - origin[2]) as f32 + local_lod0_cell[2]) * frame.lod0_cell_size_m
                 - frame.camera_relative_m[2],
         ]
     }
@@ -138,11 +152,11 @@ const fn split_u64(value: u64) -> [u32; 2] {
     [value as u32, (value >> 32) as u32]
 }
 
-const fn split_i64(value: i64) -> [u32; 2] {
+pub const fn split_i64(value: i64) -> [u32; 2] {
     split_u64(value as u64)
 }
 
-const fn join_i64(words: [u32; 2]) -> i64 {
+pub const fn join_i64(words: [u32; 2]) -> i64 {
     ((words[0] as u64) | ((words[1] as u64) << 32)) as i64
 }
 
@@ -157,6 +171,13 @@ fn planet_words(planet: PlanetId) -> [u32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_gpu_words_round_trip_the_full_canonical_range() {
+        for value in [i64::MIN, i64::MIN + 1, -1, 0, 1, i64::MAX - 1, i64::MAX] {
+            assert_eq!(join_i64(split_i64(value)), value);
+        }
+    }
 
     #[test]
     fn frame_round_trips_signed_canonical_origin() {
@@ -176,22 +197,8 @@ mod tests {
             PlanetPosition::new([63_710_017, -63_710_017, 0], [0.025, 0.075, 0.0]).unwrap();
         let frame = PlanetRenderFrame::new(PlanetId([9; 16]), camera, 4);
         let uniform = PlanetFrameUniform::from_render_frame(frame);
-        let left = GpuPageMeta::new(
-            PageKey::new(0, [1_990_938, -1_990_940, 0]),
-            frame.origin_lod0_cell(),
-            0,
-            1,
-            0,
-        )
-        .unwrap();
-        let right = GpuPageMeta::new(
-            PageKey::new(0, [1_990_939, -1_990_940, 0]),
-            frame.origin_lod0_cell(),
-            1,
-            1,
-            0,
-        )
-        .unwrap();
+        let left = GpuPageMeta::new(PageKey::new(0, [1_990_938, -1_990_940, 0]), 0, 1, 0).unwrap();
+        let right = GpuPageMeta::new(PageKey::new(0, [1_990_939, -1_990_940, 0]), 1, 1, 0).unwrap();
         assert_eq!(
             left.camera_local_position_m(uniform, [32.0, 7.5, 3.25]),
             right.camera_local_position_m(uniform, [0.0, 7.5, 3.25])

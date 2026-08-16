@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{AddressError, PageKey, PlanetId, PlanetPageKey};
+use helio_planet_voxel_core::{split_i64, AddressError, PageKey, PlanetId, PlanetPageKey};
 
 pub const PAGE_TABLE_EMPTY: u32 = 0;
 pub const PAGE_TABLE_OCCUPIED: u32 = 1;
@@ -9,36 +9,45 @@ pub const PAGE_TABLE_TOMBSTONE: u32 = 2;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuPageTableEntry {
     pub planet_id: [u32; 4],
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
     pub slot: u32,
     pub generation_low: u32,
     pub generation_high: u32,
     pub state: u32,
+    pub _pad: u32,
 }
 
 impl GpuPageTableEntry {
     pub fn occupied(key: GpuLookupKey, slot: u32, generation: u64) -> GpuPageTableEntry {
         Self {
             planet_id: key.planet_id,
-            relative_lod0_cell_min: key.relative_lod0_cell_min,
+            lod0_cell_min_x: key.lod0_cell_min_x,
+            lod0_cell_min_y: key.lod0_cell_min_y,
+            lod0_cell_min_z: key.lod0_cell_min_z,
             lod: key.lod,
             slot,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
             state: PAGE_TABLE_OCCUPIED,
+            _pad: 0,
         }
     }
 
     pub const fn tombstone() -> Self {
         Self {
             planet_id: [0; 4],
-            relative_lod0_cell_min: [0; 3],
+            lod0_cell_min_x: [0; 2],
+            lod0_cell_min_y: [0; 2],
+            lod0_cell_min_z: [0; 2],
             lod: 0,
             slot: 0,
             generation_low: 0,
             generation_high: 0,
             state: PAGE_TABLE_TOMBSTONE,
+            _pad: 0,
         }
     }
 
@@ -49,7 +58,9 @@ impl GpuPageTableEntry {
     pub const fn key(self) -> GpuLookupKey {
         GpuLookupKey {
             planet_id: self.planet_id,
-            relative_lod0_cell_min: self.relative_lod0_cell_min,
+            lod0_cell_min_x: self.lod0_cell_min_x,
+            lod0_cell_min_y: self.lod0_cell_min_y,
+            lod0_cell_min_z: self.lod0_cell_min_z,
             lod: self.lod,
         }
     }
@@ -105,16 +116,22 @@ pub struct GpuResidencyCounters {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuLookupQuery {
     pub planet_id: [u32; 4],
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
+    pub _pad: u32,
 }
 
 impl From<GpuLookupKey> for GpuLookupQuery {
     fn from(key: GpuLookupKey) -> Self {
         Self {
             planet_id: key.planet_id,
-            relative_lod0_cell_min: key.relative_lod0_cell_min,
+            lod0_cell_min_x: key.lod0_cell_min_x,
+            lod0_cell_min_y: key.lod0_cell_min_y,
+            lod0_cell_min_z: key.lod0_cell_min_z,
             lod: key.lod,
+            _pad: 0,
         }
     }
 }
@@ -145,28 +162,26 @@ impl GpuLookupResult {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GpuLookupKey {
     pub planet_id: [u32; 4],
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
 }
 
 impl GpuLookupKey {
-    pub fn from_planet_page(
-        key: PlanetPageKey,
-        frame_origin_lod0_cell: [i64; 3],
-    ) -> Result<Self, AddressError> {
+    pub fn from_planet_page(key: PlanetPageKey) -> Result<Self, AddressError> {
+        let minimum = key.page.lod0_cell_min()?;
         Ok(Self {
             planet_id: planet_words(key.planet),
-            relative_lod0_cell_min: key.page.relative_lod0_cell_min(frame_origin_lod0_cell)?,
+            lod0_cell_min_x: split_i64(minimum[0]),
+            lod0_cell_min_y: split_i64(minimum[1]),
+            lod0_cell_min_z: split_i64(minimum[2]),
             lod: u32::from(key.page.lod),
         })
     }
 
-    pub fn from_parts(
-        planet: PlanetId,
-        page: PageKey,
-        frame_origin_lod0_cell: [i64; 3],
-    ) -> Result<Self, AddressError> {
-        Self::from_planet_page(PlanetPageKey::new(planet, page), frame_origin_lod0_cell)
+    pub fn from_parts(planet: PlanetId, page: PageKey) -> Result<Self, AddressError> {
+        Self::from_planet_page(PlanetPageKey::new(planet, page))
     }
 
     pub fn hash(self) -> u32 {
@@ -174,7 +189,9 @@ impl GpuLookupKey {
         for value in self
             .planet_id
             .into_iter()
-            .chain(self.relative_lod0_cell_min.map(|value| value as u32))
+            .chain(self.lod0_cell_min_x)
+            .chain(self.lod0_cell_min_y)
+            .chain(self.lod0_cell_min_z)
             .chain([self.lod])
         {
             hash = mix_hash(hash, value);
@@ -356,9 +373,12 @@ mod tests {
     use super::*;
 
     fn key(index: i32) -> GpuLookupKey {
+        let values = [i64::from(index), -i64::from(index), i64::from(index) * 17];
         GpuLookupKey {
             planet_id: [1, 2, 3, 4],
-            relative_lod0_cell_min: [index, -index, index.wrapping_mul(17)],
+            lod0_cell_min_x: split_i64(values[0]),
+            lod0_cell_min_y: split_i64(values[1]),
+            lod0_cell_min_z: split_i64(values[2]),
             lod: index.unsigned_abs() % 8,
         }
     }

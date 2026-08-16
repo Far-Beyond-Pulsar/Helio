@@ -322,8 +322,8 @@ mod tests {
     fn budgets_use_checked_exact_bytes() {
         let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8).unwrap();
         assert_eq!(config.cell_atlas_bytes().unwrap(), 4 * 131_072);
-        assert_eq!(config.metadata_bytes().unwrap(), 4 * 32);
-        assert_eq!(config.page_table_bytes().unwrap(), 16 * 48);
+        assert_eq!(config.metadata_bytes().unwrap(), 4 * 48);
+        assert_eq!(config.page_table_bytes().unwrap(), 16 * 64);
     }
 
     #[test]
