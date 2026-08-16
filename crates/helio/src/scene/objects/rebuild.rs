@@ -144,6 +144,9 @@ impl super::super::Scene {
         self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
         self.gpu_scene.static_objects_generation =
             self.gpu_scene.static_objects_generation.wrapping_add(1);
+        // `flush()` must not immediately replace this transient frame with
+        // the legacy persistent-object arena's contents.
+        self.objects_dirty = false;
     }
 
     /// Rebuilds GPU buffers with automatic instancing.
