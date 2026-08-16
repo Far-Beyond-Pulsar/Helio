@@ -101,6 +101,7 @@ pub struct ObjectDescriptor {
     pub user_tag: u64,
 }
 
+
 /// A scene object exposed for CPU-side picking queries.
 ///
 /// Returned by [`crate::Scene::iter_pickable_objects`].  The caller builds a
@@ -118,6 +119,22 @@ pub struct PickableObject {
 
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,
+}
+
+/// Transient static-mesh render input supplied by the owning SceneDB world.
+///
+/// This is deliberately not stored in [`Scene`]. Helio consumes a fresh slice
+/// each frame and retains only the transient GPU instance/draw buffers.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticMeshRenderInput {
+    pub mesh_key: u32,
+    pub material: MaterialId,
+    pub groups: GroupMask,
+    pub movability: libhelio::Movability,
+    pub user_tag: u64,
+    pub instance: GpuInstanceData,
+    pub aabb: GpuInstanceAabb,
+    pub draw: GpuDrawCall,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -58,7 +58,8 @@ pub use scene::{
     portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer,
     FoliageTypeDescriptor, GpuFoliageInteractor, ObjectDescriptor, PickableObject,
     PortalDescriptor, ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult,
-    Scene, SceneActor, SceneActorId, SceneActorTrait, SceneError, SublevelDescriptor, VoxelMode,
+    Scene, SceneActor, SceneActorId, SceneActorTrait, SceneError, StaticMeshRenderInput,
+    SublevelDescriptor, VoxelMode,
     VoxelVolumeDescriptor, WaterHitboxActor, WaterHitboxDescriptor, WaterVolumeActor,
     WaterVolumeDescriptor,
 };

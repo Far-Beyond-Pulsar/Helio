@@ -7,8 +7,145 @@
 use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use super::super::helpers::object_is_visible;
+use super::super::types::StaticMeshRenderInput;
 
 impl super::super::Scene {
+    /// Rebuild the regular-object GPU buffers from a transient SceneDB-owned
+    /// snapshot. No static-mesh entity data is retained by Helio between calls.
+    pub fn rebuild_static_mesh_instances(&mut self, inputs: &[StaticMeshRenderInput]) {
+        let mut order: Vec<usize> = (0..inputs.len()).collect();
+        order.sort_by_key(|&i| {
+            let input = &inputs[i];
+            let (class, graph_hash) = self
+                .materials
+                .get(input.material)
+                .map(|m| (m.gpu.material_class, m.graph_hash))
+                .unwrap_or((0, 0));
+            (class, graph_hash, input.mesh_key, input.instance.material_id)
+        });
+
+        let mut instances = Vec::with_capacity(inputs.len());
+        let mut aabbs = Vec::with_capacity(inputs.len());
+        let mut draw_calls = Vec::new();
+        let mut indirect = Vec::new();
+        let mut visibility = Vec::with_capacity(inputs.len());
+        let mut group_keys = Vec::new();
+        let mut group_transparent = Vec::new();
+        let mut group_forward = Vec::new();
+
+        let mut i = 0;
+        while i < order.len() {
+            let first = &inputs[order[i]];
+            let material = self.materials.get(first.material);
+            let class = material.map(|m| m.gpu.material_class).unwrap_or(0);
+            let graph_hash = material.map(|m| m.graph_hash).unwrap_or(0);
+            let key = (first.mesh_key, first.instance.material_id);
+            let group_start = instances.len() as u32;
+            let index_count = first.draw.index_count;
+            let first_index = first.draw.first_index;
+            let vertex_offset = first.draw.vertex_offset;
+
+            while i < order.len() {
+                let input = &inputs[order[i]];
+                if (input.mesh_key, input.instance.material_id) != key {
+                    break;
+                }
+                instances.push(input.instance);
+                aabbs.push(input.aabb);
+                visibility.push(if object_is_visible(input.groups, self.group_hidden) {
+                    1
+                } else {
+                    0
+                });
+                i += 1;
+            }
+
+            let instance_count = instances.len() as u32 - group_start;
+            draw_calls.push(GpuDrawCall {
+                index_count,
+                first_index,
+                vertex_offset,
+                first_instance: group_start,
+                instance_count,
+            });
+            indirect.push(DrawIndexedIndirectArgs {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex: vertex_offset,
+                first_instance: group_start,
+            });
+            group_keys.push((class, graph_hash));
+            group_transparent.push(
+                material
+                    .map(|m| (m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0)
+                    .unwrap_or(false),
+            );
+            group_forward.push(
+                material
+                    .map(|m| (m.gpu.flags & libhelio::FLAG_FORWARD_SHADING) != 0)
+                    .unwrap_or(false),
+            );
+        }
+
+        let mut opaque_ranges = Vec::new();
+        let mut transparent_ranges = Vec::new();
+        let mut forward_ranges = Vec::new();
+        let mut group_index = 0;
+        while group_index < group_keys.len() {
+            let key = group_keys[group_index];
+            let start = group_index as u32;
+            let first_group = group_index;
+            while group_index < group_keys.len() && group_keys[group_index] == key {
+                group_index += 1;
+            }
+            let range = (key.0, key.1, start, (group_index - first_group) as u32);
+            if group_forward[first_group] {
+                forward_ranges.push(range);
+            } else if group_transparent[first_group] {
+                transparent_ranges.push(range);
+            } else {
+                opaque_ranges.push(range);
+            }
+        }
+
+        self.gpu_scene.material_class_ranges = opaque_ranges;
+        self.gpu_scene.transparent_material_class_ranges = transparent_ranges;
+        self.gpu_scene.forward_material_class_ranges = forward_ranges;
+        self.gpu_scene.instances.set_data(instances);
+        self.gpu_scene.aabbs.set_data(aabbs);
+        self.gpu_scene.draw_calls.set_data(draw_calls.clone());
+        self.gpu_scene.indirect.set_data(indirect);
+        self.gpu_scene.visibility.set_data(visibility);
+        self.gpu_scene.compacted_indices.set_data(vec![0; inputs.len()]);
+        self.gpu_scene.compacted_indices_2.set_data(vec![0; inputs.len()]);
+
+        let mut static_indirect = Vec::new();
+        let mut movable_indirect = Vec::new();
+        let mut slot = 0u32;
+        for input in &order.iter().map(|&i| &inputs[i]).collect::<Vec<_>>() {
+            let entry = DrawIndexedIndirectArgs {
+                index_count: input.draw.index_count,
+                instance_count: 1,
+                first_index: input.draw.first_index,
+                base_vertex: input.draw.vertex_offset,
+                first_instance: slot,
+            };
+            if input.movability.can_move() {
+                movable_indirect.push(entry);
+            } else {
+                static_indirect.push(entry);
+            }
+            slot += 1;
+        }
+        self.gpu_scene.shadow_static_draw_count = static_indirect.len() as u32;
+        self.gpu_scene.shadow_movable_draw_count = movable_indirect.len() as u32;
+        self.gpu_scene.shadow_static_indirect.set_data(static_indirect);
+        self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
+        self.gpu_scene.static_objects_generation =
+            self.gpu_scene.static_objects_generation.wrapping_add(1);
+    }
+
     /// Rebuilds GPU buffers with automatic instancing.
     ///
     /// Sorts objects by (mesh_id, material_id) and groups consecutive objects with
