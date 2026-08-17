@@ -147,21 +147,20 @@ impl PlanetaryVoxelRenderConfig {
 
     /// Atomic active/pending residency for the live planetary SDF path.
     ///
-    /// The bounded active frontier is capped at 192 pages. The doubled surface
-    /// budget keeps the previous complete frontier visible while its
-    /// replacement is uploaded and extracted. Allocation remains independent
-    /// of logical planet size.
+    /// Four bounded 96-page active frontiers can remain visible while their
+    /// complete replacements are uploaded and extracted. Allocation remains
+    /// independent of logical planet size.
     pub fn production_planet() -> Self {
         Self {
-            residency: PlanetaryVoxelGpuConfig::new(480, 1_024, 64, 192, 480)
+            residency: PlanetaryVoxelGpuConfig::new(768, 2_048, 64, 192, 768)
                 .expect("production planet residency configuration is valid"),
             max_surface_pages: 384,
-            max_pending_surfaces: 192,
+            max_pending_surfaces: 384,
             regular: TransvoxelGpuExtractorConfig::default(),
             transition: TransvoxelGpuTransitionExtractorConfig::default(),
-            regular_arena: ExtractionLimits::new(384, 192, 6_291_456, 12_582_912, 199_729)
+            regular_arena: ExtractionLimits::new(384, 384, 6_291_456, 12_582_912, 199_729)
                 .expect("production planet regular arena configuration is valid"),
-            transition_arena: ExtractionLimits::new(384, 192, 786_432, 2_359_296, 37_632)
+            transition_arena: ExtractionLimits::new(384, 384, 786_432, 2_359_296, 37_632)
                 .expect("production planet transition arena configuration is valid"),
             max_surface_bytes: 512 * 1024 * 1024,
         }
@@ -3419,10 +3418,10 @@ mod tests {
         let config = PlanetaryVoxelRenderConfig::production_planet();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
-        assert_eq!(config.residency.max_resident_pages, 480);
+        assert_eq!(config.residency.max_resident_pages, 768);
         assert_eq!(config.max_surface_pages, 384);
         assert_eq!(config.residency.max_batch_pages, 192);
-        assert_eq!(config.max_pending_surfaces, 192);
+        assert_eq!(config.max_pending_surfaces, 384);
         assert_eq!(plan.indirect_bytes, 384 * DRAW_ARGS_BYTES);
     }
 

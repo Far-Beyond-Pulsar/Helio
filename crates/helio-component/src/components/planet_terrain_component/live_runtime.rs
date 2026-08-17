@@ -19,7 +19,10 @@ use super::{
 
 const LIVE_MAX_PLANETS: usize = 4;
 const LIVE_ACTIVE_PAGES_PER_PLANET: usize = 96;
-const LIVE_TRANSITION_PAGES_PER_PLANET: usize = 96;
+// Rapid astronomical travel can couple many neighboring LOD replacements.
+// Keep the committed frontier visible while one complete balanced target is
+// staged, then publish the new frontier atomically.
+const LIVE_TRANSITION_PAGES_PER_PLANET: usize = LIVE_ACTIVE_PAGES_PER_PLANET * 2;
 const LIVE_GPU_VISIBLE_PAGES: usize = 384;
 
 /// Component identities retained between revisions of Pulsar's current legacy
@@ -307,6 +310,10 @@ mod tests {
         assert!(
             controller.max_planets * controller.refinement.max_transition_pages
                 <= controller.rendering.max_tracked_pages
+        );
+        assert_eq!(
+            controller.refinement.max_transition_pages,
+            controller.refinement.max_active_pages * 2
         );
         assert!(controller.rendering.max_visible_pages <= controller.rendering.max_tracked_pages);
         renderer.allocation_plan().unwrap();
