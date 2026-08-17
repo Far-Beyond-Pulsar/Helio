@@ -246,7 +246,7 @@ impl AppState {
             .collect::<Vec<_>>()
             .join(",");
         self.window.set_title(&format!(
-            "Pulsar 3D SDF Planet | {:?}/{} | {} | pos[{:+.0},{:+.0},{:+.0}]m | pages{} lod[{lods}] active{} candidate{}/{} jobs{}/{} reject s{} o{} i{} queued{}",
+            "Pulsar 3D SDF Planet | {:?}/{} | {} | pos[{:+.0},{:+.0},{:+.0}]m | pages{} lod[{lods}] active{} candidate{}/{} target{} missing{} flight{} jobs{}/{} reject s{} o{} i{} queued{}",
             pass.draw_path(),
             pass.debug_view().label(),
             self.stream_status,
@@ -257,6 +257,9 @@ impl AppState {
             diagnostics.active_surface_pages,
             diagnostics.ready_candidate_surface_pages,
             diagnostics.candidate_surface_pages,
+            diagnostics.resident_candidate_targets,
+            diagnostics.missing_candidate_dependencies,
+            diagnostics.cpu_surface_jobs_in_flight,
             diagnostics.gpu_published_jobs,
             diagnostics.gpu_submitted_jobs,
             diagnostics.gpu_stale_rejections,

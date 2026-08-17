@@ -8,8 +8,8 @@ use pulsar_terrain::{
     PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
     TerrainControllerError, TerrainPlanningConfig, TerrainRefinementConfig,
     TerrainRenderDeltaConfig, TerrainRuntimeConfig, TerrainRuntimeError, TerrainRuntimeHandle,
-    TerrainStreamingConfig, TerrainStreamingController, TerrainStreamingError, TerrainSubsystem,
-    CELL_COUNT,
+    TerrainRequestClass, TerrainStreamingConfig, TerrainStreamingController,
+    TerrainStreamingError, TerrainSubsystem, CELL_COUNT,
 };
 use thiserror::Error;
 
@@ -222,6 +222,20 @@ impl PlanetTerrainRuntime {
         for planet_frame in frame.planet_frames {
             self.adapter
                 .set_planet_frame(renderer, queue, planet_frame)?;
+        }
+        for (planet_id, page_key) in self.adapter.sampling_dependencies(&frame.visible_sets)? {
+            if self
+                .runtime
+                .resident_page_generation(planet_id, page_key)
+                .is_none()
+            {
+                self.runtime.request_page(
+                    planet_id,
+                    page_key,
+                    TerrainRequestClass::Visible,
+                    input.tick.saturating_add(1),
+                )?;
+            }
         }
         let render = self
             .adapter

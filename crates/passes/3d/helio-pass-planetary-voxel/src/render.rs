@@ -18,7 +18,8 @@ use helio_core::{
 };
 use helio_planet_voxel_core::{
     ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet, split_i64,
+    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePage, VisiblePageSet,
+    split_i64,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -148,11 +149,14 @@ impl PlanetaryVoxelRenderConfig {
     /// Atomic active/pending residency for the live planetary SDF path.
     ///
     /// Four bounded 96-page active frontiers can remain visible while their
-    /// complete replacements are uploaded and extracted. Allocation remains
+    /// complete replacements are uploaded and extracted. The larger residency
+    /// tier is the canonical CPU/GPU page-cache bound: unlike the surface
+    /// arenas, it also retains the 3x3x3 SDF sampling neighborhoods and
+    /// transition slabs required by those frontiers. Allocation remains
     /// independent of logical planet size.
     pub fn production_planet() -> Self {
         Self {
-            residency: PlanetaryVoxelGpuConfig::new(768, 2_048, 64, 192, 768)
+            residency: PlanetaryVoxelGpuConfig::new(8_192, 32_768, 64, 192, 8_192)
                 .expect("production planet residency configuration is valid"),
             max_surface_pages: 384,
             max_pending_surfaces: 384,
@@ -437,6 +441,9 @@ pub struct PlanetaryRenderDiagnostics {
     pub active_surface_pages: u32,
     pub candidate_surface_pages: u32,
     pub ready_candidate_surface_pages: u32,
+    pub resident_candidate_targets: u32,
+    pub missing_candidate_dependencies: u32,
+    pub cpu_surface_jobs_in_flight: u32,
     pub candidate_without_publication: u32,
     pub candidate_invalid_state: u32,
     pub candidate_generation_mismatches: u32,
@@ -787,8 +794,9 @@ const fn should_retarget_handoff(
     target_changed: bool,
     target_is_stale: bool,
     has_published_coverage: bool,
+    has_progress_path: bool,
 ) -> bool {
-    target_changed && target_is_stale && has_published_coverage
+    target_changed && target_is_stale && (has_published_coverage || !has_progress_path)
 }
 
 impl PlanetaryVoxelRenderPass {
@@ -1652,6 +1660,33 @@ impl PlanetaryVoxelRenderPass {
             .values()
             .filter(|candidate| candidate.ready)
             .count() as u32;
+        self.diagnostics_cache.resident_candidate_targets = self
+            .candidate_surfaces
+            .values()
+            .filter(|candidate| {
+                self.residency
+                    .cache()
+                    .resident(candidate.request.key)
+                    .is_some_and(|resident| resident.generation == candidate.request.generation)
+            })
+            .count() as u32;
+        let mut missing_candidate_dependencies = BTreeSet::new();
+        for candidate in self.candidate_surfaces.values() {
+            if let Ok(dependencies) = candidate.request.required_pages() {
+                missing_candidate_dependencies.extend(
+                    dependencies
+                        .into_iter()
+                        .filter(|key| self.residency.cache().resident(*key).is_none()),
+                );
+            }
+        }
+        self.diagnostics_cache.missing_candidate_dependencies =
+            missing_candidate_dependencies.len() as u32;
+        self.diagnostics_cache.cpu_surface_jobs_in_flight = u32::from(
+            self.prepared_publication.is_some()
+                || self.prepared_extraction.is_some()
+                || self.extraction_readback.is_some(),
+        );
         let mut lods = Vec::new();
         let mut source_min = None;
         let mut source_max = None;
@@ -1801,7 +1836,8 @@ impl PlanetaryVoxelRenderPass {
             .map(|request| (request.key, *request))
             .collect::<BTreeMap<_, _>>();
         self.validate_handoff_capacity(&requested_visible)?;
-        let outcome = self.residency.apply_visible_set(queue, set)?;
+        let protected = self.residency_protection_set(set.frame_index, &surface_requests)?;
+        let outcome = self.residency.apply_visible_set(queue, protected)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
             let changed = self.requested_visible != requested_visible;
             self.requested_visible = requested_visible;
@@ -1813,12 +1849,78 @@ impl PlanetaryVoxelRenderPass {
                 changed,
                 self.handoff_target_is_stale(),
                 self.handoff_planet_has_published_coverage(),
+                self.handoff_has_progress_path(),
             ) {
                 self.retarget_handoff(queue)?;
             }
             self.start_next_handoff(queue)?;
         }
         Ok(outcome)
+    }
+
+    /// Residency protection is wider than the surface frontier. Extraction
+    /// samples a symmetric halo and optional fine-side transition slabs, while
+    /// an atomic handoff may deliberately keep an older complete candidate
+    /// frontier alive until its last surface is published. Protect every
+    /// currently resident sampling dependency for both frontiers; otherwise a
+    /// newer CPU target can evict the pages needed by the frozen handoff and
+    /// leave the renderer permanently black.
+    fn residency_protection_set(
+        &self,
+        frame_index: u64,
+        requested: &[PlanetarySurfaceRequest],
+    ) -> Result<VisiblePageSet, PlanetaryRenderError> {
+        let candidates = self
+            .candidate_surfaces
+            .values()
+            .map(|candidate| candidate.request)
+            .collect::<Vec<_>>();
+        let mut pages = BTreeMap::new();
+
+        for request in candidates.iter().chain(requested) {
+            for key in request.required_pages()? {
+                let Some(resident) = self.residency.cache().resident(key) else {
+                    continue;
+                };
+                pages.entry(key).or_insert(VisiblePage {
+                    key,
+                    generation: resident.generation,
+                    transition_mask: 0,
+                });
+            }
+        }
+
+        // Target identities carry an authoritative source generation even
+        // before their upload arrives. Requested targets override incidental
+        // dependency entries, while frozen candidates win same-key conflicts
+        // because they are the transaction that can establish first coverage.
+        for request in requested {
+            pages.insert(
+                request.key,
+                VisiblePage {
+                    key: request.key,
+                    generation: request.generation,
+                    transition_mask: request.transition_mask,
+                },
+            );
+        }
+        for request in candidates {
+            pages.insert(
+                request.key,
+                VisiblePage {
+                    key: request.key,
+                    generation: request.generation,
+                    transition_mask: request.transition_mask,
+                },
+            );
+        }
+
+        let protected = VisiblePageSet {
+            frame_index,
+            pages: pages.into_values().collect(),
+        };
+        protected.validate(self.residency.config().max_resident_pages as usize)?;
+        Ok(protected)
     }
 
     fn validate_handoff_capacity(
@@ -1879,6 +1981,17 @@ impl PlanetaryVoxelRenderPass {
     fn handoff_planet_has_published_coverage(&self) -> bool {
         self.handoff_planet
             .is_some_and(|planet| self.active_surfaces.keys().any(|key| key.planet == planet))
+    }
+
+    fn handoff_has_progress_path(&self) -> bool {
+        self.prepared_publication.is_some()
+            || self.prepared_extraction.is_some()
+            || self.extraction_readback.is_some()
+            || !self.pending.is_empty()
+            || self
+                .candidate_surfaces
+                .values()
+                .any(|candidate| candidate.ready)
     }
 
     fn retarget_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
@@ -3366,11 +3479,12 @@ mod tests {
     }
 
     #[test]
-    fn initial_coarse_handoff_cannot_be_retargeted_before_first_publication() {
-        assert!(!should_retarget_handoff(true, true, false));
-        assert!(should_retarget_handoff(true, true, true));
-        assert!(!should_retarget_handoff(false, true, true));
-        assert!(!should_retarget_handoff(true, false, true));
+    fn initial_coarse_handoff_is_frozen_only_while_it_can_progress() {
+        assert!(!should_retarget_handoff(true, true, false, true));
+        assert!(should_retarget_handoff(true, true, true, true));
+        assert!(should_retarget_handoff(true, true, false, false));
+        assert!(!should_retarget_handoff(false, true, true, false));
+        assert!(!should_retarget_handoff(true, false, true, false));
     }
 
     #[test]
@@ -3418,7 +3532,7 @@ mod tests {
         let config = PlanetaryVoxelRenderConfig::production_planet();
         let plan = config.allocation_plan().unwrap();
         assert!(plan.total_bytes <= config.max_surface_bytes);
-        assert_eq!(config.residency.max_resident_pages, 768);
+        assert_eq!(config.residency.max_resident_pages, 8_192);
         assert_eq!(config.max_surface_pages, 384);
         assert_eq!(config.residency.max_batch_pages, 192);
         assert_eq!(config.max_pending_surfaces, 384);
@@ -3618,6 +3732,24 @@ mod tests {
                 vec![key]
             );
             let first_revision = pass.candidate_surfaces[&key].revision;
+
+            let replacement_key = PlanetPageKey::new(planet, PageKey::new(1, [8, 0, 0]));
+            let protected = pass
+                .residency_protection_set(
+                    2,
+                    &[PlanetarySurfaceRequest {
+                        key: replacement_key,
+                        generation,
+                        transition_mask: 0,
+                        dirty_microbricks: u64::MAX,
+                    }],
+                )
+                .unwrap();
+            assert!(protected.pages.iter().any(|page| page.key == key));
+            assert!(protected
+                .pages
+                .iter()
+                .any(|page| page.key == replacement_key));
 
             pass.apply_visible_set(&queue, visible(2, 0)).unwrap();
             assert!(

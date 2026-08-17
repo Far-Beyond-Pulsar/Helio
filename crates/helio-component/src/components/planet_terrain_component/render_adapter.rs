@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use helio_pass_planetary_voxel::{
     FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryRenderError,
-    PlanetaryVoxelRenderPass, PlanetaryVoxelResidency,
+    PlanetarySurfaceRequest, PlanetaryVoxelRenderPass, PlanetaryVoxelResidency,
 };
 use helio_planet_voxel_core::{
     AddressError, ContractError, EvictOutcome, EvictedPage, PAGE_EDGE_CELLS, PageEvict, PageKey,
@@ -159,6 +159,41 @@ impl PlanetTerrainComponentRenderAdapter {
     ) -> Result<VisibilityOutcome, PlanetaryTerrainRenderError> {
         let set = translate_visible_sets(frame_index, sets)?;
         Ok(self.pass_mut(renderer)?.apply_visible_set(queue, set)?)
+    }
+
+    /// Complete scalar-page neighborhood required by Helio's regular and
+    /// transition extractors for Pulsar's visible surface frontier. These are
+    /// residency-only pages: they must be streamed and published, but they are
+    /// never promoted into extra draw surfaces.
+    pub fn sampling_dependencies(
+        &self,
+        sets: &[TerrainVisiblePageSet],
+    ) -> Result<
+        BTreeSet<(pulsar_terrain::PlanetId, pulsar_terrain::PageKey)>,
+        PlanetaryTerrainRenderError,
+    > {
+        let mut dependencies = BTreeSet::new();
+        for set in sets {
+            let planet = translate_planet_id(set.planet_id);
+            for page in &set.pages {
+                let request = PlanetarySurfaceRequest {
+                    key: PlanetPageKey::new(planet, translate_page_key(page.page_key)?),
+                    generation: SourceGeneration::new(page.planet_generation, page.page_generation),
+                    transition_mask: page.transition_mask,
+                    dirty_microbricks: u64::MAX,
+                };
+                for dependency in request
+                    .required_pages()
+                    .map_err(PlanetaryRenderError::from)?
+                {
+                    dependencies.insert((
+                        pulsar_terrain::PlanetId(dependency.planet.0),
+                        pulsar_terrain::PageKey::new(dependency.page.lod, dependency.page.page_xyz),
+                    ));
+                }
+            }
+        }
+        Ok(dependencies)
     }
 
     pub fn recreate_gpu_resources(
@@ -719,6 +754,28 @@ mod tests {
                 AddressError::UnsupportedLod(u8::MAX)
             ))
         ));
+    }
+
+    #[test]
+    fn visible_surface_dependencies_include_the_complete_regular_sampling_halo() {
+        let planet = TerrainId([3; 16]);
+        let dependencies = PlanetTerrainComponentRenderAdapter::new()
+            .sampling_dependencies(&[TerrainVisiblePageSet {
+                planet_id: planet,
+                frame_index: 44,
+                pages: vec![TerrainVisiblePage {
+                    page_key: TerrainPageKey::new(2, [0, 0, 0]),
+                    planet_generation: 8,
+                    page_generation: 13,
+                    transition_mask: 0,
+                }],
+            }])
+            .unwrap();
+
+        assert_eq!(dependencies.len(), 27);
+        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [0, 0, 0]))));
+        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [-1, -1, -1]))));
+        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [1, 1, 1]))));
     }
 
     #[test]
