@@ -1988,10 +1988,6 @@ impl PlanetaryVoxelRenderPass {
             || self.prepared_extraction.is_some()
             || self.extraction_readback.is_some()
             || !self.pending.is_empty()
-            || self
-                .candidate_surfaces
-                .values()
-                .any(|candidate| candidate.ready)
     }
 
     fn retarget_handoff(&mut self, queue: &wgpu::Queue) -> Result<(), PlanetaryRenderError> {
