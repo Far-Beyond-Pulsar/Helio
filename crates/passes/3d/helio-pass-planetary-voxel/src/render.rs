@@ -791,12 +791,11 @@ fn observe_candidate_surface_state(candidate: &mut CandidateSurface, state: &Gpu
 }
 
 const fn should_retarget_handoff(
-    target_changed: bool,
     target_is_stale: bool,
     has_published_coverage: bool,
     has_progress_path: bool,
 ) -> bool {
-    target_changed && target_is_stale && (has_published_coverage || !has_progress_path)
+    target_is_stale && (has_published_coverage || !has_progress_path)
 }
 
 impl PlanetaryVoxelRenderPass {
@@ -1839,14 +1838,12 @@ impl PlanetaryVoxelRenderPass {
         let protected = self.residency_protection_set(set.frame_index, &surface_requests)?;
         let outcome = self.residency.apply_visible_set(queue, protected)?;
         if matches!(outcome, VisibilityOutcome::Applied { .. }) {
-            let changed = self.requested_visible != requested_visible;
             self.requested_visible = requested_visible;
             // Never let a stream of progressively finer targets cancel the
             // first complete coarse frontier. Without published coverage the
             // renderer has nothing to preserve, so refinement can otherwise
             // outrun extraction forever and leave a permanently black frame.
             if should_retarget_handoff(
-                changed,
                 self.handoff_target_is_stale(),
                 self.handoff_planet_has_published_coverage(),
                 self.handoff_has_progress_path(),
@@ -3476,11 +3473,10 @@ mod tests {
 
     #[test]
     fn initial_coarse_handoff_is_frozen_only_while_it_can_progress() {
-        assert!(!should_retarget_handoff(true, true, false, true));
-        assert!(should_retarget_handoff(true, true, true, true));
-        assert!(should_retarget_handoff(true, true, false, false));
-        assert!(!should_retarget_handoff(false, true, true, false));
-        assert!(!should_retarget_handoff(true, false, true, false));
+        assert!(!should_retarget_handoff(true, false, true));
+        assert!(should_retarget_handoff(true, true, true));
+        assert!(should_retarget_handoff(true, false, false));
+        assert!(!should_retarget_handoff(false, true, false));
     }
 
     #[test]
