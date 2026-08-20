@@ -65,6 +65,10 @@ pub struct Renderer {
     pub(crate) device: Arc<wgpu::Device>,
     pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) graph: RenderGraph,
+    /// Monotonic identity of the currently installed render graph. Systems
+    /// retaining renderer-local pass state use this to detect completed graph
+    /// replacement instead of guessing from resize requests or cache contents.
+    pub(crate) graph_generation: u64,
     pub(crate) scene: Scene,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
@@ -545,11 +549,18 @@ impl Renderer {
         // Extract rebuilder stored in the graph by the builder function
         self.graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
         self.graph = graph;
+        self.graph_generation = self.graph_generation.wrapping_add(1);
     }
 
     pub fn set_graph_with_builder(&mut self, graph: RenderGraph, rebuilder: GraphRebuilder) {
         self.graph = graph;
+        self.graph_generation = self.graph_generation.wrapping_add(1);
         self.graph_rebuilder = Some(rebuilder);
+    }
+
+    /// Identity of the installed graph and all graph-owned pass instances.
+    pub const fn graph_generation(&self) -> u64 {
+        self.graph_generation
     }
 
     pub fn set_rebuilder(&mut self, rebuilder: GraphRebuilder) {

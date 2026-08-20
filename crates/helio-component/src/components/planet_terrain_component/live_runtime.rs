@@ -80,7 +80,6 @@ pub struct PlanetTerrainFrameInput {
     pub delta_time_s: f32,
     pub tick: u64,
     pub frame_index: u64,
-    pub graph_rebuilt: bool,
 }
 
 #[derive(Debug)]
@@ -115,6 +114,7 @@ pub struct PlanetTerrainRuntime {
     controller: TerrainStreamingController,
     adapter: PlanetTerrainComponentRenderAdapter,
     component_cache: PlanetTerrainComponentCache,
+    renderer_graph_generation: Option<u64>,
 }
 
 impl PlanetTerrainRuntime {
@@ -135,6 +135,7 @@ impl PlanetTerrainRuntime {
             controller,
             adapter: PlanetTerrainComponentRenderAdapter::new(),
             component_cache: PlanetTerrainComponentCache::default(),
+            renderer_graph_generation: None,
         })
     }
 
@@ -170,6 +171,10 @@ impl PlanetTerrainRuntime {
         queue: &wgpu::Queue,
         input: PlanetTerrainFrameInput,
     ) -> Result<PlanetTerrainAdvanceReport, PlanetTerrainLiveError> {
+        let renderer_replaced_graph = renderer_graph_was_replaced(
+            &mut self.renderer_graph_generation,
+            renderer.graph_generation(),
+        );
         let renderer_lost_published_cache = self.controller.published_page_count() > 0
             && self
                 .adapter
@@ -178,7 +183,7 @@ impl PlanetTerrainRuntime {
                 .counters()
                 .resident_pages
                 == 0;
-        if input.graph_rebuilt || renderer_lost_published_cache {
+        if renderer_replaced_graph || renderer_lost_published_cache {
             self.controller.invalidate_renderer_cache()?;
         }
 
@@ -263,6 +268,12 @@ impl PlanetTerrainRuntime {
     }
 }
 
+fn renderer_graph_was_replaced(observed: &mut Option<u64>, current: u64) -> bool {
+    observed
+        .replace(current)
+        .is_some_and(|previous| previous != current)
+}
+
 fn live_runtime_config() -> TerrainRuntimeConfig {
     TerrainRuntimeConfig {
         max_planets: LIVE_MAX_PLANETS,
@@ -336,5 +347,14 @@ mod tests {
         );
         assert!(controller.rendering.max_visible_pages <= controller.rendering.max_tracked_pages);
         renderer.allocation_plan().unwrap();
+    }
+
+    #[test]
+    fn completed_renderer_graph_replacement_invalidates_exactly_once() {
+        let mut observed = None;
+        assert!(!renderer_graph_was_replaced(&mut observed, 7));
+        assert!(!renderer_graph_was_replaced(&mut observed, 7));
+        assert!(renderer_graph_was_replaced(&mut observed, 8));
+        assert!(!renderer_graph_was_replaced(&mut observed, 8));
     }
 }

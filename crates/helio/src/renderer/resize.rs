@@ -94,6 +94,7 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            self.graph_generation = self.graph_generation.wrapping_add(1);
         } else {
             self.graph.set_render_size(internal_w, internal_h);
         }
@@ -155,6 +156,7 @@ impl Renderer {
             &self.debug_camera_buffer,
             &self.cull_stats_buffer,
         );
+        self.graph_generation = self.graph_generation.wrapping_add(1);
     }
 }
 

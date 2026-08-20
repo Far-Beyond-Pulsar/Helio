@@ -111,10 +111,6 @@ impl AppState {
             },
         );
         self.renderer.set_render_size(width, height);
-        // The renderer applies its graph rebuild at the start of the next
-        // render. Cache loss is detected on the following terrain advance;
-        // invalidating here would republish into the old pass and immediately
-        // discard those uploads during the resize.
     }
 
     fn orientation(&self) -> Quat {
@@ -210,7 +206,6 @@ impl AppState {
             delta_time_s: dt,
             tick: self.frame_index,
             frame_index: self.frame_index,
-            graph_rebuilt: false,
         };
         self.stream_status =
             match self
