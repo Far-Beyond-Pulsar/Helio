@@ -7,23 +7,23 @@ use super::{LightComponent, LightType};
 impl LightComponent {
     /// Translate this editor-facing component into Helio's GPU light representation.
     ///
-    /// Single source of truth for the `LightComponent` -> `GpuLight` mapping --
-    /// factored out of what used to be inline logic in `runtime.rs`'s
-    /// `sync_component`, so any other call site (`sync_component` itself,
-    /// today) uses the exact same code and can never silently drift apart.
+    /// Single source of truth for the `LightComponent` -> `GpuLight` mapping.
+    /// Called from exactly one place now: `runtime.rs`'s
+    /// `hydrate_light_component`, which wraps the result into the
+    /// `#[gpu]`-mirrored `LightGpuData` companion component (`gpu_data.rs`,
+    /// Pulsar-Native#561) -- so, unlike before, this translation runs once
+    /// per genuine property edit, not once per render sync pass.
     ///
-    /// Unlike `StaticMeshComponent`'s `vertices`/`indices` (Pulsar-Native
-    /// #561 Phase D), this data does NOT go through a `#[gpu]`-mirrored
-    /// SceneDB buffer: `GpuLight` bakes in world-space `position` (transform-
-    /// dependent, recomputed every frame from `Transform`, never a hydrate-
-    /// time-stable payload the way mesh geometry is) and Helio needs its own
-    /// derived, compacted structure regardless (shadow-atlas slot assignment,
-    /// the movable/static bake partition) that a raw per-entity mirror
-    /// wouldn't replace. What #561 *does* still buy this class: no more
-    /// hand-rolled dual-state sync -- `LightComponent::on_removed`
-    /// (`runtime.rs`) is the real fix, tearing down `sync_component`'s
-    /// Helio-side light the moment `World`'s own `ChangeTracker` reports the
-    /// component gone, instead of a Helio-side cache nothing ever swept.
+    /// `position` is a hydrate-time placeholder (`[0.0; 3]`, see
+    /// `hydrate_light_component`'s doc), not a real position: `GpuLight`
+    /// bakes in world-space position, which is transform-dependent and has
+    /// no business being computed at hydrate time (an object can move
+    /// without any `LightComponent` property changing, which would never
+    /// re-trigger hydrate). `HelioRenderer::sync_light_gpu_data` overwrites
+    /// `position_range`'s xyz from the live `Transform` before ever using
+    /// the mirrored row -- the same "model-space payload + per-frame
+    /// transform combine" split `rebuild_static_mesh_frame` already uses
+    /// for mesh geometry.
     ///
     /// Returns `None` when the light is disabled (`general.enabled == false`) --
     /// the caller is responsible for removing any previously-inserted Helio light
