@@ -1,7 +1,9 @@
 use helio_planet_voxel_core::{AddressError, CellWord, PageKey, PAGE_EDGE};
 
 pub const EXTRACTION_HALO: i32 = 1;
-pub const EXTRACTION_SAMPLE_EDGE: usize = PAGE_EDGE + 2 * EXTRACTION_HALO as usize;
+/// Logical samples span `0..=PAGE_EDGE`; one central-difference sample is
+/// required beyond both ends, yielding `-1..=PAGE_EDGE + 1` (35 samples).
+pub const EXTRACTION_SAMPLE_EDGE: usize = PAGE_EDGE + 2 * EXTRACTION_HALO as usize + 1;
 pub const EXTRACTION_SAMPLE_COUNT: usize =
     EXTRACTION_SAMPLE_EDGE * EXTRACTION_SAMPLE_EDGE * EXTRACTION_SAMPLE_EDGE;
 
@@ -80,7 +82,8 @@ pub struct ExtractionFixtureMetrics {
     pub fingerprint: u64,
 }
 
-/// A deterministic page plus one sample of halo on every face. The scalar
+/// A deterministic page plus one sample beyond both ends of its logical
+/// `0..=PAGE_EDGE` sample lattice. The scalar
 /// field is evaluated in canonical LOD0 coordinates, so adjacent pages and
 /// different LODs see the same source field.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,9 +102,9 @@ impl ExtractionFixture {
             .checked_shl(u32::from(page.lod))
             .ok_or(FixtureError::Address(AddressError::CoordinateOverflow))?;
         let mut samples = Vec::with_capacity(EXTRACTION_SAMPLE_COUNT);
-        for z in -EXTRACTION_HALO..PAGE_EDGE as i32 + EXTRACTION_HALO {
-            for y in -EXTRACTION_HALO..PAGE_EDGE as i32 + EXTRACTION_HALO {
-                for x in -EXTRACTION_HALO..PAGE_EDGE as i32 + EXTRACTION_HALO {
+        for z in -EXTRACTION_HALO..=PAGE_EDGE as i32 + EXTRACTION_HALO {
+            for y in -EXTRACTION_HALO..=PAGE_EDGE as i32 + EXTRACTION_HALO {
+                for x in -EXTRACTION_HALO..=PAGE_EDGE as i32 + EXTRACTION_HALO {
                     let local = [x, y, z];
                     let mut position = [0_i64; 3];
                     for axis in 0..3 {

@@ -36,8 +36,8 @@ impl PlanetarySurfaceRequest {
         Ok(())
     }
 
-    /// Exact page dependencies for the regular 34^3 halo and every enabled
-    /// fine-side 67x67x3 transition slab. This returns page identities only;
+    /// Exact page dependencies for the regular symmetric 35^3 halo and every enabled
+    /// fine-side 69x69x5 transition slab. This returns page identities only;
     /// no renderer-specific scalar arrays are constructed on the CPU.
     pub fn required_pages(self) -> Result<BTreeSet<PlanetPageKey>, SurfaceSamplingError> {
         self.validate()?;
@@ -48,7 +48,7 @@ impl PlanetarySurfaceRequest {
             .checked_shl(u32::from(page.lod))
             .ok_or(AddressError::CoordinateOverflow)?;
         let regular_min = page_min.map(|value| value - coarse_scale);
-        let regular_max = page_min.map(|value| value + PAGE_EDGE as i64 * coarse_scale);
+        let regular_max = page_min.map(|value| value + (PAGE_EDGE as i64 + 1) * coarse_scale);
         insert_page_box(
             self.key.planet,
             page.lod,
@@ -70,9 +70,9 @@ impl PlanetarySurfaceRequest {
             let basis = transition_face_integer_basis(face);
             let mut minimum = [i64::MAX; 3];
             let mut maximum = [i64::MIN; 3];
-            for u in [-1_i64, TRANSITION_FACE_SAMPLE_EDGE as i64] {
-                for v in [-1_i64, TRANSITION_FACE_SAMPLE_EDGE as i64] {
-                    for outward in [-1_i64, 1] {
+            for u in [-2_i64, TRANSITION_FACE_SAMPLE_EDGE as i64 + 1] {
+                for v in [-2_i64, TRANSITION_FACE_SAMPLE_EDGE as i64 + 1] {
+                    for outward in [-2_i64, 2] {
                         let mut position = page_min;
                         for axis in 0..3 {
                             position[axis] = position[axis]
@@ -101,6 +101,50 @@ impl PlanetarySurfaceRequest {
         }
         Ok(pages)
     }
+
+    /// Resident scalar pages required inside the authoritative centered root.
+    /// Samples outside that root are canonical vacuum and are supplied by the
+    /// gather shader's missing-page value; they must not become terrain pages.
+    pub fn required_resident_pages(
+        self,
+        root_lod: u8,
+    ) -> Result<BTreeSet<PlanetPageKey>, SurfaceSamplingError> {
+        if !(1..=62).contains(&root_lod) {
+            return Err(SurfaceSamplingError::RootLod(root_lod));
+        }
+        Ok(self
+            .required_pages()?
+            .into_iter()
+            .filter(|key| page_inside_centered_root(key.page, root_lod))
+            .collect())
+    }
+}
+
+fn page_inside_centered_root(page: PageKey, root_lod: u8) -> bool {
+    if page.lod >= root_lod {
+        return false;
+    }
+    let Some(minimum) = page.lod0_cell_min().ok() else {
+        return false;
+    };
+    let Some(span) = 1_i64
+        .checked_shl(u32::from(page.lod))
+        .and_then(|scale| scale.checked_mul(PAGE_EDGE as i64))
+    else {
+        return false;
+    };
+    let Some(half_root_span) = 1_i64
+        .checked_shl(u32::from(root_lod - 1))
+        .and_then(|scale| scale.checked_mul(PAGE_EDGE as i64))
+    else {
+        return false;
+    };
+    minimum.into_iter().all(|axis| {
+        axis >= -half_root_span
+            && axis
+                .checked_add(span)
+                .is_some_and(|maximum| maximum <= half_root_span)
+    })
 }
 
 fn insert_page_box(
@@ -126,7 +170,9 @@ fn insert_page_box(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuSurfaceGatherJob {
     pub planet_id: [u32; 4],
-    pub relative_lod0_cell_min: [i32; 3],
+    pub lod0_cell_min_x: [u32; 2],
+    pub lod0_cell_min_y: [u32; 2],
+    pub lod0_cell_min_z: [u32; 2],
     pub lod: u32,
     pub generation_low: u32,
     pub generation_high: u32,
@@ -134,7 +180,9 @@ pub struct GpuSurfaceGatherJob {
     pub target_slot: u32,
     pub residency_epoch_low: u32,
     pub residency_epoch_high: u32,
-    pub _pad: [u32; 2],
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 impl GpuSurfaceGatherJob {
@@ -152,7 +200,9 @@ impl GpuSurfaceGatherJob {
         }
         Self {
             planet_id,
-            relative_lod0_cell_min: metadata.relative_lod0_cell_min,
+            lod0_cell_min_x: metadata.lod0_cell_min_x,
+            lod0_cell_min_y: metadata.lod0_cell_min_y,
+            lod0_cell_min_z: metadata.lod0_cell_min_z,
             lod: metadata.lod,
             generation_low: metadata.generation_low,
             generation_high: metadata.generation_high,
@@ -160,7 +210,9 @@ impl GpuSurfaceGatherJob {
             target_slot: metadata.slot,
             residency_epoch_low: residency_epoch as u32,
             residency_epoch_high: (residency_epoch >> 32) as u32,
-            _pad: [0; 2],
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         }
     }
 }
@@ -455,6 +507,8 @@ pub enum SurfaceSamplingError {
     TransitionMask(u8),
     #[error("LOD0 cannot own a transition surface")]
     FinestLodTransition,
+    #[error("centered sampling root LOD must be in 1..=62, got {0}")]
+    RootLod(u8),
     #[error("surface sampler needs {required} {name}; device provides {available}")]
     DeviceLimit {
         name: &'static str,
@@ -466,6 +520,7 @@ pub enum SurfaceSamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{TRANSITION_FACE_SLAB_EDGE, TRANSITION_FACE_SLAB_LAYERS};
     use helio_planet_voxel_core::{
         CellWord, PAGE_CELL_COUNT, PageUpload, PlanetFrameUniform, PlanetPosition,
     };
@@ -490,6 +545,28 @@ mod tests {
             request.key.planet,
             PageKey::new(4, [-1, 6, -6]),
         )));
+    }
+
+    #[test]
+    fn centered_root_clips_only_canonical_vacuum_halo_pages() {
+        let planet = PlanetId([0x5a; 16]);
+        let request = PlanetarySurfaceRequest {
+            key: PlanetPageKey::new(planet, PageKey::new(3, [-1, -1, -1])),
+            generation: SourceGeneration::new(1, 1),
+            transition_mask: 0,
+            dirty_microbricks: u64::MAX,
+        };
+
+        assert_eq!(request.required_pages().unwrap().len(), 27);
+        let resident = request.required_resident_pages(4).unwrap();
+        assert_eq!(resident.len(), 8);
+        assert!(resident.iter().all(|key| {
+            key.page
+                .page_xyz
+                .into_iter()
+                .all(|axis| (-1..=0).contains(&axis))
+        }));
+        assert!(resident.contains(&request.key));
     }
 
     #[test]
@@ -525,7 +602,7 @@ mod tests {
         let expanded_sample_bytes = (EXTRACTION_SAMPLE_COUNT
             + TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT)
             * core::mem::size_of::<CellWord>();
-        assert_eq!(expanded_sample_bytes, 480_424);
+        assert_eq!(expanded_sample_bytes, 742_820);
         assert_eq!(core::mem::size_of::<PlanetarySurfaceRequest>(), 80);
         assert!(
             expanded_sample_bytes
@@ -613,7 +690,7 @@ mod tests {
                 key.page
                     .relative_lod0_cell_min(frame.frame_origin_lod0_cell())
                     .unwrap()[0]
-                    .rem_euclid(key.page.lod0_cell_span().unwrap() as i32),
+                    .rem_euclid(key.page.lod0_cell_span().unwrap()),
                 0,
                 "the regression requires an LOD0-snapped frame that is not coarse-page aligned"
             );
@@ -655,7 +732,6 @@ mod tests {
             let resident = residency.cache().resident(key).unwrap();
             let metadata = GpuPageMeta::new(
                 key.page,
-                frame.frame_origin_lod0_cell(),
                 resident.slot,
                 resident.publication_generation,
                 request.transition_mask,
@@ -675,10 +751,11 @@ mod tests {
                 read_buffer::<CellWord>(&device, &queue, &regular_samples, EXTRACTION_SAMPLE_COUNT);
             let page_min = key.page.lod0_cell_min().unwrap();
             let scale = 1_i64 << key.page.lod;
-            for z in 0..34_i64 {
-                for y in 0..34_i64 {
-                    for x in 0..34_i64 {
-                        let index = (x + y * 34 + z * 34 * 34) as usize;
+            for z in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                for y in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                    for x in 0..crate::EXTRACTION_SAMPLE_EDGE as i64 {
+                        let edge = crate::EXTRACTION_SAMPLE_EDGE as i64;
+                        let index = (x + y * edge + z * edge * edge) as usize;
                         let position = [
                             page_min[0] + (x - 1) * scale,
                             page_min[1] + (y - 1) * scale,
@@ -699,20 +776,25 @@ mod tests {
             let coarse_span = PAGE_EDGE as i64 * scale;
             for face in TransitionFace::ALL {
                 let basis = transition_face_integer_basis(face);
-                let face_offset = usize::from(face.index()) * 67 * 67 * 3;
-                for layer in 0..3_i64 {
-                    for v in 0..67_i64 {
-                        for u in 0..67_i64 {
+                let face_offset = usize::from(face.index())
+                    * TRANSITION_FACE_SLAB_EDGE
+                    * TRANSITION_FACE_SLAB_EDGE
+                    * TRANSITION_FACE_SLAB_LAYERS;
+                for layer in 0..TRANSITION_FACE_SLAB_LAYERS as i64 {
+                    for v in 0..TRANSITION_FACE_SLAB_EDGE as i64 {
+                        for u in 0..TRANSITION_FACE_SLAB_EDGE as i64 {
                             let mut position = page_min;
                             for (axis, coordinate) in position.iter_mut().enumerate() {
                                 *coordinate += i64::from(basis.origin[axis]) * coarse_span
-                                    + i64::from(basis.u_axis[axis]) * (u - 1) * fine_scale
-                                    + i64::from(basis.v_axis[axis]) * (v - 1) * fine_scale
-                                    + i64::from(basis.outward[axis]) * (layer - 1) * fine_scale;
+                                    + i64::from(basis.u_axis[axis]) * (u - 2) * fine_scale
+                                    + i64::from(basis.v_axis[axis]) * (v - 2) * fine_scale
+                                    + i64::from(basis.outward[axis]) * (layer - 2) * fine_scale;
                             }
                             let index = face_offset
-                                + (layer as usize * 67 * 67)
-                                + (v as usize * 67)
+                                + (layer as usize
+                                    * TRANSITION_FACE_SLAB_EDGE
+                                    * TRANSITION_FACE_SLAB_EDGE)
+                                + (v as usize * TRANSITION_FACE_SLAB_EDGE)
                                 + u as usize;
                             assert_eq!(transition[index], canonical_cell(position));
                         }

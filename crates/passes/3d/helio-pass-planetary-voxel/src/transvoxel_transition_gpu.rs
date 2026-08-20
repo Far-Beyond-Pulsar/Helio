@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(TRANSVOXEL_TRANSITION_MAX_VERTICES, 73_728);
         assert_eq!(TRANSVOXEL_TRANSITION_MAX_INDICES, 221_184);
         assert_eq!(dispatch_buffer_bytes(), 32);
-        assert_eq!(sample_buffer_bytes(), 323_208);
+        assert_eq!(sample_buffer_bytes(), 571_320);
         assert_eq!(tables_buffer_bytes(), 34_912);
         assert_eq!(cells_buffer_bytes(), 98_304);
         assert_eq!(offsets_buffer_bytes(), 98_304);

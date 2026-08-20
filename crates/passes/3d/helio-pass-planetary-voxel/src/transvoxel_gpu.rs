@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn allocation_is_fixed_and_exact() {
         assert_eq!(dispatch_buffer_bytes(), 48);
-        assert_eq!(sample_buffer_bytes(), 157_216);
+        assert_eq!(sample_buffer_bytes(), 171_500);
         assert_eq!(class_buffer_bytes(), 1_024);
         assert_eq!(geometry_buffer_bytes(), 64);
         assert_eq!(output_buffer_bytes(), 524_288);

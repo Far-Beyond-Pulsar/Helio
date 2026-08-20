@@ -13,22 +13,32 @@ use wgpu::util::DeviceExt;
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
+    revision: u32,
+    regular_first_vertex: u32,
     regular_vertex_count: u32,
+    regular_first_index: u32,
     regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
+    regular_first_meshlet: u32,
     regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
     transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    transition_mask: u32,
+    _pad: [u32; 3],
 }
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct GpuDrawPage {
-    relative_lod0_cell_min: [i32; 3],
+    relative_lod0_cell_min_x: [u32; 2],
+    relative_lod0_cell_min_y: [u32; 2],
+    relative_lod0_cell_min_z: [u32; 2],
     lod: u32,
+    _pad0: u32,
     camera_relative_m: [f32; 3],
     lod0_cell_size_m: f32,
     generation_low: u32,
@@ -81,14 +91,13 @@ fn gpu_cull_is_generation_safe_conservative_and_capacity_bounded() {
         );
         let cameras = [camera, camera];
         let uniforms = GpuTerrainCullUniforms {
-            max_meshlets_per_bank: 5,
+            meshlet_capacity: 5,
             draw_capacity: 1,
             surface_kind: 0,
             _pad: 0,
         };
         let state = GpuSurfaceState {
             generation_low: 7,
-            active_bank: 0,
             valid: 1,
             regular_meshlet_count: 5,
             ..Default::default()
@@ -218,14 +227,13 @@ fn gpu_cull_is_generation_safe_conservative_and_capacity_bounded() {
         // parity without letting frustum classification mask a mismatch.
         const RANDOM_MESHLETS: u32 = 256;
         let random_uniforms = GpuTerrainCullUniforms {
-            max_meshlets_per_bank: RANDOM_MESHLETS,
+            meshlet_capacity: RANDOM_MESHLETS,
             draw_capacity: RANDOM_MESHLETS,
             surface_kind: 0,
             _pad: 0,
         };
         let random_state = GpuSurfaceState {
             generation_low: 91,
-            active_bank: 0,
             valid: 1,
             regular_meshlet_count: RANDOM_MESHLETS,
             ..Default::default()

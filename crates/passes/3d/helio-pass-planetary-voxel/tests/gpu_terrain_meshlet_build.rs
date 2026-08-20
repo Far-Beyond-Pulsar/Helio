@@ -11,32 +11,18 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
-    _pad: [u32; 2],
-}
-
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
-struct GpuSurfaceState {
-    generation_low: u32,
-    generation_high: u32,
-    active_bank: u32,
-    valid: u32,
-    regular_vertex_count: u32,
-    regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
-    regular_meshlet_count: u32,
-    transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
+    _pad: [u32; 4],
 }
 
 #[test]
@@ -89,27 +75,16 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
         });
 
         let job = GpuSurfaceJob {
+            slot: 0,
+            resident_slot: 3,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
-            regular_max_vertices: vertices.len() as u32,
-            regular_max_indices: indices.len() as u32,
-            transition_max_vertices: 1,
-            transition_max_indices: 3,
-            regular_max_meshlets: expected.len() as u32,
-            transition_max_meshlets: 1,
             ..Default::default()
         };
         let page = GpuPageMeta {
-            slot: 0,
+            slot: job.resident_slot,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
-            ..Default::default()
-        };
-        // Active bank 1 means the builder targets bank 0, where this fixture
-        // places the newly copied extraction output.
-        let state = GpuSurfaceState {
-            active_bank: 1,
-            valid: 1,
             ..Default::default()
         };
         let counters = GpuTransvoxelEmissionCounters {
@@ -122,8 +97,9 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
         };
 
         let job_buffer = initialized(&device, "Meshlet Job", bytemuck::bytes_of(&job), true);
-        let page_buffer = initialized(&device, "Meshlet Page", bytemuck::bytes_of(&page), false);
-        let state_buffer = initialized(&device, "Meshlet State", bytemuck::bytes_of(&state), false);
+        let mut pages = [GpuPageMeta::default(); 4];
+        pages[job.resident_slot as usize] = page;
+        let page_buffer = initialized(&device, "Meshlet Page", bytemuck::cast_slice(&pages), false);
         let counter_buffer = initialized(
             &device,
             "Meshlet Counters",
@@ -152,7 +128,6 @@ fn gpu_regular_builder_matches_cpu_descriptors_and_conservative_bounds() {
             entries: &[
                 entry(0, &job_buffer),
                 entry(1, &page_buffer),
-                entry(2, &state_buffer),
                 entry(3, &counter_buffer),
                 entry(4, &vertex_buffer),
                 entry(5, &index_buffer),

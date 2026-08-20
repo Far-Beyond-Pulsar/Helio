@@ -12,16 +12,18 @@ use wgpu::util::DeviceExt;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
-    _pad: [u32; 2],
+    revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
+    _pad: [u32; 4],
 }
 
 #[repr(C, align(16))]
@@ -29,15 +31,22 @@ struct GpuSurfaceJob {
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
+    revision: u32,
+    regular_first_vertex: u32,
     regular_vertex_count: u32,
+    regular_first_index: u32,
     regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
+    regular_first_meshlet: u32,
     regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
     transition_meshlet_count: u32,
-    _pad: [u32; 2],
+    transition_mask: u32,
+    _pad: [u32; 3],
 }
 
 #[repr(C, align(16))]
@@ -54,8 +63,11 @@ struct GpuSurfaceFeedback {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 struct GpuDrawPage {
-    relative_lod0_cell_min: [i32; 3],
+    relative_lod0_cell_min_x: [u32; 2],
+    relative_lod0_cell_min_y: [u32; 2],
+    relative_lod0_cell_min_z: [u32; 2],
     lod: u32,
+    _pad0: u32,
     camera_relative_m: [f32; 3],
     lod0_cell_size_m: f32,
     generation_low: u32,
@@ -215,14 +227,19 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
 
         let job = GpuSurfaceJob {
             slot: 0,
+            resident_slot: 3,
             generation_low: 43,
-            regular_max_vertices: 32,
-            regular_max_indices: 64,
-            transition_max_vertices: 16,
-            transition_max_indices: 48,
+            regular_first_vertex: 32,
+            regular_first_index: 64,
+            regular_first_meshlet: 3,
+            transition_first_vertex: 16,
+            transition_first_index: 48,
+            transition_first_meshlet: 2,
+            revision: 17,
+            transition_mask: 0b00_1011,
             ..Default::default()
         };
-        let metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), [0, 0, 0], 0, 42, 0)
+        let metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), job.resident_slot, 42, 0)
             .expect("validation metadata is valid");
         let regular_success = GpuTransvoxelEmissionCounters {
             emitted_vertices: 19,
@@ -238,11 +255,14 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
         };
         let old_state = GpuSurfaceState {
             generation_low: 41,
-            active_bank: 0,
             valid: 1,
+            regular_first_vertex: 3,
             regular_vertex_count: 7,
+            regular_first_index: 7,
             regular_index_count: 11,
+            transition_first_vertex: 2,
             transition_vertex_count: 5,
+            transition_first_index: 5,
             transition_index_count: 7,
             ..Default::default()
         };
@@ -272,10 +292,12 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             bytemuck::bytes_of(&job),
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        let mut metadata_pages = [GpuPageMeta::default(); 4];
+        metadata_pages[job.resident_slot as usize] = metadata;
         let metadata_buffer = initialized_buffer(
             &device,
             "Surface Publication Metadata",
-            bytemuck::bytes_of(&metadata),
+            bytemuck::cast_slice(&metadata_pages),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         let regular_counters = initialized_buffer(
@@ -374,13 +396,18 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             }
         );
 
-        let current_metadata = GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), [0, 0, 0], 0, 43, 0)
-            .expect("validation metadata is valid");
+        let current_metadata =
+            GpuPageMeta::new(PageKey::new(0, [0, 0, 0]), job.resident_slot, 43, 0)
+                .expect("validation metadata is valid");
         let overflow = GpuTransvoxelEmissionCounters {
             vertex_overflow: 1,
             ..regular_success
         };
-        queue.write_buffer(&metadata_buffer, 0, bytemuck::bytes_of(&current_metadata));
+        queue.write_buffer(
+            &metadata_buffer,
+            u64::from(job.resident_slot) * core::mem::size_of::<GpuPageMeta>() as u64,
+            bytemuck::bytes_of(&current_metadata),
+        );
         queue.write_buffer(&regular_counters, 0, bytemuck::bytes_of(&overflow));
         dispatch(&device, &queue, &publish_pipeline, &publish_bind_group);
         assert_eq!(
@@ -432,14 +459,21 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
             read_one::<GpuSurfaceState>(&device, &queue, &state_buffer),
             GpuSurfaceState {
                 generation_low: 43,
-                active_bank: 1,
                 valid: 1,
+                revision: 17,
+                regular_first_vertex: 32,
                 regular_vertex_count: 19,
+                regular_first_index: 64,
                 regular_index_count: 27,
-                transition_vertex_count: 13,
-                transition_index_count: 21,
+                regular_first_meshlet: 3,
                 regular_meshlet_count: 1,
+                transition_first_vertex: 16,
+                transition_vertex_count: 13,
+                transition_first_index: 48,
+                transition_index_count: 21,
+                transition_first_meshlet: 2,
                 transition_meshlet_count: 1,
+                transition_mask: 0b00_1011,
                 ..Default::default()
             }
         );

@@ -86,15 +86,23 @@ fn planet_frame_uniform_matches_wgsl_offsets_exactly() {
 #[test]
 fn page_meta_matches_wgsl_offsets_exactly() {
     assert_eq!(align_of::<GpuPageMeta>(), 16);
-    assert_eq!(size_of::<GpuPageMeta>(), 32);
+    assert_eq!(size_of::<GpuPageMeta>(), 48);
     assert_eq!(
         wgsl_struct("GpuPageMeta"),
         (
             size_of::<GpuPageMeta>() as u32,
             vec![
                 (
-                    "relative_lod0_cell_min".into(),
-                    offset_of!(GpuPageMeta, relative_lod0_cell_min) as u32,
+                    "lod0_cell_min_x".into(),
+                    offset_of!(GpuPageMeta, lod0_cell_min_x) as u32
+                ),
+                (
+                    "lod0_cell_min_y".into(),
+                    offset_of!(GpuPageMeta, lod0_cell_min_y) as u32
+                ),
+                (
+                    "lod0_cell_min_z".into(),
+                    offset_of!(GpuPageMeta, lod0_cell_min_z) as u32
                 ),
                 ("lod".into(), offset_of!(GpuPageMeta, lod) as u32),
                 ("slot".into(), offset_of!(GpuPageMeta, slot) as u32),
@@ -110,6 +118,7 @@ fn page_meta_matches_wgsl_offsets_exactly() {
                     "transition_mask".into(),
                     offset_of!(GpuPageMeta, transition_mask) as u32,
                 ),
+                ("_pad".into(), offset_of!(GpuPageMeta, _pad) as u32),
             ],
         )
     );

@@ -9,13 +9,13 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use helio_pass_planetary_voxel::{
-    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelRenderPass,
-    PlanetaryVoxelResidency,
+    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryRenderError,
+    PlanetarySurfaceRequest, PlanetaryVoxelRenderPass, PlanetaryVoxelResidency,
 };
 use helio_planet_voxel_core::{
-    AddressError, ContractError, EvictOutcome, EvictedPage, LOD0_CELL_SIZE_METERS, PAGE_EDGE_CELLS,
-    PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration,
-    UploadOutcome, VisibilityOutcome, VisiblePage, VisiblePageSet,
+    AddressError, ContractError, EvictOutcome, EvictedPage, PAGE_EDGE_CELLS, PageEvict, PageKey,
+    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome,
+    VisibilityOutcome, VisiblePage, VisiblePageSet,
 };
 use pulsar_terrain::{
     PlanetFramePayload, TerrainPageEvict, TerrainPageUpload, TerrainPlanetEvict,
@@ -56,10 +56,12 @@ pub enum PlanetaryTerrainRenderError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Residency(#[from] GpuResidencyError),
+    #[error(transparent)]
+    Render(#[from] PlanetaryRenderError),
     #[error("planet frame contains non-finite camera-relative coordinates")]
     NonFiniteFrame,
-    #[error("planet frame LOD0 cell size {actual} does not match Helio's {expected}")]
-    CellSizeMismatch { actual: f32, expected: f32 },
+    #[error("planet frame LOD0 cell size must be finite and positive, got {0}")]
+    InvalidCellSize(f32),
     #[error("planet frame page edge {actual} does not match Helio's {expected}")]
     PageEdgeMismatch { actual: u32, expected: u32 },
     #[error("planet eviction for {planet:?} contains a page owned by {page_planet:?}")]
@@ -101,14 +103,33 @@ impl PlanetTerrainComponentRenderAdapter {
             .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
     }
 
-    pub fn residency_mut<'a>(
+    fn pass_mut<'a>(
         &self,
         renderer: &'a mut helio::Renderer,
-    ) -> Result<&'a mut PlanetaryVoxelResidency, PlanetaryTerrainRenderError> {
+    ) -> Result<&'a mut PlanetaryVoxelRenderPass, PlanetaryTerrainRenderError> {
         renderer
             .find_pass_mut::<PlanetaryVoxelRenderPass>()
-            .map(PlanetaryVoxelRenderPass::residency_mut)
             .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
+    }
+
+    fn pass<'a>(
+        &self,
+        renderer: &'a helio::Renderer,
+    ) -> Result<&'a PlanetaryVoxelRenderPass, PlanetaryTerrainRenderError> {
+        renderer
+            .find_pass::<PlanetaryVoxelRenderPass>()
+            .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
+    }
+
+    pub fn set_planet_sampling_root(
+        &self,
+        renderer: &mut helio::Renderer,
+        planet: pulsar_terrain::PlanetId,
+        root_lod: u8,
+    ) -> Result<(), PlanetaryTerrainRenderError> {
+        Ok(self
+            .pass_mut(renderer)?
+            .set_planet_sampling_root(translate_planet_id(planet), root_lod)?)
     }
 
     pub fn set_planet_frame(
@@ -118,7 +139,7 @@ impl PlanetTerrainComponentRenderAdapter {
         frame: PlanetFramePayload,
     ) -> Result<FrameUpdateOutcome, PlanetaryTerrainRenderError> {
         Ok(self
-            .residency_mut(renderer)?
+            .pass_mut(renderer)?
             .set_planet_frame(queue, translate_frame(frame)?)?)
     }
 
@@ -146,7 +167,7 @@ impl PlanetTerrainComponentRenderAdapter {
         queue: &wgpu::Queue,
         batch: HelioTerrainRenderBatch,
     ) -> Result<TerrainRenderApplyReport, PlanetaryTerrainRenderError> {
-        apply_batch_to_residency(self.residency_mut(renderer)?, device, queue, batch)
+        apply_batch_to_pass(self.pass_mut(renderer)?, device, queue, batch)
     }
 
     pub fn apply_visible_sets(
@@ -157,9 +178,40 @@ impl PlanetTerrainComponentRenderAdapter {
         sets: Vec<TerrainVisiblePageSet>,
     ) -> Result<VisibilityOutcome, PlanetaryTerrainRenderError> {
         let set = translate_visible_sets(frame_index, sets)?;
-        Ok(self
-            .residency_mut(renderer)?
-            .apply_visible_set(queue, set)?)
+        Ok(self.pass_mut(renderer)?.apply_visible_set(queue, set)?)
+    }
+
+    /// Complete scalar-page neighborhood required by Helio's regular and
+    /// transition extractors for Pulsar's visible surface frontier. These are
+    /// residency-only pages: they must be streamed and published, but they are
+    /// never promoted into extra draw surfaces.
+    pub fn sampling_dependencies(
+        &self,
+        renderer: &helio::Renderer,
+        sets: &[TerrainVisiblePageSet],
+    ) -> Result<
+        BTreeSet<(pulsar_terrain::PlanetId, pulsar_terrain::PageKey)>,
+        PlanetaryTerrainRenderError,
+    > {
+        let mut dependencies = BTreeSet::new();
+        for set in sets {
+            let planet = translate_planet_id(set.planet_id);
+            for page in &set.pages {
+                let request = PlanetarySurfaceRequest {
+                    key: PlanetPageKey::new(planet, translate_page_key(page.page_key)?),
+                    generation: SourceGeneration::new(page.planet_generation, page.page_generation),
+                    transition_mask: page.transition_mask,
+                    dirty_microbricks: u64::MAX,
+                };
+                for dependency in self.pass(renderer)?.sampling_dependencies(request)? {
+                    dependencies.insert((
+                        pulsar_terrain::PlanetId(dependency.planet.0),
+                        pulsar_terrain::PageKey::new(dependency.page.lod, dependency.page.page_xyz),
+                    ));
+                }
+            }
+        }
+        Ok(dependencies)
     }
 
     pub fn recreate_gpu_resources(
@@ -169,11 +221,52 @@ impl PlanetTerrainComponentRenderAdapter {
         queue: &wgpu::Queue,
     ) -> Result<(), PlanetaryTerrainRenderError> {
         Ok(self
-            .residency_mut(renderer)?
+            .pass_mut(renderer)?
             .recreate_gpu_resources(device, queue)?)
     }
 }
 
+fn apply_batch_to_pass(
+    pass: &mut PlanetaryVoxelRenderPass,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    batch: HelioTerrainRenderBatch,
+) -> Result<TerrainRenderApplyReport, PlanetaryTerrainRenderError> {
+    let chunk_size = pass.residency().config().max_batch_pages as usize;
+    let mut report = TerrainRenderApplyReport::default();
+    let mut uploads = VecDeque::from(batch.uploads);
+    while !uploads.is_empty() {
+        let count = uploads.len().min(chunk_size);
+        let chunk = uploads.drain(..count).collect();
+        report
+            .uploads
+            .extend(pass.apply_upload_batch(device, queue, chunk)?);
+    }
+
+    let mut evictions = VecDeque::from(batch.evictions);
+    while !evictions.is_empty() {
+        let count = evictions.len().min(chunk_size);
+        let chunk = evictions.drain(..count).collect();
+        report
+            .evictions
+            .extend(pass.apply_evict_batch(device, queue, chunk)?);
+    }
+
+    for planet in batch.retired_planets {
+        let retirement = match pass.remove_planet_frame(queue, planet) {
+            Ok(true) => PlanetFrameRetirement::Removed(planet),
+            Ok(false) => PlanetFrameRetirement::AlreadyAbsent(planet),
+            Err(PlanetaryRenderError::Residency(GpuResidencyError::PlanetFrameInUse(_))) => {
+                PlanetFrameRetirement::RetainedInUse(planet)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        report.frame_retirements.push(retirement);
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
 fn apply_batch_to_residency(
     residency: &mut PlanetaryVoxelResidency,
     device: &wgpu::Device,
@@ -444,12 +537,10 @@ pub fn translate_frame(
     {
         return Err(PlanetaryTerrainRenderError::NonFiniteFrame);
     }
-    let expected_cell_size = LOD0_CELL_SIZE_METERS as f32;
-    if frame.lod0_cell_size_m() != expected_cell_size {
-        return Err(PlanetaryTerrainRenderError::CellSizeMismatch {
-            actual: frame.lod0_cell_size_m(),
-            expected: expected_cell_size,
-        });
+    if !frame.lod0_cell_size_m().is_finite() || frame.lod0_cell_size_m() <= 0.0 {
+        return Err(PlanetaryTerrainRenderError::InvalidCellSize(
+            frame.lod0_cell_size_m(),
+        ));
     }
     let expected_page_edge = PAGE_EDGE_CELLS as u32;
     if frame.page_edge_cells() != expected_page_edge {
@@ -544,9 +635,9 @@ mod tests {
         PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK, UploadOutcome,
     };
     use pulsar_terrain::{
-        CELL_COUNT, CellWord as TerrainCellWord, LOD0_CELL_SIZE_METERS as TERRAIN_CELL_SIZE_METERS,
-        PAGE_EDGE, PageKey as TerrainPageKey, PlanetFrame, PlanetId as TerrainId, PlanetPosition,
-        TERRAIN_TRANSITION_FACE_MASK, TerrainRenderDeltaCounters, TerrainVisiblePage,
+        CELL_COUNT, CellWord as TerrainCellWord, PAGE_EDGE, PageKey as TerrainPageKey, PlanetFrame,
+        PlanetId as TerrainId, PlanetPosition, TERRAIN_TRANSITION_FACE_MASK,
+        TerrainRenderDeltaCounters, TerrainVisiblePage,
     };
 
     fn terrain_upload(
@@ -593,8 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn pulsar_and_helio_share_the_same_voxel_protocol_constants() {
-        assert_eq!(TERRAIN_CELL_SIZE_METERS, LOD0_CELL_SIZE_METERS);
+    fn pulsar_and_helio_share_the_same_voxel_protocol_layout() {
         assert_eq!(PAGE_EDGE, HELIO_PAGE_EDGE);
         assert_eq!(CELL_COUNT, PAGE_CELL_COUNT);
         assert_eq!(TERRAIN_TRANSITION_FACE_MASK, TRANSITION_FACE_MASK);
@@ -685,6 +775,35 @@ mod tests {
     }
 
     #[test]
+    fn visible_surface_dependencies_include_the_complete_regular_sampling_halo() {
+        let planet = TerrainId([3; 16]);
+        let request = PlanetarySurfaceRequest {
+            key: PlanetPageKey::new(
+                translate_planet_id(planet),
+                translate_page_key(TerrainPageKey::new(2, [0, 0, 0])).unwrap(),
+            ),
+            generation: SourceGeneration::new(8, 13),
+            transition_mask: 0,
+            dirty_microbricks: u64::MAX,
+        };
+        let dependencies = request.required_resident_pages(6).unwrap();
+
+        assert_eq!(dependencies.len(), 27);
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [0, 0, 0]),
+        )));
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [-1, -1, -1]),
+        )));
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [1, 1, 1]),
+        )));
+    }
+
+    #[test]
     fn visible_frontiers_from_multiple_planets_form_one_global_publication() {
         let make_set = |planet: u8, x: i64, frame_index| TerrainVisiblePageSet {
             planet_id: TerrainId([planet; 16]),
@@ -721,7 +840,7 @@ mod tests {
     fn frame_translation_is_field_exact_at_signed_planet_scale() {
         let terrain = PlanetFrame::new(
             TerrainId([0x91; 16]),
-            PlanetPosition::new([-63_710_017, 63_710_033, -1], [0.025, 0.075, 0.099]).unwrap(),
+            PlanetPosition::new([-63_710_017, 63_710_033, -1], [0.025, 0.075, 0.099], 100).unwrap(),
             u64::MAX - 2,
         );
         let payload = terrain.renderer_payload();
@@ -793,8 +912,12 @@ mod tests {
                 .set_planet_frame(
                     &queue,
                     translate_frame(
-                        PlanetFrame::new(planet, PlanetPosition::from_lod0_cell([0; 3]), 1)
-                            .renderer_payload(),
+                        PlanetFrame::new(
+                            planet,
+                            PlanetPosition::from_lod0_cell([0; 3], 100).unwrap(),
+                            1,
+                        )
+                        .renderer_payload(),
                     )
                     .unwrap(),
                 )
@@ -918,17 +1041,14 @@ mod tests {
                 ))],
                 counters: TerrainRenderDeltaCounters::default(),
             };
+            let repopulated =
+                apply_delta_to_test_residency(&mut residency, &device, &queue, after_retirement)
+                    .unwrap();
             assert!(matches!(
-                apply_delta_to_test_residency(
-                    &mut residency,
-                    &device,
-                    &queue,
-                    after_retirement,
-                ),
-                Err(PlanetaryTerrainRenderError::Residency(
-                    GpuResidencyError::MissingPlanetFrame(PlanetId(id))
-                )) if id == [7; 16]
+                repopulated.uploads.as_slice(),
+                [GpuUploadOutcome::Residency(UploadOutcome::Inserted { .. })]
             ));
+            assert_eq!(residency.planet_frame_count(), 0);
         });
     }
 }

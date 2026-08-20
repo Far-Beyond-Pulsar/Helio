@@ -1,5 +1,5 @@
 const PAGE_EDGE: u32 = 32u;
-const SAMPLE_EDGE: u32 = 34u;
+const SAMPLE_EDGE: u32 = 35u;
 const PAGE_CELL_COUNT: u32 = 32768u;
 const SCAN_WORKGROUP_SIZE: u32 = 256u;
 const REGULAR_VERTEX_TABLE_STRIDE: u32 = 12u;

@@ -62,7 +62,7 @@ impl Renderer {
 
         self.clear_target_next_frame = true;
 
-        if let Some(rebuilder) = &self.graph_rebuilder {
+        if let Some(rebuilder) = self.graph_rebuilder.clone() {
             let config = RendererConfig {
                 width,
                 height,
@@ -85,7 +85,7 @@ impl Renderer {
                 foliage_blades_per_m2: self.foliage_blades_per_m2,
                 enable_portals: self.enable_portals,
             };
-            self.graph = rebuilder(
+            let mut graph = rebuilder(
                 &self.device,
                 &self.queue,
                 &self.scene,
@@ -94,6 +94,9 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            graph.adopt_persistent_passes_from(&mut self.graph, internal_w, internal_h);
+            self.graph = graph;
+            self.graph_generation = self.graph_generation.wrapping_add(1);
         } else {
             self.graph.set_render_size(internal_w, internal_h);
         }
@@ -146,7 +149,7 @@ impl Renderer {
         };
         log::info!("[graph] sky presence changed to {has_sky}; rebuilding render graph");
         let config = self.renderer_config();
-        self.graph = rebuilder(
+        let mut graph = rebuilder(
             &self.device,
             &self.queue,
             &self.scene,
@@ -155,6 +158,13 @@ impl Renderer {
             &self.debug_camera_buffer,
             &self.cull_stats_buffer,
         );
+        graph.adopt_persistent_passes_from(
+            &mut self.graph,
+            config.internal_width(),
+            config.internal_height(),
+        );
+        self.graph = graph;
+        self.graph_generation = self.graph_generation.wrapping_add(1);
     }
 }
 

@@ -148,6 +148,8 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
             ),
             Ok(FrameUpdateOutcome::FrameConflict)
         ));
+        let epoch_before_camera_travel = residency.publication_epoch();
+        let table_before_camera_travel = residency.page_table().clone();
         let outside_origin = [i64::from(i32::MAX).div_euclid(32) * 32 + 32, 0, 0];
         assert!(matches!(
             residency.set_planet_frame(
@@ -158,26 +160,32 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                     2,
                 ),
             ),
-            Err(GpuResidencyError::Address(_))
+            Ok(FrameUpdateOutcome::Applied {
+                previous_frame: Some(1)
+            })
         ));
+        assert_eq!(residency.publication_epoch(), epoch_before_camera_travel);
+        assert_eq!(residency.page_table(), &table_before_camera_travel);
         assert!(matches!(
             residency.set_planet_frame(
                 &queue,
                 PlanetFrameUniform::from_camera(
                     planet_a,
                     PlanetPosition::from_lod0_cell([32, 0, 0]),
-                    2,
+                    3,
                 ),
             ),
             Ok(FrameUpdateOutcome::Applied {
-                previous_frame: Some(1)
+                previous_frame: Some(2)
             })
         ));
+        assert_eq!(residency.publication_epoch(), epoch_before_camera_travel);
+        assert_eq!(residency.page_table(), &table_before_camera_travel);
         residency
             .apply_visible_set(
                 &queue,
                 VisiblePageSet {
-                    frame_index: 3,
+                    frame_index: 4,
                     pages: vec![VisiblePage {
                         key: key_a,
                         generation: source(9),
@@ -192,13 +200,11 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         residency.recreate_gpu_resources(&device, &queue).unwrap();
         assert_eq!(residency.resource_stats(), initial_resources);
 
-        let frame_a = [32_i64, 0, 0];
-        let frame_b = [0_i64; 3];
         let missing = PlanetPageKey::new(planet_a, PageKey::new(1, [-99, 4, 2]));
         let queries = [
-            GpuLookupQuery::from(GpuLookupKey::from_planet_page(key_a, frame_a).unwrap()),
-            GpuLookupQuery::from(GpuLookupKey::from_planet_page(key_b, frame_b).unwrap()),
-            GpuLookupQuery::from(GpuLookupKey::from_planet_page(missing, frame_a).unwrap()),
+            GpuLookupQuery::from(GpuLookupKey::from_planet_page(key_a).unwrap()),
+            GpuLookupQuery::from(GpuLookupKey::from_planet_page(key_b).unwrap()),
+            GpuLookupQuery::from(GpuLookupKey::from_planet_page(missing).unwrap()),
         ];
         let results = dispatch_lookup(&device, &queue, &residency, &queries);
         assert!(results[0].found());
@@ -219,7 +225,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         );
         assert_eq!(metadata[0].slot, 0);
         assert_eq!(metadata[0].generation(), 1);
-        assert_eq!(metadata[0].relative_lod0_cell_min, [-96, 32, -96]);
+        assert_eq!(metadata[0].lod0_cell_min(), [-64, 32, -96]);
         assert_eq!(metadata[0].transition_mask, 0b10_0101);
         let counters: Vec<GpuResidencyCounters> = read_buffer_range(
             &device,
@@ -373,7 +379,7 @@ fn validate_table_probe_backpressure(device: &wgpu::Device, queue: &wgpu::Queue,
     let mut collisions = Vec::new();
     for x in -10_000..10_000 {
         let key = PlanetPageKey::new(planet, PageKey::new(0, [x, 0, 0]));
-        let lookup = GpuLookupKey::from_planet_page(key, [0; 3]).unwrap();
+        let lookup = GpuLookupKey::from_planet_page(key).unwrap();
         if lookup.hash() & 7 == 0 {
             collisions.push(key);
             if collisions.len() == 2 {

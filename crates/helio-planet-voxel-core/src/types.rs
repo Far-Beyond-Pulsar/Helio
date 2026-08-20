@@ -279,20 +279,22 @@ impl PageKey {
         ])
     }
 
-    /// Converts an absolute page address into a bounded camera-local GPU
-    /// address. The subtraction happens in canonical integer space before the
-    /// checked narrowing to `i32`.
+    /// Computes the page minimum relative to an arbitrary canonical origin.
+    ///
+    /// The result intentionally remains `i64`. Planet residency is addressed
+    /// canonically on the GPU and render-relative deltas are transported as
+    /// split 64-bit words, so moving a camera cannot invalidate otherwise
+    /// resident planetary pages.
     pub fn relative_lod0_cell_min(
         self,
         frame_origin_lod0_cell: [i64; 3],
-    ) -> Result<[i32; 3], AddressError> {
+    ) -> Result<[i64; 3], AddressError> {
         let absolute = self.lod0_cell_min()?;
-        let mut relative = [0_i32; 3];
+        let mut relative = [0_i64; 3];
         for axis in 0..3 {
-            let delta = absolute[axis]
+            relative[axis] = absolute[axis]
                 .checked_sub(frame_origin_lod0_cell[axis])
                 .ok_or(AddressError::CoordinateOverflow)?;
-            relative[axis] = i32::try_from(delta).map_err(|_| AddressError::OutsideRenderFrame)?;
         }
         Ok(relative)
     }
@@ -359,8 +361,6 @@ pub enum AddressError {
     UnsupportedLod(u8),
     #[error("planetary page coordinate arithmetic overflowed")]
     CoordinateOverflow,
-    #[error("planetary page lies outside the current camera-local render frame")]
-    OutsideRenderFrame,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -429,8 +429,10 @@ mod tests {
             [64, 0, 32]
         );
         assert_eq!(
-            PageKey::new(0, [i64::from(i32::MAX), 0, 0]).relative_lod0_cell_min([0; 3]),
-            Err(AddressError::OutsideRenderFrame)
+            PageKey::new(0, [i64::from(i32::MAX), 0, 0])
+                .relative_lod0_cell_min([0; 3])
+                .unwrap()[0],
+            i64::from(i32::MAX) * PAGE_EDGE_CELLS
         );
     }
 

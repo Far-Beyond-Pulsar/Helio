@@ -87,8 +87,7 @@ fn gpu_matches_canonical_frames_at_planet_scale_and_across_rebases() {
             let frame = PlanetRenderFrame::new(planet, case.camera, index as u64 + 1);
             let uniform = PlanetFrameUniform::from_render_frame(frame);
             let (page, local) = PageKey::address_lod0_cell(0, case.point.lod0_cell()).unwrap();
-            let page =
-                GpuPageMeta::new(page, frame.origin_lod0_cell(), index as u32, 1, 0).unwrap();
+            let page = GpuPageMeta::new(page, index as u32, 1, 0).unwrap();
             let subcell = case.point.subcell_m();
             let local_lod0_cell = [
                 f32::from(local[0]) + (subcell[0] / LOD0_CELL_SIZE_METERS) as f32,
@@ -148,12 +147,12 @@ fn gpu_matches_canonical_frames_at_planet_scale_and_across_rebases() {
         let boundary_inputs = [
             GpuParityInput {
                 frame: uniform,
-                page: GpuPageMeta::new(left_page, frame.origin_lod0_cell(), 0, 1, 0).unwrap(),
+                page: GpuPageMeta::new(left_page, 0, 1, 0).unwrap(),
                 local_lod0_cell: [32.0, 13.25, 6.75, 0.0],
             },
             GpuParityInput {
                 frame: uniform,
-                page: GpuPageMeta::new(right_page, frame.origin_lod0_cell(), 1, 1, 0).unwrap(),
+                page: GpuPageMeta::new(right_page, 1, 1, 0).unwrap(),
                 local_lod0_cell: [0.0, 13.25, 6.75, 0.0],
             },
         ];
@@ -161,6 +160,70 @@ fn gpu_matches_canonical_frames_at_planet_scale_and_across_rebases() {
         assert_eq!(
             boundary_outputs[0].camera_local_m, boundary_outputs[1].camera_local_m,
             "adjacent pages must reconstruct their shared boundary bit-identically"
+        );
+
+        // A camera can travel beyond the former signed-32-bit cell window
+        // while the planet remains resident at its canonical address. At this
+        // distance f32 precision is screen-scale rather than millimeter-scale,
+        // but the position must remain finite and on the correct side of the
+        // camera instead of rejecting the frame update.
+        let far_camera =
+            PlanetPosition::new([i64::from(i32::MAX) + 1_000_000, 0, 0], [0.037, 0.0, 0.0])
+                .unwrap();
+        let planet_point = PlanetPosition::new([earth_cells, 0, 0], [0.092, 0.0, 0.0]).unwrap();
+        let far_frame = PlanetRenderFrame::new(planet, far_camera, 100);
+        let (far_page, far_local) =
+            PageKey::address_lod0_cell(0, planet_point.lod0_cell()).unwrap();
+        let far_right_page = PageKey::new(
+            0,
+            [
+                far_page.page_xyz[0] + 1,
+                far_page.page_xyz[1],
+                far_page.page_xyz[2],
+            ],
+        );
+        let far_boundary_outputs = dispatch(
+            &device,
+            &queue,
+            &[
+                GpuParityInput {
+                    frame: PlanetFrameUniform::from_render_frame(far_frame),
+                    page: GpuPageMeta::new(far_page, 0, 1, 0).unwrap(),
+                    local_lod0_cell: [32.0, 13.25, 6.75, 0.0],
+                },
+                GpuParityInput {
+                    frame: PlanetFrameUniform::from_render_frame(far_frame),
+                    page: GpuPageMeta::new(far_right_page, 1, 1, 0).unwrap(),
+                    local_lod0_cell: [0.0, 13.25, 6.75, 0.0],
+                },
+            ],
+        );
+        assert_eq!(
+            far_boundary_outputs[0].camera_local_m, far_boundary_outputs[1].camera_local_m,
+            "far adjacent pages must reconstruct their shared boundary bit-identically"
+        );
+        let far_output = dispatch(
+            &device,
+            &queue,
+            &[GpuParityInput {
+                frame: PlanetFrameUniform::from_render_frame(far_frame),
+                page: GpuPageMeta::new(far_page, 0, 1, 0).unwrap(),
+                local_lod0_cell: [
+                    f32::from(far_local[0])
+                        + (planet_point.subcell_m()[0] / LOD0_CELL_SIZE_METERS) as f32,
+                    f32::from(far_local[1]),
+                    f32::from(far_local[2]),
+                    0.0,
+                ],
+            }],
+        )[0]
+        .camera_local_m[0];
+        let expected_far = far_frame.camera_local_meters(planet_point).unwrap()[0];
+        assert!(far_output.is_finite());
+        assert!(far_output.is_sign_negative());
+        assert!(
+            (f64::from(far_output) - expected_far).abs() <= 32.0,
+            "astronomical reconstruction drifted: gpu={far_output} cpu={expected_far}"
         );
     });
 }

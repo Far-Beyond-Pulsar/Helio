@@ -7,8 +7,9 @@ use pulsar_reflection::LiveKeySet;
 use pulsar_terrain::{
     CELL_COUNT, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
     TerrainControllerError, TerrainPlanningConfig, TerrainRefinementConfig,
-    TerrainRenderDeltaConfig, TerrainRuntimeConfig, TerrainRuntimeError, TerrainRuntimeHandle,
-    TerrainStreamingConfig, TerrainStreamingController, TerrainStreamingError, TerrainSubsystem,
+    TerrainRenderDeltaConfig, TerrainRequestClass, TerrainRuntimeConfig, TerrainRuntimeError,
+    TerrainRuntimeHandle, TerrainStreamingConfig, TerrainStreamingController,
+    TerrainStreamingError, TerrainSubsystem,
 };
 use thiserror::Error;
 
@@ -18,7 +19,10 @@ use super::{
 
 const LIVE_MAX_PLANETS: usize = 4;
 const LIVE_ACTIVE_PAGES_PER_PLANET: usize = 96;
-const LIVE_TRANSITION_PAGES_PER_PLANET: usize = 96;
+// Rapid astronomical travel can couple many neighboring LOD replacements.
+// Keep the committed frontier visible while one complete balanced target is
+// staged, then publish the new frontier atomically.
+const LIVE_TRANSITION_PAGES_PER_PLANET: usize = LIVE_ACTIVE_PAGES_PER_PLANET * 2;
 const LIVE_GPU_VISIBLE_PAGES: usize = 384;
 
 /// Component identities retained between revisions of Pulsar's current legacy
@@ -76,7 +80,6 @@ pub struct PlanetTerrainFrameInput {
     pub delta_time_s: f32,
     pub tick: u64,
     pub frame_index: u64,
-    pub graph_rebuilt: bool,
 }
 
 #[derive(Debug)]
@@ -111,6 +114,7 @@ pub struct PlanetTerrainRuntime {
     controller: TerrainStreamingController,
     adapter: PlanetTerrainComponentRenderAdapter,
     component_cache: PlanetTerrainComponentCache,
+    renderer_graph_generation: Option<u64>,
 }
 
 impl PlanetTerrainRuntime {
@@ -131,11 +135,12 @@ impl PlanetTerrainRuntime {
             controller,
             adapter: PlanetTerrainComponentRenderAdapter::new(),
             component_cache: PlanetTerrainComponentCache::default(),
+            renderer_graph_generation: None,
         })
     }
 
     pub fn renderer_config() -> PlanetaryVoxelRenderConfig {
-        PlanetaryVoxelRenderConfig::horizon_demo()
+        PlanetaryVoxelRenderConfig::production_planet()
     }
 
     pub fn component_context_mut(
@@ -166,6 +171,10 @@ impl PlanetTerrainRuntime {
         queue: &wgpu::Queue,
         input: PlanetTerrainFrameInput,
     ) -> Result<PlanetTerrainAdvanceReport, PlanetTerrainLiveError> {
+        let renderer_replaced_graph = renderer_graph_was_replaced(
+            &mut self.renderer_graph_generation,
+            renderer.graph_generation(),
+        );
         let renderer_lost_published_cache = self.controller.published_page_count() > 0
             && self
                 .adapter
@@ -174,23 +183,29 @@ impl PlanetTerrainRuntime {
                 .counters()
                 .resident_pages
                 == 0;
-        if input.graph_rebuilt || renderer_lost_published_cache {
+        if renderer_replaced_graph || renderer_lost_published_cache {
             self.controller.invalidate_renderer_cache()?;
         }
 
         self.subsystem.on_frame(input.delta_time_s);
-        let camera = PlanetPosition::from_meters(input.camera_m)?;
-        let view = PlanetView::new(
-            camera,
-            input.forward,
-            input.up,
-            input.vertical_fov_radians,
-            input.viewport_px,
-            input.near_m,
-            input.far_m,
-            input.velocity_mps,
-        )?;
         for planet_id in self.component_cache.active_planets() {
+            let definition = self
+                .runtime
+                .planet_definition(planet_id)
+                .ok_or(TerrainRuntimeError::PlanetMissing(planet_id))?;
+            self.adapter
+                .set_planet_sampling_root(renderer, planet_id, definition.root_lod)?;
+            let camera = PlanetPosition::from_meters(input.camera_m, definition.lod0_cell_size_mm)?;
+            let view = PlanetView::new(
+                camera,
+                input.forward,
+                input.up,
+                input.vertical_fov_radians,
+                input.viewport_px,
+                input.near_m,
+                input.far_m,
+                input.velocity_mps,
+            )?;
             self.controller.submit_view(planet_id, view)?;
         }
 
@@ -215,6 +230,23 @@ impl PlanetTerrainRuntime {
             self.adapter
                 .set_planet_frame(renderer, queue, planet_frame)?;
         }
+        for (planet_id, page_key) in self
+            .adapter
+            .sampling_dependencies(renderer, &frame.visible_sets)?
+        {
+            if self
+                .runtime
+                .resident_page_generation(planet_id, page_key)
+                .is_none()
+            {
+                self.runtime.request_page(
+                    planet_id,
+                    page_key,
+                    TerrainRequestClass::Visible,
+                    input.tick.saturating_add(1),
+                )?;
+            }
+        }
         let render = self
             .adapter
             .apply_delta(renderer, device, queue, frame.render_delta)?;
@@ -234,6 +266,12 @@ impl PlanetTerrainRuntime {
             visibility,
         })
     }
+}
+
+fn renderer_graph_was_replaced(observed: &mut Option<u64>, current: u64) -> bool {
+    observed
+        .replace(current)
+        .is_some_and(|previous| previous != current)
 }
 
 fn live_runtime_config() -> TerrainRuntimeConfig {
@@ -303,7 +341,20 @@ mod tests {
             controller.max_planets * controller.refinement.max_transition_pages
                 <= controller.rendering.max_tracked_pages
         );
+        assert_eq!(
+            controller.refinement.max_transition_pages,
+            controller.refinement.max_active_pages * 2
+        );
         assert!(controller.rendering.max_visible_pages <= controller.rendering.max_tracked_pages);
         renderer.allocation_plan().unwrap();
+    }
+
+    #[test]
+    fn completed_renderer_graph_replacement_invalidates_exactly_once() {
+        let mut observed = None;
+        assert!(!renderer_graph_was_replaced(&mut observed, 7));
+        assert!(!renderer_graph_was_replaced(&mut observed, 7));
+        assert!(renderer_graph_was_replaced(&mut observed, 8));
+        assert!(!renderer_graph_was_replaced(&mut observed, 8));
     }
 }

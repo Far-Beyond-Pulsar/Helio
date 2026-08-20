@@ -1,20 +1,26 @@
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
+    revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 struct GpuPageMeta {
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     slot: u32,
     generation_low: u32,
@@ -58,21 +64,32 @@ struct GpuTerrainVertex {
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
+    revision: u32,
+    regular_first_vertex: u32,
     regular_vertex_count: u32,
+    regular_first_index: u32,
     regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
+    regular_first_meshlet: u32,
     regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
     transition_meshlet_count: u32,
+    transition_mask: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuDrawPage {
-    relative_lod0_cell_min: vec3<i32>,
+    relative_lod0_cell_min_x: vec2<u32>,
+    relative_lod0_cell_min_y: vec2<u32>,
+    relative_lod0_cell_min_z: vec2<u32>,
     lod: u32,
+    _pad0: u32,
     camera_relative_m: vec3<f32>,
     lod0_cell_size_m: f32,
     generation_low: u32,
@@ -104,8 +121,8 @@ struct DrawIndexedIndirectArgs {
 @group(0) @binding(1) var<storage, read> page_metadata: array<GpuPageMeta>;
 
 fn metadata_is_current() -> bool {
-    let page_meta = page_metadata[job.slot];
-    return page_meta.slot == job.slot &&
+    let page_meta = page_metadata[job.resident_slot];
+    return page_meta.slot == job.resident_slot &&
         page_meta.generation_low == job.generation_low &&
         page_meta.generation_high == job.generation_high;
 }
@@ -126,13 +143,11 @@ fn regular_succeeded() -> bool {
 @compute @workgroup_size(64)
 fn copy_regular_surface(@builtin(global_invocation_id) id: vec3<u32>) {
     if !regular_succeeded() { return; }
-    let next_bank = 1u - min(surface_states[job.slot].active_bank, 1u);
-    let bank = job.slot * 2u + next_bank;
     if id.x < regular_counters.emitted_vertices {
-        regular_vertices[bank * job.regular_max_vertices + id.x] = regular_source_vertices[id.x];
+        regular_vertices[job.regular_first_vertex + id.x] = regular_source_vertices[id.x];
     }
     if id.x < regular_counters.emitted_indices {
-        regular_indices[bank * job.regular_max_indices + id.x] = regular_source_indices[id.x];
+        regular_indices[job.regular_first_index + id.x] = regular_source_indices[id.x];
     }
 }
 
@@ -151,13 +166,11 @@ fn transition_succeeded() -> bool {
 @compute @workgroup_size(64)
 fn copy_transition_surface(@builtin(global_invocation_id) id: vec3<u32>) {
     if !transition_succeeded() { return; }
-    let next_bank = 1u - min(surface_states[job.slot].active_bank, 1u);
-    let bank = job.slot * 2u + next_bank;
     if id.x < transition_counters.emitted_vertices {
-        transition_vertices[bank * job.transition_max_vertices + id.x] = transition_source_vertices[id.x];
+        transition_vertices[job.transition_first_vertex + id.x] = transition_source_vertices[id.x];
     }
     if id.x < transition_counters.emitted_indices {
-        transition_indices[bank * job.transition_max_indices + id.x] = transition_source_indices[id.x];
+        transition_indices[job.transition_first_index + id.x] = transition_source_indices[id.x];
     }
 }
 
@@ -184,36 +197,40 @@ fn publish_surface() {
         feedback.overflow_rejections += 1u;
         return;
     }
-    let old_state = surface_states[job.slot];
-    let next_bank = 1u - min(old_state.active_bank, 1u);
     surface_states[job.slot] = GpuSurfaceState(
         job.generation_low,
         job.generation_high,
-        next_bank,
         1u,
+        job.revision,
+        job.regular_first_vertex,
         regular_counters.emitted_vertices,
+        job.regular_first_index,
         regular_counters.emitted_indices,
-        transition_counters.emitted_vertices,
-        transition_counters.emitted_indices,
+        job.regular_first_meshlet,
         (regular_counters.emitted_indices + 62u) / 63u,
+        job.transition_first_vertex,
+        transition_counters.emitted_vertices,
+        job.transition_first_index,
+        transition_counters.emitted_indices,
+        job.transition_first_meshlet,
         (transition_counters.emitted_indices + 62u) / 63u,
+        job.transition_mask,
+        0u,
         0u,
         0u,
     );
-    let regular_bank = job.slot * 2u + next_bank;
     regular_draws[job.slot] = DrawIndexedIndirectArgs(
         regular_counters.emitted_indices,
         0u,
-        regular_bank * job.regular_max_indices,
-        i32(regular_bank * job.regular_max_vertices),
+        job.regular_first_index,
+        i32(job.regular_first_vertex),
         job.slot,
     );
-    let transition_bank = job.slot * 2u + next_bank;
     transition_draws[job.slot] = DrawIndexedIndirectArgs(
         transition_counters.emitted_indices,
         0u,
-        transition_bank * job.transition_max_indices,
-        i32(transition_bank * job.transition_max_vertices),
+        job.transition_first_index,
+        i32(job.transition_first_vertex),
         job.slot,
     );
     feedback.published_jobs += 1u;

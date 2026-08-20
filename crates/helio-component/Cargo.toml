@@ -81,6 +81,8 @@ bytemuck = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 pollster = "=0.4.0"
+winit = { workspace = true }
+helio-default-graphs = { workspace = true }
 
 [[test]]
 name = "static_mesh_component_gpu_mirror"

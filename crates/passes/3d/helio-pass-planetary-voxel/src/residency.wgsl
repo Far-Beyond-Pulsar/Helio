@@ -3,12 +3,15 @@ const PAGE_TABLE_OCCUPIED: u32 = 1u;
 
 struct GpuPageTableEntry {
     planet_id: vec4<u32>,
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     slot: u32,
     generation_low: u32,
     generation_high: u32,
     state: u32,
+    _pad: u32,
 };
 
 struct GpuResidencyUniform {
@@ -51,8 +54,11 @@ struct GpuResidencyCounters {
 
 struct GpuLookupQuery {
     planet_id: vec4<u32>,
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
+    _pad: u32,
 };
 
 struct GpuLookupResult {
@@ -82,15 +88,20 @@ fn page_hash(query: GpuLookupQuery) -> u32 {
     hash = mix_hash(hash, query.planet_id.y);
     hash = mix_hash(hash, query.planet_id.z);
     hash = mix_hash(hash, query.planet_id.w);
-    hash = mix_hash(hash, bitcast<u32>(query.relative_lod0_cell_min.x));
-    hash = mix_hash(hash, bitcast<u32>(query.relative_lod0_cell_min.y));
-    hash = mix_hash(hash, bitcast<u32>(query.relative_lod0_cell_min.z));
+    hash = mix_hash(hash, query.lod0_cell_min_x.x);
+    hash = mix_hash(hash, query.lod0_cell_min_x.y);
+    hash = mix_hash(hash, query.lod0_cell_min_y.x);
+    hash = mix_hash(hash, query.lod0_cell_min_y.y);
+    hash = mix_hash(hash, query.lod0_cell_min_z.x);
+    hash = mix_hash(hash, query.lod0_cell_min_z.y);
     return mix_hash(hash, query.lod);
 }
 
 fn keys_equal(entry: GpuPageTableEntry, query: GpuLookupQuery) -> bool {
     return all(entry.planet_id == query.planet_id)
-        && all(entry.relative_lod0_cell_min == query.relative_lod0_cell_min)
+        && all(entry.lod0_cell_min_x == query.lod0_cell_min_x)
+        && all(entry.lod0_cell_min_y == query.lod0_cell_min_y)
+        && all(entry.lod0_cell_min_z == query.lod0_cell_min_z)
         && entry.lod == query.lod;
 }
 

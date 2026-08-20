@@ -3,41 +3,56 @@ const CONE_EPSILON: f32 = 0.0001;
 
 struct GpuSurfaceJob {
     slot: u32,
+    resident_slot: u32,
     transition_mask: u32,
     generation_low: u32,
     generation_high: u32,
-    regular_max_vertices: u32,
-    regular_max_indices: u32,
-    transition_max_vertices: u32,
-    transition_max_indices: u32,
-    regular_max_meshlets: u32,
-    transition_max_meshlets: u32,
+    revision: u32,
+    regular_first_vertex: u32,
+    regular_first_index: u32,
+    regular_first_meshlet: u32,
+    transition_first_vertex: u32,
+    transition_first_index: u32,
+    transition_first_meshlet: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 struct GpuPageMeta {
-    relative_lod0_cell_min: vec3<i32>,
+    lod0_cell_min_x: vec2<u32>,
+    lod0_cell_min_y: vec2<u32>,
+    lod0_cell_min_z: vec2<u32>,
     lod: u32,
     slot: u32,
     generation_low: u32,
     generation_high: u32,
     transition_mask: u32,
+    _pad: u32,
 }
 
 struct GpuSurfaceState {
     generation_low: u32,
     generation_high: u32,
-    active_bank: u32,
     valid: u32,
+    revision: u32,
+    regular_first_vertex: u32,
     regular_vertex_count: u32,
+    regular_first_index: u32,
     regular_index_count: u32,
-    transition_vertex_count: u32,
-    transition_index_count: u32,
+    regular_first_meshlet: u32,
     regular_meshlet_count: u32,
+    transition_first_vertex: u32,
+    transition_vertex_count: u32,
+    transition_first_index: u32,
+    transition_index_count: u32,
+    transition_first_meshlet: u32,
     transition_meshlet_count: u32,
+    transition_mask: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuEmissionCounters {
@@ -114,14 +129,10 @@ struct MeshletBuild {
 @group(0) @binding(12) var<storage, read_write> transition_bounds: array<GpuTerrainMeshletBounds>;
 
 fn metadata_is_current() -> bool {
-    let page = page_metadata[job.slot];
-    return page.slot == job.slot &&
+    let page = page_metadata[job.resident_slot];
+    return page.slot == job.resident_slot &&
         page.generation_low == job.generation_low &&
         page.generation_high == job.generation_high;
-}
-
-fn next_bank() -> u32 {
-    return job.slot * 2u + (1u - min(surface_states[job.slot].active_bank, 1u));
 }
 
 fn safe_normal(value: vec3<f32>) -> vec3<f32> {
@@ -211,12 +222,11 @@ fn build_regular(@builtin(global_invocation_id) id: vec3<u32>) {
     let meshlet_count = (regular_counters.emitted_indices + BUILD_INDICES - 1u) / BUILD_INDICES;
     if id.x >= meshlet_count { return; }
 
-    let bank = next_bank();
     let local_first_index = id.x * BUILD_INDICES;
     let index_count = min(BUILD_INDICES, regular_counters.emitted_indices - local_first_index);
-    let first_index = bank * job.regular_max_indices + local_first_index;
-    let first_vertex = bank * job.regular_max_vertices;
-    let output_index = bank * job.regular_max_meshlets + id.x;
+    let first_index = job.regular_first_index + local_first_index;
+    let first_vertex = job.regular_first_vertex;
+    let output_index = job.regular_first_meshlet + id.x;
     var positions: array<vec3<f32>, 63>;
     var vertex_ids: array<u32, 63>;
     for (var i = 0u; i < index_count; i += 1u) {
@@ -226,7 +236,7 @@ fn build_regular(@builtin(global_invocation_id) id: vec3<u32>) {
     let build = compute_meshlet(positions, vertex_ids, index_count);
     regular_meshlets[output_index] = GpuTerrainMeshlet(
         first_index, index_count, first_vertex, build.vertex_count, output_index,
-        job.generation_low, job.generation_high, 0u,
+        job.generation_low, job.generation_high, job.slot,
     );
     regular_bounds[output_index] = build.bounds;
 }
@@ -240,12 +250,11 @@ fn build_transition(@builtin(global_invocation_id) id: vec3<u32>) {
     let meshlet_count = (transition_counters.emitted_indices + BUILD_INDICES - 1u) / BUILD_INDICES;
     if id.x >= meshlet_count { return; }
 
-    let bank = next_bank();
     let local_first_index = id.x * BUILD_INDICES;
     let index_count = min(BUILD_INDICES, transition_counters.emitted_indices - local_first_index);
-    let first_index = bank * job.transition_max_indices + local_first_index;
-    let first_vertex = bank * job.transition_max_vertices;
-    let output_index = bank * job.transition_max_meshlets + id.x;
+    let first_index = job.transition_first_index + local_first_index;
+    let first_vertex = job.transition_first_vertex;
+    let output_index = job.transition_first_meshlet + id.x;
     var positions: array<vec3<f32>, 63>;
     var vertex_ids: array<u32, 63>;
     for (var i = 0u; i < index_count; i += 1u) {
@@ -255,7 +264,7 @@ fn build_transition(@builtin(global_invocation_id) id: vec3<u32>) {
     let build = compute_meshlet(positions, vertex_ids, index_count);
     transition_meshlets[output_index] = GpuTerrainMeshlet(
         first_index, index_count, first_vertex, build.vertex_count, output_index,
-        job.generation_low, job.generation_high, 1u,
+        job.generation_low, job.generation_high, job.slot,
     );
     transition_bounds[output_index] = build.bounds;
 }

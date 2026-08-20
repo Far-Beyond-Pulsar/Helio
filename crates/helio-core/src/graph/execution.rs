@@ -196,6 +196,43 @@ impl RenderGraph {
         }
     }
 
+    /// Move opted-in same-device persistent pass instances from a previous
+    /// graph into this freshly built graph. The new graph retains its topology
+    /// and transient resources; only compatible concrete pass instances are
+    /// exchanged.
+    pub fn adopt_persistent_passes_from(
+        &mut self,
+        previous: &mut Self,
+        width: u32,
+        height: u32,
+    ) -> usize {
+        let persistent = previous
+            .passes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pass)| {
+                pass.preserve_across_graph_rebuild()
+                    .then_some((index, pass.as_any().type_id()))
+            })
+            .collect::<Vec<_>>();
+        let mut adopted = 0;
+        for (previous_index, type_id) in persistent {
+            let Some(&new_index) = self.pass_index_map.get(&type_id) else {
+                continue;
+            };
+            std::mem::swap(
+                &mut previous.passes[previous_index],
+                &mut self.passes[new_index],
+            );
+            self.passes[new_index].on_resize(&self.device, width, height);
+            adopted += 1;
+        }
+        if adopted != 0 {
+            self.rebuild_gpu_render_bundles();
+        }
+        adopted
+    }
+
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
         self.passes
             .iter_mut()
