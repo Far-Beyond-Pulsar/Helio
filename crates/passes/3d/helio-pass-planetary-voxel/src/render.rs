@@ -657,6 +657,7 @@ pub struct PlanetaryVoxelRenderPass {
     surface_sampler: GpuSurfaceSampler,
     pending: VecDeque<PlanetarySurfaceRequest>,
     surface_requests: BTreeMap<PlanetPageKey, PlanetarySurfaceRequest>,
+    sampling_root_lods: BTreeMap<PlanetId, u8>,
     surface_dependencies: BTreeMap<PlanetPageKey, BTreeSet<PlanetPageKey>>,
     surface_dependency_generations:
         BTreeMap<PlanetPageKey, BTreeMap<PlanetPageKey, SourceGeneration>>,
@@ -1216,6 +1217,7 @@ impl PlanetaryVoxelRenderPass {
             surface_sampler,
             pending: VecDeque::new(),
             surface_requests: BTreeMap::new(),
+            sampling_root_lods: BTreeMap::new(),
             surface_dependencies: BTreeMap::new(),
             surface_dependency_generations: BTreeMap::new(),
             dependency_targets: BTreeMap::new(),
@@ -1671,7 +1673,7 @@ impl PlanetaryVoxelRenderPass {
             .count() as u32;
         let mut missing_candidate_dependencies = BTreeSet::new();
         for candidate in self.candidate_surfaces.values() {
-            if let Ok(dependencies) = candidate.request.required_pages() {
+            if let Ok(dependencies) = self.required_resident_pages(candidate.request) {
                 missing_candidate_dependencies.extend(
                     dependencies
                         .into_iter()
@@ -1735,6 +1737,42 @@ impl PlanetaryVoxelRenderPass {
         Ok(outcome)
     }
 
+    /// Define the bounded canonical sampling domain for one planet. Surface
+    /// extraction treats samples beyond this centered root as vacuum instead
+    /// of asking the terrain authority to materialize impossible halo pages.
+    pub fn set_planet_sampling_root(
+        &mut self,
+        planet: PlanetId,
+        root_lod: u8,
+    ) -> Result<(), PlanetaryRenderError> {
+        if !(1..=62).contains(&root_lod) {
+            return Err(SurfaceSamplingError::RootLod(root_lod).into());
+        }
+        self.sampling_root_lods.insert(planet, root_lod);
+        Ok(())
+    }
+
+    pub fn sampling_dependencies(
+        &self,
+        request: PlanetarySurfaceRequest,
+    ) -> Result<BTreeSet<PlanetPageKey>, PlanetaryRenderError> {
+        self.required_resident_pages(request)
+    }
+
+    fn required_resident_pages(
+        &self,
+        request: PlanetarySurfaceRequest,
+    ) -> Result<BTreeSet<PlanetPageKey>, PlanetaryRenderError> {
+        let root_lod = self
+            .sampling_root_lods
+            .get(&request.key.planet)
+            .copied()
+            .ok_or(PlanetaryRenderError::MissingSamplingRoot(
+                request.key.planet,
+            ))?;
+        Ok(request.required_resident_pages(root_lod)?)
+    }
+
     pub fn apply_upload_batch(
         &mut self,
         device: &wgpu::Device,
@@ -1789,6 +1827,7 @@ impl PlanetaryVoxelRenderPass {
     ) -> Result<bool, PlanetaryRenderError> {
         let removed = self.residency.remove_planet_frame(planet)?;
         self.retire_planet_surface_state(queue, planet)?;
+        self.sampling_root_lods.remove(&planet);
         Ok(removed)
     }
 
@@ -1828,7 +1867,7 @@ impl PlanetaryVoxelRenderPass {
             // Validate the complete sampling neighborhood before mutating the
             // visible frontier. Registration repeats this calculation, but it
             // must not be able to fail after residency has accepted the set.
-            request.required_pages()?;
+            self.required_resident_pages(*request)?;
         }
         let requested_visible = surface_requests
             .iter()
@@ -1875,7 +1914,7 @@ impl PlanetaryVoxelRenderPass {
         let mut pages = BTreeMap::new();
 
         for request in candidates.iter().chain(requested) {
-            for key in request.required_pages()? {
+            for key in self.required_resident_pages(*request)? {
                 let Some(resident) = self.residency.cache().resident(key) else {
                     continue;
                 };
@@ -2389,7 +2428,7 @@ impl PlanetaryVoxelRenderPass {
         request: PlanetarySurfaceRequest,
     ) -> Result<(), PlanetaryRenderError> {
         request.validate()?;
-        request.required_pages()?;
+        self.required_resident_pages(request)?;
         let resident = self
             .residency
             .cache()
@@ -2456,7 +2495,7 @@ impl PlanetaryVoxelRenderPass {
         &mut self,
         request: PlanetarySurfaceRequest,
     ) -> Result<(), PlanetaryRenderError> {
-        let dependencies = request.required_pages()?;
+        let dependencies = self.required_resident_pages(request)?;
         self.remove_surface_dependencies(request.key);
         for dependency in &dependencies {
             self.dependency_targets
@@ -2878,7 +2917,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                 .get(&front.key)
                 .filter(|candidate| surface_request_is_current(Some(&candidate.request), front))
                 .map_or(0, |candidate| candidate.revision);
-            let dependencies = match front.required_pages() {
+            let dependencies = match self.required_resident_pages(front) {
                 Ok(dependencies) => dependencies,
                 Err(error) => {
                     log::error!("planetary surface dependency planning failed: {error}");
@@ -3423,6 +3462,8 @@ pub enum PlanetaryRenderError {
     PendingSurfaceCapacity { maximum: u32 },
     #[error("planet {0:?} has no camera-local render frame")]
     MissingPlanetFrame(PlanetId),
+    #[error("planet {0:?} has no bounded sampling root")]
+    MissingSamplingRoot(PlanetId),
 }
 
 #[cfg(test)]
@@ -3696,6 +3737,7 @@ mod tests {
                 PlanetFrameUniform::from_camera(planet, PlanetPosition::from_lod0_cell([0; 3]), 1),
             )
             .unwrap();
+            pass.set_planet_sampling_root(planet, 6).unwrap();
             pass.apply_upload_batch(
                 &device,
                 &queue,
@@ -3738,10 +3780,12 @@ mod tests {
                 )
                 .unwrap();
             assert!(protected.pages.iter().any(|page| page.key == key));
-            assert!(protected
-                .pages
-                .iter()
-                .any(|page| page.key == replacement_key));
+            assert!(
+                protected
+                    .pages
+                    .iter()
+                    .any(|page| page.key == replacement_key)
+            );
 
             pass.apply_visible_set(&queue, visible(2, 0)).unwrap();
             assert!(
@@ -3821,6 +3865,7 @@ mod tests {
                 PlanetFrameUniform::from_camera(planet, PlanetPosition::from_lod0_cell([0; 3]), 1),
             )
             .unwrap();
+            pass.set_planet_sampling_root(planet, 6).unwrap();
             pass.apply_upload_batch(
                 &device,
                 &queue,

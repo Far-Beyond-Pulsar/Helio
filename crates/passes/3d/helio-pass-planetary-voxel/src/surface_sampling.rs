@@ -1,11 +1,11 @@
 use crate::{
-    transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
+    EXTRACTION_SAMPLE_COUNT, PlanetaryVoxelResidency, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
+    TRANSITION_FACE_SAMPLE_EDGE, transition_face_integer_basis,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{
-    AddressError, GpuPageMeta, PageKey, PlanetId, PlanetPageKey, SourceGeneration, TransitionFace,
-    PAGE_EDGE, TRANSITION_FACE_MASK,
+    AddressError, GpuPageMeta, PAGE_EDGE, PageKey, PlanetId, PlanetPageKey, SourceGeneration,
+    TRANSITION_FACE_MASK, TransitionFace,
 };
 use std::collections::BTreeSet;
 
@@ -101,6 +101,50 @@ impl PlanetarySurfaceRequest {
         }
         Ok(pages)
     }
+
+    /// Resident scalar pages required inside the authoritative centered root.
+    /// Samples outside that root are canonical vacuum and are supplied by the
+    /// gather shader's missing-page value; they must not become terrain pages.
+    pub fn required_resident_pages(
+        self,
+        root_lod: u8,
+    ) -> Result<BTreeSet<PlanetPageKey>, SurfaceSamplingError> {
+        if !(1..=62).contains(&root_lod) {
+            return Err(SurfaceSamplingError::RootLod(root_lod));
+        }
+        Ok(self
+            .required_pages()?
+            .into_iter()
+            .filter(|key| page_inside_centered_root(key.page, root_lod))
+            .collect())
+    }
+}
+
+fn page_inside_centered_root(page: PageKey, root_lod: u8) -> bool {
+    if page.lod >= root_lod {
+        return false;
+    }
+    let Some(minimum) = page.lod0_cell_min().ok() else {
+        return false;
+    };
+    let Some(span) = 1_i64
+        .checked_shl(u32::from(page.lod))
+        .and_then(|scale| scale.checked_mul(PAGE_EDGE as i64))
+    else {
+        return false;
+    };
+    let Some(half_root_span) = 1_i64
+        .checked_shl(u32::from(root_lod - 1))
+        .and_then(|scale| scale.checked_mul(PAGE_EDGE as i64))
+    else {
+        return false;
+    };
+    minimum.into_iter().all(|axis| {
+        axis >= -half_root_span
+            && axis
+                .checked_add(span)
+                .is_some_and(|maximum| maximum <= half_root_span)
+    })
 }
 
 fn insert_page_box(
@@ -463,6 +507,8 @@ pub enum SurfaceSamplingError {
     TransitionMask(u8),
     #[error("LOD0 cannot own a transition surface")]
     FinestLodTransition,
+    #[error("centered sampling root LOD must be in 1..=62, got {0}")]
+    RootLod(u8),
     #[error("surface sampler needs {required} {name}; device provides {available}")]
     DeviceLimit {
         name: &'static str,
@@ -476,7 +522,7 @@ mod tests {
     use super::*;
     use crate::{TRANSITION_FACE_SLAB_EDGE, TRANSITION_FACE_SLAB_LAYERS};
     use helio_planet_voxel_core::{
-        CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
+        CellWord, PAGE_CELL_COUNT, PageUpload, PlanetFrameUniform, PlanetPosition,
     };
     use std::sync::mpsc;
 
@@ -499,6 +545,28 @@ mod tests {
             request.key.planet,
             PageKey::new(4, [-1, 6, -6]),
         )));
+    }
+
+    #[test]
+    fn centered_root_clips_only_canonical_vacuum_halo_pages() {
+        let planet = PlanetId([0x5a; 16]);
+        let request = PlanetarySurfaceRequest {
+            key: PlanetPageKey::new(planet, PageKey::new(3, [-1, -1, -1])),
+            generation: SourceGeneration::new(1, 1),
+            transition_mask: 0,
+            dirty_microbricks: u64::MAX,
+        };
+
+        assert_eq!(request.required_pages().unwrap().len(), 27);
+        let resident = request.required_resident_pages(4).unwrap();
+        assert_eq!(resident.len(), 8);
+        assert!(resident.iter().all(|key| {
+            key.page
+                .page_xyz
+                .into_iter()
+                .all(|axis| (-1..=0).contains(&axis))
+        }));
+        assert!(resident.contains(&request.key));
     }
 
     #[test]

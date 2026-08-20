@@ -112,6 +112,26 @@ impl PlanetTerrainComponentRenderAdapter {
             .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
     }
 
+    fn pass<'a>(
+        &self,
+        renderer: &'a helio::Renderer,
+    ) -> Result<&'a PlanetaryVoxelRenderPass, PlanetaryTerrainRenderError> {
+        renderer
+            .find_pass::<PlanetaryVoxelRenderPass>()
+            .ok_or(PlanetaryTerrainRenderError::MissingPlanetaryPass)
+    }
+
+    pub fn set_planet_sampling_root(
+        &self,
+        renderer: &mut helio::Renderer,
+        planet: pulsar_terrain::PlanetId,
+        root_lod: u8,
+    ) -> Result<(), PlanetaryTerrainRenderError> {
+        Ok(self
+            .pass_mut(renderer)?
+            .set_planet_sampling_root(translate_planet_id(planet), root_lod)?)
+    }
+
     pub fn set_planet_frame(
         &self,
         renderer: &mut helio::Renderer,
@@ -167,6 +187,7 @@ impl PlanetTerrainComponentRenderAdapter {
     /// never promoted into extra draw surfaces.
     pub fn sampling_dependencies(
         &self,
+        renderer: &helio::Renderer,
         sets: &[TerrainVisiblePageSet],
     ) -> Result<
         BTreeSet<(pulsar_terrain::PlanetId, pulsar_terrain::PageKey)>,
@@ -182,10 +203,7 @@ impl PlanetTerrainComponentRenderAdapter {
                     transition_mask: page.transition_mask,
                     dirty_microbricks: u64::MAX,
                 };
-                for dependency in request
-                    .required_pages()
-                    .map_err(PlanetaryRenderError::from)?
-                {
+                for dependency in self.pass(renderer)?.sampling_dependencies(request)? {
                     dependencies.insert((
                         pulsar_terrain::PlanetId(dependency.planet.0),
                         pulsar_terrain::PageKey::new(dependency.page.lod, dependency.page.page_xyz),
@@ -759,23 +777,30 @@ mod tests {
     #[test]
     fn visible_surface_dependencies_include_the_complete_regular_sampling_halo() {
         let planet = TerrainId([3; 16]);
-        let dependencies = PlanetTerrainComponentRenderAdapter::new()
-            .sampling_dependencies(&[TerrainVisiblePageSet {
-                planet_id: planet,
-                frame_index: 44,
-                pages: vec![TerrainVisiblePage {
-                    page_key: TerrainPageKey::new(2, [0, 0, 0]),
-                    planet_generation: 8,
-                    page_generation: 13,
-                    transition_mask: 0,
-                }],
-            }])
-            .unwrap();
+        let request = PlanetarySurfaceRequest {
+            key: PlanetPageKey::new(
+                translate_planet_id(planet),
+                translate_page_key(TerrainPageKey::new(2, [0, 0, 0])).unwrap(),
+            ),
+            generation: SourceGeneration::new(8, 13),
+            transition_mask: 0,
+            dirty_microbricks: u64::MAX,
+        };
+        let dependencies = request.required_resident_pages(6).unwrap();
 
         assert_eq!(dependencies.len(), 27);
-        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [0, 0, 0]))));
-        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [-1, -1, -1]))));
-        assert!(dependencies.contains(&(planet, TerrainPageKey::new(2, [1, 1, 1]))));
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [0, 0, 0]),
+        )));
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [-1, -1, -1]),
+        )));
+        assert!(dependencies.contains(&PlanetPageKey::new(
+            translate_planet_id(planet),
+            PageKey::new(2, [1, 1, 1]),
+        )));
     }
 
     #[test]

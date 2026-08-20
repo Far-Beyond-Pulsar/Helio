@@ -5,11 +5,11 @@ use helio_pass_planetary_voxel::PlanetaryVoxelRenderConfig;
 use helio_planet_voxel_core::VisibilityOutcome;
 use pulsar_reflection::LiveKeySet;
 use pulsar_terrain::{
-    PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
+    CELL_COUNT, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
     TerrainControllerError, TerrainPlanningConfig, TerrainRefinementConfig,
-    TerrainRenderDeltaConfig, TerrainRuntimeConfig, TerrainRuntimeError, TerrainRuntimeHandle,
-    TerrainRequestClass, TerrainStreamingConfig, TerrainStreamingController,
-    TerrainStreamingError, TerrainSubsystem, CELL_COUNT,
+    TerrainRenderDeltaConfig, TerrainRequestClass, TerrainRuntimeConfig, TerrainRuntimeError,
+    TerrainRuntimeHandle, TerrainStreamingConfig, TerrainStreamingController,
+    TerrainStreamingError, TerrainSubsystem,
 };
 use thiserror::Error;
 
@@ -188,6 +188,8 @@ impl PlanetTerrainRuntime {
                 .runtime
                 .planet_definition(planet_id)
                 .ok_or(TerrainRuntimeError::PlanetMissing(planet_id))?;
+            self.adapter
+                .set_planet_sampling_root(renderer, planet_id, definition.root_lod)?;
             let camera = PlanetPosition::from_meters(input.camera_m, definition.lod0_cell_size_mm)?;
             let view = PlanetView::new(
                 camera,
@@ -223,7 +225,10 @@ impl PlanetTerrainRuntime {
             self.adapter
                 .set_planet_frame(renderer, queue, planet_frame)?;
         }
-        for (planet_id, page_key) in self.adapter.sampling_dependencies(&frame.visible_sets)? {
+        for (planet_id, page_key) in self
+            .adapter
+            .sampling_dependencies(renderer, &frame.visible_sets)?
+        {
             if self
                 .runtime
                 .resident_page_generation(planet_id, page_key)

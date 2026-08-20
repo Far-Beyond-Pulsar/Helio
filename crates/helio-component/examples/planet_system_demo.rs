@@ -74,7 +74,6 @@ struct AppState {
     keys: HashSet<KeyCode>,
     mouse_delta: (f32, f32),
     cursor_grabbed: bool,
-    graph_rebuilt: bool,
     frame_index: u64,
     last_frame: Instant,
     last_title_update: Instant,
@@ -112,7 +111,10 @@ impl AppState {
             },
         );
         self.renderer.set_render_size(width, height);
-        self.graph_rebuilt = true;
+        // The renderer applies its graph rebuild at the start of the next
+        // render. Cache loss is detected on the following terrain advance;
+        // invalidating here would republish into the old pass and immediately
+        // discard those uploads during the resize.
     }
 
     fn orientation(&self) -> Quat {
@@ -208,7 +210,7 @@ impl AppState {
             delta_time_s: dt,
             tick: self.frame_index,
             frame_index: self.frame_index,
-            graph_rebuilt: std::mem::take(&mut self.graph_rebuilt),
+            graph_rebuilt: false,
         };
         self.stream_status =
             match self
@@ -421,7 +423,6 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             mouse_delta: (0.0, 0.0),
             cursor_grabbed: false,
-            graph_rebuilt: false,
             frame_index: 0,
             last_frame: Instant::now(),
             last_title_update: Instant::now() - Duration::from_secs(1),
