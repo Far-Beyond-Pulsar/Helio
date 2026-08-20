@@ -33,6 +33,35 @@
 //! rather than trusting a baked model matrix. Everything else in the row
 //! (color, intensity, shadow/god-rays/flare settings) IS trustworthy as-is
 //! -- none of it depends on the object's transform.
+//!
+//! ## Why this is hand-written, not `#[gpu]` on `LightComponent`'s own properties
+//!
+//! `engine_class_derive` later grew a generic version of exactly this
+//! pattern: mark a `#[property]` field `#[gpu]` and it auto-generates this
+//! same shape of companion (`pulsar_world_registry::GpuMirrored`/
+//! `GpuListMirrored`) for you. `LightComponent` doesn't use it, on purpose,
+//! for two reasons specific to this component -- not a gap to eventually
+//! close:
+//!
+//! 1. **The byte layout is externally fixed.** The generator lays its
+//!    mirror out in the SOURCE struct's own field/`#[sub_props]`
+//!    declaration order. `GpuLight`'s layout is fixed by seven separate
+//!    WGSL shader files that hand-mirror it (see that struct's own doc) --
+//!    an auto-generated mirror following `LightComponent`'s property
+//!    grouping would NOT reproduce that layout, and "SceneDB holds a
+//!    byte-identical copy of what the GPU wants" (this file's whole point)
+//!    would stop being true.
+//! 2. **Disabled means absent, not zeroed.** `LightGpuData` deliberately
+//!    doesn't exist on `entity` at all while the light is disabled (see
+//!    `hydrate_light_component`, `runtime.rs`) -- that's what lets
+//!    `sync_light_gpu_data` (`renderer.rs`) treat "does this entity have a
+//!    `LightGpuData`" as the enabled/disabled signal. `GpuMirrored::
+//!    sync_gpu_mirror`'s generated default has no such concept -- it always
+//!    inserts a value, unconditionally.
+//!
+//! Nothing stops a FUTURE primitive with no pre-existing external shader
+//! contract and no "sometimes absent" semantics from using the generic
+//! path directly instead of hand-writing this shape again.
 
 use helio::GpuLight;
 
