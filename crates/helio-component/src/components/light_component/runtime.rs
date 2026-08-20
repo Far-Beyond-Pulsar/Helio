@@ -7,8 +7,27 @@ use pulsar_reflection::{
 
 use super::LightComponent;
 
+/// Drops `owner`'s Helio light, if it has one -- the single teardown path
+/// shared by [`ComponentRuntimeBehavior::sync_component`]'s disabled-light
+/// branch and this class's `on_removed` hook (component removed, or its
+/// owning object despawned; see `#[register_world_component(on_removed =
+/// ...)]` below and `pulsar_world_registry::WorldComponentRegistration::
+/// on_removed`'s doc for why a *hook* is what removal needs -- SceneDB has
+/// no idea what a `LightId` is, only this component does). Idempotent: a
+/// tag with no light is simply not found, not an error -- safe to call
+/// speculatively (`dispatch_component_removals`'s whole-object sweep calls
+/// every registered class's `on_removed` for every despawned object,
+/// whether or not that object ever actually had a `LightComponent`).
+fn remove_light_by_tag(owner: &RuntimeComponentOwner, context: &mut dyn ComponentRuntimeContext) {
+    let tag = scene_id_to_tag(owner.scene_object_id);
+    let scene = get_subsystem!(context, Renderer).scene_mut();
+    if let Some(id) = scene.light_by_tag(tag) {
+        let _ = scene.remove_light(id);
+    }
+}
+
 // Phase B5 (Pulsar-Native#556).
-#[register_world_component]
+#[register_world_component(on_removed = remove_light_by_tag)]
 #[register_runtime_behavior]
 impl ComponentRuntimeBehavior for LightComponent {
     const CLASS_NAME: &'static str = "LightComponent";
@@ -19,20 +38,18 @@ impl ComponentRuntimeBehavior for LightComponent {
         component: &Self,
         context: &mut dyn ComponentRuntimeContext,
     ) {
-        let tag = scene_id_to_tag(owner.scene_object_id);
-        let scene = get_subsystem!(context, Renderer).scene_mut();
-
         // `to_gpu_light` is the single source of truth for this translation --
         // see its doc for why this exists as a standalone method rather than
         // inline logic here.
         match component.to_gpu_light(owner.position) {
             None => {
-                // Disabled — drop the light we previously inserted, if any.
-                if let Some(id) = scene.light_by_tag(tag) {
-                    let _ = scene.remove_light(id);
-                }
+                // Disabled — same teardown as a real removal (see
+                // `remove_light_by_tag`'s doc).
+                remove_light_by_tag(owner, context);
             }
             Some(gpu) => {
+                let tag = scene_id_to_tag(owner.scene_object_id);
+                let scene = get_subsystem!(context, Renderer).scene_mut();
                 // Helio owns the scene: ask it whether we already have a light for
                 // this object rather than tracking handles editor-side.
                 match scene.light_by_tag(tag) {

@@ -9,10 +9,21 @@ impl LightComponent {
     ///
     /// Single source of truth for the `LightComponent` -> `GpuLight` mapping --
     /// factored out of what used to be inline logic in `runtime.rs`'s
-    /// `sync_component` so that path and any future SceneDB-driven bridge
-    /// (the same `#[gpu]`-mirrored-field pattern `StaticMeshComponent`
-    /// already uses, Pulsar-Native#561 Phase D) call the exact same code
-    /// and can never silently drift apart.
+    /// `sync_component`, so any other call site (`sync_component` itself,
+    /// today) uses the exact same code and can never silently drift apart.
+    ///
+    /// Unlike `StaticMeshComponent`'s `vertices`/`indices` (Pulsar-Native
+    /// #561 Phase D), this data does NOT go through a `#[gpu]`-mirrored
+    /// SceneDB buffer: `GpuLight` bakes in world-space `position` (transform-
+    /// dependent, recomputed every frame from `Transform`, never a hydrate-
+    /// time-stable payload the way mesh geometry is) and Helio needs its own
+    /// derived, compacted structure regardless (shadow-atlas slot assignment,
+    /// the movable/static bake partition) that a raw per-entity mirror
+    /// wouldn't replace. What #561 *does* still buy this class: no more
+    /// hand-rolled dual-state sync -- `LightComponent::on_removed`
+    /// (`runtime.rs`) is the real fix, tearing down `sync_component`'s
+    /// Helio-side light the moment `World`'s own `ChangeTracker` reports the
+    /// component gone, instead of a Helio-side cache nothing ever swept.
     ///
     /// Returns `None` when the light is disabled (`general.enabled == false`) --
     /// the caller is responsible for removing any previously-inserted Helio light
