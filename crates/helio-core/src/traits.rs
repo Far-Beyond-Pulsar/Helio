@@ -490,6 +490,17 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
+    /// Keep this pass instance when the renderer rebuilds the graph on the
+    /// same device. Opt in only when graph-sized resources are handled by
+    /// [`Self::on_resize`] and the pass declarations remain compatible with
+    /// the freshly built pass of the same concrete type.
+    ///
+    /// This preserves expensive persistent GPU caches while allowing the graph
+    /// to recreate transient, resolution-dependent resources around them.
+    fn preserve_across_graph_rebuild(&self) -> bool {
+        false
+    }
+
     /// Updates the renderer-wide debug visualisation mode.
     ///
     /// Passes that expose [`debug_views`](Self::debug_views) must override this

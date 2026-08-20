@@ -2869,6 +2869,10 @@ impl PlanetaryVoxelRenderPass {
 }
 
 impl RenderPass for PlanetaryVoxelRenderPass {
+    fn preserve_across_graph_rebuild(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "PlanetaryVoxel"
     }
