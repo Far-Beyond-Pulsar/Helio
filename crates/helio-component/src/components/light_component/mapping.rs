@@ -1,56 +1,56 @@
-use helio::{GpuLight, LightType as HelioLightType};
+use helio::GpuLight;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::{LightComponent, LightComponentGpuMirror, LightType};
+use super::LightComponent;
 
-impl LightComponentGpuMirror {
+impl super::LightComponentGpuMirror {
     /// Translate this `#[gpu]`-mirrored companion into Helio's GPU light
     /// representation -- single source of truth for the `LightComponent` ->
     /// `GpuLight` mapping (Pulsar-Native#561).
     ///
-    /// Reads ONLY the fields `runtime.rs`'s sub-props marked `#[gpu]`
-    /// (`general.light_type`, `intensity.intensity`, `color.color`,
-    /// `attenuation.{range,inner_cone_angle,outer_cone_angle}`, `shadows.
-    /// cast_shadows`) -- every other `LightComponent` property (falloff
-    /// curve shaping, volumetrics, light functions, performance/mobile
-    /// settings, ...) has no `GpuLight` field to land in and stays plain
-    /// `#[property]`-only, absent from this mirror entirely.
+    /// Every field this reads (`general.light_type`, `intensity.intensity`,
+    /// `color.color`, `attenuation.{range,inner_cone_angle,outer_cone_
+    /// angle}`, `shadows.cast_shadows`) is ALREADY in `GpuLight`'s own units
+    /// and value space by the time it lands here -- degrees->radians and
+    /// the `LightType`->`u32`/`bool`->shadow-request-sentinel remaps happen
+    /// once, upload-time, via each field's own `#[gpu(as = .., with = ..)]`
+    /// (`sub_props/attenuation.rs`/`general.rs`/`shadows.rs`), not in this
+    /// function. What's left here is ONLY reshaping already-transformed
+    /// values into `GpuLight`'s packed-vec4 field grouping (a GPU memory-
+    /// layout choice, unrelated to units or semantics) plus the one piece
+    /// that structurally cannot happen any earlier:
     ///
     /// `position_range`'s xyz is always `[0.0; 0.0; 0.0]` here -- `GpuLight`
-    /// bakes in world-space position, which is transform-dependent and has
-    /// no business being cached in a mirror that only updates on a genuine
-    /// property edit (an object can move without any `LightComponent`
-    /// property changing, which would never re-trigger a mirror rebuild).
-    /// `HelioRenderer::rebuild_light_frame` overwrites those three
-    /// components from the live `Transform` before ever using the result --
-    /// the same "model-space payload + per-frame transform combine" split
-    /// `rebuild_static_mesh_frame` already uses for mesh geometry.
+    /// bakes in world-space position, which lives on a COMPLETELY SEPARATE
+    /// component (`Transform`, updated every frame the object moves, on no
+    /// schedule related to this component's own property edits) and simply
+    /// doesn't exist yet at the moment THIS mirror gets built. No upload-
+    /// time transform can pre-combine two values produced by two
+    /// independent systems on two independent schedules -- `HelioRenderer::
+    /// rebuild_light_frame` is the one place both are actually available at
+    /// once, and overwrites these three components from the live `Transform`
+    /// right before use, the same "model-space payload + per-frame
+    /// transform combine" split `rebuild_static_mesh_frame` already uses
+    /// for mesh geometry.
     ///
     /// Called only for an ENABLED light -- `runtime.rs`'s hydrate checks
     /// `general.enabled` itself and skips `sync_gpu_mirror` (so this mirror
     /// is never even inserted) when it's `false`, the same "disabled means
     /// absent, not zeroed" contract this type has always had.
     pub fn to_helio_gpu_light(&self) -> GpuLight {
-        let helio_type = match self.general.light_type.0 {
-            LightType::Directional => HelioLightType::Directional,
-            LightType::Point => HelioLightType::Point,
-            LightType::Spot => HelioLightType::Spot,
-            LightType::Area => HelioLightType::Point, // helio has no Area; nearest equivalent
-        };
-
         GpuLight {
             position_range: [0.0, 0.0, 0.0, self.attenuation.range.0],
-            direction_outer: [0.0, -1.0, 0.0, self.attenuation.outer_cone_angle.0.to_radians()],
+            direction_outer: [0.0, -1.0, 0.0, self.attenuation.outer_cone_angle.0],
             color_intensity: [
                 self.color.color.0[0],
                 self.color.color.0[1],
                 self.color.color.0[2],
                 self.intensity.intensity.0,
             ],
-            shadow_index: if self.shadows.cast_shadows.0 { 0 } else { u32::MAX },
-            light_type: helio_type as u32,
-            inner_angle: self.attenuation.inner_cone_angle.0.to_radians(),
+            shadow_index: self.shadows.cast_shadows.0,
+            light_type: self.general.light_type.0,
+            inner_angle: self.attenuation.inner_cone_angle.0,
             _pad: 0,
             ..Default::default()
         }
@@ -92,6 +92,8 @@ impl LightComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::LightType;
+    use helio::LightType as HelioLightType;
     use pulsar_world_registry::GpuMirrored;
 
     // NOTE: "a disabled light produces no GpuLight" is no longer this
