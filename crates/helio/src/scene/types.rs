@@ -137,6 +137,27 @@ pub struct StaticMeshRenderInput {
     pub draw: GpuDrawCall,
 }
 
+/// Transient light render input supplied by the owning SceneDB world -- the
+/// light equivalent of [`StaticMeshRenderInput`] (Pulsar-Native#561:
+/// `LightComponent` fully normalized onto SceneDB's `#[gpu]` mirror, no more
+/// per-entity `insert_light`/`update_light`/`remove_light`/tag-lookup
+/// bookkeeping on the caller's side).
+///
+/// This is deliberately not stored in [`Scene`] either: [`Scene::
+/// rebuild_light_instances`] consumes a fresh slice each frame and retains
+/// only the resulting (shadow-index-annotated, movability-filtered) `GpuLight`
+/// array `flush()` already builds -- same "transient input, persistent
+/// derived output" split `StaticMeshRenderInput` uses.
+#[derive(Debug, Clone, Copy)]
+pub struct LightRenderInput {
+    pub light: GpuLight,
+    /// Application-defined tag -- see [`ObjectDescriptor::user_tag`]. Lets
+    /// picking/other consumers resolve a rendered light back to its owning
+    /// SceneDB entity, the same way `StaticMeshRenderInput::user_tag` does
+    /// for objects.
+    pub user_tag: u64,
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Internal Record Types (pub(crate) - not part of public API)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
