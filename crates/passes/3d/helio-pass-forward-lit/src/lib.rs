@@ -36,7 +36,7 @@ pub struct ForwardLitPass {
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
     globals_buf: wgpu::Buffer,
@@ -122,6 +122,26 @@ impl ForwardLitPass {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -398,6 +418,12 @@ impl RenderPass for ForwardLitPass {
         let instances_ptr = ctx.scene.instances as *const _ as usize;
         let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
         let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
+        // `None` (mirror not attached / no entity has a Transform yet) folds
+        // to 0, same as the `cluster` map-or-0 below -- distinct from any
+        // real buffer's address, so it still forces a rebind the moment a
+        // real Transform buffer shows up.
+        let transforms_ptr = ctx.scene.transforms.map(|b| b as *const _ as usize).unwrap_or(0);
 
         let cluster = ctx.resources.cluster_light_grid.get();
         let tile_lists_ptr = cluster
@@ -414,6 +440,8 @@ impl RenderPass for ForwardLitPass {
             lights_ptr,
             tile_lists_ptr,
             tile_counts_ptr,
+            light_entity_indices_ptr,
+            transforms_ptr,
         );
         if self.bind_group_0_key != Some(bg0_key) {
             let cluster_ref = ctx.resources.cluster_light_grid.get();
@@ -424,6 +452,14 @@ impl RenderPass for ForwardLitPass {
             let tile_counts = cluster_ref
                 .map(|c| c.tile_light_counts)
                 .unwrap_or(fallback_buf);
+            // Same fallback idea as `tile_lists`/`tile_counts` above: before
+            // `Scene::rebind_transform_buffer` has ever been called (e.g.
+            // the very first frame), bind *some* valid buffer so bind-group
+            // creation can't fail -- the shader only reads it through
+            // `light_entity_indices`, which is empty until real lights with
+            // real transforms exist, so this fallback is never actually
+            // dereferenced at a live light's index in practice.
+            let transforms = ctx.scene.transforms.unwrap_or(fallback_buf);
 
             log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -457,6 +493,14 @@ impl RenderPass for ForwardLitPass {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: tile_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: ctx.scene.light_entity_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: transforms.as_entire_binding(),
                     },
                 ],
             }));
