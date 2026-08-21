@@ -6,12 +6,73 @@
 
 use helio_core::GpuLight;
 
+use crate::arena::DenseArena;
 use crate::handles::LightId;
 
 use super::super::errors::{invalid, Result};
-use super::super::types::LightRecord;
+use super::super::types::{LightRecord, LightRenderInput};
 
 impl super::super::Scene {
+    /// Wholesale-replaces the scene's light list from a transient, SceneDB-
+    /// owned snapshot -- the light equivalent of [`Scene::
+    /// rebuild_static_mesh_instances`] (Pulsar-Native#561: `LightComponent`
+    /// fully normalized onto SceneDB's `#[gpu]` mirror). No per-entity
+    /// `insert_light`/`update_light`/`remove_light`/`lights_by_tag` lookup
+    /// bookkeeping happens here or needs to happen on the caller's side --
+    /// every light present in `inputs` this call IS the complete real-time
+    /// light set for this frame, full stop. A light absent from `inputs`
+    /// this call (its `LightComponent` was disabled, removed, or its owning
+    /// object despawned) simply doesn't get re-inserted -- no explicit
+    /// teardown signal needed, the same "absence is removal" property
+    /// `rebuild_static_mesh_instances` already has for objects.
+    ///
+    /// Every light inserted this way is [`libhelio::Movability::Movable`] --
+    /// `LightComponent` has no movability/static-baking concept of its own,
+    /// and this call's whole point is BEING the per-frame rebuild, so a
+    /// "baked once, never touched again" light has no way to reach it in the
+    /// first place. [`Scene::insert_light_with_movability`] (unchanged) is
+    /// still how a non-SceneDB-driven caller (an editor tool, a baking pass)
+    /// inserts a genuinely static light into a `Scene` that ISN'T also
+    /// driven by this call.
+    ///
+    /// `flush()`'s shadow-atlas importance-scoring/movability-filter/
+    /// per-caster dirty-hash logic needs no changes at all: it already reads
+    /// from `self.lights` (this call's target) regardless of how that arena
+    /// got populated -- `flush()` doesn't know or care that this call
+    /// replaced it wholesale instead of individual `insert_light`/
+    /// `update_light`/`remove_light` calls accumulating it over time.
+    ///
+    /// # Warning
+    ///
+    /// Calling this on a `Scene` that ALSO has independently-inserted
+    /// lights (via [`Scene::insert_light`]/[`Scene::
+    /// insert_light_with_movability`] from some other caller) wholesale-
+    /// replaces those too -- same caveat `rebuild_static_mesh_instances`
+    /// already carries for objects. Don't mix the two insertion models on
+    /// one `Scene`.
+    pub fn rebuild_light_instances(&mut self, inputs: &[LightRenderInput]) {
+        let mut lights: DenseArena<LightRecord, LightId> = DenseArena::new();
+        let mut lights_by_tag = std::collections::HashMap::new();
+        for input in inputs {
+            let (handle, _dense_index) = lights.insert(LightRecord {
+                gpu: input.light,
+                movability: libhelio::Movability::Movable,
+                user_tag: input.user_tag,
+                // Recomputed correctly by flush()'s movability-filter pass
+                // (every record here is Movable, so it always survives that
+                // filter) -- an initial value here is never actually read
+                // before flush() overwrites it.
+                gpu_index: 0,
+                entity_index: input.entity_index,
+            });
+            if input.user_tag != 0 {
+                lights_by_tag.insert(input.user_tag, handle);
+            }
+        }
+        self.lights = lights;
+        self.lights_by_tag = lights_by_tag;
+        self.lights_dirty = true;
+    }
     /// Insert a light into the scene.
     ///
     /// Adds the light to the dense arena and uploads it to the GPU light storage buffer.
@@ -67,6 +128,9 @@ impl super::super::Scene {
             movability,
             user_tag,
             gpu_index,
+            // Meaningless here -- this is the general-purpose insertion
+            // API, not SceneDB-driven. See LightRecord::entity_index's doc.
+            entity_index: 0,
         });
         debug_assert_eq!(gpu_index as usize, dense_index);
 
@@ -207,6 +271,135 @@ impl super::super::Scene {
         self.lights_dirty = true;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::Scene;
+    use super::LightRenderInput;
+    use helio_core::GpuLight;
+
+    fn create_test_device() -> (std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("No adapter found");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
+        .expect("Failed to create device");
+
+        (std::sync::Arc::new(device), std::sync::Arc::new(queue))
+    }
+
+    fn light(color: [f32; 4]) -> GpuLight {
+        GpuLight { color_intensity: color, ..Default::default() }
+    }
+
+    #[test]
+    fn rebuild_populates_lights_readable_by_iter_and_tag() {
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        scene.rebuild_light_instances(&[
+            LightRenderInput { light: light([1.0, 0.0, 0.0, 10.0]), user_tag: 111, entity_index: 11 },
+            LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 },
+        ]);
+
+        let mut seen: Vec<(u64, [f32; 4])> = scene.iter_lights().map(|(_, l, tag)| (tag, l.color_intensity)).collect();
+        seen.sort_by_key(|&(tag, _)| tag);
+        assert_eq!(seen, vec![(111, [1.0, 0.0, 0.0, 10.0]), (222, [0.0, 1.0, 0.0, 20.0])]);
+
+        let id = scene.light_by_tag(222).expect("tag must resolve via light_by_tag");
+        assert_eq!(scene.get_light(id).unwrap().color_intensity, [0.0, 1.0, 0.0, 20.0]);
+    }
+
+    #[test]
+    fn a_light_absent_from_the_next_rebuild_is_gone_no_explicit_removal_needed() {
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        scene.rebuild_light_instances(&[
+            LightRenderInput { light: light([1.0, 0.0, 0.0, 10.0]), user_tag: 111, entity_index: 11 },
+            LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 },
+        ]);
+        assert_eq!(scene.iter_lights().count(), 2);
+
+        // Tag 111's light disappears (disabled/removed on the SceneDB side) --
+        // the next rebuild simply doesn't include it, same as a despawned
+        // entity vanishing from a World::query result.
+        scene.rebuild_light_instances(&[LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 }]);
+
+        assert!(scene.light_by_tag(111).is_none(), "absence from the rebuild must be enough, no explicit remove_light call needed");
+        assert!(scene.light_by_tag(222).is_some());
+        assert_eq!(scene.iter_lights().count(), 1);
+    }
+
+    #[test]
+    fn flush_still_runs_shadow_assignment_correctly_against_a_rebuilt_light_list() {
+        // The real proof this integrates cleanly with the PRE-EXISTING
+        // shadow-atlas importance-scoring logic in flush() -- that logic
+        // reads from `self.lights` regardless of whether individual
+        // insert_light calls populated it (the old way) or one
+        // rebuild_light_instances call did (this test).
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        // A bright, large-range light -- must win a shadow atlas slot.
+        let mut bright = light([1.0, 1.0, 1.0, 1000.0]);
+        bright.position_range[3] = 100.0; // range
+        bright.shadow_index = 0; // requests shadows (anything != u32::MAX)
+
+        scene.rebuild_light_instances(&[LightRenderInput { light: bright, user_tag: 42, entity_index: 4 }]);
+        scene.flush();
+
+        let id = scene.light_by_tag(42).expect("light must still be present after flush");
+        let after = scene.get_light(id).expect("light must be readable after flush");
+        assert_ne!(after.shadow_index, u32::MAX, "a lone, shadow-requesting light must win a shadow atlas slot");
+    }
+
+    #[test]
+    fn entity_indices_stay_in_lockstep_with_lights_through_flush() {
+        // The whole point of GpuLightEntityIndexBuffer: a shading pass reads
+        // `lights[i]` and `light_entity_indices[i]` with the SAME index `i`
+        // to look up that light's live Transform. If flush()'s movability
+        // filter ever reordered/dropped one array without the other, every
+        // light's position lookup would silently point at the wrong entity.
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        scene.rebuild_light_instances(&[
+            LightRenderInput { light: light([1.0, 0.0, 0.0, 1.0]), user_tag: 111, entity_index: 55 },
+            LightRenderInput { light: light([0.0, 1.0, 0.0, 1.0]), user_tag: 222, entity_index: 77 },
+            LightRenderInput { light: light([0.0, 0.0, 1.0, 1.0]), user_tag: 333, entity_index: 99 },
+        ]);
+        scene.flush();
+
+        assert_eq!(scene.gpu_scene.lights.len(), 3);
+        assert_eq!(scene.gpu_scene.light_entity_indices.len(), 3);
+
+        let lights = scene.gpu_scene.lights.as_slice();
+        let entity_indices = scene.gpu_scene.light_entity_indices.as_slice();
+        for (light, &entity_index) in lights.iter().zip(entity_indices.iter()) {
+            let expected = match light.color_intensity {
+                [1.0, 0.0, 0.0, _] => 55,
+                [0.0, 1.0, 0.0, _] => 77,
+                [0.0, 0.0, 1.0, _] => 99,
+                other => panic!("unexpected light color in this test: {other:?}"),
+            };
+            assert_eq!(entity_index, expected, "light/entity_index pair at the same buffer position must agree");
+        }
     }
 }
 

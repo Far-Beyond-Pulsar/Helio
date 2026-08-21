@@ -2,10 +2,31 @@ use engine_class_derive::engine_class;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// `#[gpu(as = u32, with = ...)]` target for `cast_shadows` -- encodes the
+/// "does this light request shadows at all" flag as `helio::GpuLight::
+/// shadow_index`'s own request/disabled sentinel (`0` = requests shadows,
+/// `u32::MAX` = explicitly disabled), computed once at mirror-build time.
+///
+/// Not the FINAL shadow atlas slot: `Scene::flush()`'s importance-scoring
+/// pass overwrites this to the light's real assigned slot (or leaves it at
+/// `u32::MAX` if the light loses the budget) every frame, by design -- that
+/// value depends on every OTHER currently-live light's own score, so it
+/// structurally cannot be computed per-entity, at upload time, no matter
+/// how the byte layout is chosen. This function only ever encodes the
+/// request bit; see `Scene::flush`'s own doc for the rest.
+pub fn cast_shadows_to_shadow_request(cast_shadows: bool) -> u32 {
+    if cast_shadows {
+        0
+    } else {
+        u32::MAX
+    }
+}
+
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Shadows", category_color = "#A78BFA", default_collapsed = true)]
 pub struct ShadowLightProps {
     #[property(category = "Shadows")]
+    #[gpu(as = u32, with = cast_shadows_to_shadow_request)]
     pub cast_shadows: bool,
     #[property(category = "Shadows")]
     pub cast_static_shadows: bool,

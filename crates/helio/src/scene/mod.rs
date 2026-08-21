@@ -94,6 +94,6 @@ pub use foliage::{
 pub use errors::*;
 pub use portals::{portal_pose_facing, PortalDescriptor};
 pub use sublevels::SublevelDescriptor;
-pub use types::{ObjectDescriptor, PickableObject, StaticMeshRenderInput, VoxelVolumeDescriptor};
+pub use types::{LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput, VoxelVolumeDescriptor};
 pub use voxel::VoxelMode;
 

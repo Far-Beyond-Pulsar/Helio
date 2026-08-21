@@ -56,7 +56,7 @@ pub use renderer::{
 pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
     portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer,
-    FoliageTypeDescriptor, GpuFoliageInteractor, ObjectDescriptor, PickableObject,
+    FoliageTypeDescriptor, GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject,
     PortalDescriptor, ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult,
     Scene, SceneActor, SceneActorId, SceneActorTrait, SceneError, StaticMeshRenderInput,
     SublevelDescriptor, VoxelMode,
