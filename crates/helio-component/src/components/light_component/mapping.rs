@@ -22,7 +22,7 @@ impl LightComponentGpuMirror {
     /// no business being cached in a mirror that only updates on a genuine
     /// property edit (an object can move without any `LightComponent`
     /// property changing, which would never re-trigger a mirror rebuild).
-    /// `HelioRenderer::sync_light_gpu_data` overwrites those three
+    /// `HelioRenderer::rebuild_light_frame` overwrites those three
     /// components from the live `Transform` before ever using the result --
     /// the same "model-space payload + per-frame transform combine" split
     /// `rebuild_static_mesh_frame` already uses for mesh geometry.
@@ -113,7 +113,7 @@ mod tests {
         let gpu = light.to_gpu_mirror().to_helio_gpu_light();
 
         // xyz is always the zeroed placeholder here -- HelioRenderer::
-        // sync_light_gpu_data is the one place that overwrites it from the
+        // rebuild_light_frame is the one place that overwrites it from the
         // live Transform (see this fn's own doc).
         assert_eq!(gpu.position_range, [0.0, 0.0, 0.0, 10.0]);
         assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0]);

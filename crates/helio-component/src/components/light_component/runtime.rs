@@ -1,30 +1,8 @@
 use engine_class_derive::{register_runtime_behavior, register_world_component};
-use helio::Renderer;
-use pulsar_reflection::{
-    get_subsystem, scene_id_to_tag, ComponentRuntimeBehavior, ComponentRuntimeContext,
-    RuntimeComponentOwner,
-};
+use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use pulsar_world_registry::GpuMirrored;
 
 use super::LightComponent;
-
-/// Drops `owner`'s Helio light, if it has one -- the single teardown path
-/// for this class's `on_removed` hook (component removed, or its owning
-/// object despawned; see `#[register_world_component(on_removed = ...)]`
-/// below and `pulsar_world_registry::WorldComponentRegistration::
-/// on_removed`'s doc for why a *hook* is what removal needs -- SceneDB has
-/// no idea what a `LightId` is, only this component does). Idempotent: a
-/// tag with no light is simply not found, not an error -- safe to call
-/// speculatively (`dispatch_component_removals`'s whole-object sweep calls
-/// every registered class's `on_removed` for every despawned object,
-/// whether or not that object ever actually had a `LightComponent`).
-fn remove_light_by_tag(owner: &RuntimeComponentOwner, context: &mut dyn ComponentRuntimeContext) {
-    let tag = scene_id_to_tag(owner.scene_object_id);
-    let scene = get_subsystem!(context, Renderer).scene_mut();
-    if let Some(id) = scene.light_by_tag(tag) {
-        let _ = scene.remove_light(id);
-    }
-}
 
 /// Custom hydrate (Pulsar-Native#561, normalized onto the generic auto-
 /// mirror system): parses `LightComponent` as the auto-generated hydrate
@@ -69,8 +47,14 @@ fn remove_light_component(world: &mut pulsar_scenedb::World, entity: pulsar_scen
     LightComponent::remove_gpu_mirror(world, entity);
 }
 
-// Phase B5 (Pulsar-Native#556).
-#[register_world_component(hydrate = hydrate_light_component, remove = remove_light_component, on_removed = remove_light_by_tag)]
+// Phase B5 (Pulsar-Native#556). No `on_removed` hook: `HelioRenderer::
+// rebuild_light_frame` (`renderer.rs`) rebuilds Helio's ENTIRE light list
+// from a fresh SceneDB query every frame, so a removed/disabled light
+// simply has no `LightComponentGpuMirror` row for that query to find --
+// absence is the removal signal, nothing left for a teardown hook to do
+// (unlike before this component was normalized, when Helio held a
+// persistent `LightId` actor that needed an explicit `remove_light` call).
+#[register_world_component(hydrate = hydrate_light_component, remove = remove_light_component)]
 #[register_runtime_behavior]
 impl ComponentRuntimeBehavior for LightComponent {
     const CLASS_NAME: &'static str = "LightComponent";
@@ -87,12 +71,13 @@ impl ComponentRuntimeBehavior for LightComponent {
         // Helio directly -- that translation now happens once, at hydrate
         // time, into the auto-generated `#[gpu]`-mirrored
         // `LightComponentGpuMirror` companion (`hydrate_light_component`
-        // above), which SceneDB keeps in sync automatically. Resolving that
-        // already-hydrated data into a Helio actor needs the entity's row
-        // (`HelioRenderer::sync_light_gpu_data`, `renderer.rs`) -- this
-        // trait's `&Self`-only signature has no way to reach it,
-        // deliberately (see `StaticMeshComponent::sync_component`'s doc for
-        // the same structural reason).
+        // above), which SceneDB keeps in sync automatically. Resolving
+        // every entity's already-hydrated mirror into Helio's actual light
+        // list happens once per frame, for every light at once
+        // (`HelioRenderer::rebuild_light_frame`, `renderer.rs`) -- this
+        // trait's `&Self`-only, one-component-at-a-time signature has no
+        // way to do that, deliberately (see `StaticMeshComponent::
+        // sync_component`'s doc for the same structural reason).
     }
 }
 
