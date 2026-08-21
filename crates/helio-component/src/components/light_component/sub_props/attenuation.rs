@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[category("Attenuation", category_color = "#6EC5FF")]
 pub struct AttenuationLightProps {
     #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Attenuation")]
+    #[gpu]
     pub range: f32,
     #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Attenuation")]
     pub falloff_start: f32,
@@ -16,8 +17,10 @@ pub struct AttenuationLightProps {
     #[property(min = 0.0, max = 200.0, step = 0.1, category = "Attenuation")]
     pub source_length: f32,
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
+    #[gpu]
     pub inner_cone_angle: f32,
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
+    #[gpu]
     pub outer_cone_angle: f32,
 }
 

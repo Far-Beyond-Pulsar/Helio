@@ -12,6 +12,7 @@ pub struct GeneralLightProps {
     #[property(category = "General")]
     pub affects_world: bool,
     #[property(category = "General")]
+    #[gpu]
     pub light_type: LightType,
     #[property(min = 0.0, max = 255.0, step = 1.0, category = "General")]
     pub light_channels: u64,

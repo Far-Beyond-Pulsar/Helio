@@ -4,8 +4,9 @@ use pulsar_reflection::{
     get_subsystem, scene_id_to_tag, ComponentRuntimeBehavior, ComponentRuntimeContext,
     RuntimeComponentOwner,
 };
+use pulsar_world_registry::GpuMirrored;
 
-use super::{LightComponent, LightGpuData};
+use super::LightComponent;
 
 /// Drops `owner`'s Helio light, if it has one -- the single teardown path
 /// for this class's `on_removed` hook (component removed, or its owning
@@ -25,19 +26,22 @@ fn remove_light_by_tag(owner: &RuntimeComponentOwner, context: &mut dyn Componen
     }
 }
 
-/// Custom hydrate (Pulsar-Native#561): parses `LightComponent` as the
-/// auto-generated hydrate would, AND keeps its `#[gpu]`-mirrored companion
-/// `LightGpuData` (`gpu_data.rs`) in step -- inserted when the light is
-/// enabled, removed when it isn't (mirroring `to_gpu_light`'s existing
-/// `None` = disabled contract exactly, so "disabled" and "absent" stay the
-/// same state for `LightGpuData` the way they already are for the Helio
-/// actor `HelioRenderer::sync_light_gpu_data` maintains from it).
-///
-/// `to_gpu_light` is called with a placeholder `[0.0; 3]` position -- this
-/// is a hydrate-time computation, position is transform-dependent (see
-/// `gpu_data.rs`'s doc), and `sync_light_gpu_data` overwrites `position_
-/// range`'s xyz from the live `Transform` before ever using this value, so
-/// whatever's written here is never actually read as a position.
+/// Custom hydrate (Pulsar-Native#561, normalized onto the generic auto-
+/// mirror system): parses `LightComponent` as the auto-generated hydrate
+/// would, AND keeps its auto-generated `#[gpu]`-mirrored companion
+/// (`LightComponentGpuMirror`, produced by `#[engine_class]` from the
+/// `#[gpu]`-marked fields in `general`/`intensity`/`color`/`attenuation`/
+/// `shadows`, `component.rs`/`sub_props/*.rs`) in step -- inserted (via
+/// `GpuMirrored::sync_gpu_mirror`) when the light is enabled, removed (via
+/// `GpuMirrored::remove_gpu_mirror`) when it isn't. This custom hydrate
+/// still exists ONLY for that conditional: `sync_gpu_mirror`'s own default
+/// always inserts unconditionally (see that trait's doc), and "disabled
+/// means absent, not present-with-meaningless-values" is business logic
+/// specific to this component, not something any generic default could
+/// know -- everything else about how the mirror itself is built and
+/// attached goes through the exact same `GpuMirrored` trait every other
+/// `#[gpu]`-marked component uses, no bespoke insert/remove of a hand-
+/// rolled companion type anymore.
 fn hydrate_light_component(
     world: &mut pulsar_scenedb::World,
     entity: pulsar_scenedb::Entity,
@@ -45,13 +49,10 @@ fn hydrate_light_component(
 ) -> Result<(), String> {
     let parsed: LightComponent = serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
 
-    match parsed.to_gpu_light([0.0; 3]) {
-        Some(gpu) => {
-            world.insert(entity, LightGpuData { row: gpu.into() });
-        }
-        None => {
-            let _ = world.remove::<LightGpuData>(entity);
-        }
+    if parsed.general.enabled {
+        parsed.sync_gpu_mirror(world, entity);
+    } else {
+        LightComponent::remove_gpu_mirror(world, entity);
     }
 
     world.insert(entity, parsed);
@@ -60,12 +61,12 @@ fn hydrate_light_component(
 
 /// Custom remove (Pulsar-Native#561): drops both halves -- the plain
 /// `world.remove::<LightComponent>(entity)` `#[register_world_component]`
-/// would otherwise generate leaves `LightGpuData` orphaned (a real, if
+/// would otherwise generate leaves the GPU mirror orphaned (a real, if
 /// GPU-storage-only, leak: nothing else ever removes it, since it isn't
 /// itself a registered class `dispatch_component_removals` knows to sweep).
 fn remove_light_component(world: &mut pulsar_scenedb::World, entity: pulsar_scenedb::Entity) {
     let _ = world.remove::<LightComponent>(entity);
-    let _ = world.remove::<LightGpuData>(entity);
+    LightComponent::remove_gpu_mirror(world, entity);
 }
 
 // Phase B5 (Pulsar-Native#556).
@@ -84,20 +85,21 @@ impl ComponentRuntimeBehavior for LightComponent {
         // `StaticMeshComponent::sync_component`'s own doc for why). This
         // used to translate `component` into a `GpuLight` and push it into
         // Helio directly -- that translation now happens once, at hydrate
-        // time, into the `#[gpu]`-mirrored `LightGpuData` companion
-        // (`hydrate_light_component` above), which SceneDB keeps in sync
-        // automatically. Resolving that already-hydrated data into a Helio
-        // actor needs the entity's row (`HelioRenderer::
-        // sync_light_gpu_data`, `renderer.rs`) -- this trait's `&Self`-only
-        // signature has no way to reach it, deliberately (see
-        // `StaticMeshComponent::sync_component`'s doc for the same
-        // structural reason).
+        // time, into the auto-generated `#[gpu]`-mirrored
+        // `LightComponentGpuMirror` companion (`hydrate_light_component`
+        // above), which SceneDB keeps in sync automatically. Resolving that
+        // already-hydrated data into a Helio actor needs the entity's row
+        // (`HelioRenderer::sync_light_gpu_data`, `renderer.rs`) -- this
+        // trait's `&Self`-only signature has no way to reach it,
+        // deliberately (see `StaticMeshComponent::sync_component`'s doc for
+        // the same structural reason).
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::LightComponentGpuMirror;
 
     fn light_json(enabled: bool) -> serde_json::Value {
         let mut light = LightComponent::default();
@@ -106,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_inserts_light_gpu_data_for_an_enabled_light() {
+    fn hydrate_inserts_the_gpu_mirror_for_an_enabled_light() {
         let mut world = pulsar_scenedb::World::new();
         let entity = world.spawn();
 
@@ -114,13 +116,13 @@ mod tests {
 
         assert!(world.get::<LightComponent>(entity).is_some());
         assert!(
-            world.get::<LightGpuData>(entity).is_some(),
+            world.get::<LightComponentGpuMirror>(entity).is_some(),
             "an enabled light must get its #[gpu]-mirrored companion"
         );
     }
 
     #[test]
-    fn hydrate_omits_light_gpu_data_for_a_disabled_light() {
+    fn hydrate_omits_the_gpu_mirror_for_a_disabled_light() {
         let mut world = pulsar_scenedb::World::new();
         let entity = world.spawn();
 
@@ -128,8 +130,8 @@ mod tests {
 
         assert!(world.get::<LightComponent>(entity).is_some());
         assert!(
-            world.get::<LightGpuData>(entity).is_none(),
-            "a disabled light must not carry a LightGpuData row"
+            world.get::<LightComponentGpuMirror>(entity).is_none(),
+            "a disabled light must not carry a GPU-mirrored row"
         );
     }
 
@@ -139,11 +141,11 @@ mod tests {
         let entity = world.spawn();
 
         hydrate_light_component(&mut world, entity, &light_json(true)).unwrap();
-        assert!(world.get::<LightGpuData>(entity).is_some());
+        assert!(world.get::<LightComponentGpuMirror>(entity).is_some());
 
         hydrate_light_component(&mut world, entity, &light_json(false)).unwrap();
         assert!(
-            world.get::<LightGpuData>(entity).is_none(),
+            world.get::<LightComponentGpuMirror>(entity).is_none(),
             "toggling enabled -> disabled must remove the stale mirrored row, not just stop updating it"
         );
     }
@@ -154,14 +156,14 @@ mod tests {
         let entity = world.spawn();
         hydrate_light_component(&mut world, entity, &light_json(true)).unwrap();
         assert!(world.get::<LightComponent>(entity).is_some());
-        assert!(world.get::<LightGpuData>(entity).is_some());
+        assert!(world.get::<LightComponentGpuMirror>(entity).is_some());
 
         remove_light_component(&mut world, entity);
 
         assert!(world.get::<LightComponent>(entity).is_none());
         assert!(
-            world.get::<LightGpuData>(entity).is_none(),
-            "remove must not orphan LightGpuData -- nothing else ever sweeps it"
+            world.get::<LightComponentGpuMirror>(entity).is_none(),
+            "remove must not orphan the GPU mirror -- nothing else ever sweeps it"
         );
     }
 }

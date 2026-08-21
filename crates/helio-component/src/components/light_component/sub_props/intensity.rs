@@ -8,6 +8,7 @@ use super::super::IntensityUnits;
 #[category("Intensity", category_color = "#F59E0B")]
 pub struct IntensityLightProps {
     #[property(min = 0.0, max = 200000.0, step = 10.0, category = "Intensity")]
+    #[gpu]
     pub intensity: f32,
     #[property(category = "Intensity")]
     pub intensity_units: IntensityUnits,

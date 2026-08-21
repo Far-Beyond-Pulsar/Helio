@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[category("Shadows", category_color = "#A78BFA", default_collapsed = true)]
 pub struct ShadowLightProps {
     #[property(category = "Shadows")]
+    #[gpu]
     pub cast_shadows: bool,
     #[property(category = "Shadows")]
     pub cast_static_shadows: bool,
