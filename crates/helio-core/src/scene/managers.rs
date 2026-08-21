@@ -452,6 +452,19 @@ pub struct GpuAabbBuffer(pub GrowableBuffer<GpuInstanceAabb>);
 pub struct GpuDrawCallBuffer(pub GrowableBuffer<GpuDrawCall>);
 /// Storage buffer for GPU lights.
 pub struct GpuLightBuffer(pub GrowableBuffer<GpuLight>);
+/// Parallel to [`GpuLightBuffer`] -- entry `i` is the SceneDB `Entity`
+/// index the light at `lights[i]` was built from this frame (Pulsar-
+/// Native#561: `LightComponent`'s position/direction read directly off
+/// SceneDB's own GPU-mirrored `Transform` buffer, not a CPU-combined copy
+/// baked into `GpuLight` itself). Deliberately a SEPARATE buffer rather
+/// than a new field on `GpuLight`: that struct's layout is shared,
+/// byte-for-byte, across every lighting/shadow/cull pass's own WGSL struct
+/// declaration -- adding a field there means updating all of them in
+/// lock-step or silently corrupting whichever ones a caller forgets. A
+/// pass that needs the entity index just adds ONE extra buffer binding
+/// and indexes it with the same `light_idx` it already uses for `lights`;
+/// every pass that doesn't need it is completely unaffected.
+pub struct GpuLightEntityIndexBuffer(pub GrowableBuffer<u32>);
 /// Storage buffer for GPU decals.
 pub struct GpuDecalBuffer(pub GrowableBuffer<GpuDecal>);
 /// Storage buffer for GPU materials.
@@ -570,6 +583,29 @@ impl std::ops::Deref for GpuLightBuffer {
     }
 }
 impl std::ops::DerefMut for GpuLightBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl GpuLightEntityIndexBuffer {
+    pub fn new(device: Arc<wgpu::Device>) -> Self {
+        Self(GrowableBuffer::new(
+            device,
+            1024,
+            wgpu::BufferUsages::STORAGE,
+            "Light Entity Index Buffer",
+        ))
+    }
+}
+
+impl std::ops::Deref for GpuLightEntityIndexBuffer {
+    type Target = GrowableBuffer<u32>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for GpuLightEntityIndexBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

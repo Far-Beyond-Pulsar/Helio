@@ -84,6 +84,11 @@ impl Scene {
         if self.lights_dirty {
             let light_rec_count = self.lights.dense_len();
             let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+            // Kept in lockstep with `movable_lights` -- entry `i` here is
+            // `movable_lights[i]`'s own SceneDB entity row. See
+            // `GpuLightEntityIndexBuffer`'s own doc (helio-core) for why
+            // this rides alongside `lights` as a separate buffer.
+            let mut movable_entity_indices: Vec<u32> = Vec::with_capacity(light_rec_count);
             let mut gpu_idx = 0u32;
 
             for i in 0..light_rec_count {
@@ -92,6 +97,7 @@ impl Scene {
                         record.gpu_index = gpu_idx;
                         gpu_idx += 1;
                         movable_lights.push(record.gpu);
+                        movable_entity_indices.push(record.entity_index);
                     }
                 }
             }
@@ -100,6 +106,7 @@ impl Scene {
             // read again after this, so move it in rather than cloning it.
             let movable_count = movable_lights.len();
             self.gpu_scene.lights.set_data(movable_lights);
+            self.gpu_scene.light_entity_indices.set_data(movable_entity_indices);
             self.gpu_scene.movable_light_count = movable_count as u32;
 
             if movable_count < light_rec_count {

@@ -77,7 +77,7 @@ use crate::component::ComponentRegistry;
 use crate::scene::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer,
     GpuCompactedIndices2Buffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
-    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
     GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
 use crate::scene::managers::GrowableBuffer;
@@ -185,6 +185,8 @@ pub struct GpuScene {
     pub aabbs: GpuAabbBuffer,
     pub draw_calls: GpuDrawCallBuffer,
     pub lights: GpuLightBuffer,
+    /// Parallel to `lights` -- see [`GpuLightEntityIndexBuffer`]'s own doc.
+    pub light_entity_indices: GpuLightEntityIndexBuffer,
     pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
@@ -339,6 +341,7 @@ impl GpuScene {
         let aabbs = GpuAabbBuffer::new(device.clone());
         let draw_calls = GpuDrawCallBuffer::new(device.clone());
         let lights = GpuLightBuffer::new(device.clone());
+        let light_entity_indices = GpuLightEntityIndexBuffer::new(device.clone());
         let decals = GpuDecalBuffer::new(device.clone());
         let materials = GpuMaterialBuffer::new(device.clone());
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
@@ -407,6 +410,7 @@ impl GpuScene {
             aabbs,
             draw_calls,
             lights,
+            light_entity_indices,
             decals,
             materials,
             shadow_matrices,
@@ -478,6 +482,7 @@ impl GpuScene {
             aabbs: self.aabbs.buffer(),
             draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
+            light_entity_indices: self.light_entity_indices.buffer(),
             decals: self.decals.buffer(),
             decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),

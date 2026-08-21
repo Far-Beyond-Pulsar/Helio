@@ -156,6 +156,15 @@ pub struct LightRenderInput {
     /// SceneDB entity, the same way `StaticMeshRenderInput::user_tag` does
     /// for objects.
     pub user_tag: u64,
+    /// The SceneDB `Entity`'s own raw index (`Entity::index()`) -- NOT the
+    /// same thing as `user_tag` (a hash of the stable-id string, for cross-
+    /// frame/picking identity). This is a direct row index into SceneDB's
+    /// own `Transform` GPU buffer, carried through `Scene::
+    /// rebuild_light_instances` into `GpuLightEntityIndexBuffer` so a
+    /// lighting pass can look up this light's live world position/
+    /// direction on the GPU without SceneDB and Helio ever exchanging a
+    /// CPU-side copy of it.
+    pub entity_index: u32,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -195,6 +204,11 @@ pub(crate) struct LightRecord {
     pub user_tag: u64,
     /// Index in the GPU lights buffer (may differ from arena dense_index after flush filtering).
     pub gpu_index: u32,
+    /// SceneDB `Entity` row index -- see [`LightRenderInput::entity_index`]'s
+    /// own doc. `0` for a light not sourced from `rebuild_light_instances`
+    /// (e.g. `insert_light`'s general-purpose API) -- meaningless in that
+    /// case, never read unless a light was built through the SceneDB path.
+    pub entity_index: u32,
 }
 
 /// Internal record for a scene object.
