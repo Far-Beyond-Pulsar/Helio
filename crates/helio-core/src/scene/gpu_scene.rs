@@ -187,6 +187,17 @@ pub struct GpuScene {
     pub lights: GpuLightBuffer,
     /// Parallel to `lights` -- see [`GpuLightEntityIndexBuffer`]'s own doc.
     pub light_entity_indices: GpuLightEntityIndexBuffer,
+    /// SceneDB's own `Transform` GPU buffer (entity-indexed, `#[gpu]`-
+    /// mirrored on the SceneDB side -- see `engine_backend::scene::
+    /// world_store::Transform`'s own doc), rebound in from outside via
+    /// `Scene::rebind_transform_buffer` -- the same "point at an
+    /// externally-owned SceneDB buffer instead of maintaining our own copy"
+    /// seam `mesh_pool`'s vertex/index storage already uses. Lives here
+    /// (not on `Scene`) so a pass can reach it through `ctx.scene.
+    /// transform_buffer`, the same way it already reaches `ctx.scene.
+    /// lights`. `None` until rebound -- no dummy buffer, so a pass reaching
+    /// for this before it's bound fails loudly instead of reading garbage.
+    pub transform_buffer: Option<Arc<wgpu::Buffer>>,
     pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
@@ -411,6 +422,7 @@ impl GpuScene {
             draw_calls,
             lights,
             light_entity_indices,
+            transform_buffer: None,
             decals,
             materials,
             shadow_matrices,
@@ -483,6 +495,7 @@ impl GpuScene {
             draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
             light_entity_indices: self.light_entity_indices.buffer(),
+            transforms: self.transform_buffer.as_deref(),
             decals: self.decals.buffer(),
             decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),
