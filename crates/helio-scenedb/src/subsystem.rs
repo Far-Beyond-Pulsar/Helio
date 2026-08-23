@@ -147,11 +147,16 @@ pub struct HelioRenderSubsystem {
     material_ids: HashMap<Entity, MaterialId>,
     sectioned_ids: HashMap<Entity, SectionedInstanceId>,
     pending: Vec<PendingOp>,
+    pushed_deltas: Vec<pulsar_scenedb::replication::Delta>,
 }
 
 impl HelioRenderSubsystem {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn push_delta(&mut self, delta: pulsar_scenedb::replication::Delta) {
+        self.pushed_deltas.push(delta);
     }
 
     /// Packs an [`Entity`] into Helio's `user_tag`. `+1`, not identity:
@@ -272,29 +277,8 @@ impl HelioRenderSubsystem {
             }
         }
     }
-}
 
-impl Subsystem for HelioRenderSubsystem {
-    fn name(&self) -> &'static str {
-        "helio_render"
-    }
-
-    fn simulate_a(&mut self, _world: &mut World, _witness: &SimulateA) {}
-
-    /// Drains this frame's `Delta` from `world`'s attached change tracker
-    /// (a no-op if none is attached -- see [`Self`]'s doc) and queues
-    /// [`PendingOp`]s for [`Self::apply_to`]: materials first (so an object
-    /// referencing a material added in the same frame resolves correctly
-    /// once `apply_to` runs), then removals for despawned entities, then
-    /// static-mesh and multi-material object upserts/updates. Lights are not
-    /// handled here -- see `crate::components`'s "No `LightComponent` here"
-    /// doc section.
-    fn simulate_b(&mut self, world: &mut World, _witness: &SimulateB) {
-        let Some(tracker) = world.change_tracker().cloned() else {
-            return;
-        };
-        let delta = tracker.drain_with_world(world);
-
+    pub fn process_delta(&mut self, world: &World, delta: &pulsar_scenedb::replication::Delta) {
         let material_slot_cid = component_id::<MaterialSlot>();
         let static_mesh_cid = component_id::<StaticMeshComponent>();
         let multi_mesh_cid = component_id::<MultiMaterialStaticMeshComponent>();
@@ -363,6 +347,32 @@ impl Subsystem for HelioRenderSubsystem {
                 self.pending.push(PendingOp::RemoveObject(entity));
                 self.pending.push(PendingOp::RemoveSectionedObject(entity));
             }
+        }
+    }
+}
+
+impl Subsystem for HelioRenderSubsystem {
+    fn name(&self) -> &'static str {
+        "helio_render"
+    }
+
+    fn simulate_a(&mut self, _world: &mut World, _witness: &SimulateA) {}
+
+    /// Drains this frame's `Delta` from `world`'s attached change tracker
+    /// (a no-op if none is attached -- see [`Self`]'s doc) and queues
+    /// [`PendingOp`]s for [`Self::apply_to`]: materials first (so an object
+    /// referencing a material added in the same frame resolves correctly
+    /// once `apply_to` runs), then removals for despawned entities, then
+    /// static-mesh and multi-material object upserts/updates. Lights are not
+    /// handled here -- see `crate::components`'s "No `LightComponent` here"
+    /// doc section.
+    fn simulate_b(&mut self, world: &mut World, _witness: &SimulateB) {
+        let mut deltas = std::mem::take(&mut self.pushed_deltas);
+        if let Some(tracker) = world.change_tracker().cloned() {
+            deltas.push(tracker.drain_with_world(world));
+        }
+        for delta in deltas {
+            self.process_delta(world, &delta);
         }
     }
 
