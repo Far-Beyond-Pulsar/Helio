@@ -101,6 +101,7 @@ pub struct ObjectDescriptor {
     pub user_tag: u64,
 }
 
+
 /// A scene object exposed for CPU-side picking queries.
 ///
 /// Returned by [`crate::Scene::iter_pickable_objects`].  The caller builds a
@@ -118,6 +119,52 @@ pub struct PickableObject {
 
     /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
     pub user_tag: u64,
+}
+
+/// Transient static-mesh render input supplied by the owning SceneDB world.
+///
+/// This is deliberately not stored in [`Scene`]. Helio consumes a fresh slice
+/// each frame and retains only the transient GPU instance/draw buffers.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticMeshRenderInput {
+    pub mesh_key: u32,
+    pub material: MaterialId,
+    pub groups: GroupMask,
+    pub movability: libhelio::Movability,
+    pub user_tag: u64,
+    pub instance: GpuInstanceData,
+    pub aabb: GpuInstanceAabb,
+    pub draw: GpuDrawCall,
+}
+
+/// Transient light render input supplied by the owning SceneDB world -- the
+/// light equivalent of [`StaticMeshRenderInput`] (Pulsar-Native#561:
+/// `LightComponent` fully normalized onto SceneDB's `#[gpu]` mirror, no more
+/// per-entity `insert_light`/`update_light`/`remove_light`/tag-lookup
+/// bookkeeping on the caller's side).
+///
+/// This is deliberately not stored in [`Scene`] either: [`Scene::
+/// rebuild_light_instances`] consumes a fresh slice each frame and retains
+/// only the resulting (shadow-index-annotated, movability-filtered) `GpuLight`
+/// array `flush()` already builds -- same "transient input, persistent
+/// derived output" split `StaticMeshRenderInput` uses.
+#[derive(Debug, Clone, Copy)]
+pub struct LightRenderInput {
+    pub light: GpuLight,
+    /// Application-defined tag -- see [`ObjectDescriptor::user_tag`]. Lets
+    /// picking/other consumers resolve a rendered light back to its owning
+    /// SceneDB entity, the same way `StaticMeshRenderInput::user_tag` does
+    /// for objects.
+    pub user_tag: u64,
+    /// The SceneDB `Entity`'s own raw index (`Entity::index()`) -- NOT the
+    /// same thing as `user_tag` (a hash of the stable-id string, for cross-
+    /// frame/picking identity). This is a direct row index into SceneDB's
+    /// own `Transform` GPU buffer, carried through `Scene::
+    /// rebuild_light_instances` into `GpuLightEntityIndexBuffer` so a
+    /// lighting pass can look up this light's live world position/
+    /// direction on the GPU without SceneDB and Helio ever exchanging a
+    /// CPU-side copy of it.
+    pub entity_index: u32,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -157,6 +204,11 @@ pub(crate) struct LightRecord {
     pub user_tag: u64,
     /// Index in the GPU lights buffer (may differ from arena dense_index after flush filtering).
     pub gpu_index: u32,
+    /// SceneDB `Entity` row index -- see [`LightRenderInput::entity_index`]'s
+    /// own doc. `0` for a light not sourced from `rebuild_light_instances`
+    /// (e.g. `insert_light`'s general-purpose API) -- meaningless in that
+    /// case, never read unless a light was built through the SceneDB path.
+    pub entity_index: u32,
 }
 
 /// Internal record for a scene object.

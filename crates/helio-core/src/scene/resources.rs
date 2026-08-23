@@ -132,6 +132,14 @@ pub struct SceneResources<'a> {
     pub aabbs: &'a wgpu::Buffer,
     pub draw_calls: &'a wgpu::Buffer,
     pub lights: &'a wgpu::Buffer,
+    /// Parallel to `lights` -- entry `i` is the SceneDB `Entity` index
+    /// `lights[i]` was built from this frame. See `GpuLightEntityIndexBuffer`'s
+    /// own doc (`scene::managers`) for why this is a separate buffer instead
+    /// of a new `GpuLight` field.
+    pub light_entity_indices: &'a wgpu::Buffer,
+    /// SceneDB's `Transform` buffer, if `Scene::rebind_transform_buffer`
+    /// has been called yet -- see that method's own doc.
+    pub transforms: Option<&'a wgpu::Buffer>,
     pub decals: &'a wgpu::Buffer,
     pub decal_count: u32,
     pub materials: &'a wgpu::Buffer,

@@ -3,19 +3,17 @@
 use engine_class_derive::{
     engine_class, register_runtime_behavior, register_scene_props_applier, register_world_component,
 };
-use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{GpuMaterial, GroupMask, Movability, ObjectDescriptor, Renderer, SceneActor};
+use helio::PackedVertex;
 use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, LiveKeySet, ReflectError,
-    RuntimeComponentOwner, ScenePropsProjector, get_subsystem, scene_id_to_tag,
+    ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, RuntimeComponentOwner,
+    ScenePropsProjector,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use crate::asset_component::AssetComponentRegistration;
-use crate::subsystems::{MeshCache, load_mesh_upload, resolve_asset_path};
+use crate::subsystems::{load_mesh_upload, resolve_asset_path};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
@@ -284,29 +282,20 @@ fn mesh_asset_editor(
 #[allow(dead_code)]
 type RegisteredMeshAssetPath = MeshAssetPath;
 
-/// Tracks which (scene_object_id, mesh_asset) pairs have already been reported
-/// as errors, so we only log once per mesh-assignment cycle rather than every frame.
-static MESH_ERROR_LOG: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Returns `true` if an error was ALREADY logged for this exact (scene_id, mesh_asset) pair.
-fn already_reported(scene_id: &str, mesh_asset: &str) -> bool {
-    let Ok(mut map) = MESH_ERROR_LOG.lock() else {
-        return false;
-    };
-    match map.get(scene_id) {
-        Some(prev) if prev == mesh_asset => true,
-        _ => {
-            map.insert(scene_id.to_string(), mesh_asset.to_string());
-            false
-        }
-    }
-}
-
 // ── StaticMeshComponent ───────────────────────────────────────────────────────
 
 /// Attaches a mesh asset to a scene object.
-#[engine_class(category = "Rendering", default, clone, debug, serialize, deserialize)]
+///
+/// `scene_store` (Pulsar-Native#561 Phase D): opts this struct into
+/// `#[gpu]`-mirrored fields via `#[engine_class]`'s delegation to
+/// `pulsar_scenedb::SceneStore` -- see `vertices`/`indices` below, and
+/// `hydrate_static_mesh_component`'s doc for how they get populated. A
+/// `#[gpu] Vec<T>` field routes through SceneDB's variable-length codegen
+/// path, which implies no `Copy`/`Pod` requirement on this struct (see
+/// `engine_class_derive`'s `struct_has_gpu_vec_field` check) -- unlike
+/// every OTHER `scene_store` struct so far, which are all plain fixed-size
+/// `Pod` rows.
+#[engine_class(category = "Rendering", default, clone, debug, serialize, deserialize, scene_store)]
 pub struct StaticMeshComponent {
     /// Relative asset path to the mesh file (e.g. "meshes/primitives/SM_Cube.fbx").
     ///
@@ -314,6 +303,24 @@ pub struct StaticMeshComponent {
     /// search browser instead of a plain text input.
     #[property]
     pub mesh_asset: MeshAssetPath,
+
+    /// The mesh's actual vertex/index data -- not an indirect handle into a
+    /// separate asset registry, the payload itself (per the governing rule:
+    /// "it doesn't hold an int32 that points to the mesh, it holds the
+    /// mesh"). Populated once, at hydrate time, by
+    /// `hydrate_static_mesh_component` -- never authored directly, never
+    /// touched by `sync_component` (which only ever sees `&World`, never
+    /// disk I/O). Never round-tripped through JSON: mesh geometry lives in
+    /// the asset file `mesh_asset` already names, re-derived at hydrate
+    /// time, not duplicated into every saved scene.
+    #[gpu]
+    #[serde(skip)]
+    pub vertices: Vec<PackedVertex>,
+    /// See [`Self::vertices`] -- same rules, the index half of the same
+    /// upload.
+    #[gpu]
+    #[serde(skip)]
+    pub indices: Vec<u32>,
 }
 
 #[register_scene_props_applier]
@@ -334,149 +341,98 @@ impl ScenePropsProjector for StaticMeshComponent {
     }
 }
 
+/// Custom hydrate for `#[register_world_component(hydrate = ...)]`
+/// (Pulsar-Native#561 Phase D). Loads `mesh_asset`'s actual vertex/index
+/// data, once, right here at hydrate time -- not per render frame, and not
+/// through any Helio-specific code (`sync_component`'s dispatch only ever
+/// gets `&World`, deliberately, so it structurally can't do disk I/O; this
+/// is the one call site that already has `&mut World`). Resolves the
+/// project-relative path via `engine_state::get_project_path()` -- a
+/// global, context-free accessor, since the fixed hydrate signature
+/// (`&mut World, Entity, &Value`) has no `ComponentRuntimeContext` to pull
+/// a project root from the way `sync_component` does.
+///
+/// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
+/// `sync_component`'s existing "no mesh_asset" tolerance -- the component
+/// still hydrates, just with empty `vertices`/`indices` (a real, if
+/// invisible, entity, same as today's `insert_actor`-based path leaves an
+/// object with no mesh assigned).
+fn hydrate_static_mesh_component(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+    data: &serde_json::Value,
+) -> Result<(), String> {
+    let mut parsed: StaticMeshComponent =
+        serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
+
+    let mesh_asset = parsed.mesh_asset.as_str().trim();
+    if !mesh_asset.is_empty() {
+        match engine_state::get_project_path() {
+            Some(project_root) => {
+                let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
+                match load_mesh_upload(&abs_path) {
+                    Some(upload) => {
+                        tracing::info!(
+                            "StaticMeshComponent hydrate: loaded '{}' ({} vertices, {} indices)",
+                            abs_path.display(),
+                            upload.vertices.len(),
+                            upload.indices.len()
+                        );
+                        parsed.vertices = upload.vertices;
+                        parsed.indices = upload.indices;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "StaticMeshComponent hydrate: failed to load mesh '{}' ({})",
+                            mesh_asset,
+                            abs_path.display()
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "StaticMeshComponent hydrate: no project path available, cannot resolve mesh_asset '{}'",
+                    mesh_asset
+                );
+            }
+        }
+    }
+
+    world.insert(entity, parsed);
+    Ok(())
+}
+
 // Phase B4 (Pulsar-Native#555): the first component migrated onto
 // pulsar_world_registry's World bridge -- proves the pattern before B5
 // rolls it out to the rest. `#[register_world_component]` must be written
 // above `#[register_runtime_behavior]` (see that macro's own doc for why:
 // only the bottom attribute in the stack re-emits the impl block).
-#[register_world_component]
+#[register_world_component(hydrate = hydrate_static_mesh_component)]
 #[register_runtime_behavior]
 impl ComponentRuntimeBehavior for StaticMeshComponent {
     const CLASS_NAME: &'static str = "StaticMeshComponent";
 
     fn sync_component(
-        owner: &RuntimeComponentOwner,
+        _owner: &RuntimeComponentOwner,
         _component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
+        _component: &Self,
+        _context: &mut dyn ComponentRuntimeContext,
     ) {
-        let mesh_asset = component.mesh_asset.as_str().trim().to_string();
-
-        if mesh_asset.is_empty() {
-            if !already_reported(owner.scene_object_id, "") {
-                context.report_error(format!(
-                    "StaticMeshComponent on '{}' has no mesh_asset",
-                    owner.scene_object_id
-                ));
-            }
-            return;
-        }
-
-        let pr = context.project_root();
-        let abs_path = resolve_asset_path(pr, &mesh_asset)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        let q = Quat::from_euler(
-            EulerRot::YXZ,
-            owner.rotation[1].to_radians(),
-            owner.rotation[0].to_radians(),
-            owner.rotation[2].to_radians(),
-        );
-        let transform = Mat4::from_scale_rotation_translation(
-            Vec3::from_array(owner.scale),
-            q,
-            Vec3::from_array(owner.position),
-        );
-        let pos = transform.w_axis.truncate();
-        let radius = Vec3::from_array(owner.scale).length() * 0.5;
-
-        let tag = scene_id_to_tag(owner.scene_object_id);
-
-        // Phase 1: check mesh cache
-        let cached = {
-            let mc = get_subsystem!(context, MeshCache);
-            mc.get(&abs_path)
-        };
-
-        let (mesh_id, mat_id) = if let Some(ids) = cached {
-            ids
-        } else {
-            // Cache miss — load file and upload.
-            let path = std::path::Path::new(&abs_path);
-            let upload = match load_mesh_upload(path) {
-                Some(u) => u,
-                None => {
-                    if !already_reported(owner.scene_object_id, &abs_path) {
-                        tracing::warn!("[SMC] load_mesh_upload FAILED for {}", abs_path);
-                        context.report_error(format!(
-                            "StaticMeshComponent on '{}': failed to load '{}'",
-                            owner.scene_object_id, abs_path
-                        ));
-                    }
-                    return;
-                }
-            };
-            let renderer = get_subsystem!(context, Renderer);
-            let scene = renderer.scene_mut();
-            let mid = match scene.insert_actor(SceneActor::mesh(upload)).as_mesh() {
-                Some(m) => m,
-                None => {
-                    if !already_reported(owner.scene_object_id, &abs_path) {
-                        tracing::warn!("[SMC] insert_actor returned no mesh id");
-                    }
-                    return;
-                }
-            };
-            let mat = GpuMaterial {
-                base_color: [0.22, 0.15, 0.08, 1.0],
-                emissive: [0.0, 0.0, 0.0, 0.0],
-                roughness_metallic: [0.7, 0.0, 1.5, 0.5],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            };
-            let matid = renderer.scene_mut().insert_material(mat);
-            // Store in cache
-            let mc = get_subsystem!(context, MeshCache);
-            mc.insert(abs_path.clone(), (mid, matid));
-            (mid, matid)
-        };
-
-        // Phase 2: update or insert the scene object. Helio owns the scene,
-        // so we ask it — by the tag we stamped on insert — whether this
-        // object already exists, instead of mirroring its contents in an
-        // editor-side map. Unchanged objects are updated in place rather
-        // than removed and re-inserted, which would cascade-free their mesh
-        // and material.
-        let desc = ObjectDescriptor {
-            mesh: mesh_id,
-            material: mat_id,
-            transform,
-            bounds: [pos.x, pos.y, pos.z, radius.max(0.1)],
-            flags: 0,
-            groups: GroupMask::NONE,
-            movability: Some(Movability::Movable),
-            user_tag: tag,
-        };
-
-        let scene = get_subsystem!(context, Renderer).scene_mut();
-        match scene.object_by_tag(tag) {
-            None => {
-                scene.insert_actor(SceneActor::object(desc));
-            }
-            Some(obj_id) => {
-                // Compare against the mesh Helio currently has rather than a
-                // remembered asset path: the mesh handle *is* the identity of
-                // the loaded asset, so a swap shows up here with nothing to
-                // keep in sync.
-                let same_mesh = scene
-                    .get_object_descriptor(obj_id)
-                    .map(|d| d.mesh == mesh_id)
-                    .unwrap_or(false);
-                if same_mesh {
-                    let _ = scene.update_object_transform(obj_id, transform);
-                } else {
-                    let _ = scene.remove_object(obj_id);
-                    scene.insert_actor(SceneActor::object(desc));
-                }
-            }
-        }
+        // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
+        // to load `mesh_asset` itself and call `Renderer::scene_mut()
+        // .insert_actor(SceneActor::mesh(upload))` -- a second, independent
+        // copy of the mesh data in Helio's own mesh pool, loaded from disk a
+        // second time every dirty pass, on top of what `hydrate_static_mesh_component`
+        // already does (loads the file once, populates this component's own
+        // `#[gpu] vertices`/`indices` fields, which SceneDB mirrors straight
+        // into the SAME pool `helio::Scene`'s `MeshPool` reads from -- see
+        // `mesh.rs`'s `rebind_static_pools`/`adopt_static_slice`). Resolving
+        // a `MeshId`/`ObjectDescriptor` for that already-GPU-resident data
+        // needs the entity's row (`entity.index()`) and the SceneDB-side
+        // `..._gpu_handle` accessors this trait's `&Self`-only signature has
+        // no way to reach -- that's `engine_backend`'s
+        // `HelioRenderer::sync_snapshot_components`, which already has
+        // `Entity`/`World` in scope for exactly this reason.
     }
 }

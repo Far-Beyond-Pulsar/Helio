@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[category("Attenuation", category_color = "#6EC5FF")]
 pub struct AttenuationLightProps {
     #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Attenuation")]
+    #[gpu]
     pub range: f32,
     #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Attenuation")]
     pub falloff_start: f32,
@@ -15,9 +16,17 @@ pub struct AttenuationLightProps {
     pub source_radius: f32,
     #[property(min = 0.0, max = 200.0, step = 0.1, category = "Attenuation")]
     pub source_length: f32,
+    // `as = f32, with = f32::to_radians`: the properties panel edits degrees
+    // (human-friendly); the GPU mirror holds radians (what the shader
+    // actually consumes) -- computed once here, at mirror-build time, not
+    // by a hand-written post-mirror translation function. See `pulsar_
+    // world_registry`'s `GpuMirrored` doc / `engine_class_derive`'s
+    // `GpuFieldOverride` doc for why this belongs on the field itself.
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
+    #[gpu(as = f32, with = f32::to_radians)]
     pub inner_cone_angle: f32,
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
+    #[gpu(as = f32, with = f32::to_radians)]
     pub outer_cone_angle: f32,
 }
 

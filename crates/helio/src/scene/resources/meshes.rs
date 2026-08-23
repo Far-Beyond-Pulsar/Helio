@@ -3,12 +3,57 @@
 //! Meshes are stored in a shared `MeshPool` and reference-counted. Multiple objects
 //! can reference the same mesh. Meshes cannot be removed while objects are using them.
 
+use std::sync::Arc;
+
 use crate::handles::MeshId;
 use crate::mesh::{MeshBuffers, MeshUpload, PackedVertex};
 
 use super::super::errors::{invalid, Result, SceneError};
 
 impl super::super::Scene {
+    /// See [`crate::mesh::MeshPool::vertex_pool`] -- the static sub-pool's
+    /// shared vertex storage, `Arc`-cloned so an external owner (a
+    /// `SceneGpuStore`, Pulsar-Native#561 Phase D) can register it, or a
+    /// caller can compare identity against a pool it holds elsewhere.
+    pub fn mesh_vertex_pool(&self) -> Arc<pulsar_scenedb::gpu::VarLenGpuPool<PackedVertex>> {
+        self.mesh_pool.vertex_pool()
+    }
+
+    /// See [`crate::mesh::MeshPool::index_pool`] -- the index half of
+    /// [`Self::mesh_vertex_pool`].
+    pub fn mesh_index_pool(&self) -> Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>> {
+        self.mesh_pool.index_pool()
+    }
+
+    /// See [`crate::mesh::MeshPool::rebind_static_pools`] -- points the
+    /// scene's static mesh storage at externally-owned pools instead of the
+    /// ones it constructed for itself.
+    pub fn rebind_static_mesh_pools(
+        &mut self,
+        vertices: Arc<pulsar_scenedb::gpu::VarLenGpuPool<PackedVertex>>,
+        indices: Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>>,
+    ) {
+        self.mesh_pool.rebind_static_pools(vertices, indices);
+    }
+
+    /// See [`crate::mesh::MeshPool::adopt_static_slice`] -- mints a
+    /// `MeshId` for data a `#[gpu] Vec<T>` field already wrote into the
+    /// (rebound) static pool, no copy. Read that method's `# Ownership`
+    /// doc before calling: the returned `MeshId` must go through
+    /// [`Self::forget_adopted_mesh_slice`], never [`Self::remove_mesh`].
+    pub fn adopt_static_mesh_slice(
+        &mut self,
+        vertex_handle: pulsar_scenedb::gpu::VarLenHandle,
+        index_handle: pulsar_scenedb::gpu::VarLenHandle,
+    ) -> MeshId {
+        self.mesh_pool.adopt_static_slice(vertex_handle, index_handle)
+    }
+
+    /// See [`crate::mesh::MeshPool::forget_adopted_slice`].
+    pub fn forget_adopted_mesh_slice(&mut self, id: MeshId) {
+        self.mesh_pool.forget_adopted_slice(id);
+    }
+
     /// Insert a mesh into the scene's mesh pool.
     ///
     /// Uploads vertex and index data to GPU memory and returns a handle that can be

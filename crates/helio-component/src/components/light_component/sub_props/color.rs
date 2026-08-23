@@ -6,6 +6,7 @@ use std::collections::HashMap;
 #[category("Color", category_color = "#FF8AAE")]
 pub struct ColorLightProps {
     #[property(category = "Color")]
+    #[gpu]
     pub color: [f32; 4],
     #[property(category = "Color")]
     pub use_temperature: bool,

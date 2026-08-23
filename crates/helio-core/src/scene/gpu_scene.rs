@@ -77,7 +77,7 @@ use crate::component::ComponentRegistry;
 use crate::scene::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer,
     GpuCompactedIndices2Buffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
-    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
     GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
 use crate::scene::managers::GrowableBuffer;
@@ -185,6 +185,19 @@ pub struct GpuScene {
     pub aabbs: GpuAabbBuffer,
     pub draw_calls: GpuDrawCallBuffer,
     pub lights: GpuLightBuffer,
+    /// Parallel to `lights` -- see [`GpuLightEntityIndexBuffer`]'s own doc.
+    pub light_entity_indices: GpuLightEntityIndexBuffer,
+    /// SceneDB's own `Transform` GPU buffer (entity-indexed, `#[gpu]`-
+    /// mirrored on the SceneDB side -- see `engine_backend::scene::
+    /// world_store::Transform`'s own doc), rebound in from outside via
+    /// `Scene::rebind_transform_buffer` -- the same "point at an
+    /// externally-owned SceneDB buffer instead of maintaining our own copy"
+    /// seam `mesh_pool`'s vertex/index storage already uses. Lives here
+    /// (not on `Scene`) so a pass can reach it through `ctx.scene.
+    /// transform_buffer`, the same way it already reaches `ctx.scene.
+    /// lights`. `None` until rebound -- no dummy buffer, so a pass reaching
+    /// for this before it's bound fails loudly instead of reading garbage.
+    pub transform_buffer: Option<Arc<wgpu::Buffer>>,
     pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
@@ -339,6 +352,7 @@ impl GpuScene {
         let aabbs = GpuAabbBuffer::new(device.clone());
         let draw_calls = GpuDrawCallBuffer::new(device.clone());
         let lights = GpuLightBuffer::new(device.clone());
+        let light_entity_indices = GpuLightEntityIndexBuffer::new(device.clone());
         let decals = GpuDecalBuffer::new(device.clone());
         let materials = GpuMaterialBuffer::new(device.clone());
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
@@ -407,6 +421,8 @@ impl GpuScene {
             aabbs,
             draw_calls,
             lights,
+            light_entity_indices,
+            transform_buffer: None,
             decals,
             materials,
             shadow_matrices,
@@ -478,6 +494,8 @@ impl GpuScene {
             aabbs: self.aabbs.buffer(),
             draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
+            light_entity_indices: self.light_entity_indices.buffer(),
+            transforms: self.transform_buffer.as_deref(),
             decals: self.decals.buffer(),
             decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),

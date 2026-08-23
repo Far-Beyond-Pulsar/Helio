@@ -611,4 +611,33 @@ impl Scene {
     pub fn set_transparent_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
         self.gpu_scene.transparent_template_registry = Some(reg);
     }
+
+    /// Points this scene's Transform lookup at SceneDB's own `Transform`
+    /// GPU buffer (entity-indexed, `#[gpu]`-mirrored on the SceneDB side --
+    /// see `engine_backend::scene::world_store::Transform`'s doc) -- the
+    /// same "rebind onto an externally-owned SceneDB buffer instead of
+    /// maintaining our own copy" seam [`Self::rebind_static_mesh_pools`]
+    /// already uses for mesh vertex/index storage.
+    ///
+    /// A pass that needs a light's (or any other GPU-mirrored component's)
+    /// live world position combines [`GpuLightEntityIndexBuffer`]'s
+    /// (`helio_core`) per-light entity index with this buffer, on the GPU,
+    /// instead of a CPU-side per-frame combine -- see that type's own doc.
+    pub fn rebind_transform_buffer(&mut self, buffer: std::sync::Arc<wgpu::Buffer>) {
+        // Stored on `gpu_scene`, not `Scene` itself, so passes can reach it
+        // through `ctx.scene.transform_buffer` the exact same way they
+        // already reach `ctx.scene.lights` -- `ctx.scene` IS `&GpuScene`,
+        // not `&Scene` (confirmed against `helio-pass-forward-lit`'s own
+        // bind-group code) -- a field living only on the outer `Scene`
+        // wrapper would simply be unreachable from pass code.
+        self.gpu_scene.transform_buffer = Some(buffer);
+    }
+
+    /// The buffer [`Self::rebind_transform_buffer`] points at, if any has
+    /// been bound yet. `None` before the first rebind call -- a pass
+    /// reaching for this needs to handle that (skip whatever needs it that
+    /// frame, or fall back), not assume it's always present.
+    pub fn transform_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.gpu_scene.transform_buffer.as_deref()
+    }
 }

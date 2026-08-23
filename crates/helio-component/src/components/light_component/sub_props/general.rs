@@ -2,7 +2,7 @@ use engine_class_derive::engine_class;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::super::LightType;
+use super::super::{light_type_to_gpu_u32, LightType};
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
@@ -11,7 +11,10 @@ pub struct GeneralLightProps {
     pub enabled: bool,
     #[property(category = "General")]
     pub affects_world: bool,
+    // See `light_type_to_gpu_u32`'s own doc: a genuine semantic remap
+    // (Helio has no Area light type), computed once at mirror-build time.
     #[property(category = "General")]
+    #[gpu(as = u32, with = light_type_to_gpu_u32)]
     pub light_type: LightType,
     #[property(min = 0.0, max = 255.0, step = 1.0, category = "General")]
     pub light_channels: u64,

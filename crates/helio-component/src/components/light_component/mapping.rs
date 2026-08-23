@@ -1,56 +1,63 @@
-use helio::{GpuLight, LightType as HelioLightType};
+use helio::GpuLight;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use super::{LightComponent, LightType};
+use super::LightComponent;
 
-impl LightComponent {
-    /// Translate this editor-facing component into Helio's GPU light representation.
+impl super::LightComponentGpuMirror {
+    /// Translate this `#[gpu]`-mirrored companion into Helio's GPU light
+    /// representation -- single source of truth for the `LightComponent` ->
+    /// `GpuLight` mapping (Pulsar-Native#561).
     ///
-    /// Single source of truth for the `LightComponent` -> `GpuLight` mapping --
-    /// factored out of what used to be inline logic in `runtime.rs`'s
-    /// `sync_component` so that path and any future SceneDB-driven bridge (the
-    /// Pulsar-Native#561 "set us up" step -- see `helio_scenedb::components::
-    /// LightComponent`'s doc for why lights can't be a simple `#[gpu(buffer=...)]`
-    /// mirrored field, and `helio_scenedb::HelioRenderSubsystem` for the seam this
-    /// is meant to eventually feed) call the exact same code and can never
-    /// silently drift apart.
+    /// Every field this reads (`general.light_type`, `intensity.intensity`,
+    /// `color.color`, `attenuation.{range,inner_cone_angle,outer_cone_
+    /// angle}`, `shadows.cast_shadows`) is ALREADY in `GpuLight`'s own units
+    /// and value space by the time it lands here -- degrees->radians and
+    /// the `LightType`->`u32`/`bool`->shadow-request-sentinel remaps happen
+    /// once, upload-time, via each field's own `#[gpu(as = .., with = ..)]`
+    /// (`sub_props/attenuation.rs`/`general.rs`/`shadows.rs`), not in this
+    /// function. What's left here is ONLY reshaping already-transformed
+    /// values into `GpuLight`'s packed-vec4 field grouping (a GPU memory-
+    /// layout choice, unrelated to units or semantics) plus the one piece
+    /// that structurally cannot happen any earlier:
     ///
-    /// Returns `None` when the light is disabled (`general.enabled == false`) --
-    /// the caller is responsible for removing any previously-inserted Helio light
-    /// in that case; this function only describes what a currently-enabled light
-    /// should look like on the GPU side.
-    pub fn to_gpu_light(&self, position: [f32; 3]) -> Option<GpuLight> {
-        if !self.general.enabled {
-            return None;
-        }
-
-        let helio_type = match self.general.light_type {
-            LightType::Directional => HelioLightType::Directional,
-            LightType::Point => HelioLightType::Point,
-            LightType::Spot => HelioLightType::Spot,
-            LightType::Area => HelioLightType::Point, // helio has no Area; nearest equivalent
-        };
-
-        let [px, py, pz] = position;
-
-        Some(GpuLight {
-            position_range: [px, py, pz, self.attenuation.range],
-            direction_outer: [0.0, -1.0, 0.0, self.attenuation.outer_cone_angle.to_radians()],
+    /// `position_range`'s xyz is always `[0.0; 0.0; 0.0]` here -- `GpuLight`
+    /// bakes in world-space position, which lives on a COMPLETELY SEPARATE
+    /// component (`Transform`, updated every frame the object moves, on no
+    /// schedule related to this component's own property edits) and simply
+    /// doesn't exist yet at the moment THIS mirror gets built. No upload-
+    /// time transform can pre-combine two values produced by two
+    /// independent systems on two independent schedules -- `HelioRenderer::
+    /// rebuild_light_frame` is the one place both are actually available at
+    /// once, and overwrites these three components from the live `Transform`
+    /// right before use, the same "model-space payload + per-frame
+    /// transform combine" split `rebuild_static_mesh_frame` already uses
+    /// for mesh geometry.
+    ///
+    /// Called only for an ENABLED light -- `runtime.rs`'s hydrate checks
+    /// `general.enabled` itself and skips `sync_gpu_mirror` (so this mirror
+    /// is never even inserted) when it's `false`, the same "disabled means
+    /// absent, not zeroed" contract this type has always had.
+    pub fn to_helio_gpu_light(&self) -> GpuLight {
+        GpuLight {
+            position_range: [0.0, 0.0, 0.0, self.attenuation.range.0],
+            direction_outer: [0.0, -1.0, 0.0, self.attenuation.outer_cone_angle.0],
             color_intensity: [
-                self.color.color[0],
-                self.color.color[1],
-                self.color.color[2],
-                self.intensity.intensity,
+                self.color.color.0[0],
+                self.color.color.0[1],
+                self.color.color.0[2],
+                self.intensity.intensity.0,
             ],
-            shadow_index: if self.shadows.cast_shadows { 0 } else { u32::MAX },
-            light_type: helio_type as u32,
-            inner_angle: self.attenuation.inner_cone_angle.to_radians(),
+            shadow_index: self.shadows.cast_shadows.0,
+            light_type: self.general.light_type.0,
+            inner_angle: self.attenuation.inner_cone_angle.0,
             _pad: 0,
             ..Default::default()
-        })
+        }
     }
+}
 
+impl LightComponent {
     pub fn from_component_data(data: &Value) -> Self {
         let mut light = Self::default();
         if let Some(obj) = data.as_object() {
@@ -85,26 +92,32 @@ impl LightComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::LightType;
+    use helio::LightType as HelioLightType;
+    use pulsar_world_registry::GpuMirrored;
+
+    // NOTE: "a disabled light produces no GpuLight" is no longer this
+    // function's responsibility -- `to_helio_gpu_light` always translates
+    // whatever mirror it's given; "disabled means absent" now lives one
+    // level up, in `runtime.rs`'s hydrate (which skips `sync_gpu_mirror`
+    // entirely for a disabled light, so no `LightComponentGpuMirror` --
+    // and therefore no `to_helio_gpu_light` call -- ever happens). See
+    // `runtime.rs`'s `hydrate_omits_light_gpu_data_for_a_disabled_light`
+    // for that coverage.
 
     #[test]
-    fn disabled_light_translates_to_no_gpu_light() {
-        let mut light = LightComponent::default();
-        light.general.enabled = false;
-        assert!(light.to_gpu_light([1.0, 2.0, 3.0]).is_none());
-    }
-
-    #[test]
-    fn enabled_light_carries_position_color_and_intensity() {
+    fn mirror_carries_color_and_intensity_with_a_zeroed_position_placeholder() {
         let mut light = LightComponent::default();
         light.color.color = [0.25, 0.5, 0.75, 1.0];
         light.intensity.intensity = 42.0;
         light.attenuation.range = 10.0;
 
-        let gpu = light
-            .to_gpu_light([1.0, 2.0, 3.0])
-            .expect("enabled light must produce a GpuLight");
+        let gpu = light.to_gpu_mirror().to_helio_gpu_light();
 
-        assert_eq!(gpu.position_range, [1.0, 2.0, 3.0, 10.0]);
+        // xyz is always the zeroed placeholder here -- HelioRenderer::
+        // rebuild_light_frame is the one place that overwrites it from the
+        // live Transform (see this fn's own doc).
+        assert_eq!(gpu.position_range, [0.0, 0.0, 0.0, 10.0]);
         assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0]);
     }
 
@@ -120,7 +133,7 @@ mod tests {
         for (editor_type, expected) in cases {
             let mut light = LightComponent::default();
             light.general.light_type = editor_type;
-            let gpu = light.to_gpu_light([0.0, 0.0, 0.0]).unwrap();
+            let gpu = light.to_gpu_mirror().to_helio_gpu_light();
             assert_eq!(
                 gpu.light_type, expected as u32,
                 "{editor_type:?} should map to {expected:?}"
@@ -133,11 +146,11 @@ mod tests {
         let mut light = LightComponent::default();
 
         light.shadows.cast_shadows = true;
-        assert_eq!(light.to_gpu_light([0.0, 0.0, 0.0]).unwrap().shadow_index, 0);
+        assert_eq!(light.to_gpu_mirror().to_helio_gpu_light().shadow_index, 0);
 
         light.shadows.cast_shadows = false;
         assert_eq!(
-            light.to_gpu_light([0.0, 0.0, 0.0]).unwrap().shadow_index,
+            light.to_gpu_mirror().to_helio_gpu_light().shadow_index,
             u32::MAX
         );
     }
