@@ -5,6 +5,8 @@
 
 pub mod asset_component;
 pub mod components;
+pub mod content_id;
+pub mod content_ledger;
 pub mod mesh_cache;
 pub mod subsystems;
 
