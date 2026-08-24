@@ -13,9 +13,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::asset_component::AssetComponentRegistration;
-use crate::subsystems::{
-    ensure_content_ledger_attached, load_mesh_upload_shared, resolve_asset_path,
-};
+use crate::subsystems::{load_mesh_upload, resolve_asset_path};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
@@ -297,15 +295,7 @@ type RegisteredMeshAssetPath = MeshAssetPath;
 /// `engine_class_derive`'s `struct_has_gpu_vec_field` check) -- unlike
 /// every OTHER `scene_store` struct so far, which are all plain fixed-size
 /// `Pod` rows.
-#[engine_class(
-    category = "Rendering",
-    default,
-    clone,
-    debug,
-    serialize,
-    deserialize,
-    scene_store
-)]
+#[engine_class(category = "Rendering", default, clone, debug, serialize, deserialize, scene_store)]
 pub struct StaticMeshComponent {
     /// Relative asset path to the mesh file (e.g. "meshes/primitives/SM_Cube.fbx").
     ///
@@ -313,28 +303,6 @@ pub struct StaticMeshComponent {
     /// search browser instead of a plain text input.
     #[property]
     pub mesh_asset: MeshAssetPath,
-
-    /// Content-addressed identity of `mesh_asset`'s decoded geometry
-    /// (Pulsar-Native content-dedup work). NOT user-visible and never
-    /// serialized (`skip`): derived at hydrate time from the payload bytes
-    /// themselves, exactly like `vertices`/`indices` -- a scene file that
-    /// predates this field loads unchanged, and property editors never see
-    /// it (it is not a `#[property]`, and `MeshAssetPath` JSON stays a
-    /// plain string).
-    ///
-    /// Its TYPE is what matters mechanically:
-    /// `pulsar_scenedb::handle_ledger::HandleId` -- SceneDB's derive
-    /// recognizes handle fields by type, so `World::insert` acquires a
-    /// reference into the attached ledger on first hydrate, swaps counts
-    /// when `mesh_asset` changes in place, releases on component removal,
-    /// and batch-releases through the despawn fast path. That is the whole
-    /// "last reference out frees everything" story: two entities pointing
-    /// at one file resolve to one identity with count 2; when both die,
-    /// the count hits zero exactly once and the drop callback evicts the
-    /// shared CPU parse (see `crate::content_ledger`). Zero means "no
-    /// asset" (load failed / not yet hydrated) and produces no events.
-    #[serde(skip)]
-    pub content_id: pulsar_scenedb::handle_ledger::HandleId,
 
     /// The mesh's actual vertex/index data -- not an indirect handle into a
     /// separate asset registry, the payload itself (per the governing rule:
@@ -345,13 +313,6 @@ pub struct StaticMeshComponent {
     /// disk I/O). Never round-tripped through JSON: mesh geometry lives in
     /// the asset file `mesh_asset` already names, re-derived at hydrate
     /// time, not duplicated into every saved scene.
-    ///
-    /// Since the shared-parse layer landed, these are cloned out of ONE
-    /// deduplicated parse per distinct asset (`subsystems::
-    /// load_mesh_upload_shared`) -- N components hydrating the same file
-    /// decode once; each still materializes its own `Vec`s here (per-field
-    /// GPU mirroring is per-entity by design; pool-level single-instancing
-    /// of identical geometry is a later milestone).
     #[gpu]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
@@ -404,40 +365,21 @@ fn hydrate_static_mesh_component(
     let mut parsed: StaticMeshComponent =
         serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
 
-    // Ledger wiring must precede the insert below, or this component's
-    // acquisition arrives pre-ledger (un-counted acquire that its despawn
-    // WILL release against). Idempotent; also registers the CPU-eviction
-    // drop callback once per process. See `ensure_content_ledger_attached`.
-    ensure_content_ledger_attached(world);
-
     let mesh_asset = parsed.mesh_asset.as_str().trim();
     if !mesh_asset.is_empty() {
         match engine_state::get_project_path() {
             Some(project_root) => {
                 let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
-                // Shared-parse dedup: N components hydrating the same asset
-                // cost one read + one hash + one decode total (freshness
-                // validated by a single stat per call). Identity comes from
-                // the same pass -- no second hashing round-trip.
-                match load_mesh_upload_shared(&abs_path) {
-                    Some(shared) => {
+                match load_mesh_upload(&abs_path) {
+                    Some(upload) => {
                         tracing::info!(
-                            "StaticMeshComponent hydrate: loaded '{}' ({} vertices, {} indices, content {})",
+                            "StaticMeshComponent hydrate: loaded '{}' ({} vertices, {} indices)",
                             abs_path.display(),
-                            shared.upload.vertices.len(),
-                            shared.upload.indices.len(),
-                            shared.content_id
+                            upload.vertices.len(),
+                            upload.indices.len()
                         );
-                        parsed.vertices = shared.upload.vertices.clone();
-                        parsed.indices = shared.upload.indices.clone();
-                        // The ledger event fires inside `world.insert`
-                        // below, driven by THIS field's type (`HandleId`):
-                        // first insert acquires, later re-hydrates with an
-                        // unchanged id are exact no-ops, a changed asset
-                        // swaps counts, and despawn releases through the
-                        // SceneDB capability end-to-end.
-                        parsed.content_id =
-                            pulsar_scenedb::handle_ledger::HandleId(shared.content_id.0);
+                        parsed.vertices = upload.vertices;
+                        parsed.indices = upload.indices;
                     }
                     None => {
                         tracing::warn!(
@@ -445,9 +387,6 @@ fn hydrate_static_mesh_component(
                             mesh_asset,
                             abs_path.display()
                         );
-                        // content_id stays ZERO ("no asset"): zero produces
-                        // no ledger events, so a failed load never poisons
-                        // counts.
                     }
                 }
             }

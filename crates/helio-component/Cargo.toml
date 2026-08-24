@@ -78,24 +78,9 @@ engine_fs.workspace = true
 engine_state.workspace = true
 engine_subsystems.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
-twox-hash.workspace = true
-# ContentLedger's shard locks: workspace-standard parking_lot (no poisoning,
-# smaller/faster than std::sync::Mutex) -- the house choice for
-# fine-grained locking elsewhere in this workspace.
-parking_lot.workspace = true
 
 [dev-dependencies]
 pollster = "=0.4.0"
-# Bench infrastructure (criterion) follows SceneDB's existing convention
-# (`criterion = { version = "=0.8.2" }`, harness = false benches): the
-# ledger-throughput / hashing / dedup benchmarks this crate needs measure
-# PULSAR-side types (ContentLedger, ContentId, the hydrate dedup layer)
-# that don't exist in SceneDB, so its bench suite can't host them.
-criterion = { version = "=0.8.2" }
-
-[[bench]]
-name = "content_infra"
-harness = false
 
 [[test]]
 name = "static_mesh_component_gpu_mirror"

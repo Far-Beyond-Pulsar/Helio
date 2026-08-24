@@ -1,12 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
 
 use helio::{MaterialId, MeshId, MeshUpload};
-
-use crate::content_id::ContentId;
-use crate::mesh_cache::{content_id_for_payload, decode_detailed, upgrade_v1_file};
 
 /// Per-component-instance foliage handles, keyed by `scene_object_id:component_index`.
 ///
@@ -488,221 +483,21 @@ pub fn resolve_asset_path(project_root: &Path, asset: &str) -> PathBuf {
     proj
 }
 
-/// Load a mesh file from disk (or from embedded primitive bytes) into an
-/// owned [`MeshUpload`] payload.
+/// Load a mesh file from disk (or from embedded primitive bytes) into a
+/// [`MeshUpload`] payload.
 ///
 /// Components call this when they need to load geometry that hasn't been
 /// cached yet.  The `path` should already be resolved to an absolute path
 /// (use [`resolve_asset_path`] first if needed).
-///
-/// This is now a thin compatibility wrapper over
-/// [`load_mesh_upload_shared`] (same parse, same identity computation, same
-/// cache), cloning the shared payload into owned `Vec`s -- the public
-/// signature and observable return value are unchanged for existing
-/// callers. New call sites that hydrate components should prefer the shared
-/// variant: it hands back ONE decode for N consumers of the same asset
-/// instead of N full parses behind identical signatures.
 pub fn load_mesh_upload(path: &Path) -> Option<MeshUpload> {
-    load_mesh_upload_shared(path).map(|shared| MeshUpload {
-        vertices: shared.upload.vertices.clone(),
-        indices: shared.upload.indices.clone(),
-    })
-}
-
-// ── Shared parse layer (content dedup: N components → 1 read/hash/decode) ──
-//
-// The point of this layer: when N entities hydrate the same mesh asset in
-// one load burst (a level full of the same crate, say), the file is READ,
-// HASHED, and DECODED exactly once; every component then clones its own
-// `vertices`/`indices` `Vec`s out of ONE shared [`Arc<MeshUpload>`]. Each
-// component still materializes its OWN copies into its own `#[gpu]` fields
-// (GPU-pool single-instancing is explicitly a later milestone -- this layer
-// only kills redundant CPU work). The [`ContentId`] comes from the same
-// single pass, so the ledger acquire that follows hydrate is O(1)
-// bookkeeping on an identity everyone already agrees on.
-//
-// Process-global by necessity, not convenience: hydrate's fixed signature
-// (`&mut World, Entity, &Value`) has no context object to thread a cache
-// through -- the same reasoning as `engine_state::get_project_path()`.
-// Size is bounded naturally by distinct resolved asset paths a project
-// actually uses; [`clear_shared_mesh_cache`] exists for tests/hot-reload.
-
-/// One shared parse result: identity plus the immutable payload everyone
-/// clones from. `Arc`-wrapped so N hydrates share one decode.
-#[derive(Debug, Clone)]
-pub struct SharedMesh {
-    pub content_id: ContentId,
-    pub upload: Arc<MeshUpload>,
-}
-
-#[derive(Clone)]
-struct CacheEntry {
-    /// `(mtime, size)` captured at parse time — the fast-path staleness
-    /// check (one `stat`, no re-read). The INNER `Option` records an
-    /// unreadable mtime (size still usable). The OUTER `None` means no
-    /// backing file (embedded engine primitives), which are immutable by
-    /// construction and cached unconditionally.
-    freshness: Option<(Option<SystemTime>, u64)>,
-    shared: Arc<SharedMesh>,
-}
-
-static SHARED_MESH_CACHE: OnceLock<Mutex<HashMap<PathBuf, CacheEntry>>> = OnceLock::new();
-
-fn shared_mesh_cache() -> &'static Mutex<HashMap<PathBuf, CacheEntry>> {
-    SHARED_MESH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Drops every cached entry. Test/asset-hot-reload tooling — not part of
-/// any frame path. `Arc`s already handed out stay alive (they are shared);
-/// only FUTURE lookups re-parse.
-pub fn clear_shared_mesh_cache() {
-    shared_mesh_cache().lock().unwrap().clear();
-}
-
-/// Evicts every cached parse whose content identity matches `content` --
-/// THE drop callback wired into [`crate::content_ledger`] below. Fires
-/// exactly when an asset's last entity reference dies ("last reference out
-/// frees everything"): the CPU parse is released immediately; GPU-resident
-/// copies get their own hookpoint here in a later milestone (the streaming
-/// scheduler registers its own cleanup by extending this callback -- the
-/// seam already exists, nothing in this file changes shape when that
-/// lands).
-///
-/// Removal only drops the MAP's reference: any component still cloning out
-/// of an `Arc` keeps the bytes alive until done (they're shared), and a
-/// resurrection race (re-acquire between count-0 and eviction) simply
-/// re-parses on next miss. Advisory by design.
-fn evict_shared_mesh_content(content: ContentId) {
-    shared_mesh_cache()
-        .lock()
-        .unwrap()
-        .retain(|_, entry| entry.shared.content_id != content);
-}
-
-/// One-call hydrate wiring: attaches the process-global
-/// [`crate::content_ledger::ContentLedger`] to `world` (if not already
-/// attached) and registers the CPU-eviction drop callback (once per
-/// process, first call wins). MUST be called BEFORE inserting a component
-/// carrying handle fields, so the insert's acquisition event is observed
-/// rather than arriving pre-ledger (which would leave un-counted acquires
-/// that despawns still release against -- see
-/// `World::attach_handle_ledger`'s hazard note).
-pub fn ensure_content_ledger_attached(world: &mut pulsar_scenedb::World) {
-    static EVICTION_WIRED: OnceLock<()> = OnceLock::new();
-    let ledger = crate::content_ledger::shared_content_ledger();
-    EVICTION_WIRED.get_or_init(|| {
-        ledger.set_drop_callback(Box::new(evict_shared_mesh_content));
-    });
-    if !world.has_handle_ledger() {
-        world.attach_handle_ledger(ledger);
-    }
-}
-
-/// Loads (or cache-hits) an asset as a deduplicated shared parse:
-/// identical paths within the freshness window return the SAME `Arc`, so N
-/// callers cost one read + one hash + one decode total. Freshness is
-/// validated per call via a single `stat`: mtime+size match ⇒ trust the
-/// cached value (the hot path); anything else ⇒ reparse and replace.
-///
-/// Lock discipline: the mutex guards MAP ACCESS ONLY — parsing happens
-/// outside it, so concurrent first-loads of DIFFERENT assets never
-/// serialize behind each other. Two threads racing the SAME cold entry may
-/// both parse once (last writer wins the slot); that bounded thundering
-/// herd beats serializing every hydrate in the engine behind one global
-/// lock, which is the alternative shape.
-pub fn load_mesh_upload_shared(path: &Path) -> Option<Arc<SharedMesh>> {
-    // Fast path: fresh cached entry? One stat + one lock acquisition,
-    // zero IO, zero hashing.
-    let freshness = std::fs::metadata(path)
-        .ok()
-        .map(|m| (m.modified().ok(), m.len()));
-
-    {
-        let map = shared_mesh_cache().lock().unwrap();
-        if let Some(entry) = map.get(path) {
-            let still_fresh = match (&entry.freshness, &freshness) {
-                // Both disk-backed with readable mtimes: mtime AND size
-                // must match exactly.
-                (Some((Some(cached_mtime), cached_size)), Some((Some(mtime), size))) => {
-                    *cached_mtime == *mtime && *cached_size == *size
-                }
-                // Either side has an unreadable mtime: fall back to size
-                // alone as the staleness signal.
-                (Some((_, cached_size)), Some((_, size))) => *cached_size == *size,
-                // No file either time (embedded primitives): trusted.
-                (None, None) => true,
-                // File appeared or vanished since capture: stale.
-                _ => false,
-            };
-            if still_fresh {
-                return Some(Arc::clone(&entry.shared));
-            }
-        }
-    }
-
-    // Slow path: real parse, no locks held.
-    let shared = Arc::new(parse_mesh_with_identity(path)?);
-
-    let mut map = shared_mesh_cache().lock().unwrap();
-    map.insert(
-        path.to_path_buf(),
-        CacheEntry {
-            freshness,
-            shared: Arc::clone(&shared),
-        },
-    );
-    Some(shared)
-}
-
-/// Single-parse loader backing [`load_mesh_upload_shared`]: reads/decodes
-/// ONCE, computes content identity from those same decoded bytes, and --
-/// for legacy v1 `.mesh` files -- best-effort upgrades the FILE to v2 so
-/// identities converge on disk too. Upgrade failure is logged, never
-/// fatal: a read-only project still loads fine, it just stays v1.
-fn parse_mesh_with_identity(path: &Path) -> Option<SharedMesh> {
-    // Engine-native baked mesh asset (`.mesh`). One file read serves both
-    // identity and geometry: v2 declares its id (trusted over recomputation
-    // -- see mesh_cache's doc for why corruption must not fork identity);
-    // v1 gets it computed from the decoded arrays, byte-for-byte what a v2
-    // writer would have stored.
+    // Engine-native baked mesh asset (`.mesh`), produced at import time from the
+    // source model. Load it directly — no conversion or options (issues #391/#409).
     if path.extension().and_then(|e| e.to_str()) == Some("mesh") {
-        let bytes = std::fs::read(path).ok()?;
-        let decoded = decode_detailed(&bytes)?;
-        if decoded.source_version == 1 && upgrade_v1_file(path) {
-            tracing::debug!(
-                "PMSH: upgraded '{}' to v2 (content id {})",
-                path.display(),
-                decoded.content_id
-            );
-        } else if decoded.source_version == 1 {
-            tracing::debug!(
-                "PMSH: '{}' stays v1 (upgrade failed -- read-only volume?); loading anyway",
-                path.display()
-            );
-        }
-        return Some(SharedMesh {
-            content_id: decoded.content_id,
-            upload: Arc::new(decoded.upload),
-        });
+        return std::fs::read(path)
+            .ok()
+            .and_then(|bytes| crate::mesh_cache::decode(&bytes));
     }
 
-    // Source-model route (.fbx etc.) or embedded primitive: decode through
-    // asset-compat, then identify from the DECODED arrays. Identifying from
-    // decoded output (not raw file bytes) is what makes cross-route dedup
-    // work: an FBX and a `.mesh` holding identical geometry produce the
-    // same id, and import options that don't change geometry don't change
-    // identity.
-    let upload = load_mesh_upload_uncached(path)?;
-    let content_id = content_id_for_payload(&upload.vertices, &upload.indices);
-    Some(SharedMesh {
-        content_id,
-        upload: Arc::new(upload),
-    })
-}
-
-/// The uncached parse [`load_mesh_upload`] has always done, factored out so
-/// the caching wrapper wraps it instead of duplicating it.
-fn load_mesh_upload_uncached(path: &Path) -> Option<MeshUpload> {
     let cfg = helio_asset_compat::LoadConfig {
         flip_uv_y: true,
         merge_meshes: false,

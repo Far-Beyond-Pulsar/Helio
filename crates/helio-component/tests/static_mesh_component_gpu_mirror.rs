@@ -84,7 +84,6 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
         entity,
         StaticMeshComponent {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
-            content_id: Default::default(),
             vertices: vec![v(1.0), v(2.0), v(3.0)],
             indices: vec![0, 1, 2],
         },
@@ -135,7 +134,6 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
         entity,
         StaticMeshComponent {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
-            content_id: Default::default(),
             vertices: vec![v(1.0), v(2.0), v(3.0), v(4.0)],
             indices: (0..6).collect(),
         },
@@ -150,7 +148,6 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
         entity,
         StaticMeshComponent {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx"),
-            content_id: Default::default(),
             vertices: vec![v(9.0)],
             indices: vec![0],
         },
@@ -195,7 +192,6 @@ fn scene_mesh_buffers_reads_back_data_written_through_a_rebound_static_mesh_comp
         entity,
         StaticMeshComponent {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
-            content_id: Default::default(),
             vertices: vec![v(11.0), v(22.0), v(33.0)],
             indices: vec![0, 1, 2],
         },
