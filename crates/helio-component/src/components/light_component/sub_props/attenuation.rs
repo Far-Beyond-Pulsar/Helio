@@ -16,18 +16,31 @@ pub struct AttenuationLightProps {
     pub source_radius: f32,
     #[property(min = 0.0, max = 200.0, step = 0.1, category = "Attenuation")]
     pub source_length: f32,
-    // `as = f32, with = f32::to_radians`: the properties panel edits degrees
-    // (human-friendly); the GPU mirror holds radians (what the shader
-    // actually consumes) -- computed once here, at mirror-build time, not
-    // by a hand-written post-mirror translation function. See `pulsar_
-    // world_registry`'s `GpuMirrored` doc / `engine_class_derive`'s
-    // `GpuFieldOverride` doc for why this belongs on the field itself.
+    // `as = f32, with = cone_degrees_to_cosine`: the properties panel edits
+    // degrees (human-friendly); the GPU mirror holds the COSINE of the
+    // angle -- what `GpuLight`'s contract actually specifies for these two
+    // fields (`direction_outer.w` = spot outer-cos, `inner_angle` = spot
+    // inner-cos: every lighting shader smoothsteps them against
+    // `dot(-L, direction)` directly). Uploading raw radians instead made
+    // that smoothstep run reversed (edge0 > edge1) -- a dark disc at the
+    // spot's center with the bright ring outside it (#172). Computed once
+    // here, at mirror-build time, not by a hand-written post-mirror
+    // translation function. See `pulsar_world_registry`'s `GpuMirrored` doc
+    // / `engine_class_derive`'s `GpuFieldOverride` doc for why this belongs
+    // on the field itself.
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
-    #[gpu(as = f32, with = f32::to_radians)]
+    #[gpu(as = f32, with = cone_degrees_to_cosine)]
     pub inner_cone_angle: f32,
     #[property(min = 0.0, max = 90.0, step = 1.0, category = "Attenuation")]
-    #[gpu(as = f32, with = f32::to_radians)]
+    #[gpu(as = f32, with = cone_degrees_to_cosine)]
     pub outer_cone_angle: f32,
+}
+
+/// `#[gpu(with = ...)]` target for both cone-angle fields -- degrees as the
+/// human edits them to cosines as `GpuLight` stores them (see the fields'
+/// own comment for why the cosine is the right upload shape).
+fn cone_degrees_to_cosine(degrees: f32) -> f32 {
+    degrees.to_radians().cos()
 }
 
 impl Default for AttenuationLightProps {

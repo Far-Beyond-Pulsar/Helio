@@ -12,7 +12,7 @@ impl super::LightComponentGpuMirror {
     /// Every field this reads (`general.light_type`, `intensity.intensity`,
     /// `color.color`, `attenuation.{range,inner_cone_angle,outer_cone_
     /// angle}`, `shadows.cast_shadows`) is ALREADY in `GpuLight`'s own units
-    /// and value space by the time it lands here -- degrees->radians and
+    /// and value space by the time it lands here -- degrees->cosines and
     /// the `LightType`->`u32`/`bool`->shadow-request-sentinel remaps happen
     /// once, upload-time, via each field's own `#[gpu(as = .., with = ..)]`
     /// (`sub_props/attenuation.rs`/`general.rs`/`shadows.rs`), not in this
@@ -153,5 +153,38 @@ mod tests {
             light.to_gpu_mirror().to_helio_gpu_light().shadow_index,
             u32::MAX
         );
+    }
+
+    #[test]
+    fn spot_cone_angles_land_on_gpulight_as_cosines_with_inner_inside_outer() {
+        // #172: these two fields were uploaded as raw radians while every
+        // lighting shader treats them as cosines -- `smoothstep(outer_cos,
+        // inner_cos, dot(-L, dir))` ran with edge0 > edge1, a REVERSED
+        // smoothstep: black at the cone's center, full brightness only past
+        // ~58 degrees off-axis. The mirror must hand over cosines, with
+        // inner >= outer so brightness saturates INSIDE the cone.
+        let mut light = LightComponent::default();
+        light.general.light_type = LightType::Spot;
+        light.attenuation.inner_cone_angle = 30.0;
+        light.attenuation.outer_cone_angle = 45.0;
+
+        let gpu = light.to_gpu_mirror().to_helio_gpu_light();
+
+        let expected_inner = 30.0_f32.to_radians().cos();
+        let expected_outer = 45.0_f32.to_radians().cos();
+        assert!(
+            (gpu.inner_angle - expected_inner).abs() < 1e-6,
+            "inner_angle must be cos(30deg) = {expected_inner}, got {}",
+            gpu.inner_angle
+        );
+        assert!(
+            (gpu.direction_outer[3] - expected_outer).abs() < 1e-6,
+            "direction_outer.w must be cos(45deg) = {expected_outer}, got {}",
+            gpu.direction_outer[3]
+        );
+        // The property every shader actually depends on (saturated inside
+        // the inner cone, falling off to the outer cone): radians-as-cosines
+        // inverted this ordering, which WAS the #172 artifact.
+        assert!(gpu.inner_angle > gpu.direction_outer[3]);
     }
 }

@@ -72,6 +72,18 @@ fn light_component_gpu_mirror_lands_on_the_gpu_through_sync_gpu_mirror_alone() {
     assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0], "must be real GPU-resident data, not just the CPU World row");
     assert_eq!(gpu.light_type, HelioLightType::Spot as u32);
 
+    // Spot cones must land on the GPU as COSINES (the shader contract), not
+    // radians -- #172's reversed-cone artifact came from exactly this row.
+    let expected_inner_cos = 30.0_f32.to_radians().cos();
+    let expected_outer_cos = 45.0_f32.to_radians().cos();
+    assert!(
+        (gpu.inner_angle - expected_inner_cos).abs() < 1e-6
+            && (gpu.direction_outer[3] - expected_outer_cos).abs() < 1e-6,
+        "cone angles must be GPU-round-tripped cosines: inner {expected_inner_cos}/outer {expected_outer_cos}, got inner {}/outer {}",
+        gpu.inner_angle,
+        gpu.direction_outer[3]
+    );
+
     // The CPU-side World row must also read back correctly, same guarantee
     // static mesh's own mirror test makes for its non-#[gpu] field.
     let stored = world.get::<LightComponentGpuMirror>(entity).expect("mirror must be readable back");
