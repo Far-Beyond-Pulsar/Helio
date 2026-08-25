@@ -1217,9 +1217,11 @@ dependencies = [
  "glam 0.33.5",
  "helio-bake",
  "helio-core",
+ "helio-default-graphs",
  "helio-foliage-core",
  "helio-pass-postprocess",
  "helio-pass-tsr",
+ "helio-pass-vt-density",
  "helio-portal-core",
  "helio-voxel-core",
  "helio-xr",
@@ -1350,6 +1352,7 @@ dependencies = [
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-mesh",
+ "helio-pass-vt-density",
  "helio-pass-water-sim",
  "image",
  "pollster 0.4.0",
@@ -1890,6 +1893,18 @@ dependencies = [
  "helio-voxel-core",
  "libhelio",
  "log",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-vt-density"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -3396,7 +3411,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=de0e524e01789003fc0108f18239d7a6575f269f#de0e524e01789003fc0108f18239d7a6575f269f"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5#72291d0f211dc8826eb70339aeb0409be4270ad5"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
@@ -3410,7 +3425,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=de0e524e01789003fc0108f18239d7a6575f269f#de0e524e01789003fc0108f18239d7a6575f269f"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5#72291d0f211dc8826eb70339aeb0409be4270ad5"
 dependencies = [
  "proc-macro2",
  "quote",

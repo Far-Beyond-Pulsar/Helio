@@ -38,6 +38,7 @@ helio-pass-shadow-cull = { path = "../passes/3d/helio-pass-shadow-cull" }
 helio-pass-shadow-dirty = { path = "../passes/3d/helio-pass-shadow-dirty" }
 helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
+helio-pass-vt-density = { path = "../passes/3d/helio-pass-vt-density" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-sky-lut = { path = "../passes/3d/helio-pass-sky-lut" }

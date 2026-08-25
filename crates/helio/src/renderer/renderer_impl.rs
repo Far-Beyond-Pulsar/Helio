@@ -61,6 +61,14 @@ pub(crate) enum CullStatsReadbackState {
     Disabled,
 }
 
+/// Fenced readback state for the texel-streaming feedback buffer (Helio#238)
+/// — same consume-previous-then-enqueue discipline as [`CullStatsReadbackState`].
+pub(crate) enum VtFeedbackReadbackState {
+    Idle,
+    Mapping(Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
+    Disabled,
+}
+
 pub struct Renderer {
     pub(crate) device: Arc<wgpu::Device>,
     pub(crate) queue: Arc<wgpu::Queue>,
@@ -96,6 +104,12 @@ pub struct Renderer {
     /// Mirrors `RendererConfig::enable_portals` — same "persist for resize
     /// rebuild" reasoning as `enable_foliage` above.
     pub(crate) enable_portals: bool,
+    /// Mirrors `RendererConfig::{virtual_texturing_enabled,
+    /// texture_stream_pool_mb, vt_tile_size_px}` — persisted so the resize
+    /// rebuild reconstructs the identical graph/config (Helio#238).
+    pub(crate) virtual_texturing_enabled: bool,
+    pub(crate) texture_stream_pool_mb: u32,
+    pub(crate) vt_tile_size_px: u32,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
@@ -125,6 +139,14 @@ pub struct Renderer {
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
     pub(crate) cull_stats: [u32; 8],
+    /// Texel-streaming feedback readback (Helio#238): persistent staging
+    /// mirror of the compaction pass's output, plus the fence state and the
+    /// latest TAKEN snapshot. The staging buffer is a byte bucket — its
+    /// contents are fully rewritten every frame, so retaining it retains no
+    /// derivable frame state.
+    pub(crate) vt_feedback_staging: wgpu::Buffer,
+    pub(crate) vt_feedback_readback_state: VtFeedbackReadbackState,
+    pub(crate) vt_feedback: Option<libhelio::VtFeedbackSnapshot>,
     pub(crate) frame_times: Vec<f32>,
     pub(crate) frame_times_cursor: usize,
     /// Whether per-frame subpixel camera jitter is applied. Graphs with a
@@ -655,6 +677,9 @@ impl Renderer {
             enable_foliage: self.enable_foliage,
             foliage_blades_per_m2: self.foliage_blades_per_m2,
             enable_portals: self.enable_portals,
+            virtual_texturing_enabled: self.virtual_texturing_enabled,
+            texture_stream_pool_mb: self.texture_stream_pool_mb,
+            vt_tile_size_px: self.vt_tile_size_px,
         }
     }
 

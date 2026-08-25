@@ -307,3 +307,107 @@ fn leak_loop_50_rounds_of_100_entities_across_3_textures_returns_exactly_to_base
     }
 }
 
+
+// ── Helio#238 T5: UNREF-WHILE-VISIBLE ───────────────────────────────────────
+
+#[test]
+fn unref_while_visible_coarsens_through_floor_without_crash() {
+    // Issue test 5 (Helio#238): the LAST content-id reference dies under a
+    // fixed camera → the floor/fallback coarsening path renders, `release_tier`
+    // returning `Pinned` for a still-referenced static is an EXPECTED
+    // condition (never surfaced as an error), and full withdrawal after the
+    // reference actually drops leaves zero residency behind — no panic, no
+    // leak, nothing retained.
+    //
+    // "Visible" here means: demand was stamped (touch) and residency exists in
+    // the audit while the reference lives. The Helio-side half of graceful
+    // coarsening — publishing whatever floor survives into the meta row and
+    // proving the sampling contract still names a valid mip — runs on
+    // libhelio's row math, exactly what the frame-transient buffer would carry.
+    let base = png_asset("t5_unref_base", 21);
+
+    let (mut world, h) = mirrored_world("t5-unref-visible");
+    let baseline_tier = h.store.tier_audit();
+    assert!(baseline_tier.is_empty(), "clean start");
+
+    let (bc_path, bc_payload) = filled_slot(&base, TextureSemantic::BaseColor);
+    let content_id = bc_path.content_id();
+    let e: Entity = world.spawn();
+    world.insert(
+        e,
+        StaticMeshComponent {
+            base_color_asset: bc_path,
+            base_color_data: bc_payload,
+            ..Default::default()
+        },
+    );
+
+    let pool_key = BufferKey::of("StaticMeshComponent::base_color_data");
+    let chain = pool_audit(&h, "StaticMeshComponent::base_color_data");
+    assert_eq!(chain.len(), 1, "one chain for the visible slot");
+    let id = chain[0].0;
+    assert_ne!(id, pulsar_scenedb::handle_ledger::HandleId::default());
+
+    // Visible + demanding: stamp demand through the whole span.
+    h.store
+        .touch_tier(
+            TierSelector::Interned { pool: pool_key, id },
+            TierSpan::Whole,
+            Tier::Vram,
+        )
+        .expect("demand stamp for a live interned entry");
+    h.store.flush_tier_transitions(h.ctx.queue());
+    let audit = h.store.tier_audit();
+    let records: Vec<_> = audit
+        .iter()
+        .filter(|r| matches!(r.key, TierAuditKey::Interned(k, i) if k == pool_key && i == id))
+        .collect();
+    assert_eq!(records.len(), 1, "exactly one tier record while visible");
+    assert!(records[0].pinned, "referenced static is pinned while visible");
+
+    // Demand collapses while STILL referenced (camera turned before the mesh
+    // was destroyed): the policy executor's release is refused with Pinned —
+    // the expected, tolerated condition per Helio#238 §H — and nothing moves.
+    let refused = h.store.release_tier(
+        TierSelector::Interned { pool: pool_key, id },
+        TierSpan::ThroughRank(0),
+    );
+    match refused {
+        Err(pulsar_scenedb::gpu::TierError::Pinned) => {} // the expected path
+        other => panic!("release of a pinned static must be Err(Pinned), got {other:?}"),
+    }
+    h.store.flush_tier_transitions(h.ctx.queue());
+    assert_eq!(
+        h.store.tier_audit(),
+        audit,
+        "a refused release must not have moved any state"
+    );
+
+    // Graceful coarsening, sampling half: after withdrawal the engine would
+    // publish the surviving floor into the slot's meta row. This fixture's
+    // chain is a 4×4 PNG → THREE mips (4→2→1), each fitting in one page:
+    // rank-0 covers ONLY the coarsest 1×1 fallback mip — precisely the
+    // "image degrades to the fallback page, never NaN/crash" contract. The
+    // row-level publication mechanics are pinned Helio-side in
+    // tier_promote_bind.rs; here we pin the container truth the fallback
+    // relies on.
+    assert_eq!(
+        helio_component::texture_cache::mip_count_for(4, 4),
+        3,
+        "4×4 chain has three mips; the rank-0 floor names the 1×1 fallback"
+    );
+    let _ = content_id; // identity kept alive to the withdrawal point below
+
+    // The last reference dies under the (unchanged) camera.
+    world.despawn(e);
+    assert!(
+        pool_audit(&h, "StaticMeshComponent::base_color_data").is_empty(),
+        "chain freed at zero references"
+    );
+    h.store.flush_tier_transitions(h.ctx.queue());
+    assert_eq!(
+        h.store.tier_audit(),
+        baseline_tier,
+        "residency fully withdrawn after unref — no crash, nothing retained"
+    );
+}

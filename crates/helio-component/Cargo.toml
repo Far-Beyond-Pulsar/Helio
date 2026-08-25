@@ -123,5 +123,15 @@ required-features = ["gpu"]
 name = "texture_benchmarks"
 required-features = ["gpu"]
 
+# Helio#238: VT sampling golden (CPU reference half) + LUT authority pin.
+[[test]]
+name = "vt_golden_reference"
+required-features = []
+
+# Helio#238: policy evaluation cost vs touch count.
+[[test]]
+name = "tier_policy_benchmarks"
+required-features = []
+
 [lints]
 workspace = true

@@ -82,6 +82,7 @@ helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
 helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-pass-voxel-mesh = { path = "crates/passes/3d/helio-pass-voxel-mesh" }
+helio-pass-vt-density = { path = "crates/passes/3d/helio-pass-vt-density" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
 helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }

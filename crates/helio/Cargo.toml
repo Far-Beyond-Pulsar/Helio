@@ -16,6 +16,7 @@ helio-portal-core = { workspace = true }
 helio-foliage-core = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
+helio-pass-vt-density = { workspace = true }
 
 libhelio = { workspace = true }
 log = { workspace = true }
@@ -55,6 +56,12 @@ meshopt = "0.6.2"
 # dev uses a session-local PATH patch (see the #237 final report); do not
 # commit one.
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5", features = ["gpu"] }
+
+[dev-dependencies]
+# T4 statelessness gate (Helio#238) renders through the default external
+# graph — the same one hosts build — so the teardown/rebuild boundary it
+# enforces covers the REAL pass set, not a test double.
+helio-default-graphs = { workspace = true }
 
 [features]
 default = ["profiling"]

@@ -1,4 +1,5 @@
 //!use pbr_eval
+//!use helio_vt
 
 enable wgpu_binding_array;
 
@@ -211,7 +212,8 @@ fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<
         return fallback;
     }
     let uv = select_uv(slot, base_uv);
-    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
+    vt_record_demand(slot.texture_index, uv);
+    return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], uv);
 }
 
 fn resolve_specular_f0(
@@ -441,6 +443,7 @@ fn pbr_direct_light(
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    vt_frame_begin(input.clip_position.xy);
     let material = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
 

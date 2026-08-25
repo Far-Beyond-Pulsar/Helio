@@ -306,6 +306,29 @@ pub struct RendererConfig {
     /// unlike sublevels they get an actual off switch: a scene that never
     /// calls `Scene::add_portal` can skip paying for it by setting this `false`.
     pub enable_portals: bool,
+
+    /// Enable the texel-streaming demand loop (Helio#238). Default `false`.
+    ///
+    /// When `false`, every texture slot publishes an unrestricted floor: the
+    /// `//!use helio_vt` sampling contract degenerates to whole-mip sampling
+    /// (pixel-identical to pre-VT) and feedback measurement still records —
+    /// but no engine consumes it, so nothing streams. The engine-side
+    /// translation seam turns `project/streaming` settings into these fields
+    /// plus one SceneDB `configure_tiers` call; Helio itself never reads
+    /// settings (renderer crates stay settings-free by contract).
+    pub virtual_texturing_enabled: bool,
+    /// VRAM budget for streamed texture pages, in mebibytes.
+    ///
+    /// Handed to SceneDB's `TierConfig::vram_budget_bytes` at the engine's ONE
+    /// `configure_tiers` call; Helio carries it only as configuration
+    /// passthrough. Canonical engine key:
+    /// `project/streaming.texture_stream_pool_mb`.
+    pub texture_stream_pool_mb: u32,
+    /// Streamed page granularity in texels (`.ptex` native default 128 for
+    /// 16-byte BCn blocks). Passthrough for the engine's
+    /// `project/streaming.virtual_texture_tile_size`; changing it after assets
+    /// are imported re-encodes on next load.
+    pub vt_tile_size_px: u32,
 }
 
 impl RendererConfig {
@@ -331,6 +354,9 @@ impl RendererConfig {
             render_mode: RenderMode::Deferred,
             enable_xr: false,
             enable_portals: true,
+            virtual_texturing_enabled: false,
+            texture_stream_pool_mb: 512,
+            vt_tile_size_px: 128,
         }
     }
 

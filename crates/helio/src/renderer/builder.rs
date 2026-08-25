@@ -128,6 +128,20 @@ impl RendererBuilder {
         self
     }
 
+    /// Enable the texel-streaming demand loop with a VRAM page budget in MiB
+    /// (Helio#238). See [`RendererConfig::virtual_texturing_enabled`].
+    pub fn with_texture_streaming(mut self, pool_mb: u32) -> Self {
+        self.config.virtual_texturing_enabled = true;
+        self.config.texture_stream_pool_mb = pool_mb.max(1);
+        self
+    }
+
+    /// Override the streamed page granularity in texels.
+    pub fn with_vt_tile_size(mut self, tile_px: u32) -> Self {
+        self.config.vt_tile_size_px = tile_px.max(16);
+        self
+    }
+
     /// Build the [`Renderer`].
     ///
     /// Creates the scene, debug buffers, and debug state internally, then calls
