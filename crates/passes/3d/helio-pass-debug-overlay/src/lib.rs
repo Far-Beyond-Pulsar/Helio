@@ -197,6 +197,20 @@ impl DebugOverlayState {
         }
     }
 
+    /// Writes a block of plain-text lines at (col, row) — the shape the
+    /// texel-streaming pool-pressure viewmode uses (Helio#238): a host's
+    /// `populate` callback formats its SceneDB `tier_audit()` snapshot into
+    /// lines each frame and hands them here. Pure read → pure render; the
+    /// overlay retains nothing frame-to-frame beyond the glyph grid itself.
+    pub fn set_text_lines(&mut self, col: u32, row: u32, lines: &[String]) {
+        for (i, line) in lines.iter().enumerate() {
+            let r = row + i as u32;
+            for (j, ch) in line.chars().enumerate() {
+                self.set_char(col + j as u32, r, ch);
+            }
+        }
+    }
+
     pub fn write_text(&mut self, col: u32, row: u32, text: &str) {
         for (i, ch) in text.chars().enumerate() {
             self.set_char(col + i as u32, row, ch);

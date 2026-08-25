@@ -10,7 +10,7 @@ use crate::groups::GroupId;
 use crate::scene::Camera;
 
 use super::renderer_impl::{
-    CullStatsReadbackState, DebugCameraUniform, Renderer,
+    CullStatsReadbackState, DebugCameraUniform, Renderer, VtFeedbackReadbackState,
 };
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
@@ -102,11 +102,68 @@ impl Renderer {
         }
     }
 
+    /// Fenced readback poll for the texel-streaming feedback buffer
+    /// (Helio#238) — same shape as [`Self::poll_cull_stats_readback`]: the
+    /// PREVIOUS frame's copy is consumed before this frame's is enqueued, so
+    /// nothing ever blocks mid-frame.
+    ///
+    /// The parsed snapshot lands in `self.vt_feedback`, where
+    /// [`Self::take_vt_feedback`] hands it to the policy loop.
+    fn poll_vt_feedback_readback(&mut self) {
+        if !self.owns_device {
+            return;
+        }
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let result = match &self.vt_feedback_readback_state {
+            VtFeedbackReadbackState::Idle | VtFeedbackReadbackState::Disabled => return,
+            VtFeedbackReadbackState::Mapping(completion) => completion
+                .lock()
+                .ok()
+                .and_then(|mut completion| completion.take()),
+        };
+        match result {
+            Some(Ok(())) => {
+                let parsed = match self.vt_feedback_staging.slice(..).get_mapped_range() {
+                    Ok(mapped) => {
+                        let words: &[u32] = bytemuck::cast_slice(&mapped);
+                        libhelio::VtFeedbackSnapshot::parse(words)
+                    }
+                    Err(_) => {
+                        self.vt_feedback_staging.unmap();
+                        self.vt_feedback_readback_state = VtFeedbackReadbackState::Disabled;
+                        return;
+                    }
+                };
+                self.vt_feedback_staging.unmap();
+                self.vt_feedback = Some(parsed);
+                self.vt_feedback_readback_state = VtFeedbackReadbackState::Idle;
+            }
+            Some(Err(_)) => {
+                // A mapping error disables further attempts (cull-stats
+                // precedent): feedback degrades to "no demand observed", never
+                // blocks or panics.
+                log::warn!("VT feedback readback failed; disabling until restart");
+                self.vt_feedback_staging.unmap();
+                self.vt_feedback_readback_state = VtFeedbackReadbackState::Disabled;
+            }
+            None => {}
+        }
+    }
+
+    /// Takes the latest parsed feedback snapshot (frame N-1's measurement),
+    /// leaving the renderer holding nothing. This take is the statelessness
+    /// seam: whoever runs the policy consumes it between frames; Helio keeps
+    /// no copy. `None` = no completed readback yet (or readback disabled).
+    pub fn take_vt_feedback(&mut self) -> Option<libhelio::VtFeedbackSnapshot> {
+        self.vt_feedback.take()
+    }
+
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         // Browser WebGPU buffer mapping is asynchronous. Consume the previous
         // frame's completed readback before recording a new copy.
         self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
+        self.poll_vt_feedback_readback();
 
         if let Some((w, h)) = self.pending_resize.take() {
             self.apply_resize_now(w, h);
@@ -436,6 +493,24 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs = None;
 
+        // ── Frame-transient VT meta rows (Helio#238 §4) ────────────────────
+        // Rebuilt from scene texture records EVERY frame; the buffer is a
+        // local dropped at the end of this function. Derivable data lives
+        // nowhere: no Renderer field, no cache — the statelessness gate tears
+        // down everything around this and it must not matter.
+        let vt_meta_rows = self.scene.vt_meta_rows();
+        let vt_meta_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VT Meta Rows (frame-transient)"),
+            size: (vt_meta_rows.len() * std::mem::size_of::<libhelio::GpuVtMetaRow>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(
+            &vt_meta_buffer,
+            0,
+            bytemuck::cast_slice(&vt_meta_rows),
+        );
+
         let mut frame_resources = libhelio::FrameResources::empty();
         frame_resources.main_scene.write(
             libhelio::MainSceneResources {
@@ -463,6 +538,9 @@ impl Renderer {
                     samplers: samplers.as_slice(),
                     version: self.scene.texture_binding_version(),
                 },
+                vt_bindings: libhelio::Tracked::with_value(libhelio::VtFrameBindings {
+                    vt_meta_buffer: &vt_meta_buffer,
+                }),
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
@@ -661,6 +739,43 @@ impl Renderer {
                     }
                 });
             self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
+        }
+
+        if self.owns_device
+            && matches!(
+                self.vt_feedback_readback_state,
+                VtFeedbackReadbackState::Idle
+            )
+            && self.vt_feedback_staging.size() >= libhelio::VT_FEEDBACK_WORDS as u64 * 4
+        {
+            // Enqueue the copy from the compaction pass's output buffer —
+            // found by type in the graph; when the pass is absent (custom
+            // graph) there is simply nothing to copy and feedback stays None.
+            let feedback_src: Option<&wgpu::Buffer> = self
+                .graph
+                .find_pass::<helio_pass_vt_density::VtDensityCompactPass>()
+                .map(|p| p.feedback_buffer());
+            if let Some(src) = feedback_src {
+                let staging = &self.vt_feedback_staging;
+                let queue = &self.queue;
+                let len = libhelio::VT_FEEDBACK_WORDS as u64 * 4;
+                let mut read_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("VT Feedback Readback"),
+                });
+                read_encoder.copy_buffer_to_buffer(src, 0, staging, 0, len);
+                queue.submit(std::iter::once(read_encoder.finish()));
+
+                let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let callback_completion = std::sync::Arc::clone(&completion);
+                staging
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        if let Ok(mut completion) = callback_completion.lock() {
+                            *completion = Some(result);
+                        }
+                    });
+                self.vt_feedback_readback_state = VtFeedbackReadbackState::Mapping(completion);
+            }
         }
 
         // Release the texture/sampler view borrows on the scene before advancing

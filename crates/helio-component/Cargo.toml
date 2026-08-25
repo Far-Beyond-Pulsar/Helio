@@ -78,6 +78,14 @@ engine_fs.workspace = true
 engine_state.workspace = true
 engine_subsystems.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
+# Content-addressed asset identity (Pulsar-Native#632): xxh3-128 over decoded
+# mesh bytes for PMSH v1 backfill / non-native source paths, and as the
+# fallback path->id hash in `MeshAssetPath::content_id` (see mesh_cache.rs).
+twox-hash = { workspace = true }
+# Helio#237: source-image decode for the `.ptex` import pipeline and hydrate-
+# time conversion of raw textures (same decoders/features the PN root
+# workspace pins on `image` — png/jpeg/bmp/tga/gif/webp).
+image = { workspace = true }
 
 [dev-dependencies]
 pollster = "=0.4.0"
@@ -85,6 +93,45 @@ pollster = "=0.4.0"
 [[test]]
 name = "static_mesh_component_gpu_mirror"
 required-features = ["gpu"]
+
+[[test]]
+name = "content_dedup"
+required-features = ["gpu"]
+
+[[test]]
+name = "content_dedup_benchmarks"
+required-features = ["gpu"]
+
+# Helio#237: texture container/dedup/mipgen/lifecycle coverage + benchmarks.
+[[test]]
+name = "texture_container"
+required-features = ["gpu"]
+
+[[test]]
+name = "texture_content_dedup"
+required-features = ["gpu"]
+
+[[test]]
+name = "texture_mipgen_golden"
+required-features = ["gpu"]
+
+[[test]]
+name = "texture_slot_lifecycle"
+required-features = ["gpu"]
+
+[[test]]
+name = "texture_benchmarks"
+required-features = ["gpu"]
+
+# Helio#238: VT sampling golden (CPU reference half) + LUT authority pin.
+[[test]]
+name = "vt_golden_reference"
+required-features = []
+
+# Helio#238: policy evaluation cost vs touch count.
+[[test]]
+name = "tier_policy_benchmarks"
+required-features = []
 
 [lints]
 workspace = true

@@ -37,6 +37,10 @@ pub struct VirtualGeometryPass {
     pub(crate) draw_bg_0: Option<wgpu::BindGroup>,
     pub(crate) draw_bg_1: Option<wgpu::BindGroup>,
     pub(crate) bg1_version: Option<u64>,
+    /// Group 2 (Helio#238): `//!use helio_vt` meta rows + density target.
+    pub(crate) vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
+    pub(crate) draw_bg_2: Option<wgpu::BindGroup>,
+    pub(crate) bg2_key: helio_core::shader::vt_binder::VtGroupKey,
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
     pub(crate) object_buf: wgpu::Buffer,
@@ -358,9 +362,17 @@ impl VirtualGeometryPass {
 
         let draw_bgl_1 = create_material_bgl(device, material_binding);
 
+        // Group 2 (Helio#238): VT meta rows + quarter-res density target.
+        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
+        let draw_bgl_2 = vt_binder.layout().clone();
+
         let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("VG Draw PL"),
-            bind_group_layouts: &[Some(&draw_bgl_0), Some(&draw_bgl_1)],
+            bind_group_layouts: &[
+                Some(&draw_bgl_0),
+                Some(&draw_bgl_1),
+                Some(&draw_bgl_2),
+            ],
             immediate_size: 0,
         });
         let vg_vertex_buffers = &[Some(wgpu::VertexBufferLayout {
@@ -540,6 +552,9 @@ impl VirtualGeometryPass {
             draw_bg_0,
             draw_bg_1: None,
             bg1_version: None,
+            vt_binder,
+            draw_bg_2: None,
+            bg2_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             globals_buf,
             meshlet_buf,
             object_buf,
@@ -1207,6 +1222,27 @@ impl RenderPass for VirtualGeometryPass {
             return Ok(());
         };
 
+        // Group 2 (Helio#238) — same rebuild cadence as BG1; see the GBuffer
+        // pass's comment for the promote-before-bind contract. Lives in the
+        // draw path because it needs the graph-owned density view.
+        let vt_meta_buf = main_scene.vt_bindings.get().map(|v| v.vt_meta_buffer);
+        let vt_density_view = ctx.resource_pool.get_view("vt_density");
+        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
+            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
+            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
+            version: main_scene.material_textures.version,
+        };
+        if self.bg2_key != vt_key || self.draw_bg_2.is_none() {
+            self.draw_bg_2 = Some(
+                self.vt_binder
+                    .bind_group(ctx.device, vt_meta_buf, vt_density_view),
+            );
+            self.bg2_key = vt_key;
+        }
+        let Some(draw_bg2) = self.draw_bg_2.as_ref() else {
+            return Ok(());
+        };
+
         let max_draw_count = self.last_max_draw_count;
 
         unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
@@ -1275,6 +1311,7 @@ impl RenderPass for VirtualGeometryPass {
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
+            rpass.set_bind_group(2, draw_bg2, &[]);
             rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
             rpass.set_index_buffer(
                 main_scene.mesh_buffers.indices.slice(..),

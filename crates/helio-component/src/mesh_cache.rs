@@ -13,6 +13,24 @@
 //! NOTE: only mesh geometry is baked today. Materials/textures from the source
 //! scene are not yet written as native assets — that's a follow-up once the
 //! engine's native material-asset format is wired in here.
+//!
+//! # v2: content-id provenance (Pulsar-Native#632/#658)
+//!
+//! v2 appends a 16-byte `content_id: u128` to the header — the xxh3-128
+//! hash of the decoded vertex+index bytes, computed once at import time
+//! (see [`content_id_for_bytes`]) and stored so every later load reads it
+//! directly instead of re-hashing. This is what
+//! [`crate::components::static_mesh_component::MeshAssetPath::content_id`]
+//! feeds into SceneDB's `ContentAddressed`/interned-var-len mechanism —
+//! `helio-component` and `pulsar_scenedb` both stay opaque to what the id
+//! MEANS; it's just a stable identity two components can compare.
+//!
+//! v1 files (no id in the header) decode fine — [`decode`] computes the
+//! same hash on the fly and [`crate::subsystems::load_mesh_upload`]
+//! opportunistically rewrites the file as v2 so the NEXT load is a direct
+//! header read, not a repeated hash. A failed rewrite (read-only project
+//! dir, etc.) never fails the load itself; the in-memory id from that one
+//! call is still correct, just not persisted.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -24,8 +42,14 @@ use helio::{MeshUpload, PackedVertex};
 use pulsar_reflection::{RuntimeTypeInfo, TypeStructure, RUNTIME_TYPE_REGISTRY};
 
 const MAGIC: &[u8; 4] = b"PMSH";
-const VERSION: u32 = 1;
+/// Current WRITE version — every fresh `encode` call produces this.
+const VERSION: u32 = 2;
 const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_count
+/// v2 only: `HEADER` bytes plus a trailing 16-byte `content_id: u128`,
+/// BEFORE the vertex/index payload (so a v1 reader that somehow ignored the
+/// version check would still fail the length check rather than misread
+/// content-id bytes as geometry).
+const HEADER_V2: usize = HEADER + 16;
 
 // ---------------------------------------------------------------------------
 // Engine-native import-schema types (bridge from solid_rs::configurator).
@@ -80,8 +104,11 @@ fn leak_static<T: 'static>(val: T) -> &'static T {
     Box::leak(Box::new(val))
 }
 
-fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeTypeInfo {
-    let variants: Vec<&'static str> = choices
+/// Build a `&'static` enum-shaped `RuntimeTypeInfo` over `u64` discriminants
+/// for an import-options field. `pub(crate)` since `texture_cache`'s import
+/// schema reuses it (Helio#237) — the leak-based shape is modal-lifetime by
+/// design (import schemas live for the process).
+pub(crate) fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeTypeInfo {    let variants: Vec<&'static str> = choices
         .iter()
         .map(|c| Box::leak(c.clone().into_boxed_str()) as &'static str)
         .collect();
@@ -219,10 +246,120 @@ pub fn is_importable_model(ext: &str) -> bool {
     )
 }
 
-/// Serialise a [`MeshUpload`] into the native `.mesh` byte format.
-pub fn encode(mesh: &MeshUpload) -> Vec<u8> {
+/// Path → content id memoization, canonical-path-keyed so two different
+/// spellings of the SAME file (`a.png` vs `A/../a.png`, a hardlink/second
+/// copy resolving through a symlink, etc.) converge on one cache entry and
+/// therefore one id (Pulsar-Native#661's path-aliasing test). Value is
+/// `(mtime, len, id)`: a stale entry (file's current mtime/len disagree
+/// with what's cached) is treated as a miss, so an edited file mints a new
+/// id on its next resolve rather than serving a stale one forever.
+static CONTENT_ID_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>>> =
+    std::sync::OnceLock::new();
+
+fn content_id_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>> {
+    CONTENT_ID_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Resolve a stable content id for the mesh asset at `abs_path` (an
+/// already-resolved absolute path — see `subsystems::resolve_asset_path`).
+///
+/// - A native `.mesh` file: reads the id straight out of its v2 header (a
+///   `HEADER_V2`-byte read, not a full geometry decode) when present; a v1
+///   file with no stored id falls through to the memoization path below
+///   (it'll be upgraded to v2 the next time `load_mesh_upload` loads it,
+///   see that fn's doc, but this call itself doesn't write anything).
+/// - Anything else (a v1 file with nothing to read yet, or a non-native
+///   source path pre-import): canonicalizes `abs_path` (this is what makes
+///   two spellings of the same file converge — symlinks and `..` segments
+///   both resolve here) and checks the mtime/len-validated memoization
+///   cache; on a miss/staleness, hashes the file's raw bytes once
+///   (xxh3-128) and caches the result.
+///
+/// `None` only if `abs_path` can't be read/canonicalized at all (a
+/// dangling reference) — mirrors `MeshAssetPath::content_id`'s own
+/// `HandleId::ZERO`-on-failure convention at its call site.
+pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
+    if abs_path.extension().and_then(|e| e.to_str()) == Some("mesh") {
+        if let Ok(bytes) = std::fs::read(abs_path) {
+            if bytes.len() >= HEADER_V2 && &bytes[0..4] == MAGIC {
+                if let Ok(version) = bytes[4..8].try_into().map(u32::from_le_bytes) {
+                    if version == VERSION {
+                        if let Ok(id_bytes) = bytes[HEADER..HEADER_V2].try_into() {
+                            return Some(u128::from_le_bytes(id_bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    memoized_content_id_for_file(abs_path)
+}
+
+/// The canonicalize → mtime/len-validated memoize → xxh3-128 tail shared by
+/// EVERY non-native asset path resolution in this crate: `content_id_for_path`
+/// (after its `.mesh` header fast path) and `texture_cache::
+/// content_id_for_path` (after its `.ptex` one, Helio#237). One memoization
+/// domain per canonical path means a mesh and a texture can never disagree
+/// about the same file's identity.
+pub(crate) fn memoized_content_id_for_file(abs_path: &Path) -> Option<u128> {
+    let canonical = std::fs::canonicalize(abs_path).ok()?;
+    let meta = std::fs::metadata(&canonical).ok()?;
+    let mtime = meta.modified().ok()?;
+    let len = meta.len();
+
+    {
+        let cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+        if let Some(&(cached_mtime, cached_len, id)) = cache.get(&canonical) {
+            if cached_mtime == mtime && cached_len == len {
+                return Some(id);
+            }
+        }
+    }
+
+    let bytes = std::fs::read(&canonical).ok()?;
+    let id = twox_hash::XxHash3_128::oneshot(&bytes);
+    content_id_cache().lock().expect("content id cache mutex poisoned").insert(canonical, (mtime, len, id));
+    Some(id)
+}
+
+/// Primes the memoization cache directly from an id [`decode`] already
+/// computed (or read) during a hydrate-time load — so the write-path's
+/// later [`content_id_for_path`] call (from
+/// `MeshAssetPath::content_id`, driven by SceneDB's derive-generated GPU
+/// mirror dispatch) is a warm cache hit, not a second cold hash of the same
+/// file. A no-op if `abs_path` can't be canonicalized or stat'd (matches
+/// [`content_id_for_path`]'s own silent-`None` tolerance — priming is an
+/// optimization, never load-bearing for correctness).
+pub fn prime_content_id_cache(abs_path: &Path, id: u128) {
+    let Ok(canonical) = std::fs::canonicalize(abs_path) else { return };
+    let Ok(meta) = std::fs::metadata(&canonical) else { return };
+    let Ok(mtime) = meta.modified() else { return };
+    content_id_cache().lock().expect("content id cache mutex poisoned").insert(canonical, (mtime, meta.len(), id));
+}
+
+/// xxh3-128 over the SAME bytes [`encode`] writes for the geometry payload
+/// (vertices then indices, both in their native `Pod` byte representation)
+/// — the content identity for a mesh whose header doesn't already carry one
+/// (v1 backfill) or that was never a native `.mesh` file at all (a source
+/// format, hashed post-conversion). Two calls with byte-identical geometry
+/// always produce the same id; this crate never claims anything stronger
+/// (e.g. semantic equivalence of differently-tessellated meshes).
+pub fn content_id_for_bytes(mesh: &MeshUpload) -> u128 {
+    let mut buf = Vec::with_capacity(
+        mesh.vertices.len() * std::mem::size_of::<PackedVertex>() + mesh.indices.len() * 4,
+    );
+    buf.extend_from_slice(bytemuck::cast_slice(&mesh.vertices));
+    buf.extend_from_slice(bytemuck::cast_slice(&mesh.indices));
+    twox_hash::XxHash3_128::oneshot(&buf)
+}
+
+/// Serialise a [`MeshUpload`] into the native `.mesh` byte format (always
+/// v2 — see the module doc). `content_id` is the identity to store in the
+/// header; callers that don't already have one on hand (a fresh import)
+/// should compute it via [`content_id_for_bytes`] first.
+pub fn encode(mesh: &MeshUpload, content_id: u128) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        HEADER
+        HEADER_V2
             + mesh.vertices.len() * std::mem::size_of::<PackedVertex>()
             + mesh.indices.len() * 4,
     );
@@ -230,25 +367,35 @@ pub fn encode(mesh: &MeshUpload) -> Vec<u8> {
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(mesh.vertices.len() as u64).to_le_bytes());
     out.extend_from_slice(&(mesh.indices.len() as u64).to_le_bytes());
+    out.extend_from_slice(&content_id.to_le_bytes());
     out.extend_from_slice(bytemuck::cast_slice(&mesh.vertices));
     out.extend_from_slice(bytemuck::cast_slice(&mesh.indices));
     out
 }
 
-/// Parse a [`MeshUpload`] from native `.mesh` bytes, or `None` if invalid / a
-/// version or size mismatch (callers may fall back to converting a source).
-pub fn decode(bytes: &[u8]) -> Option<MeshUpload> {
+/// Parse a [`MeshUpload`] plus its content id from native `.mesh` bytes, or
+/// `None` if invalid / an unsupported version / a size mismatch (callers
+/// may fall back to converting a source). v1 files (no stored id) get one
+/// computed on the fly via [`content_id_for_bytes`] — identical to what a
+/// fresh v2 write of the same geometry would store, so a later backfill
+/// write produces a byte-stable upgrade, not a new identity.
+pub fn decode(bytes: &[u8]) -> Option<(MeshUpload, u128)> {
     if bytes.len() < HEADER || &bytes[0..4] != MAGIC {
         return None;
     }
-    if u32::from_le_bytes(bytes[4..8].try_into().ok()?) != VERSION {
+    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    if version != 1 && version != VERSION {
         return None;
     }
     let vcount = u64::from_le_bytes(bytes[8..16].try_into().ok()?) as usize;
     let icount = u64::from_le_bytes(bytes[16..24].try_into().ok()?) as usize;
     let vbytes = vcount.checked_mul(std::mem::size_of::<PackedVertex>())?;
     let ibytes = icount.checked_mul(4)?;
-    let vstart = HEADER;
+    let (vstart, stored_id) = if version == 1 {
+        (HEADER, None)
+    } else {
+        (HEADER_V2, Some(u128::from_le_bytes(bytes[HEADER..HEADER_V2].try_into().ok()?)))
+    };
     let istart = vstart.checked_add(vbytes)?;
     let end = istart.checked_add(ibytes)?;
     if bytes.len() < end {
@@ -262,7 +409,12 @@ pub fn decode(bytes: &[u8]) -> Option<MeshUpload> {
     let mut indices = vec![0u32; icount];
     bytemuck::cast_slice_mut(&mut indices).copy_from_slice(&bytes[istart..end]);
 
-    Some(MeshUpload { vertices, indices })
+    let mesh = MeshUpload { vertices, indices };
+    let id = match stored_id {
+        Some(id) => id,
+        None => content_id_for_bytes(&mesh),
+    };
+    Some((mesh, id))
 }
 
 /// Resolve import options for a native asset — options stored from a previous
@@ -306,7 +458,8 @@ pub fn import_model_to_native(
         indices: mesh.indices,
     };
 
-    std::fs::write(native, encode(&upload))
+    let content_id = content_id_for_bytes(&upload);
+    std::fs::write(native, encode(&upload, content_id))
         .map_err(|e| format!("failed to write native mesh {}: {e}", native.display()))?;
 
     // Persist chosen options for reimport / configurator pre-fill (#409).
@@ -358,12 +511,50 @@ mod tests {
             vertices: vec![PackedVertex::zeroed(); 3],
             indices: vec![0u32, 1, 2],
         };
-        let bytes = encode(&mesh);
-        let back = decode(&bytes).expect("decode");
+        let id = content_id_for_bytes(&mesh);
+        let bytes = encode(&mesh, id);
+        let (back, decoded_id) = decode(&bytes).expect("decode");
         assert_eq!(back.vertices.len(), 3);
         assert_eq!(back.indices, vec![0, 1, 2]);
+        assert_eq!(decoded_id, id, "v2 must round-trip the exact stored id, not recompute it");
         // Truncated / garbage input is rejected, not panicked on.
         assert!(decode(&bytes[..10]).is_none());
         assert!(decode(b"nope").is_none());
+    }
+
+    #[test]
+    fn v1_files_decode_with_a_computed_id_matching_a_fresh_v2_encode() {
+        // Hand-roll a v1 header (no content_id field) around the same
+        // geometry `encode` would write, to prove the backfill path
+        // produces the IDENTICAL id a fresh v2 write of the same bytes
+        // would -- the whole point of `content_id_for_bytes` being the
+        // single source both `encode` (fresh import) and `decode`'s v1 arm
+        // (backfill) call.
+        let mesh = MeshUpload {
+            vertices: vec![PackedVertex::zeroed(); 2],
+            indices: vec![0u32, 1],
+        };
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(MAGIC);
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&(mesh.vertices.len() as u64).to_le_bytes());
+        v1.extend_from_slice(&(mesh.indices.len() as u64).to_le_bytes());
+        v1.extend_from_slice(bytemuck::cast_slice(&mesh.vertices));
+        v1.extend_from_slice(bytemuck::cast_slice(&mesh.indices));
+
+        let (decoded, id) = decode(&v1).expect("v1 must still decode");
+        assert_eq!(decoded.indices, mesh.indices);
+        assert_eq!(id, content_id_for_bytes(&mesh));
+
+        let v2 = encode(&mesh, id);
+        let (_, id2) = decode(&v2).expect("v2 decode");
+        assert_eq!(id2, id, "backfilled id matches a fresh v2 write of the same geometry");
+    }
+
+    #[test]
+    fn different_geometry_never_collides_in_practice() {
+        let a = MeshUpload { vertices: vec![PackedVertex::zeroed(); 3], indices: vec![0, 1, 2] };
+        let b = MeshUpload { vertices: vec![PackedVertex::zeroed(); 3], indices: vec![0, 2, 1] };
+        assert_ne!(content_id_for_bytes(&a), content_id_for_bytes(&b));
     }
 }

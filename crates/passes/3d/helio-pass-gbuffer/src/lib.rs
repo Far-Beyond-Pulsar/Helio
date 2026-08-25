@@ -77,6 +77,10 @@ pub struct GBufferPass {
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
+    /// Group 2 (Helio#238): `//!use helio_vt` meta rows + density target.
+    vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
+    bind_group_2: Option<wgpu::BindGroup>,
+    bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     /// CSM cascade split distances. Must match the values used in shadow_matrices.wgsl
@@ -193,10 +197,20 @@ impl GBufferPass {
         // ── Bind Group Layout 1: material + textures ──────────────────────────
         let bind_group_layout_1 = create_material_bgl(device, material_binding);
 
+        // ── Group 2 (Helio#238): VT meta rows + quarter-res density target ────
+        // Canonical layout from the shared binder; the shader module's own
+        // bindings are the contract this must match.
+        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
+        let bind_group_layout_2 = vt_binder.layout().clone();
+
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GBuffer PL"),
-            bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
+            bind_group_layouts: &[
+                Some(&bind_group_layout_0),
+                Some(&bind_group_layout_1),
+                Some(&bind_group_layout_2),
+            ],
             immediate_size: 0,
         });
 
@@ -222,6 +236,9 @@ impl GBufferPass {
             bind_group_0_key: None,
             bind_group_1: None,
             bind_group_1_version: None,
+            vt_binder,
+            bind_group_2: None,
+            bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             globals_buf,
             // Default CSM splits — single source of truth is libhelio::CSM_SPLITS.
             csm_splits: libhelio::CSM_SPLITS,
@@ -529,11 +546,36 @@ impl RenderPass for GBufferPass {
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
+        // Rebuild bind group 2 when VT inputs changed (Helio#238). Rides the
+        // SAME version gate cadence as group 1: the meta buffer is a fresh
+        // frame-transient allocation each frame, so its pointer advances once
+        // per frame and the group rebuilds with it — never mid-frame, never
+        // unconditionally. Residency rows inside are already-committed frame
+        // input (promote-before-bind): nothing here reads back or blocks.
+        let vt_meta_buf = main_scene
+            .vt_bindings
+            .get()
+            .map(|v| v.vt_meta_buffer);
+        let vt_density_view = ctx.resource_pool.get_view("vt_density");
+        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
+            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
+            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
+            version: main_scene.material_textures.version,
+        };
+        if self.bind_group_2_key != vt_key || self.bind_group_2.is_none() {
+            self.bind_group_2 = Some(
+                self.vt_binder
+                    .bind_group(ctx.device, vt_meta_buf, vt_density_view),
+            );
+            self.bind_group_2_key = vt_key;
+        }
+
         let indirect = ctx.scene.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
         pass.set_index_buffer(
             main_scene.mesh_buffers.indices.slice(..),

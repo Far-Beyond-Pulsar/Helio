@@ -86,6 +86,8 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(1.0), v(2.0), v(3.0)],
             indices: vec![0, 1, 2],
+            // Helio#237 texture slots: empty path = ZERO semantics.
+            ..Default::default()
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -96,11 +98,15 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
     // .unwrap_or_else(|| format!("{name}::{field_name}"))`), so these are
     // the real, derive-assigned keys, not a guess.
     let vertex_pool = store
-        .var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
-        .expect("vertices pool must be registered by register_gpu_columns_growable");
+        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
+        .expect("vertices pool must be registered by register_gpu_columns_growable")
+        .underlying()
+        .clone();
     let index_pool = store
-        .var_len_pool::<u32>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::indices"))
-        .expect("indices pool must be registered by register_gpu_columns_growable");
+        .interned_var_len_pool::<u32>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::indices"))
+        .expect("indices pool must be registered by register_gpu_columns_growable")
+        .underlying()
+        .clone();
 
     let mut vertex_bytes = Vec::new();
     vertex_pool.with_buffer(&mut |b| vertex_bytes = readback(&ctx, b, 3 * std::mem::size_of::<PackedVertex>() as u64));
@@ -136,6 +142,7 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(1.0), v(2.0), v(3.0), v(4.0)],
             indices: (0..6).collect(),
+            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -150,6 +157,7 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx"),
             vertices: vec![v(9.0)],
             indices: vec![0],
+            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -194,6 +202,7 @@ fn scene_mesh_buffers_reads_back_data_written_through_a_rebound_static_mesh_comp
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(11.0), v(22.0), v(33.0)],
             indices: vec![0, 1, 2],
+            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
