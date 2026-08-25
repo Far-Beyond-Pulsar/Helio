@@ -78,12 +78,24 @@ engine_fs.workspace = true
 engine_state.workspace = true
 engine_subsystems.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
+# Content-addressed asset identity (Pulsar-Native#632): xxh3-128 over decoded
+# mesh bytes for PMSH v1 backfill / non-native source paths, and as the
+# fallback path->id hash in `MeshAssetPath::content_id` (see mesh_cache.rs).
+twox-hash = { workspace = true }
 
 [dev-dependencies]
 pollster = "=0.4.0"
 
 [[test]]
 name = "static_mesh_component_gpu_mirror"
+required-features = ["gpu"]
+
+[[test]]
+name = "content_dedup"
+required-features = ["gpu"]
+
+[[test]]
+name = "content_dedup_benchmarks"
 required-features = ["gpu"]
 
 [lints]

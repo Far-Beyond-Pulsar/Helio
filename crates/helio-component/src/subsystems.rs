@@ -493,9 +493,33 @@ pub fn load_mesh_upload(path: &Path) -> Option<MeshUpload> {
     // Engine-native baked mesh asset (`.mesh`), produced at import time from the
     // source model. Load it directly — no conversion or options (issues #391/#409).
     if path.extension().and_then(|e| e.to_str()) == Some("mesh") {
-        return std::fs::read(path)
-            .ok()
-            .and_then(|bytes| crate::mesh_cache::decode(&bytes));
+        let bytes = std::fs::read(path).ok()?;
+        let (mesh, id) = crate::mesh_cache::decode(&bytes)?;
+
+        // Content-id provenance (Pulsar-Native#658): prime the memoization
+        // cache now, from the id `decode` just produced (read directly for
+        // v2, computed on the fly for v1) — so `MeshAssetPath::content_id`'s
+        // later resolve, driven by SceneDB's GPU-mirror write dispatch, is
+        // a warm hit instead of a second cold hash of this same file.
+        crate::mesh_cache::prime_content_id_cache(path, id);
+
+        // v1 backfill: a file with no header id gets upgraded to v2 in
+        // place, atomically (write to a sibling temp file, then rename —
+        // never a partial/torn write visible to a concurrent reader) so
+        // the NEXT load reads the id straight from the header instead of
+        // re-hashing. Best-effort: any failure here (read-only project
+        // dir, concurrent access, etc.) is silently ignored -- the load
+        // itself already succeeded with a correct in-memory id, and the
+        // upgrade is a pure optimization, never load-bearing.
+        if bytes.len() < 8 || u32::from_le_bytes(bytes[4..8].try_into().unwrap_or_default()) != 2 {
+            let upgraded = crate::mesh_cache::encode(&mesh, id);
+            let tmp = path.with_extension("mesh.tmp");
+            if std::fs::write(&tmp, &upgraded).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
+
+        return Some(mesh);
     }
 
     let cfg = helio_asset_compat::LoadConfig {

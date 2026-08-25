@@ -61,6 +61,40 @@ impl MeshAssetPath {
     }
 }
 
+/// SceneDB's content-identity seam (Pulsar-Native#632/#659): lets
+/// `vertices`/`indices` intern their GPU-resident geometry by content
+/// instead of allocating one private copy per entity — see those fields'
+/// `#[gpu(content_id = "mesh_asset")]` attribute and
+/// `pulsar_scenedb::handle_ledger::ContentAddressed`'s own doc for the
+/// mechanism this drives. Resolution: an empty path is
+/// `HandleId::ZERO` (no asset, opts out of interning, matches every other
+/// zero-value convention in this codebase); otherwise resolves the
+/// project-relative path exactly like `hydrate_static_mesh_component`
+/// already does and defers to `mesh_cache::content_id_for_path` (native
+/// `.mesh` v2: a header read; anything else: a canonical-path + mtime/size
+/// memoized hash — see that fn's own doc for why this converges path
+/// aliases onto one id and mints a new one on a real edit). No project path
+/// available, or the file can't be read at all, ALSO falls back to
+/// `HandleId::ZERO` — a dangling/unresolvable reference behaves like "no
+/// asset" for interning purposes rather than panicking or erroring; the
+/// existing hydrate-time tolerance for a missing mesh already covers the
+/// user-visible side of this (empty `vertices`/`indices`).
+impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshAssetPath {
+    fn content_id(&self) -> pulsar_scenedb::handle_ledger::HandleId {
+        use pulsar_scenedb::handle_ledger::HandleId;
+
+        let path = self.0.trim();
+        if path.is_empty() {
+            return HandleId::ZERO;
+        }
+        let Some(project_root) = engine_state::get_project_path() else {
+            return HandleId::ZERO;
+        };
+        let abs_path = crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), path);
+        crate::mesh_cache::content_id_for_path(&abs_path).map(HandleId).unwrap_or(HandleId::ZERO)
+    }
+}
+
 impl std::fmt::Display for MeshAssetPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -313,12 +347,27 @@ pub struct StaticMeshComponent {
     /// disk I/O). Never round-tripped through JSON: mesh geometry lives in
     /// the asset file `mesh_asset` already names, re-derived at hydrate
     /// time, not duplicated into every saved scene.
-    #[gpu]
+    ///
+    /// `content_id = "mesh_asset"` (Pulsar-Native#632/#659): SceneDB routes
+    /// this field's GPU allocation through its content-id-interned pool
+    /// instead of one private allocation per entity -- ten components
+    /// naming the same `mesh_asset` upload and store the geometry ONCE,
+    /// freed automatically when the last reference despawns/removes. This
+    /// is the ENTIRE consumer-side change the dedup feature asks for: the
+    /// attribute plus `MeshAssetPath`'s `ContentAddressed` impl above.
+    /// Nothing else about this struct, its hydrate, or any renderer call
+    /// site changes -- `..._gpu_handle` accessors keep their exact
+    /// signature and now transparently resolve to a range shared with every
+    /// other entity referencing the same asset.
+    #[gpu(mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
     /// See [`Self::vertices`] -- same rules, the index half of the same
-    /// upload.
-    #[gpu]
+    /// upload, interned under the SAME `mesh_asset` content id (a separate
+    /// pool from `vertices`' own -- see `gpu::interned_pool`'s module doc
+    /// on why sharing an id across two pools needs no coordination between
+    /// them).
+    #[gpu(mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
 }
