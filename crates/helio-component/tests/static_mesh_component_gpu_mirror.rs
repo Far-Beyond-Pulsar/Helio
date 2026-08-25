@@ -96,11 +96,15 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
     // .unwrap_or_else(|| format!("{name}::{field_name}"))`), so these are
     // the real, derive-assigned keys, not a guess.
     let vertex_pool = store
-        .var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
-        .expect("vertices pool must be registered by register_gpu_columns_growable");
+        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
+        .expect("vertices pool must be registered by register_gpu_columns_growable")
+        .underlying()
+        .clone();
     let index_pool = store
-        .var_len_pool::<u32>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::indices"))
-        .expect("indices pool must be registered by register_gpu_columns_growable");
+        .interned_var_len_pool::<u32>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::indices"))
+        .expect("indices pool must be registered by register_gpu_columns_growable")
+        .underlying()
+        .clone();
 
     let mut vertex_bytes = Vec::new();
     vertex_pool.with_buffer(&mut |b| vertex_bytes = readback(&ctx, b, 3 * std::mem::size_of::<PackedVertex>() as u64));
