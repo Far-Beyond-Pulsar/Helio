@@ -7,6 +7,7 @@ pub mod asset_component;
 pub mod components;
 pub mod mesh_cache;
 pub mod subsystems;
+pub mod texture_cache;
 
 pub use asset_component::*;
 pub use components::*;
