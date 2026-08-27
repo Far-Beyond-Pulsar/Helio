@@ -37,6 +37,11 @@ pub struct RenderGraph {
     pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
+    /// Set by [`set_render_size`](Self::set_render_size) and consumed only
+    /// after the first successful frame at the new size. Passes use this
+    /// one-frame pulse through [`PrepareContext::resize`] to rebuild resources
+    /// that depend on graph-owned texture dimensions.
+    resize_pending: bool,
     /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
     /// Set by graph builders, consumed by the Renderer on construction.
     graph_data: Option<Box<dyn std::any::Any + Send + Sync>>,
@@ -69,6 +74,7 @@ impl RenderGraph {
             xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
+            resize_pending: false,
             graph_data: None,
         }
     }
@@ -122,6 +128,7 @@ impl RenderGraph {
         self.internal_h = height;
         self.output_w = width;
         self.output_h = height;
+        self.resize_pending = true;
 
         if self.locked {
             self.locked = false;
@@ -389,6 +396,7 @@ impl RenderGraph {
             });
 
         let mut visible_frame_resources = *frame_resources;
+        let resized_this_frame = self.resize_pending;
 
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
         let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
@@ -442,7 +450,7 @@ impl RenderGraph {
                     frame_num: scene.frame_count,
                     scene,
                     frame_resources: &visible_frame_resources,
-                    resize: false,
+                    resize: resized_this_frame,
                     width: self.internal_w,
                     height: self.internal_h,
                     delta_time: self.delta_time,
@@ -656,6 +664,7 @@ impl RenderGraph {
         );
 
         self.frame_count += 1;
+        self.resize_pending = false;
 
         Ok(submission_index)
     }

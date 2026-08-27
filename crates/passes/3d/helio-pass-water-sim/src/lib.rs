@@ -503,7 +503,9 @@ impl RenderPass for WaterSimPass {
         None
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.resize_internal(device, width, height);
+    }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
