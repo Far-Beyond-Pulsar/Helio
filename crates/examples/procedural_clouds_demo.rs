@@ -53,7 +53,7 @@ impl ApplicationHandler for App{
   let bgl1=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl1"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Texture{sample_type:wgpu::TextureSampleType::Float{filterable:true},view_dimension:wgpu::TextureViewDimension::D3,multisampled:false},count:None}]});
   let bgl2=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl2"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::StorageTexture{access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba16Float,view_dimension:wgpu::TextureViewDimension::D3},count:None}]});
   let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("proc"),source:wgpu::ShaderSource::Wgsl(SHADER.into())});
-  let pl=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("pl"),bind_group_layouts:&[Some(&bgl0),Some(&bgl1),Some(&bgl2)],immediate_size:0});
+  let pl=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("pl"),bind_group_layouts:&[Some(&bgl0),Some(&bgl1)],immediate_size:0});
   let pipeline=device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{label:Some("pipe"),layout:Some(&pl),vertex:wgpu::VertexState{module:&shader,entry_point:Some("vs"),buffers:&[],compilation_options:Default::default()},fragment:Some(wgpu::FragmentState{module:&shader,entry_point:Some("fs"),targets:&[Some(wgpu::ColorTargetState{format:fmt,blend:None,write_mask:wgpu::ColorWrites::ALL})],compilation_options:Default::default()}),primitive:Default::default(),depth_stencil:None,multisample:Default::default(),multiview_mask:None,cache:None});
   let bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("bg"),layout:&bgl0,entries:&[wgpu::BindGroupEntry{binding:0,resource:cam_buf.as_entire_binding()},wgpu::BindGroupEntry{binding:1,resource:params_buf.as_entire_binding()}]});
   let density_tex=device.create_texture(&wgpu::TextureDescriptor{label:Some("densityTex"),size:wgpu::Extent3d{width:64,height:32,depth_or_array_layers:64},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D3,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::STORAGE_BINDING,view_formats:&[]});
@@ -61,7 +61,7 @@ impl ApplicationHandler for App{
   let density_sampler=device.create_sampler(&wgpu::SamplerDescriptor{label:Some("densitySampler"),address_mode_u:wgpu::AddressMode::ClampToEdge,address_mode_v:wgpu::AddressMode::ClampToEdge,address_mode_w:wgpu::AddressMode::ClampToEdge,mag_filter:wgpu::FilterMode::Linear,min_filter:wgpu::FilterMode::Linear,..Default::default()});
   let density_bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("density_bind"),layout:&bgl1,entries:&[wgpu::BindGroupEntry{binding:0,resource:wgpu::BindingResource::Sampler(&density_sampler)},wgpu::BindGroupEntry{binding:1,resource:wgpu::BindingResource::TextureView(&density_view)}]});
   let density_store_bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("density_store"),layout:&bgl2,entries:&[wgpu::BindGroupEntry{binding:0,resource:wgpu::BindingResource::TextureView(&density_view)}]});
-  let compute_pipeline=device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("cs"),layout:Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("cs_pl"),bind_group_layouts:&[Some(&bgl0),Some(&bgl1),Some(&bgl2)],immediate_size:0})),module:&shader,entry_point:Some("cs"),compilation_options:Default::default(),cache:None});
+  let compute_pipeline=device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("cs"),layout:Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("cs_pl"),bind_group_layouts:&[Some(&bgl0),None,Some(&bgl2)],immediate_size:0})),module:&shader,entry_point:Some("cs"),compilation_options:Default::default(),cache:None});
   self.state=Some(State{window,surface,device:Arc::new(device),queue:Arc::new(queue),pipeline,bind,cam_buf,params_buf,density_tex,density_view,density_sampler,density_bind,density_store_bind,compute_pipeline,format:fmt,pos:glam::Vec3::new(0.0,2.5,7.0),yaw:0.0,pitch:-0.2,keys:HashSet::new(),grabbed:false,delta:(0.0,0.0),time:0.0});
  }
  fn window_event(&mut self, el:&ActiveEventLoop, _id:WindowId, e:WindowEvent){
@@ -103,7 +103,6 @@ impl ApplicationHandler for App{
             let mut cpass=enc.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("bake"),timestamp_writes:None});
             cpass.set_pipeline(&s.compute_pipeline);
             cpass.set_bind_group(0,&s.bind, &[]);
-            cpass.set_bind_group(1,&s.density_bind, &[]);
             cpass.set_bind_group(2,&s.density_store_bind, &[]);
             cpass.dispatch_workgroups(16,8,16);
         }
