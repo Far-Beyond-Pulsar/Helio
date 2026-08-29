@@ -7,6 +7,7 @@ use web_time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
+use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
 
@@ -498,6 +499,35 @@ impl Renderer {
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// Select the cloud representation used by the default sky pass.
+    ///
+    /// This is intentionally a no-op when a custom graph does not contain a
+    /// sky pass, which keeps the renderer facade usable with stripped graphs.
+    pub fn set_cloud_render_mode(&mut self, mode: CloudRenderMode) {
+        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
+            pass.set_cloud_mode(mode);
+            pass.reset_history();
+        }
+    }
+
+    /// Select the cloud detail tier. Higher tiers add density detail and
+    /// lighting samples; the tier is independent from render resolution.
+    pub fn set_cloud_quality(&mut self, quality: CloudQuality) {
+        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
+            pass.set_cloud_quality(quality);
+            pass.reset_history();
+        }
+    }
+
+    /// Select the cloud render resolution (full, half, quarter, or eighth
+    /// resolution per axis). The pass reallocates its temporal targets at the
+    /// next frame boundary and invalidates history safely.
+    pub fn set_cloud_resolution(&mut self, resolution: CloudResolution) {
+        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
+            pass.set_cloud_resolution(resolution);
+        }
     }
 
     /// Access the gbuffer template registry (preserved across graph rebuilds).

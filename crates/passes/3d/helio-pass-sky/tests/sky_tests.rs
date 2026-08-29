@@ -30,9 +30,9 @@ struct ShaderSkyUniforms {
     cloud_speed: f32,           // 88..92
     time_sky: f32,              // 92..96
     skylight_intensity: f32,    // 96..100
-    _pad0: f32,                 // 100..104
-    _pad1: f32,                 // 104..108
-    _pad2: f32,                 // 108..112
+    cloud_mode: u32,            // 100..104
+    cloud_quality: u32,         // 104..108
+    cloud_resolution: u32,      // 108..112
 }
 
 /// Mirror of the private `earth_like()` constructor.
@@ -61,9 +61,9 @@ fn earth_like() -> ShaderSkyUniforms {
         cloud_speed: 0.0,
         time_sky: 0.0,
         skylight_intensity: 0.0,
-        _pad0: 0.0,
-        _pad1: 0.0,
-        _pad2: 0.0,
+        cloud_mode: 1,
+        cloud_quality: 2,
+        cloud_resolution: 4,
     }
 }
 
@@ -280,7 +280,7 @@ fn cloud_coverage_is_zero_by_default() {
 #[test]
 fn padding_fields_are_zero() {
     let u = earth_like();
-    assert_eq!(u._pad0, 0.0);
-    assert_eq!(u._pad1, 0.0);
-    assert_eq!(u._pad2, 0.0);
+    assert_eq!(u.cloud_mode, 1);
+    assert_eq!(u.cloud_quality, 2);
+    assert_eq!(u.cloud_resolution, 4);
 }

@@ -16,6 +16,7 @@ helio-portal-core = { workspace = true }
 helio-foliage-core = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
+helio-pass-sky = { workspace = true }
 
 libhelio = { workspace = true }
 log = { workspace = true }

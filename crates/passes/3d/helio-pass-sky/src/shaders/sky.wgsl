@@ -42,9 +42,9 @@ struct SkyUniforms {
     cloud_speed:       f32,
     time_sky:          f32,        // elapsed time (seconds)
     skylight_intensity: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    cloud_mode:        u32,        // 0 = 2D layer, 1 = finite 3D volume
+    cloud_quality:     u32,        // 0..3
+    cloud_resolution:  u32,        // 1, 2, 4, or 8
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -230,7 +230,9 @@ fn fbm(p: vec3<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var q = p;
-    for (var i = 0u; i < 5u; i++) {
+    // Three octaves preserve the broad fluffy silhouette while keeping the
+    // fullscreen fallback cheap enough for laptop GPUs.
+    for (var i = 0u; i < 3u; i++) {
         v += a * noise3(q);
         q  = q * 2.03 + vec3<f32>(31.1, 17.7, 43.3);
         a *= 0.5;
@@ -254,41 +256,72 @@ fn fbm(p: vec3<f32>) -> f32 {
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn trace_clouds(ro: vec3<f32>, rd: vec3<f32>, bg_col: vec3<f32>) -> vec3<f32> {
-    if sky.clouds_enabled == 0u { return bg_col; }
-    // Only visible above horizon and when looking upward enough to hit the slab
-    if rd.y < 0.001 { return bg_col; }
+    if sky.clouds_enabled == 0u || sky.cloud_top <= sky.cloud_base { return bg_col; }
 
-    // Ray–plane intersection with the cloud base
-    let t = (sky.cloud_base - ro.y) / rd.y;
-    if t < 0.0 { return bg_col; }
+    // Intersect the finite cloud slab.  Sampling through the band gives the
+    // layer real body/underside variation without a full per-pixel ray march.
+    let dy = rd.y;
+    var t0 = 0.0;
+    var t1 = 0.0;
+    if (abs(dy) > 0.0005) {
+        let ta = (sky.cloud_base - ro.y) / dy;
+        let tb = (sky.cloud_top - ro.y) / dy;
+        t0 = max(min(ta, tb), 0.0);
+        t1 = min(max(ta, tb), 5000.0);
+    } else {
+        // A horizontal ray can see the cloud volume only when the camera is
+        // inside the layer. This is essential when flying through it.
+        if (ro.y < sky.cloud_base || ro.y > sky.cloud_top) { return bg_col; }
+        t0 = 0.0;
+        t1 = 1800.0;
+    }
+    if (t1 <= t0) { return bg_col; }
+    // Wind is expressed in world units per second.  The larger multiplier is
+    // intentional: the procedural noise domain is kilometres wide.
+    let wind = vec2<f32>(sky.cloud_wind_x, sky.cloud_wind_z) * sky.cloud_speed * sky.time_sky * 300.0;
 
-    let hit = ro + rd * t;
+    var optical = 0.0;
+    var weighted_height = 0.0;
+    // The 2D mode is intentionally a single layer sample. Volume mode uses a
+    // small, quality-selected number of depth taps through the finite slab.
+    // dramatically cheaper than a 32-112 step volumetric march.
+    let sample_count = select(1u, min(4u, sky.cloud_quality + 2u), sky.cloud_mode == 1u);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        if (i >= sample_count) { break; }
+        var h = (f32(i) + 0.5) / f32(sample_count);
+        if (sample_count == 1u) { h = 0.5; }
+        let p = ro + rd * mix(t0, t1, h);
+        // The field is genuinely 3D: world Y changes the noise domain several
+        // times across the layer, while X/Z repeat for boundless coverage.
+        // The smaller domains also prevent kilometre-wide flat blobs.
+        let uv = (p.xz + wind) * 0.00135;
+        let vertical = (p.y - sky.cloud_base) / max(sky.cloud_top - sky.cloud_base, 1.0);
+        let warp = fbm(vec3<f32>(uv * 0.55 + vec2<f32>(2.7, -1.9), vertical * 2.4));
+        let macro_shape = fbm(vec3<f32>(uv + (warp - 0.5) * 0.16, vertical * 4.8));
+        let detail = noise3(vec3<f32>(uv * 5.0 + vec2<f32>(8.1, 3.4), vertical * 12.0)) * 0.24;
+        let profile = smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(0.72, 1.0, h));
+        let threshold = 1.0 - sky.cloud_coverage;
+        let d = smoothstep(threshold - 0.10, threshold + 0.18, macro_shape + detail) * profile;
+        let sample_weight = 1.0 / f32(sample_count);
+        optical += d * sample_weight;
+        weighted_height += d * h * sample_weight;
+    }
+    if optical <= 0.001 { return bg_col; }
 
-    // Animated 2D noise position
-    let wind = vec2<f32>(sky.cloud_wind_x, sky.cloud_wind_z) * sky.cloud_speed * sky.time_sky;
-    let sp   = vec3<f32>((hit.xz + wind) * 0.0006, 0.0);
+    let height = weighted_height / max(optical, 0.001);
+    let angle_fade = smoothstep(0.001, 0.018, abs(rd.y));
+    let horizon_fade = 1.0 - smoothstep(50000.0, 130000.0, t0);
+    let alpha = clamp(1.0 - exp(-optical * sky.cloud_density * 3.8), 0.0, 0.97) * angle_fade * horizon_fade;
 
-    // Two FBM samples: macro shape + fine detail
-    let base_noise = fbm(sp);
-    let detail     = fbm(sp * 3.7 + vec3<f32>(5.2, 0.0, 2.7)) * 0.35;
-    let raw        = base_noise + detail - (1.0 - sky.cloud_coverage);
-    if raw <= 0.0 { return bg_col; }
-
-    // Fade distant clouds and very flat-angle rays to avoid sharp slab edge
-    let dist_fade  = 1.0 - smoothstep(30000.0, 80000.0, t);
-    let angle_fade = smoothstep(0.001, 0.06, rd.y);
-    let coverage   = clamp(raw * sky.cloud_density * dist_fade * angle_fade, 0.0, 1.0);
-
-    // Analytical lighting: top face lit by sun, underside is sky-ambient
-    let sun_up    = clamp(sky.sun_direction.y, 0.0, 1.0);
-    // Sunset tint when sun is near horizon
-    let sun_tint  = mix(vec3<f32>(1.0, 0.55, 0.25), vec3<f32>(1.0, 0.97, 0.92), smoothstep(0.0, 0.2, sun_up));
-    let lit_top   = sun_tint * sky.sun_intensity * 0.12 * sun_up;
-    let lit_amb   = bg_col * 0.30;  // underside picks up sky colour
-    let cloud_col = lit_top + lit_amb;
-
-    // Soft blend with a small view-angle-based normal approximation for depth
-    let alpha = coverage * smoothstep(0.0, 0.15, coverage);
+    // Cheap self-shadow approximation: dense lower samples are cooler/darker;
+    // forward HG-like response supplies the silver lining at the sun-facing edge.
+    let sun_up = clamp(sky.sun_direction.y, 0.0, 1.0);
+    let toward_sun = max(dot(rd, sky.sun_direction), 0.0);
+    let silver = pow(toward_sun, 10.0) * (1.0 - height) * 0.65;
+    let sun_tint = mix(vec3<f32>(1.0, 0.42, 0.18), vec3<f32>(1.0, 0.96, 0.86), smoothstep(0.0, 0.28, sun_up));
+    let direct = sun_tint * sky.sun_intensity * (0.045 + 0.11 * sun_up) * (0.55 + 0.45 * height);
+    let ambient = bg_col * (0.20 + 0.20 * height) * max(sky.skylight_intensity, 0.35);
+    let cloud_col = ambient + direct * (1.0 - optical * 0.35) + sun_tint * silver;
     return mix(bg_col, cloud_col, alpha);
 }
 
@@ -327,6 +360,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let t = clamp(-ray_dir.y, 0.0, 1.0); // 0 at horizon, 1 at straight down
         let dark = vec3<f32>(0.02, 0.01, 0.005);
         let descent = pow(t, 1.8); // smooth non-linear falloff
+        // Trace before darkening so a camera above or inside the layer can
+        // look down through the cloud volume instead of losing it at the
+        // horizon branch.
+        if (sky.cloud_mode == 0u) {
+            sky_col = trace_clouds(camera_pos, ray_dir, sky_col);
+        }
         let sunset_col = mix(sky_col, dark, descent);
         return vec4<f32>(aces_approx(sunset_col * sky.exposure), 1.0);
     }
@@ -339,7 +378,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Volumetric clouds: still full-res but atmosphere sampling is now free
-    sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
+    if (sky.cloud_mode == 0u) {
+        sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
+    }
 
     let final_col = aces_approx(sky_col * sky.exposure);
     return vec4<f32>(final_col, 1.0);

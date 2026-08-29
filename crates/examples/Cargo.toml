@@ -287,6 +287,9 @@ winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
 pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
 

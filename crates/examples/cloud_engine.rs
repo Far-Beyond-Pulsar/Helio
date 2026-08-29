@@ -11,6 +11,10 @@ use std::{
     time::Instant,
 };
 
+use egui_wgpu::{
+    Renderer as EguiRenderer, RendererOptions as EguiRendererOptions, ScreenDescriptor,
+};
+use egui_winit::State as EguiState;
 use glam::Vec3;
 use microfont::{stamp_text, FHEIGHT};
 mod v3_demo_common;
@@ -30,7 +34,6 @@ const VOLUME: (u32, u32, u32) = (96, 48, 96);
 // Keep simulation/painting in the original cloudbox but draw a flatter box in the
 // viewport for coverage.
 const BOUNDS_XZ_EXPAND_FACTOR: f32 = 2.0;
-const BOUNDS_Y_HEIGHT_SCALE: f32 = 0.5;
 const CLOUD_WORLD_HEIGHT: f32 = 25.0;
 const BOUNDS_SIM_MIN_X: f32 = -8.0;
 const BOUNDS_SIM_MAX_X: f32 = 8.0;
@@ -50,19 +53,12 @@ const BOUNDS_SIM_MAX: Vec3 = Vec3::new(
     BOUNDS_SIM_MAX_Z,
 );
 
-const BOUNDS_RENDER_Y_MID: f32 = (BOUNDS_SIM_MIN_Y + BOUNDS_SIM_MAX_Y) * 0.5;
-const BOUNDS_RENDER_Y_HALF: f32 =
-    ((BOUNDS_SIM_MAX_Y - BOUNDS_SIM_MIN_Y) * 0.5) * BOUNDS_Y_HEIGHT_SCALE;
-const BOUNDS_RENDER_MIN: Vec3 = Vec3::new(
-    BOUNDS_SIM_MIN_X * BOUNDS_XZ_EXPAND_FACTOR,
-    BOUNDS_RENDER_Y_MID - BOUNDS_RENDER_Y_HALF,
-    BOUNDS_SIM_MIN_Z,
-);
-const BOUNDS_RENDER_MAX: Vec3 = Vec3::new(
-    BOUNDS_SIM_MAX_X * BOUNDS_XZ_EXPAND_FACTOR,
-    BOUNDS_RENDER_Y_MID + BOUNDS_RENDER_Y_HALF,
-    BOUNDS_SIM_MAX_Z,
-);
+// Rendering and painting must address the same finite volume. The previous
+// flattened render band clipped the upper half of the simulation, making
+// apparently valid brush hits invisible. Keep the optional scale constant for
+// compatibility with old tuning, but use the authoritative simulation bounds.
+const BOUNDS_RENDER_MIN: Vec3 = BOUNDS_SIM_MIN;
+const BOUNDS_RENDER_MAX: Vec3 = BOUNDS_SIM_MAX;
 const SIMULATION_INTERVAL: f32 = 1.0 / 30.0;
 
 // Static version of cloud-engine-config_2026-08-23_06-14-45.json. The saved
@@ -104,6 +100,28 @@ const PERF_OVERLAY_TEXTURE_WIDTH: u32 = 192;
 const PERF_OVERLAY_TEXTURE_HEIGHT: u32 = 32;
 const PERF_OVERLAY_SCALE: f32 = 2.0;
 const PERF_OVERLAY_MARGIN: f32 = 12.0;
+
+fn brush_sphere_vertices(center: Vec3, radius: Vec3) -> Vec<f32> {
+    let mut vertices = Vec::with_capacity(3 * 24 * 3);
+    for axis in 0..3 {
+        for i in 0..24 {
+            let a0 = (i as f32 / 24.0) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / 24.0) * std::f32::consts::TAU;
+            let point = |a: f32| {
+                let ring = match axis {
+                    0 => Vec3::new(0.0, a.cos(), a.sin()),
+                    1 => Vec3::new(a.cos(), 0.0, a.sin()),
+                    _ => Vec3::new(a.cos(), a.sin(), 0.0),
+                };
+                center + ring * radius
+            };
+            for p in [point(a0), point(a1)] {
+                vertices.extend_from_slice(&[p.x, p.y, p.z]);
+            }
+        }
+    }
+    vertices
+}
 const CUBE_GRID_SIZE: i32 = 16;
 const CUBE_SPACING: f32 = 1.1;
 const CUBE_HALF_EXTENT: f32 = 0.45;
@@ -648,14 +666,18 @@ struct State {
     scene_renderer: Renderer,
     outline_vertex_buffer: wgpu::Buffer,
     outline_vertex_count: u32,
+    brush_vertex_buffer: wgpu::Buffer,
+    brush_vertex_count: u32,
     current_volume: usize,
     camera: FlyCamera,
     input: WinitFlyInput,
     pointer_position: Option<winit::dpi::PhysicalPosition<f64>>,
     brush_center: Vec3,
     brush_active: bool,
+    paint_buttons: u8,
     brush_sign: f32,
     brush_size: f32,
+    brush_depth: f32,
     auto_brush: AutoBezierBrush,
     curve_painter: bool,
     art_preset: Arc<Mutex<PresetMode>>,
@@ -666,6 +688,10 @@ struct State {
     frame: u32,
     pending_clear: bool,
     perf_overlay: PerfOverlay,
+    egui_ctx: egui::Context,
+    egui_state: EguiState,
+    egui_renderer: EguiRenderer,
+    egui_wants_pointer: bool,
 }
 
 /// A quiet autonomous counterpart to the mouse brush. It only takes over
@@ -1291,6 +1317,20 @@ impl App {
         });
         let outline_vertex_count = (outline_vertex_data.len() / 3) as u32;
 
+        let initial_brush_world =
+            BOUNDS_SIM_MIN + Vec3::new(0.5, 0.45, 0.64) * (BOUNDS_SIM_MAX - BOUNDS_SIM_MIN);
+        let initial_brush_data = brush_sphere_vertices(
+            initial_brush_world,
+            (BOUNDS_SIM_MAX - BOUNDS_SIM_MIN) * BRUSH_SIZE_MAX,
+        );
+        let brush_vertex_count = (initial_brush_data.len() / 3) as u32;
+        let brush_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cloud brush sphere vertices"),
+            size: (initial_brush_data.len() * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let outline_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cloudbox outline uniforms"),
             size: (24 * 4) as u64,
@@ -1312,6 +1352,11 @@ impl App {
             &outline_vertex_buffer,
             0,
             bytemuck::cast_slice(&outline_vertex_data),
+        );
+        queue.write_buffer(
+            &brush_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&initial_brush_data),
         );
         let make_volume = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -1416,6 +1461,17 @@ impl App {
             })
         });
         let perf_overlay = PerfOverlay::new(&device, &queue, config.format);
+        let egui_ctx = egui::Context::default();
+        let egui_state = EguiState::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        );
+        let egui_renderer =
+            EguiRenderer::new(&device, config.format, EguiRendererOptions::default());
         State {
             window,
             surface,
@@ -1444,6 +1500,8 @@ impl App {
             outline_pipeline,
             outline_vertex_buffer,
             outline_vertex_count,
+            brush_vertex_buffer,
+            brush_vertex_count,
             current_volume: 0,
             // The WebGPU source used +Z as forward. Helio's standard flycam
             // uses -Z, so rotate this imported pose by π to preserve its view.
@@ -1457,8 +1515,10 @@ impl App {
             pointer_position: None,
             brush_center: Vec3::new(0.5, 0.45, 0.64),
             brush_active: false,
+            paint_buttons: 0,
             brush_sign: 1.0,
             brush_size: BRUSH_SIZE_MAX,
+            brush_depth: 0.64,
             auto_brush: AutoBezierBrush::new(),
             curve_painter,
             art_preset,
@@ -1469,11 +1529,91 @@ impl App {
             frame: 0,
             pending_clear: true,
             perf_overlay,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            egui_wants_pointer: false,
         }
     }
 }
 
 impl State {
+    fn prepare_egui(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> (Vec<egui::ClippedPrimitive>, ScreenDescriptor) {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        self.egui_ctx.begin_pass(raw_input);
+        egui::Window::new("Cloud Engine Tools")
+            .default_pos([12.0, 12.0])
+            .default_size([280.0, 420.0])
+            .resizable(true)
+            .show(&self.egui_ctx, |ui| {
+                ui.heading("Cloud Engine");
+                ui.label("Paint directly in the 3D volume");
+                ui.separator();
+                ui.label("Brush");
+                ui.add(
+                    egui::Slider::new(&mut self.brush_size, BRUSH_SIZE_MIN..=BRUSH_SIZE_MAX)
+                        .text("radius"),
+                );
+                ui.add(egui::Slider::new(&mut self.brush_depth, 0.0..=1.0).text("depth"));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.brush_sign, 1.0, "Add");
+                    ui.selectable_value(&mut self.brush_sign, -1.0, "Erase");
+                });
+                ui.checkbox(&mut self.curve_painter, "Autonomous curve painter");
+                if ui.button("Clear volume").clicked() {
+                    self.pending_clear = true;
+                }
+                ui.separator();
+                ui.label("Mouse: move to position the 3D brush");
+                ui.label("Left drag adds density; right drag erases");
+                ui.label("F toggles fly camera; Escape releases it");
+                ui.separator();
+                ui.label(format!(
+                    "Brush voxel: {:.3}, {:.3}, {:.3}",
+                    self.brush_center.x, self.brush_center.y, self.brush_center.z
+                ));
+                ui.label(format!(
+                    "Simulation: {} Hz",
+                    (1.0 / SIMULATION_INTERVAL) as u32
+                ));
+            });
+        let mut full_output = self.egui_ctx.end_pass();
+        self.egui_wants_pointer = self.egui_ctx.egui_wants_pointer_input();
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output);
+        for (id, deltas) in &full_output.textures_delta.set {
+            for delta in deltas {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+        let pixels_per_point = self.window.scale_factor() as f32;
+        let screen_descriptor = ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point,
+        };
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, pixels_per_point);
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
+        // The renderer has consumed all texture deltas; clear the container
+        // before FullOutput is dropped (egui asserts otherwise).
+        full_output.textures_delta.clear();
+        (paint_jobs, screen_descriptor)
+    }
+
     fn camera_basis(&self) -> (Vec3, Vec3, Vec3) {
         let basis = self.camera.basis();
         (basis.forward, basis.right, basis.right.cross(basis.forward))
@@ -1495,8 +1635,9 @@ impl State {
             self.brush_size =
                 (self.brush_size + BRUSH_RECHARGE_PER_SECOND * dt).min(BRUSH_SIZE_MAX);
         }
+        let painting = self.brush_active || self.paint_buttons != 0;
         let run_simulation = self.pending_clear
-            || self.brush_active
+            || painting
             || auto_painting
             || self.simulation_accumulator >= SIMULATION_INTERVAL;
         // Whether a paint stroke forces an update every display frame or the
@@ -1529,7 +1670,8 @@ impl State {
             0.0,
             wind_angle.cos() * WIND_STRENGTH,
         );
-        let (brush_center, brush_size, brush_active, brush_sign) = if self.brush_active {
+        let painting = self.brush_active || self.paint_buttons != 0;
+        let (brush_center, brush_size, brush_active, brush_sign) = if painting {
             (self.brush_center, self.brush_size, true, self.brush_sign)
         } else if self.auto_brush.active {
             (self.auto_brush.center(), self.auto_brush.size, true, 1.0)
@@ -1549,7 +1691,7 @@ impl State {
             brush_center.y,
             brush_center.z,
             brush_size,
-            0.38,
+            0.85,
             brush_active as u8 as f32,
             brush_sign,
             2.0,
@@ -1691,6 +1833,16 @@ impl State {
         ];
         self.queue
             .write_buffer(&self.outline_uniform, 0, bytemuck::cast_slice(&outline));
+        let brush_world = BOUNDS_SIM_MIN + self.brush_center * (BOUNDS_SIM_MAX - BOUNDS_SIM_MIN);
+        let brush_vertices = brush_sphere_vertices(
+            brush_world,
+            (BOUNDS_SIM_MAX - BOUNDS_SIM_MIN) * self.brush_size,
+        );
+        self.queue.write_buffer(
+            &self.brush_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&brush_vertices),
+        );
     }
 
     /// Converts a viewport cursor coordinate into the editable volume's
@@ -1714,8 +1866,11 @@ impl State {
         if near > far || far < 0.0 {
             return false;
         }
-        // Preset brush depth: 64% through the ray segment inside the volume.
-        let world = origin + ray * (near.max(0.0) + (far - near.max(0.0)) * 0.64);
+        // Position the brush inside the actual finite volume. Depth is
+        // adjustable in the panel, which makes the spherical cursor useful
+        // for painting the front, middle, or back of a cloud.
+        let near = near.max(0.0);
+        let world = origin + ray * (near + (far - near) * self.brush_depth);
         self.brush_center = ((world - BOUNDS_SIM_MIN) / (BOUNDS_SIM_MAX - BOUNDS_SIM_MIN))
             .clamp(Vec3::splat(0.002), Vec3::splat(0.998));
         true
@@ -1753,6 +1908,7 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Cloud frame"),
             });
+        let (egui_paint_jobs, egui_screen) = self.prepare_egui(&mut encoder);
         let mut render_volume = self.current_volume;
         let view = output.texture.create_view(&Default::default());
         if run_simulation {
@@ -1812,6 +1968,10 @@ impl State {
             pass.set_bind_group(0, &self.outline_bind_group, &[]);
             pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
             pass.draw(0..self.outline_vertex_count, 0..1);
+            if self.pointer_position.is_some() && !self.egui_wants_pointer {
+                pass.set_vertex_buffer(0, self.brush_vertex_buffer.slice(..));
+                pass.draw(0..self.brush_vertex_count, 0..1);
+            }
         }
 
         self.perf_overlay.draw(
@@ -1822,6 +1982,28 @@ impl State {
             &view,
             winit::dpi::PhysicalSize::new(self.config.width, self.config.height),
         );
+
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Cloud Engine egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            self.egui_renderer
+                .render(&mut pass, &egui_paint_jobs, &egui_screen);
+        }
 
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(output);
@@ -1843,6 +2025,23 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        let egui_response = state.egui_state.on_window_event(&state.window, &event);
+        if egui_response.consumed {
+            if let WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button,
+                ..
+            } = &event
+            {
+                match button {
+                    MouseButton::Left => state.paint_buttons &= !1,
+                    MouseButton::Right => state.paint_buttons &= !2,
+                    _ => {}
+                }
+            }
+            state.brush_active = false;
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => state.render(),
@@ -1874,6 +2073,7 @@ impl ApplicationHandler for App {
                             state.perf_mode_index,
                         );
                     } else {
+                        state.paint_buttons |= 1;
                         state.brush_sign = 1.0;
                         state.brush_active = state
                             .pointer_position
@@ -1886,6 +2086,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } if !state.input.cursor_grabbed() => {
+                state.paint_buttons |= 2;
                 state.brush_sign = -1.0;
                 state.brush_active = state
                     .pointer_position
@@ -1893,13 +2094,24 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
-                button: MouseButton::Left | MouseButton::Right,
+                button: MouseButton::Left,
                 ..
-            } if !state.input.cursor_grabbed() => state.brush_active = false,
+            } if !state.input.cursor_grabbed() => {
+                state.paint_buttons &= !1;
+                state.brush_active = false;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } if !state.input.cursor_grabbed() => {
+                state.paint_buttons &= !2;
+                state.brush_active = false;
+            }
             WindowEvent::CursorMoved { position, .. } if !state.input.cursor_grabbed() => {
                 state.pointer_position = Some(position);
                 let valid = state.update_brush_from_cursor(position);
-                state.brush_active &= valid;
+                state.brush_active = valid && state.paint_buttons != 0;
             }
             WindowEvent::KeyboardInput {
                 event:

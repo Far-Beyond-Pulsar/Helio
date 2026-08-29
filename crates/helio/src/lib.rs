@@ -33,6 +33,7 @@ pub use handles::{
     MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
     SublevelId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
+pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
 /// Portal pair math (`pair_map`, crossing detection, teleport) — CPU-only,
 /// rendering-architecture-agnostic. See [`scene::portal_pose_facing`] and

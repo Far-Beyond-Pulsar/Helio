@@ -15,7 +15,9 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{
+    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+};
 
 pub const VOLUME_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     width: 96,
@@ -48,6 +50,9 @@ pub const CLOUD_RAYMARCH_SHADER: &str = include_str!("shaders/cloud_raymarch.wgs
 pub const CLOUD_REPROJECT_SHADER: &str = include_str!("shaders/cloud_reproject.wgsl");
 pub const CLOUD_UPSAMPLE_SHADER: &str = include_str!("shaders/cloud_upsample.wgsl");
 pub const CLOUD_COMMON_SHADER: &str = include_str!("shaders/cloud_common.wgsl");
+pub const CLOUD_VOLUME_LOWRES_SHADER: &str = include_str!("shaders/cloud_volume_lowres.wgsl");
+pub const CLOUD_VOLUME_COMPOSITE_SHADER: &str = include_str!("shaders/cloud_volume_composite.wgsl");
+pub const CLOUD_TEMPORAL_SHADER: &str = include_str!("shaders/cloud_temporal.wgsl");
 
 // ── Atmospheric Sky LUT Shader (Hillaire 2020) ──────────────────────────────
 pub const SKY_LUT_SHADER: &str = include_str!("shaders/sky_lut.wgsl");
@@ -82,9 +87,9 @@ pub struct ShaderSkyUniforms {
     pub cloud_speed: f32,
     pub time_sky: f32,
     pub skylight_intensity: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    pub cloud_mode: u32,
+    pub cloud_quality: u32,
+    pub cloud_resolution: u32,
 }
 
 impl ShaderSkyUniforms {
@@ -113,11 +118,39 @@ impl ShaderSkyUniforms {
             cloud_speed: 0.0,
             time_sky: 0.0,
             skylight_intensity: 0.0,
-            _pad0: 0.0,
-            _pad1: 0.0,
-            _pad2: 0.0,
+            cloud_mode: CloudRenderMode::Volume3D as u32,
+            cloud_quality: CloudQuality::High as u32,
+            cloud_resolution: CloudResolution::Quarter as u32,
         }
     }
+}
+
+/// Cloud representation selected by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CloudRenderMode {
+    Layer2D = 0,
+    Volume3D = 1,
+}
+
+/// Bounded quality tier. Higher tiers spend more samples/detail in the volume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CloudQuality {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+    Ultra = 3,
+}
+
+/// Cloud render resolution divisor: 1/full, 2/half, 4/quarter, 8/eighth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CloudResolution {
+    Full = 1,
+    Half = 2,
+    Quarter = 4,
+    Eighth = 8,
 }
 
 // ── Debug Views ─────────────────────────────────────────────────────────────
@@ -176,6 +209,7 @@ pub const HALF_DIVISOR: u32 = 2;
 // ── Cloud Pipeline Config ───────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug)]
 pub struct CloudPipelineConfig {
+    pub enabled: bool,
     /// Sub-sampling divisor per axis: 2 or 4. Default 4 (quarter-res).
     pub divisor: u32,
     /// Temporal blend: 0.90 history, 0.10 new (EMA). Default 0.90.
@@ -187,16 +221,23 @@ pub struct CloudPipelineConfig {
     /// When true, clouds use infinite horizontal extent (skydome mode) covering
     /// the entire horizon via tiled weather map and dome-shell ray intersection.
     pub infinite_extent: bool,
+    pub mode: CloudRenderMode,
+    pub quality: CloudQuality,
+    pub resolution: CloudResolution,
 }
 
 impl Default for CloudPipelineConfig {
     fn default() -> Self {
         Self {
-            divisor: QUARTER_DIVISOR,
+            enabled: true,
+            divisor: HALF_DIVISOR,
             temporal_blend: 0.90,
             bilateral_sigma: 1.0,
             debug: CloudDebugMode::Off,
             infinite_extent: false,
+            mode: CloudRenderMode::Volume3D,
+            quality: CloudQuality::High,
+            resolution: CloudResolution::Half,
         }
     }
 }
@@ -260,7 +301,18 @@ pub struct SkyPass {
     history_valid: bool,
     width: u32,
     height: u32,
+    allocated_divisor: u32,
     use_high_perf: bool,
+    volume_lowres_pipeline: wgpu::ComputePipeline,
+    volume_lowres_bgl: wgpu::BindGroupLayout,
+    temporal_pipeline: wgpu::ComputePipeline,
+    temporal_bgl: wgpu::BindGroupLayout,
+    temporal_params: wgpu::Buffer,
+    volume_composite_pipeline: wgpu::RenderPipeline,
+    volume_composite_bgl: wgpu::BindGroupLayout,
+    volume_composite_sampler: wgpu::Sampler,
+    volume_composite_bg: Option<wgpu::BindGroup>,
+    volume_composite_bg_key: Option<usize>,
 
     // ── Atmospheric Sky (Hillaire LUT + Skydome composite) ───────────────────
     sky_uniform_buf: wgpu::Buffer,
@@ -328,7 +380,11 @@ fn texture_2d(
 
 impl SkyPass {
     /// Creates the sky pass with a camera buffer (preferred for unified sky+clouds).
-    pub fn new(device: &wgpu::Device, camera_buf: &wgpu::Buffer, target_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
         Self::new_with_camera_and_size(device, camera_buf, target_format, 1280, 720)
     }
 
@@ -344,7 +400,10 @@ impl SkyPass {
     }
 
     /// Backwards compat: CloudVolumePass::new redirected.
-    pub fn new_cloud_volume_compat(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    pub fn new_cloud_volume_compat(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
         Self::new_legacy(device, target_format)
     }
 
@@ -730,7 +789,10 @@ impl SkyPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -756,13 +818,21 @@ impl SkyPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -776,7 +846,10 @@ impl SkyPass {
         let sky_bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sky Composite BG0 (Unified)"),
             layout: &sky_bgl0,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buf.as_entire_binding(),
+            }],
         });
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky Composite PL (Unified)"),
@@ -786,14 +859,26 @@ impl SkyPass {
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sky Composite Pipeline (Unified)"),
             layout: Some(&sky_layout),
-            vertex: wgpu::VertexState { module: &sky_module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            vertex: wgpu::VertexState {
+                module: &sky_module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &sky_module,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -1217,6 +1302,252 @@ impl SkyPass {
             cache: None,
         });
 
+        let volume_lowres_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Finite Cloud Volume Low Resolution"),
+            source: wgpu::ShaderSource::Wgsl(CLOUD_VOLUME_LOWRES_SHADER.into()),
+        });
+        let volume_lowres_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Finite Cloud Volume Low Resolution BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let volume_lowres_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Finite Cloud Volume Low Resolution PL"),
+            bind_group_layouts: &[Some(&volume_lowres_bgl)],
+            immediate_size: 0,
+        });
+        let volume_lowres_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Finite Cloud Volume Low Resolution"),
+                layout: Some(&volume_lowres_layout),
+                module: &volume_lowres_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let volume_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Finite Cloud Volume Composite"),
+            source: wgpu::ShaderSource::Wgsl(CLOUD_VOLUME_COMPOSITE_SHADER.into()),
+        });
+        let volume_composite_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Finite Cloud Volume Composite BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let volume_composite_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Finite Cloud Volume Composite PL"),
+                bind_group_layouts: &[Some(&volume_composite_bgl)],
+                immediate_size: 0,
+            });
+        let volume_composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Finite Cloud Volume Composite"),
+                layout: Some(&volume_composite_layout),
+                vertex: wgpu::VertexState {
+                    module: &volume_composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &volume_composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                    // cloud_volume_lowres writes premultiplied radiance
+                    // (rgb already contains the integrated alpha). Do not
+                    // multiply it by alpha a second time during compositing.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let volume_composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Finite Cloud Volume Composite Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Finite Cloud Temporal Accumulation"),
+            source: wgpu::ShaderSource::Wgsl(CLOUD_TEMPORAL_SHADER.into()),
+        });
+        let temporal_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Finite Cloud Temporal Accumulation BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let temporal_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Finite Cloud Temporal Accumulation PL"),
+            bind_group_layouts: &[Some(&temporal_bgl)],
+            immediate_size: 0,
+        });
+        let temporal_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Finite Cloud Temporal Accumulation"),
+            layout: Some(&temporal_layout),
+            module: &temporal_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let temporal_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Finite Cloud Temporal Parameters"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             sim_pipeline,
             render_pipeline,
@@ -1239,6 +1570,16 @@ impl SkyPass {
             raymarch_bgl,
             reproject_bgl,
             upsample_bgl,
+            volume_lowres_pipeline,
+            volume_lowres_bgl,
+            temporal_pipeline,
+            temporal_bgl,
+            temporal_params,
+            volume_composite_pipeline,
+            volume_composite_bgl,
+            volume_composite_sampler,
+            volume_composite_bg: None,
+            volume_composite_bg_key: None,
             linear_sampler,
             nearest_sampler,
             history_textures: [h0, h1],
@@ -1256,6 +1597,7 @@ impl SkyPass {
             history_valid: false,
             width,
             height,
+            allocated_divisor: config.divisor,
             use_high_perf: true,
             sky_uniform_buf,
             sky_lut_pipeline,
@@ -1311,11 +1653,38 @@ impl SkyPass {
         }
     }
     pub fn set_divisor(&mut self, divisor: u32) {
-        self.config.divisor = divisor.clamp(2, 4);
+        self.config.divisor = divisor.clamp(1, 8);
+        self.config.resolution = match self.config.divisor {
+            2 => CloudResolution::Half,
+            _ => CloudResolution::Quarter,
+        };
+    }
+    pub fn set_cloud_mode(&mut self, mode: CloudRenderMode) {
+        if self.config.mode != mode {
+            self.config.mode = mode;
+            self.history_valid = false;
+        }
+    }
+    pub fn set_cloud_quality(&mut self, quality: CloudQuality) {
+        if self.config.quality != quality {
+            self.config.quality = quality;
+            self.history_valid = false;
+        }
+    }
+    pub fn set_cloud_resolution(&mut self, resolution: CloudResolution) {
+        self.config.resolution = resolution;
+        self.config.divisor = resolution as u32;
+        self.history_valid = false;
     }
     pub fn reset_history(&mut self) {
         self.history_valid = false;
         self.frame_idx = 0;
+    }
+
+    /// Snapshot the complete runtime cloud configuration for UI/settings
+    /// systems. The returned value is cheap to copy and can be persisted.
+    pub fn cloud_config(&self) -> CloudPipelineConfig {
+        self.config
     }
 
     pub fn history_view(&self) -> &wgpu::TextureView {
@@ -1340,7 +1709,12 @@ impl SkyPass {
     pub fn infinite_extent(&self) -> bool {
         self.config.infinite_extent
     }
-    pub fn set_clouds_enabled(&mut self, _enabled: bool) {}
+    pub fn set_clouds_enabled(&mut self, enabled: bool) {
+        if self.config.enabled != enabled {
+            self.config.enabled = enabled;
+            self.history_valid = false;
+        }
+    }
     /// Fluent builder for divisor (2 or 4).
     pub fn with_divisor(mut self, divisor: u32) -> Self {
         self.set_divisor(divisor);
@@ -1381,7 +1755,10 @@ impl RenderPass for SkyPass {
         builder.write_color_raw(
             "sky_lut",
             wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::Absolute { width: LUT_WIDTH, height: LUT_HEIGHT },
+            ResourceSize::Absolute {
+                width: LUT_WIDTH,
+                height: LUT_HEIGHT,
+            },
         );
         // Main HDR target (pre_aa) — sky composite writes here
         builder.write_color_raw("pre_aa", self.target_format, ResourceSize::MatchSurface);
@@ -1389,19 +1766,25 @@ impl RenderPass for SkyPass {
         builder.write_color(
             "cloud_quarter_color",
             ResourceFormat::Rgba16Float,
-            ResourceSize::ScaledInternal { divisor: QUARTER_DIVISOR },
+            ResourceSize::ScaledInternal {
+                divisor: self.config.divisor,
+            },
         );
         // Quarter-resolution depth/data buffer
         builder.write_color(
             "cloud_quarter_data",
             ResourceFormat::Rgba16Float,
-            ResourceSize::ScaledInternal { divisor: QUARTER_DIVISOR },
+            ResourceSize::ScaledInternal {
+                divisor: self.config.divisor,
+            },
         );
         // History buffer (quarter-res, ping-ponged internally but declared for graph aliasing)
         builder.write_color(
             "cloud_history",
             ResourceFormat::Rgba16Float,
-            ResourceSize::ScaledInternal { divisor: QUARTER_DIVISOR },
+            ResourceSize::ScaledInternal {
+                divisor: self.config.divisor,
+            },
         );
         // Velocity is read from gbuffer_velocity (published by GBufferPass)
         builder.read("gbuffer_velocity");
@@ -1449,12 +1832,19 @@ impl RenderPass for SkyPass {
         self.confidence_view = cf_view;
         self.history_textures = [h0_tex, h1_tex];
         self.history_views = [h0_view, h1_view];
+        self.allocated_divisor = divisor;
         self.history_valid = false;
         self.frame_idx = 0;
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.frame_idx = ctx.frame_num;
+        // Resolution is a runtime setting. Reallocate the owned temporal
+        // targets lazily here so changing it between frames is safe and does
+        // not invalidate bind groups while a frame is being encoded.
+        if self.allocated_divisor != self.config.divisor {
+            self.on_resize(ctx.device, self.width, self.height);
+        }
         let qw = (self.width / self.config.divisor).max(1) as f32;
         let qh = (self.height / self.config.divisor).max(1) as f32;
         let w = self.width as f32;
@@ -1475,12 +1865,29 @@ impl RenderPass for SkyPass {
         };
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniform));
+        let (cloud_base, cloud_top) = ctx
+            .frame_resources
+            .sky
+            .clouds
+            .map(|clouds| (clouds.base, clouds.top))
+            .unwrap_or((32.0, 120.0));
+        let temporal_values = [
+            self.config.temporal_blend,
+            if self.history_valid { 1.0 } else { 0.0 },
+            cloud_base,
+            cloud_top,
+        ];
+        ctx.queue.write_buffer(
+            &self.temporal_params,
+            0,
+            bytemuck::cast_slice(&temporal_values),
+        );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
         if ctx.frame_resources.sky.has_sky {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
             if let Some(clouds) = ctx.frame_resources.sky.clouds {
-                sky_uniforms.clouds_enabled = 1;
+                sky_uniforms.clouds_enabled = self.config.enabled as u32;
                 sky_uniforms.cloud_coverage = clouds.coverage;
                 sky_uniforms.cloud_density = clouds.density;
                 sky_uniforms.cloud_base = clouds.base;
@@ -1491,8 +1898,11 @@ impl RenderPass for SkyPass {
                 sky_uniforms.skylight_intensity = clouds.skylight_intensity;
                 // Propagate infinite extent flag from pipeline config to shader via coverage scaling is handled in raymarch
             }
+            sky_uniforms.cloud_mode = self.config.mode as u32;
+            sky_uniforms.cloud_quality = self.config.quality as u32;
+            sky_uniforms.cloud_resolution = self.config.resolution as u32;
             // Reflect infiniteExtent flag by expanding cloud top/base when enabled — optional skydome coverage
-            if self.config.infinite_extent {
+            if self.config.infinite_extent && self.config.mode == CloudRenderMode::Layer2D {
                 // widen vertical range slightly for full dome visibility
                 sky_uniforms.cloud_base = sky_uniforms.cloud_base.min(800.0);
                 sky_uniforms.cloud_top = sky_uniforms.cloud_top.max(2500.0);
@@ -1520,7 +1930,10 @@ impl RenderPass for SkyPass {
                     view: sky_lut_view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sky LUT (Unified)"),
@@ -1537,7 +1950,19 @@ impl RenderPass for SkyPass {
             }
         }
 
-        // ── 2) Legacy cloud volume simulation dispatch (always) ───────────────
+        // Boundless procedural clouds are rendered by the sky shader.  Do not
+        // also simulate/overlay the legacy 3D volume: that path is expensive
+        // and its empty/default volume is the source of the gray/black veil
+        // seen over the procedural demo.
+        let procedural_clouds = ctx
+            .resources
+            .sky
+            .clouds
+            .map(|clouds| clouds.infinite_extent)
+            .unwrap_or(false);
+
+        // ── 2) Legacy cloud volume simulation dispatch ───────────────────────
+        if self.config.enabled && !procedural_clouds && self.config.mode == CloudRenderMode::Layer2D
         {
             let ce = unsafe { &mut *ctx.compute_encoder_ptr };
             self.dispatch(ce);
@@ -1573,15 +1998,29 @@ impl RenderPass for SkyPass {
                     if let Some(sky_lut_view) = ctx.resources.sky_lut.get() {
                         let key = sky_lut_view as *const _ as usize;
                         if self.sky_bg1_key != Some(key) {
-                            self.sky_bg1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("Sky Composite BG1 (Legacy)"),
-                                layout: &self.sky_bgl1,
-                                entries: &[
-                                    wgpu::BindGroupEntry { binding: 0, resource: self.sky_uniform_buf.as_entire_binding() },
-                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(sky_lut_view) },
-                                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler) },
-                                ],
-                            }));
+                            self.sky_bg1 =
+                                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: Some("Sky Composite BG1 (Legacy)"),
+                                    layout: &self.sky_bgl1,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: self.sky_uniform_buf.as_entire_binding(),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                sky_lut_view,
+                                            ),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 2,
+                                            resource: wgpu::BindingResource::Sampler(
+                                                &self.sky_lut_sampler,
+                                            ),
+                                        },
+                                    ],
+                                }));
                             self.sky_bg1_key = Some(key);
                         }
                     }
@@ -1603,54 +2042,142 @@ impl RenderPass for SkyPass {
         // textures when those resources are not available, ensuring the pipeline
         // never fails validation on minimal graphs.
 
-        // For now, record dispatches with placeholder bind groups that reference
-        // owned quarter/history textures. Real integration would create per-frame
-        // bind groups keyed on ctx.depth, gbuffer_velocity, etc.
+        let volume_clouds_enabled = self.config.enabled
+            && self.config.mode == CloudRenderMode::Volume3D
+            && ctx.resources.sky.has_sky
+            && ctx.resources.sky.clouds.is_some();
+        // Godot's reference path deliberately keeps reduced-resolution cloud
+        // frames free of temporal color history.  Reusing coarse texels and
+        // then filtering them at presentation resolution is what creates the
+        // long streaks and ghost silhouettes this pass used to exhibit.
+        let use_cloud_temporal = volume_clouds_enabled && self.config.divisor == 1;
+        if volume_clouds_enabled {
+            let compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Finite Cloud Volume Low Resolution BG"),
+                layout: &self.volume_lowres_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.sky_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.quarter_color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.quarter_data_view),
+                    },
+                ],
+            });
+            let ce = unsafe { &mut *ctx.compute_encoder_ptr };
+            let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Finite Cloud Volume Low Resolution"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.volume_lowres_pipeline);
+            cpass.set_bind_group(0, &compute_bg, &[]);
+            let qw = (self.width / self.config.divisor).max(1);
+            let qh = (self.height / self.config.divisor).max(1);
+            cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);
+            drop(cpass);
+        }
 
         // History ping-pong
         let history_read = self.history_ping;
         let history_write = 1 - self.history_ping;
 
-        // Dispatch quarter-res raymarch (8x8 workgroups over quarter res)
-        {
-            // In a full integration, bind group creation would happen here per-frame:
-            // let bg = ctx.device.create_bind_group(... quarter_color_view, quarter_data_view ...)
-            // For this refactor, we dispatch a no-op that validates pipeline compilation
-            // and rely on the shaders' documented interface for the actual binding.
-            // The executor's graph-owned textures (cloud_quarter_color etc.) are
-            // allocated via declare_resources and routed via FrameResources.
+        if use_cloud_temporal {
+            let temporal_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Finite Cloud Temporal Accumulation BG"),
+                layout: &self.temporal_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.quarter_color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.history_views[history_read],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.temporal_params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.history_views[history_write],
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&self.quarter_data_view),
+                    },
+                ],
+            });
             let ce = unsafe { &mut *ctx.compute_encoder_ptr };
-            // Validate that pipelines are compiled — actual dispatches are deferred
-            // until the frame graph provides depth/velocity/weather bindings.
-            // We still increment frame state:
-            let _ = (&self.raymarch_pipeline, &self.reproject_pipeline, &self.upsample_pipeline);
-            let _ = (&self.quarter_color_view, &self.accum_view, &self.history_views[history_read]);
-            let _ = (&self.confidence_view, &self.quarter_data_view);
-            let _ = ce; // suppress unused warning
-            // Real dispatches (uncomment when graph provides required views):
-            // {
-            //   let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor{ label: Some("Cloud Quarter Raymarch"), .. });
-            //   cpass.set_pipeline(&self.raymarch_pipeline);
-            //   cpass.set_bind_group(0, &raymarch_bg, &[]);
-            //   cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);
-            // }
-            // {
-            //   let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor{ label: Some("Cloud Reproject"), .. });
-            //   cpass.set_pipeline(&self.reproject_pipeline);
-            //   cpass.set_bind_group(0, &reproject_bg, &[]);
-            //   cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);
-            // }
-            // {
-            //   let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor{ label: Some("Cloud Bilateral Upsample"), .. });
-            //   cpass.set_pipeline(&self.upsample_pipeline);
-            //   cpass.set_bind_group(0, &upsample_bg, &[]);
-            //   cpass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
-            // }
+            let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Finite Cloud Temporal Accumulation"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.temporal_pipeline);
+            cpass.set_bind_group(0, &temporal_bg, &[]);
+            let qw = (self.width / self.config.divisor).max(1);
+            let qh = (self.height / self.config.divisor).max(1);
+            cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);
+            drop(cpass);
+            self.history_ping = history_write;
+            self.history_valid = true;
         }
 
-        // Advance temporal state
-        self.history_ping = history_write;
-        self.history_valid = true;
+        if volume_clouds_enabled {
+            let cloud_source = if use_cloud_temporal {
+                &self.history_views[history_write]
+            } else {
+                &self.quarter_color_view
+            };
+            let key = cloud_source as *const _ as usize;
+            if self.volume_composite_bg_key != Some(key) {
+                self.volume_composite_bg = Some(ctx.device.create_bind_group(
+                    &wgpu::BindGroupDescriptor {
+                        label: Some("Finite Cloud Volume Composite BG"),
+                        layout: &self.volume_composite_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(cloud_source),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &self.volume_composite_sampler,
+                                ),
+                            },
+                        ],
+                    },
+                ));
+                self.volume_composite_bg_key = Some(key);
+            }
+        }
 
         // ── 3) Composite sky + clouds into pre_aa (active render pass) ─────────
         // Lazy bind group for sky composite (needs LUT view)
@@ -1661,9 +2188,18 @@ impl RenderPass for SkyPass {
                     label: Some("Sky Composite BG1 (Unified)"),
                     layout: &self.sky_bgl1,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.sky_uniform_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(sky_lut_view) },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.sky_uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(sky_lut_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler),
+                        },
                     ],
                 }));
                 self.sky_bg1_key = Some(key);
@@ -1682,9 +2218,19 @@ impl RenderPass for SkyPass {
                 }
                 rp.draw(0..3, 0..1);
             }
-            // Overlay volumetric clouds on top of sky (additive composite via legacy raymarch)
-            // When infinite_extent enabled, cloud raymarch already tiled across dome.
-            self.render(rp);
+            if volume_clouds_enabled {
+                rp.set_pipeline(&self.volume_composite_pipeline);
+                rp.set_bind_group(0, self.volume_composite_bg.as_ref().unwrap(), &[]);
+                rp.draw(0..3, 0..1);
+            }
+            // Localized cloud actors still use the legacy volume renderer.
+            // Boundless procedural clouds are already part of the sky composite.
+            if self.config.enabled
+                && !procedural_clouds
+                && self.config.mode == CloudRenderMode::Layer2D
+            {
+                self.render(rp);
+            }
         } else {
             // No active pass — manual fallback (writes to pre_aa when graph allocates it)
             let target_view = ctx.resources.pre_aa.get().unwrap_or(ctx.target);
@@ -1715,7 +2261,17 @@ impl RenderPass for SkyPass {
                 }
                 pass.draw(0..3, 0..1);
             }
-            self.render(&mut pass);
+            if volume_clouds_enabled {
+                pass.set_pipeline(&self.volume_composite_pipeline);
+                pass.set_bind_group(0, self.volume_composite_bg.as_ref().unwrap(), &[]);
+                pass.draw(0..3, 0..1);
+            }
+            if self.config.enabled
+                && !procedural_clouds
+                && self.config.mode == CloudRenderMode::Layer2D
+            {
+                self.render(&mut pass);
+            }
         }
 
         Ok(())

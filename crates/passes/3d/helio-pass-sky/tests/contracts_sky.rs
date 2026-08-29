@@ -1,6 +1,4 @@
-use helio_pass_sky::{
-    RenderParams, SimParams, RENDER_PARAMS_SIZE, SIM_PARAMS_SIZE, VOLUME_SIZE,
-};
+use helio_pass_sky::{RenderParams, SimParams, RENDER_PARAMS_SIZE, SIM_PARAMS_SIZE, VOLUME_SIZE};
 
 #[test]
 fn authored_contract_sizes_and_volume_are_exact() {

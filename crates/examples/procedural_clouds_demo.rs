@@ -10,6 +10,9 @@
 //!   Q/E          — rotate sun (time of day)
 //!   B            — toggle boundless (infinite) extent
 //!   1/2/3/4      — presets: clear / scattered / overcast / storm
+//!   F1/F2        — 2D layer / finite 3D volume
+//!   F3/F4/F5/F6  — low / medium / high / ultra quality
+//!   F7/F8/F9/F10 — full / half / quarter / eighth cloud resolution
 //!   +/-  (or =/-) — adjust coverage, [/] — adjust density
 //!   Esc          — release cursor / exit
 
@@ -57,10 +60,54 @@ struct CloudPreset {
 }
 
 const PRESETS: [(&str, CloudPreset); 4] = [
-    ("clear", CloudPreset { coverage: 0.15, density: 0.4, base: 1400.0, top: 2000.0, wind_x: 0.6, wind_z: 0.1, speed: 0.8 }),
-    ("scattered", CloudPreset { coverage: 0.45, density: 0.65, base: 1200.0, top: 1850.0, wind_x: 0.8, wind_z: 0.2, speed: 1.2 }),
-    ("overcast", CloudPreset { coverage: 0.78, density: 0.85, base: 1000.0, top: 2100.0, wind_x: 0.5, wind_z: 0.3, speed: 1.0 }),
-    ("storm", CloudPreset { coverage: 0.92, density: 1.0, base: 700.0, top: 2800.0, wind_x: 1.2, wind_z: -0.4, speed: 1.8 }),
+    (
+        "clear",
+        CloudPreset {
+            coverage: 0.15,
+            density: 0.4,
+            base: 32.0,
+            top: 105.0,
+            wind_x: 0.6,
+            wind_z: 0.1,
+            speed: 0.2,
+        },
+    ),
+    (
+        "scattered",
+        CloudPreset {
+            coverage: 0.45,
+            density: 0.65,
+            base: 28.0,
+            top: 120.0,
+            wind_x: 0.8,
+            wind_z: 0.2,
+            speed: 0.3,
+        },
+    ),
+    (
+        "overcast",
+        CloudPreset {
+            coverage: 0.78,
+            density: 0.85,
+            base: 22.0,
+            top: 135.0,
+            wind_x: 0.5,
+            wind_z: 0.3,
+            speed: 0.25,
+        },
+    ),
+    (
+        "storm",
+        CloudPreset {
+            coverage: 0.92,
+            density: 1.0,
+            base: 16.0,
+            top: 180.0,
+            wind_x: 1.2,
+            wind_z: -0.4,
+            speed: 0.45,
+        },
+    ),
 ];
 
 struct AppState {
@@ -84,6 +131,9 @@ struct AppState {
     density: f32,
     infinite: bool,
     skylight: f32,
+    cloud_mode: helio::CloudRenderMode,
+    cloud_quality: helio::CloudQuality,
+    cloud_resolution: helio::CloudResolution,
 }
 
 impl App {
@@ -111,7 +161,9 @@ impl ApplicationHandler for App {
             flags: wgpu::InstanceFlags::empty(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let surface = instance.create_surface(window.clone()).expect("Failed to create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("Failed to create surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -127,13 +179,23 @@ impl ApplicationHandler for App {
             ..Default::default()
         }))
         .expect("Failed to create device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU UNCAPTURED ERROR] {:?}", e)));
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e)
+        }));
         let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
+        println!(
+            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
+            info.backend, info.name, info.driver
+        );
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(surface_caps.formats[0]);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
         let size = window.inner_size();
         let cfg = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -158,7 +220,9 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
@@ -186,11 +250,32 @@ impl ApplicationHandler for App {
             debug_camera_buf,
             cull_stats_buf,
         );
-        let mat = renderer.scene_mut().insert_material(make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0));
-        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0))).as_mesh().unwrap();
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)), 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 40.0);
+        let mat = renderer.scene_mut().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let cube1 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .as_mesh()
+            .unwrap();
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
+            .as_mesh()
+            .unwrap();
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube1,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
+            0.5,
+        );
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 40.0);
         let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
@@ -221,6 +306,9 @@ impl ApplicationHandler for App {
         renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
             helio::SkyActor::new().with_clouds(volumetric),
         ));
+        renderer.set_cloud_render_mode(helio::CloudRenderMode::Volume3D);
+        renderer.set_cloud_quality(helio::CloudQuality::High);
+        renderer.set_cloud_resolution(helio::CloudResolution::Half);
         log::info!("Boundless procedural clouds: coverage={}, infinite=true — press B to toggle, 1-4 presets", volumetric.coverage);
         self.state = Some(AppState {
             window,
@@ -243,6 +331,9 @@ impl ApplicationHandler for App {
             density: preset.density,
             infinite: true,
             skylight: 0.25,
+            cloud_mode: helio::CloudRenderMode::Volume3D,
+            cloud_quality: helio::CloudQuality::High,
+            cloud_resolution: helio::CloudResolution::Half,
         });
     }
 
@@ -251,7 +342,12 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -263,7 +359,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
                 ..
             } => match ks {
                 ElementState::Pressed => {
@@ -281,7 +382,12 @@ impl ApplicationHandler for App {
                                 let (name, p) = PRESETS[idx];
                                 state.coverage = p.coverage;
                                 state.density = p.density;
-                                log::info!("Preset {}: {} coverage={:.2}", idx + 1, name, p.coverage);
+                                log::info!(
+                                    "Preset {}: {} coverage={:.2}",
+                                    idx + 1,
+                                    name,
+                                    p.coverage
+                                );
                                 state.sync_clouds_with_preset(p);
                             }
                         }
@@ -305,6 +411,35 @@ impl ApplicationHandler for App {
                             log::info!("density {:.2}", state.density);
                             state.sync_clouds();
                         }
+                        KeyCode::F1 | KeyCode::F2 => {
+                            state.cloud_mode = if key == KeyCode::F1 {
+                                helio::CloudRenderMode::Layer2D
+                            } else {
+                                helio::CloudRenderMode::Volume3D
+                            };
+                            state.renderer.set_cloud_render_mode(state.cloud_mode);
+                            log::info!("cloud mode: {:?}", state.cloud_mode);
+                        }
+                        KeyCode::F3 | KeyCode::F4 | KeyCode::F5 | KeyCode::F6 => {
+                            state.cloud_quality = match key {
+                                KeyCode::F3 => helio::CloudQuality::Low,
+                                KeyCode::F4 => helio::CloudQuality::Medium,
+                                KeyCode::F5 => helio::CloudQuality::High,
+                                _ => helio::CloudQuality::Ultra,
+                            };
+                            state.renderer.set_cloud_quality(state.cloud_quality);
+                            log::info!("cloud quality: {:?}", state.cloud_quality);
+                        }
+                        KeyCode::F7 | KeyCode::F8 | KeyCode::F9 | KeyCode::F10 => {
+                            state.cloud_resolution = match key {
+                                KeyCode::F7 => helio::CloudResolution::Full,
+                                KeyCode::F8 => helio::CloudResolution::Half,
+                                KeyCode::F9 => helio::CloudResolution::Quarter,
+                                _ => helio::CloudResolution::Eighth,
+                            };
+                            state.renderer.set_cloud_resolution(state.cloud_resolution);
+                            log::info!("cloud resolution: {:?}", state.cloud_resolution);
+                        }
                         _ => {}
                     }
                     state.keys.insert(key);
@@ -313,10 +448,17 @@ impl ApplicationHandler for App {
                     state.keys.remove(&key);
                 }
             },
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                        .is_ok();
                     if grabbed {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
@@ -381,9 +523,11 @@ impl AppState {
             infinite_extent: self.infinite,
         };
         // Re-insert sky actor — SkyActor is the single source of truth for sky+clouds
-        self.renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
-            helio::SkyActor::new().with_clouds(clouds),
-        ));
+        self.renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::Sky(
+                helio::SkyActor::new().with_clouds(clouds),
+            ));
     }
     fn sync_clouds_with_preset(&mut self, p: CloudPreset) {
         let clouds = VolumetricClouds {
@@ -399,16 +543,22 @@ impl AppState {
         };
         self.coverage = p.coverage;
         self.density = p.density;
-        self.renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
-            helio::SkyActor::new().with_clouds(clouds),
-        ));
+        self.renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::Sky(
+                helio::SkyActor::new().with_clouds(clouds),
+            ));
     }
     fn render(&mut self, dt: f32) {
         const SPEED: f32 = 5.0;
         const LOOK_SENS: f32 = 0.002;
         const SUN_SPEED: f32 = 0.5;
-        if self.keys.contains(&KeyCode::KeyQ) { self.sun_angle -= SUN_SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyE) { self.sun_angle += SUN_SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyQ) {
+            self.sun_angle -= SUN_SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyE) {
+            self.sun_angle += SUN_SPEED * dt;
+        }
         self.cam_yaw += self.mouse_delta.0 * LOOK_SENS;
         self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.45, 1.45);
         self.mouse_delta = (0.0, 0.0);
@@ -416,26 +566,57 @@ impl AppState {
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right = glam::Vec3::new(cy, 0.0, sy);
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos += glam::Vec3::Y * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= glam::Vec3::Y * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += glam::Vec3::Y * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= glam::Vec3::Y * SPEED * dt;
+        }
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::perspective_look_at(self.cam_pos, self.cam_pos + forward, glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 2000.0);
-        let sun_dir = glam::Vec3::new(self.sun_angle.cos() * 0.3, self.sun_angle.sin(), 0.5).normalize();
+        let camera = Camera::perspective_look_at(
+            self.cam_pos,
+            self.cam_pos + forward,
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            5000.0,
+        );
+        let sun_dir =
+            glam::Vec3::new(self.sun_angle.cos() * 0.3, self.sun_angle.sin(), 0.5).normalize();
         let light_dir = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
         let sun_elev = sun_dir.y.clamp(-1.0, 1.0);
         let sun_lux = (sun_elev * 3.0).clamp(0.0, 1.0);
-        let sun_color = [1.0_f32.min(1.0 + (1.0 - sun_elev) * 0.3), (0.85 + sun_elev * 0.15).clamp(0.0, 1.0), (0.7 + sun_elev * 0.3).clamp(0.0, 1.0)];
+        let sun_color = [
+            1.0_f32.min(1.0 + (1.0 - sun_elev) * 0.3),
+            (0.85 + sun_elev * 0.15).clamp(0.0, 1.0),
+            (0.7 + sun_elev * 0.3).clamp(0.0, 1.0),
+        ];
         let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => return,
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let _ = self.renderer.scene_mut().update_light(self.sun_light_id, directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let _ = self.renderer.scene_mut().update_light(
+            self.sun_light_id,
+            directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
+        );
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
