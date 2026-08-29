@@ -44,21 +44,9 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
     }
     sample_switch.push_str("        default: { return fallback; }\n    }");
 
-    let mut vt_sample_switch = String::from("switch slot.texture_index {\n");
-    for index in 0..max_textures {
-        vt_sample_switch.push_str(&format!(
-            "        case {index}u: {{ return vt_sample(scene_texture_{index}, scene_sampler_{index}, vt_meta[{index}], uv); }}\n",
-        ));
-    }
-    vt_sample_switch.push_str("        default: { return fallback; }\n    }");
-
-    let source = source.replace(
+    source.replace(
         "return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);",
         &sample_switch,
-    );
-    source.replace(
-        "return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], uv);",
-        &vt_sample_switch,
     )
 }
 

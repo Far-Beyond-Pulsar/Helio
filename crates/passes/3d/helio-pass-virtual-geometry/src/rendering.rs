@@ -80,9 +80,7 @@ impl VirtualGeometryPass {
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
         });
         let draw_shader_source = {
-            let raw = include_str!("../shaders/vg_gbuffer.wgsl");
-            let resolved = helio_core::shader::resolve(raw);
-            let s = resolved
+            let s = include_str!("../shaders/vg_gbuffer.wgsl")
                 .replace(
                     "binding_array<texture_2d<f32>, 256>",
                     &format!(

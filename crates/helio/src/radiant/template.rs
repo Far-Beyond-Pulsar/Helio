@@ -25,11 +25,9 @@ impl RadiantTemplate {
     /// If `graph_wgsl` is empty, the OVERRIDE markers are replaced with a no-op
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
-        // Expand `//!use helio_vt` (and other markers) before any other
-        // string fixups — otherwise `vt_record_demand` etc have no definition.
-        let resolved = helio_core::shader::resolve(self.wgsl_source);
         let max_tex_str = max_textures.to_string();
-        let mut src = resolved
+        let mut src = self
+            .wgsl_source
             .replace(
                 "binding_array<texture_2d<f32>, 256>",
                 &format!("binding_array<texture_2d<f32>, {max_tex_str}>"),

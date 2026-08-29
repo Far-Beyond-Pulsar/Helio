@@ -92,7 +92,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal:   vec3<f32>,
     @location(2) tex_coords:     vec2<f32>,
-    @location(3) @interpolate(flat) material_id:    u32,
+    @location(3) material_id:    u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {

@@ -219,17 +219,11 @@ impl PortalInstancePass {
 
 fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Cow<'static, str> {
     let source = include_str!("../shaders/gbuffer_portal.wgsl");
-    // Expand `//!use helio_vt` (and any other markers) into the exact text
-    // the GPU will compile, before platform fixups touch bindless patterns.
-    // Without this the shader dies at `create_shader_module` with
-    // "no definition in scope for `vt_record_demand`" — the marker is an
-    // ordinary WGSL comment until `resolve` prepends `vt_sample.wgsl`.
-    let resolved = helio_core::shader::resolve(source);
     if material_binding.uses_binding_arrays() {
-        Cow::Owned(resolved.into_owned())
+        Cow::Borrowed(source)
     } else {
         Cow::Owned(libhelio::shader::apply_webgpu_material_bindings(
-            &resolved,
+            source,
             material_binding.max_textures,
         ))
     }
@@ -460,9 +454,7 @@ mod tests {
         assert!(!source.contains("binding_array<"));
         assert!(source.contains("@group(1) @binding(2) var scene_texture_0"));
         assert!(source.contains("@group(1) @binding(5) var scene_sampler_1"));
-        // VT path rewrites `vt_sample(...)` per-slot; legacy path rewrites
-        // `textureSample(...)`. Either switch is evidence the fixup ran.
-        assert!(source.contains("case 1u: { return vt_sample") || source.contains("case 1u: { return textureSampleLevel"));
+        assert!(source.contains("case 1u: { return textureSampleLevel"));
     }
 
     #[test]
@@ -472,14 +464,8 @@ mod tests {
             max_textures: 256,
         });
 
-        // VT expansion always makes the source owned (the `//!use helio_vt`
-        // marker is resolved into the full `vt_sample.wgsl` text), but the
-        // binding_array declarations themselves must survive untouched.
+        assert!(matches!(source, std::borrow::Cow::Borrowed(_)));
         assert!(source.contains("enable wgpu_binding_array;"));
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
-        // VT contract must be present — this is what the runtime panic was
-        // about (missing `vt_record_demand`).
-        assert!(source.contains("fn vt_record_demand"));
-        assert!(source.contains("fn vt_sample"));
     }
 }

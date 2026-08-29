@@ -21,7 +21,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let write_coord = vec3<i32>(global_id);
         let src_coord = write_coord - params.origin_delta;
         var clamped = src_coord;
-        if (any(src_coord < vec3<i32>(0)) || any(src_coord >= vec3<i32>(i32(VOXEL_RESOLUTION)))) {
+        if (any(src_coord < vec3<i32>(0)) || any(src_coord >= vec3<i32>(VOXEL_RESOLUTION))) {
             let half = i32(VOXEL_RESOLUTION) / 2;
             clamped = vec3<i32>(half, half, half);
         }
