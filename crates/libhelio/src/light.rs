@@ -99,10 +99,10 @@ pub struct GpuLight {
     pub flare_tint_g: f32,
     pub flare_tint_b: f32,
     // ── IES light profiles / light functions ──
-    pub ies_profile_index: i32,        // -1 = no IES profile, 0+ = index into IES texture array
-    pub light_function_index: i32,     // -1 = no gobo, 0+ = index into light function texture array
-    pub ies_angle_scale: f32,          // Angular scale for the IES profile
-    pub ies_angle_offset: f32,         // Angular rotation offset for the IES profile (degrees)
+    pub ies_profile_index: i32, // -1 = no IES profile, 0+ = index into IES texture array
+    pub light_function_index: i32, // -1 = no gobo, 0+ = index into light function texture array
+    pub ies_angle_scale: f32,   // Angular scale for the IES profile
+    pub ies_angle_offset: f32,  // Angular rotation offset for the IES profile (degrees)
 }
 
 // The WGSL mirrors above assume this exact size. A storage-buffer array of
@@ -161,4 +161,3 @@ pub struct GpuShadowMatrix {
     /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
     pub light_view_proj: [f32; 16],
 }
-

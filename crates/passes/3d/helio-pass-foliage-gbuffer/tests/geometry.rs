@@ -31,11 +31,16 @@ fn assert_position(lod: u32, index: u32, height: f32, width: f32, expected: [f32
 fn vertices_walk_up_the_blade_two_at_a_time_and_end_in_a_collapsed_tip() {
     // LOD 0: 5 segments, 11 vertices. Rows 0,0,1,1,2,2,3,3,4,4 then the tip.
     let expected_rows = [0u32, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5];
-    let expected_sides = [-1.0f32, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 0.0];
+    let expected_sides = [
+        -1.0f32, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 0.0,
+    ];
     for index in 0..LOD_VERTEX_COUNTS[0] {
         let v = blade_vertex(0, index);
         assert_eq!(v.row, expected_rows[index as usize], "row at index {index}");
-        assert_eq!(v.side, expected_sides[index as usize], "side at index {index}");
+        assert_eq!(
+            v.side, expected_sides[index as usize],
+            "side at index {index}"
+        );
         assert_eq!(v.is_tip, index == 10, "tip flag at index {index}");
     }
 
@@ -138,7 +143,10 @@ fn card_positions_are_pinned_and_flat() {
     let clump_w = 0.2 * LOD_WIDTH_SCALE[3];
     assert_position(3, 0, clump_h, clump_w, [-0.5 * clump_w, 0.0, 0.0]);
     assert_position(3, 3, clump_h, clump_w, [0.5 * clump_w, clump_h, 0.0]);
-    assert!(LOD_WIDTH_SCALE[3] > LOD_WIDTH_SCALE[2], "a clump card must be wider than one blade");
+    assert!(
+        LOD_WIDTH_SCALE[3] > LOD_WIDTH_SCALE[2],
+        "a clump card must be wider than one blade"
+    );
 
     // Every card vertex is planar in the blade's local Z.
     for lod in [2u32, 3] {
@@ -194,7 +202,10 @@ fn every_strip_triangle_at_every_lod_shares_a_winding() {
         }
         // Pinned rather than merely consistent: the value is what the front face *is*,
         // and flipping it would invert every blade's lighting at once.
-        assert_eq!(sign, 1.0, "LOD {lod} strip is not counter-clockwise in local XY");
+        assert_eq!(
+            sign, 1.0,
+            "LOD {lod} strip is not counter-clockwise in local XY"
+        );
     }
 }
 
@@ -243,9 +254,16 @@ fn a_blade_normal_tilts_forward_as_the_blade_curls() {
     // were flat and the curl is invisible under any directional light.
     let root = blade_local_normal(0, 0, 1.0);
     let tip = blade_local_normal(0, 10, 1.0);
-    assert_eq!(root, [0.0, 0.0, 1.0], "the root is vertical, so its normal is unturned");
+    assert_eq!(
+        root,
+        [0.0, 0.0, 1.0],
+        "the root is vertical, so its normal is unturned"
+    );
     assert!(tip[1] < 0.0, "the tip's normal must tip over with the curl");
-    assert!(tip[2] > 0.0, "and must not flip past horizontal at the default curl");
+    assert!(
+        tip[2] > 0.0,
+        "and must not flip past horizontal at the default curl"
+    );
 }
 
 // ── Defensive behaviour ───────────────────────────────────────────────────────

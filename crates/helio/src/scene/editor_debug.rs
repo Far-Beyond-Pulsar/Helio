@@ -199,7 +199,11 @@ impl super::Scene {
                 let local_to_world = Mat4::from_cols_array_2d(&g.world_to_local).inverse();
                 sink.wire_box(local_to_world, v3(&g.extents_transition), COLOR_REFLECTION);
             } else {
-                sink.wire_sphere(v3(&g.position_radius), g.position_radius[3], COLOR_REFLECTION);
+                sink.wire_sphere(
+                    v3(&g.position_radius),
+                    g.position_radius[3],
+                    COLOR_REFLECTION,
+                );
             }
         }
 

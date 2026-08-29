@@ -590,7 +590,13 @@ impl DebugDrawPass {
         self.pass.set_depth_test(enabled);
     }
 
-    fn rebuild_editor_grid_cache(&mut self, center_x: f32, center_z: f32, grid_step: f32, color_blind_mode: u8) {
+    fn rebuild_editor_grid_cache(
+        &mut self,
+        center_x: f32,
+        center_z: f32,
+        grid_step: f32,
+        color_blind_mode: u8,
+    ) {
         self.editor_grid_cache.clear();
 
         let minor_color: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
@@ -794,7 +800,12 @@ impl RenderPass for DebugDrawPass {
             let mut grid_rebuilt = false;
             if self.editor_last_key != Some(key) || self.editor_last_volume_gen != Some(volume_gen)
             {
-                self.rebuild_editor_grid_cache(center_x, center_z, grid_step, state.color_blind_mode);
+                self.rebuild_editor_grid_cache(
+                    center_x,
+                    center_z,
+                    grid_step,
+                    state.color_blind_mode,
+                );
                 self.editor_grid_cache
                     .extend_from_slice(&state.editor_volume_lines);
                 self.editor_last_key = Some(key);

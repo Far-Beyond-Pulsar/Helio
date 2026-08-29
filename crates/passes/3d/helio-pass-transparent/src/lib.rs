@@ -139,9 +139,18 @@ impl TransparentPass {
             label: Some("Transparent BG 0"),
             layout: &bgl_0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: instances_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: globals_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: instances_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -156,9 +165,8 @@ impl TransparentPass {
         // gbuffer templates that have incompatible bind group layouts.
         let base_src = include_str!("../../../../helio/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
-            let mut resolved = String::with_capacity(
-                base_src.len() + libhelio::shader::PBR_EVAL.len(),
-            );
+            let mut resolved =
+                String::with_capacity(base_src.len() + libhelio::shader::PBR_EVAL.len());
             resolved.push_str(libhelio::shader::PBR_EVAL);
             resolved.push('\n');
             resolved.push_str(base_src);
@@ -186,7 +194,6 @@ impl TransparentPass {
             surface_format,
         }
     }
-
 }
 
 impl RenderPass for TransparentPass {
@@ -242,7 +249,10 @@ impl RenderPass for TransparentPass {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })]));
         let depth_view = resources.full_res_depth.get().unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
@@ -250,7 +260,10 @@ impl RenderPass for TransparentPass {
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -261,9 +274,14 @@ impl RenderPass for TransparentPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let draw_count = ctx.scene.draw_count;
-        log::info!("[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
-            draw_count, ctx.scene.transparent_material_class_ranges);
-        if draw_count == 0 { return Ok(()); }
+        log::info!(
+            "[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
+            draw_count,
+            ctx.scene.transparent_material_class_ranges
+        );
+        if draw_count == 0 {
+            return Ok(());
+        }
 
         // Sync transparent templates from GpuScene (merge into existing registry,
         // keeping the transparent base at class 0).
@@ -295,8 +313,12 @@ impl RenderPass for TransparentPass {
         // Rebuild bind group 1 (lights + cluster data) when buffer pointers change
         let cluster = ctx.resources.cluster_light_grid.get();
         let lights_ptr = ctx.scene.lights as *const _ as usize;
-        let tile_lists_ptr = cluster.map(|c| c.tile_light_lists as *const _ as usize).unwrap_or(0);
-        let tile_counts_ptr = cluster.map(|c| c.tile_light_counts as *const _ as usize).unwrap_or(0);
+        let tile_lists_ptr = cluster
+            .map(|c| c.tile_light_lists as *const _ as usize)
+            .unwrap_or(0);
+        let tile_counts_ptr = cluster
+            .map(|c| c.tile_light_counts as *const _ as usize)
+            .unwrap_or(0);
         let bg1_key = (lights_ptr, tile_lists_ptr, tile_counts_ptr);
         if self.bind_group_1_key != Some(bg1_key) {
             let fallback = ctx.scene.instances;
@@ -306,9 +328,18 @@ impl RenderPass for TransparentPass {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: tile_lists.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: tile_counts.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: tile_lists.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: tile_counts.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_1_key = Some(bg1_key);
@@ -323,23 +354,46 @@ impl RenderPass for TransparentPass {
 
         let ranges = ctx.scene.transparent_material_class_ranges;
         if ranges.is_empty() {
-            let pipeline = self.get_or_create_pipeline(&ctx.device, RadiantShaderKey { template_id: 0, graph_hash: 0, feature_flags: 0 }, "");
+            let pipeline = self.get_or_create_pipeline(
+                &ctx.device,
+                RadiantShaderKey {
+                    template_id: 0,
+                    graph_hash: 0,
+                    feature_flags: 0,
+                },
+                "",
+            );
             rp.set_pipeline(pipeline);
             #[cfg(not(target_arch = "wasm32"))]
             rp.multi_draw_indexed_indirect(indirect, 0, draw_count);
             #[cfg(target_arch = "wasm32")]
-            for i in 0..draw_count { rp.draw_indexed_indirect(indirect, i as u64 * 20); }
+            for i in 0..draw_count {
+                rp.draw_indexed_indirect(indirect, i as u64 * 20);
+            }
         } else {
             for &(class, graph_hash, start, count) in ranges {
-                if count == 0 { continue; }
-                let key = RadiantShaderKey { template_id: class, graph_hash, feature_flags: 0 };
-                let graph_wgsl = ctx.scene.graph_wgsl_snippets.get(&graph_hash).map(|s| s.as_str()).unwrap_or("");
+                if count == 0 {
+                    continue;
+                }
+                let key = RadiantShaderKey {
+                    template_id: class,
+                    graph_hash,
+                    feature_flags: 0,
+                };
+                let graph_wgsl = ctx
+                    .scene
+                    .graph_wgsl_snippets
+                    .get(&graph_hash)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
                 rp.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
                 #[cfg(target_arch = "wasm32")]
-                for i in start..start + count { rp.draw_indexed_indirect(indirect, i as u64 * 20); }
+                for i in start..start + count {
+                    rp.draw_indexed_indirect(indirect, i as u64 * 20);
+                }
             }
         }
         Ok(())
@@ -364,12 +418,18 @@ impl TransparentPass {
                 None
             };
             let guard = shared_arc.as_ref().map(|a| a.read().unwrap());
-            let template = guard.as_ref().and_then(|g| g.get(key.template_id)).unwrap_or_else(|| {
-                if key.template_id >= 5 {
-                    log::debug!("[Transparent] template class {} not found, falling back to class 0", key.template_id);
-                }
-                &self.local_class0
-            });
+            let template = guard
+                .as_ref()
+                .and_then(|g| g.get(key.template_id))
+                .unwrap_or_else(|| {
+                    if key.template_id >= 5 {
+                        log::debug!(
+                            "[Transparent] template class {} not found, falling back to class 0",
+                            key.template_id
+                        );
+                    }
+                    &self.local_class0
+                });
             let module = self.shader_cache.get_or_compile(
                 device,
                 key,
@@ -397,12 +457,36 @@ impl TransparentPass {
                         array_stride: 40,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 12, shader_location: 1 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 32, shader_location: 3 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 36, shader_location: 4 },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 24,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 32,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 36,
+                                shader_location: 4,
+                            },
                         ],
                     })],
                 },

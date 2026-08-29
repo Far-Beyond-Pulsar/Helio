@@ -223,4 +223,3 @@ impl ShadowConfig {
         splits
     }
 }
-

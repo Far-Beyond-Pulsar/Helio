@@ -3,8 +3,8 @@ pub mod simulation;
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use wgpu::util::DeviceExt;
 use std::f32::consts::PI;
+use wgpu::util::DeviceExt;
 
 /// Simple fullscreen blit: copies a texture to the render target as-is.
 const BLIT_WGSL: &str = "
@@ -43,11 +43,41 @@ struct ClipmapRingDef {
 }
 
 const CLIPMAP_RINGS: [ClipmapRingDef; 5] = [
-    ClipmapRingDef { inner_radius: 0.0,  outer_radius: 3.0,   inner_divs: 1,  outer_divs: 12, level_divs: 4 },
-    ClipmapRingDef { inner_radius: 3.0,  outer_radius: 10.0,  inner_divs: 12, outer_divs: 16, level_divs: 4 },
-    ClipmapRingDef { inner_radius: 10.0, outer_radius: 30.0,  inner_divs: 16, outer_divs: 24, level_divs: 3 },
-    ClipmapRingDef { inner_radius: 30.0, outer_radius: 90.0,  inner_divs: 24, outer_divs: 32, level_divs: 3 },
-    ClipmapRingDef { inner_radius: 90.0, outer_radius: 250.0, inner_divs: 32, outer_divs: 48, level_divs: 2 },
+    ClipmapRingDef {
+        inner_radius: 0.0,
+        outer_radius: 3.0,
+        inner_divs: 1,
+        outer_divs: 12,
+        level_divs: 4,
+    },
+    ClipmapRingDef {
+        inner_radius: 3.0,
+        outer_radius: 10.0,
+        inner_divs: 12,
+        outer_divs: 16,
+        level_divs: 4,
+    },
+    ClipmapRingDef {
+        inner_radius: 10.0,
+        outer_radius: 30.0,
+        inner_divs: 16,
+        outer_divs: 24,
+        level_divs: 3,
+    },
+    ClipmapRingDef {
+        inner_radius: 30.0,
+        outer_radius: 90.0,
+        inner_divs: 24,
+        outer_divs: 32,
+        level_divs: 3,
+    },
+    ClipmapRingDef {
+        inner_radius: 90.0,
+        outer_radius: 250.0,
+        inner_divs: 32,
+        outer_divs: 48,
+        level_divs: 2,
+    },
 ];
 
 // ---- Mesh helpers ----------------------------------------------------------------
@@ -58,32 +88,31 @@ fn make_static_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u
     const FACE_DETAIL: u32 = 4;
     let fn1 = FACE_DETAIL + 1;
     let side_vert_count = (fn1 * fn1) as usize;
-    let side_idx_count  = (FACE_DETAIL * FACE_DETAIL * 6) as usize;
+    let side_idx_count = (FACE_DETAIL * FACE_DETAIL * 6) as usize;
     let total_verts = 4 * side_vert_count;
     let total_indices = 4 * side_idx_count;
 
     let mut verts: Vec<[f32; 4]> = Vec::with_capacity(total_verts);
     let mut indices: Vec<u32> = Vec::with_capacity(total_indices);
 
-    let mut add_face = |verts: &mut Vec<[f32; 4]>,
-                        indices: &mut Vec<u32>,
-                        make_vert: fn(u32, u32) -> [f32; 4]| {
-        let voffset = verts.len() as u32;
-        for j in 0..fn1 {
-            for i in 0..fn1 {
-                verts.push(make_vert(i, j));
+    let mut add_face =
+        |verts: &mut Vec<[f32; 4]>, indices: &mut Vec<u32>, make_vert: fn(u32, u32) -> [f32; 4]| {
+            let voffset = verts.len() as u32;
+            for j in 0..fn1 {
+                for i in 0..fn1 {
+                    verts.push(make_vert(i, j));
+                }
             }
-        }
-        for j in 0..FACE_DETAIL {
-            for i in 0..FACE_DETAIL {
-                let tl = voffset + j * fn1 + i;
-                let tr = voffset + j * fn1 + (i + 1);
-                let bl = voffset + (j + 1) * fn1 + i;
-                let br = voffset + (j + 1) * fn1 + (i + 1);
-                indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+            for j in 0..FACE_DETAIL {
+                for i in 0..FACE_DETAIL {
+                    let tl = voffset + j * fn1 + i;
+                    let tr = voffset + j * fn1 + (i + 1);
+                    let bl = voffset + (j + 1) * fn1 + i;
+                    let br = voffset + (j + 1) * fn1 + (i + 1);
+                    indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+                }
             }
-        }
-    };
+        };
 
     // Front face (z = -1)
     add_face(&mut verts, &mut indices, |i, j| {
@@ -599,8 +628,6 @@ impl RenderPass for WaterSimPass {
             self.drop_staged = true;
         }
 
-
-
         Ok(())
     }
 
@@ -749,132 +776,134 @@ impl RenderPass for WaterSimPass {
 
         // ---- 3 & 4. Cascade wave propagation + normal recomputation --------
         if ctx.resources.water_volume_count > 0 || ctx.resources.water_hitbox_count > 0 {
-        for vol_idx in 0..volume_count {
-            let base = (vol_idx * CASCADE_COUNT as u32) as usize;
-        for ci in 0..CASCADE_COUNT {
-            let layer = base + ci;
+            for vol_idx in 0..volume_count {
+                let base = (vol_idx * CASCADE_COUNT as u32) as usize;
+                for ci in 0..CASCADE_COUNT {
+                    let layer = base + ci;
 
-        // ---- 3. Wave propagation (2 steps per layer) ----------------------
-        for i in 0..2u32 {
-            let src = layer_view(layer, self.front_per_layer[layer]);
-            let dst = if self.front_per_layer[layer] {
-                &self.sim_layer_views_b[layer]
-            } else {
-                &self.sim_layer_views_a[layer]
-            };
+                    // ---- 3. Wave propagation (2 steps per layer) ----------------------
+                    for i in 0..2u32 {
+                        let src = layer_view(layer, self.front_per_layer[layer]);
+                        let dst = if self.front_per_layer[layer] {
+                            &self.sim_layer_views_b[layer]
+                        } else {
+                            &self.sim_layer_views_a[layer]
+                        };
 
-            let src_key = src as *const wgpu::TextureView as usize;
-            let bg_label = format!("WaterSim Update BG V{} C{}", vol_idx, ci);
-            if self.update_bg_keys[layer] != Some(src_key) {
-                self.update_bgs[layer] = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&bg_label),
-                    layout: &self.sim_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(src),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.update_bufs[ci].as_entire_binding(),
-                        },
-                    ],
-                }));
-                self.update_bg_keys[layer] = Some(src_key);
+                        let src_key = src as *const wgpu::TextureView as usize;
+                        let bg_label = format!("WaterSim Update BG V{} C{}", vol_idx, ci);
+                        if self.update_bg_keys[layer] != Some(src_key) {
+                            self.update_bgs[layer] =
+                                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: Some(&bg_label),
+                                    layout: &self.sim_bgl,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(src),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 2,
+                                            resource: self.update_bufs[ci].as_entire_binding(),
+                                        },
+                                    ],
+                                }));
+                            self.update_bg_keys[layer] = Some(src_key);
+                        }
+                        let bg = self.update_bgs[layer].as_ref().unwrap();
+
+                        let label_str = format!("WaterSim Update {} V{} C{}", i + 1, vol_idx, ci);
+                        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                            view: dst,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })];
+                        let desc = wgpu::RenderPassDescriptor {
+                            label: Some(&label_str),
+                            color_attachments: &color_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        };
+                        let mut pass = ctx.begin_render_pass(&desc);
+                        pass.set_pipeline(&self.update_pipeline);
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw(0..6, 0..1);
+                        drop(pass);
+                        self.front_per_layer[layer] = !self.front_per_layer[layer];
+                    }
+
+                    // ---- 4. Normal recomputation (per layer) --------------------------
+                    {
+                        let src = layer_view(layer, self.front_per_layer[layer]);
+                        let dst = if self.front_per_layer[layer] {
+                            &self.sim_layer_views_b[layer]
+                        } else {
+                            &self.sim_layer_views_a[layer]
+                        };
+
+                        let src_key = src as *const wgpu::TextureView as usize;
+                        let nrm_label = format!("WaterSim Normal BG V{} C{}", vol_idx, ci);
+                        if self.normal_bg_keys[layer] != Some(src_key) {
+                            self.normal_bgs[layer] =
+                                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: Some(&nrm_label),
+                                    layout: &self.sim_bgl,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(src),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 2,
+                                            resource: self.normal_bufs[ci].as_entire_binding(),
+                                        },
+                                    ],
+                                }));
+                            self.normal_bg_keys[layer] = Some(src_key);
+                        }
+                        let bg = self.normal_bgs[layer].as_ref().unwrap();
+
+                        let nrm_pass_label = format!("WaterSim Normal V{} C{}", vol_idx, ci);
+                        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                            view: dst,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })];
+                        let desc = wgpu::RenderPassDescriptor {
+                            label: Some(&nrm_pass_label),
+                            color_attachments: &color_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        };
+                        let mut pass = ctx.begin_render_pass(&desc);
+                        pass.set_pipeline(&self.normal_pipeline);
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw(0..6, 0..1);
+                        drop(pass);
+                        self.front_per_layer[layer] = !self.front_per_layer[layer];
+                    }
+                }
             }
-            let bg = self.update_bgs[layer].as_ref().unwrap();
-
-            let label_str = format!("WaterSim Update {} V{} C{}", i + 1, vol_idx, ci);
-            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: dst,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let desc = wgpu::RenderPassDescriptor {
-                label: Some(&label_str),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            };
-            let mut pass = ctx.begin_render_pass(&desc);
-            pass.set_pipeline(&self.update_pipeline);
-            pass.set_bind_group(0, bg, &[]);
-            pass.draw(0..6, 0..1);
-            drop(pass);
-            self.front_per_layer[layer] = !self.front_per_layer[layer];
-        }
-
-        // ---- 4. Normal recomputation (per layer) --------------------------
-        {
-            let src = layer_view(layer, self.front_per_layer[layer]);
-            let dst = if self.front_per_layer[layer] {
-                &self.sim_layer_views_b[layer]
-            } else {
-                &self.sim_layer_views_a[layer]
-            };
-
-            let src_key = src as *const wgpu::TextureView as usize;
-            let nrm_label = format!("WaterSim Normal BG V{} C{}", vol_idx, ci);
-            if self.normal_bg_keys[layer] != Some(src_key) {
-                self.normal_bgs[layer] = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&nrm_label),
-                    layout: &self.sim_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(src),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.normal_bufs[ci].as_entire_binding(),
-                        },
-                    ],
-                }));
-                self.normal_bg_keys[layer] = Some(src_key);
-            }
-            let bg = self.normal_bgs[layer].as_ref().unwrap();
-
-            let nrm_pass_label = format!("WaterSim Normal V{} C{}", vol_idx, ci);
-            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: dst,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let desc = wgpu::RenderPassDescriptor {
-                label: Some(&nrm_pass_label),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            };
-            let mut pass = ctx.begin_render_pass(&desc);
-            pass.set_pipeline(&self.normal_pipeline);
-            pass.set_bind_group(0, bg, &[]);
-            pass.draw(0..6, 0..1);
-            drop(pass);
-            self.front_per_layer[layer] = !self.front_per_layer[layer];
-        }
-        }
-        }
         }
 
         // ---- Consolidate: copy any layers still on tex_b to tex_a --------
@@ -886,13 +915,21 @@ impl RenderPass for WaterSimPass {
                     wgpu::TexelCopyTextureInfo {
                         texture: &self.sim_tex_b,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::TexelCopyTextureInfo {
                         texture: &self.sim_tex_a,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     wgpu::Extent3d {
@@ -924,7 +961,9 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(&self.sim_array_view_a),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.sim_array_view_a,
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
@@ -1065,7 +1104,9 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: wgpu::BindingResource::TextureView(&self.sim_array_view_a),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.sim_array_view_a,
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
@@ -1150,12 +1191,23 @@ impl RenderPass for WaterSimPass {
                     // Top face: instance_count = water_volume_count
                     pass.set_vertex_buffer(0, self.top_vbuf.slice(..));
                     pass.set_index_buffer(self.top_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.top_index_count, 0, 0..ctx.resources.water_volume_count);
+                    pass.draw_indexed(
+                        0..self.top_index_count,
+                        0,
+                        0..ctx.resources.water_volume_count,
+                    );
 
                     // Static box sides/bottom
                     pass.set_vertex_buffer(0, self.static_box_vbuf.slice(..));
-                    pass.set_index_buffer(self.static_box_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.static_box_index_count, 0, 0..ctx.resources.water_volume_count);
+                    pass.set_index_buffer(
+                        self.static_box_ibuf.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..self.static_box_index_count,
+                        0,
+                        0..ctx.resources.water_volume_count,
+                    );
                 }
 
                 // 3. Underwater effect
@@ -1205,7 +1257,9 @@ impl RenderPass for WaterSimPass {
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 6,
-                                        resource: wgpu::BindingResource::TextureView(&self.sim_array_view_a),
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.sim_array_view_a,
+                                        ),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 7,
@@ -1216,17 +1270,14 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 8,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.resources
-                                                .water_caustics
-                                                .read("WaterSim")
-                                                .unwrap(),
+                                            ctx.resources.water_caustics.read("WaterSim").unwrap(),
                                         ),
                                     },
                                 ],
                             }));
                         self.underwater_tint_bg_key = Some(new_tint_key);
                     }
-                        let tint_bg = self.underwater_tint_bg.as_ref().unwrap();
+                    let tint_bg = self.underwater_tint_bg.as_ref().unwrap();
                     let tint_attachments = [Some(wgpu::RenderPassColorAttachment {
                         view: &self.tint_scratch_view,
                         resolve_target: None,

@@ -129,9 +129,7 @@ impl CoronaPass {
         });
         let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Corona Render Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/corona_render.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/corona_render.wgsl").into()),
         });
 
         // ── Buffers ──────────────────────────────────────────────────────────

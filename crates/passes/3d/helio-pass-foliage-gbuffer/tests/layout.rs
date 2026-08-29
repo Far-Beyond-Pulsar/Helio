@@ -30,7 +30,10 @@ fn foliage_globals_field_offsets_match_the_wgsl_mirror() {
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 48);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, scale_in_band), 52);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_fade_band), 56);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_strength), 60);
+    assert_eq!(
+        std::mem::offset_of!(FoliageGlobals, interaction_strength),
+        60
+    );
 }
 
 #[test]
@@ -49,7 +52,9 @@ fn draw_indirect_stride_matches_draw_indirect_args() {
     // `DrawIndirectArgs` is four u32: vertex_count, instance_count, first_vertex,
     // first_instance. The four LOD commands therefore sit at 0/16/32/48.
     assert_eq!(DRAW_INDIRECT_STRIDE, 16);
-    let offsets: Vec<u64> = (0..4).map(|lod| lod as u64 * DRAW_INDIRECT_STRIDE).collect();
+    let offsets: Vec<u64> = (0..4)
+        .map(|lod| lod as u64 * DRAW_INDIRECT_STRIDE)
+        .collect();
     assert_eq!(offsets, vec![0, 16, 32, 48]);
 }
 
@@ -150,7 +155,9 @@ fn visible_blade_halves_cover_the_default_ring_and_tile_occupancy() {
 #[test]
 fn region_offsets_are_contiguous_in_lod_order() {
     for stride in [1u32, 64, 4096, 262_144] {
-        let offsets: Vec<u32> = (0..4).map(|lod| visible_region_offset(lod, stride)).collect();
+        let offsets: Vec<u32> = (0..4)
+            .map(|lod| visible_region_offset(lod, stride))
+            .collect();
         assert_eq!(offsets, vec![0, stride, 2 * stride, 3 * stride]);
         // Strictly increasing, so no two LODs can read each other's region.
         assert!(offsets.windows(2).all(|w| w[1] > w[0]));

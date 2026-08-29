@@ -559,7 +559,10 @@ mod tests {
         ring.update([TILE * 1.5, 0.0], 0);
         // Window is now x in -1..=3.
         assert!(!ring.is_resident([-2, 0]), "the far column must have left");
-        assert!(ring.is_resident([3, 0]), "the near column must have entered");
+        assert!(
+            ring.is_resident([3, 0]),
+            "the near column must have entered"
+        );
         for z in -2..=2 {
             assert!(ring.is_resident([-1, z]));
             assert!(ring.is_resident([3, z]));
@@ -577,7 +580,11 @@ mod tests {
 
         // Somewhere with no window overlap at all.
         let update = ring.update([TILE * 10_000.0, TILE * 10_000.0], 0);
-        assert_eq!(update.released, ACROSS * ACROSS, "the old window is fully dropped");
+        assert_eq!(
+            update.released,
+            ACROSS * ACROSS,
+            "the old window is fully dropped"
+        );
         assert_eq!(
             update.placed, BUDGET,
             "a teleport must not place more than the per-frame budget"
@@ -610,7 +617,10 @@ mod tests {
         // Nothing from the original window survived.
         for x in -2..=2i32 {
             for z in -2..=2i32 {
-                assert!(!ring.is_resident([x, z]), "stale request placed tile {x},{z}");
+                assert!(
+                    !ring.is_resident([x, z]),
+                    "stale request placed tile {x},{z}"
+                );
             }
         }
     }
@@ -624,7 +634,10 @@ mod tests {
             let update = ring.update([0.0, 0.0], 0);
             evicted_total += update.evicted;
         }
-        assert!(evicted_total > 0, "an undersized ring must report thrashing");
+        assert!(
+            evicted_total > 0,
+            "an undersized ring must report thrashing"
+        );
         assert!(
             ring.resident_count() <= 8,
             "residency exceeded the ring capacity"

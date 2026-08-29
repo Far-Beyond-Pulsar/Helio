@@ -44,10 +44,12 @@ pub use data::BakedData;
 pub use inject::BakeInjectPass;
 
 // Re-export the Nebula scene types users need to build a BakeRequest.
-pub use nebula::prelude::{BakeContext, NullReporter, SceneGeometry};
-pub use nebula::core::scene::{BakeMesh, LightSource, LightSourceKind, MaterialDesc as BakeMaterialDesc};
 pub use nebula::ao::AoConfig;
+pub use nebula::core::scene::{
+    BakeMesh, LightSource, LightSourceKind, MaterialDesc as BakeMaterialDesc,
+};
 pub use nebula::light::LightmapConfig;
+pub use nebula::prelude::{BakeContext, NullReporter, SceneGeometry};
 pub use nebula::probe::ProbeConfig;
 pub use nebula::visibility::PvsConfig;
 

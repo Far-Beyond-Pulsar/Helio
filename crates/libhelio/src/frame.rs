@@ -279,7 +279,6 @@ pub struct FrameResources<'a> {
     pub water_hitbox_count: u32,
 
     // ── Foliage ──────────────────────────────────────────────────────────────
-
     /// Foliage type/layer tables plus the global wind uniform for this frame.
     ///
     /// Published by the high-level `Renderer`; read by every foliage pass. Left
@@ -341,7 +340,6 @@ pub struct FrameResources<'a> {
     pub depth_sampler_view: Tracked<&'a wgpu::TextureView>,
 
     // ── Pre-baked data (populated by BakeInjectPass when baking is enabled) ──
-
     /// Pre-baked ambient occlusion texture (R8Unorm, same format as SSAO output).
     ///
     /// When present, `SsaoPass` skips runtime computation and publishes this texture
@@ -415,7 +413,6 @@ pub struct FrameResources<'a> {
     pub planar_reflection_sampler: Tracked<&'a wgpu::Sampler>,
 
     // ── HLFS resources (populated by HLFS pass) ──
-
     /// Clip-stack read views for the shade pass (4 levels of 128³ RGBA16F).
     ///
     /// Populated by `HlfsPass::publish()` after the clip-stack buffer swap.
@@ -425,7 +422,6 @@ pub struct FrameResources<'a> {
     pub hlfs_globals: Option<&'a wgpu::Buffer>,
 
     // ── DOF resources (populated by PostProcessPass / DofPass) ──
-
     /// Pre-DOF HDR colour — output of the post-process uber-shader before
     /// depth-of-field is applied. Written by PostProcessPass when DofPass
     /// follows in the graph; read by DofPass.
@@ -459,7 +455,9 @@ impl<'a> BakedPvsRef<'a> {
     #[inline]
     pub fn is_visible(&self, from_cell: usize, to_cell: usize) -> bool {
         let idx = from_cell * self.words_per_cell as usize + to_cell / 64;
-        if idx >= self.bits.len() { return true; } // conservative default
+        if idx >= self.bits.len() {
+            return true;
+        } // conservative default
         (self.bits[idx] >> (to_cell % 64)) & 1 == 1
     }
 
@@ -470,9 +468,7 @@ impl<'a> BakedPvsRef<'a> {
         let dx = ((p[0] - self.world_min[0]) / self.cell_size) as i32;
         let dy = ((p[1] - self.world_min[1]) / self.cell_size) as i32;
         let dz = ((p[2] - self.world_min[2]) / self.cell_size) as i32;
-        if dx < 0 || dy < 0 || dz < 0
-            || dx >= gx as i32 || dy >= gy as i32 || dz >= gz as i32
-        {
+        if dx < 0 || dy < 0 || dz < 0 || dx >= gx as i32 || dy >= gy as i32 || dz >= gz as i32 {
             return None;
         }
         Some(dx as usize + dy as usize * gx as usize + dz as usize * gx as usize * gy as usize)
@@ -753,4 +749,3 @@ pub struct FoliageTerrainViews<'a> {
     /// which terrain representation produced it.
     pub normal_material: &'a wgpu::TextureView,
 }
-

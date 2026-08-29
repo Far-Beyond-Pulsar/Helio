@@ -20,16 +20,24 @@ const SMAA_CORNER_ROUNDING: u32 = 25;
 // ── Helpers mirroring internal texture properties ────────────────────────────
 
 /// Returns number of channels for the edge texture format (Rg16Float → 2).
-fn edge_texture_channel_count() -> usize { 2 }
+fn edge_texture_channel_count() -> usize {
+    2
+}
 
 /// Returns bytes per texel for Rg16Float (2 channels × 2 bytes per f16).
-fn edge_texel_bytes() -> usize { 4 }
+fn edge_texel_bytes() -> usize {
+    4
+}
 
 /// Returns number of channels for the blend texture format (Rgba8Unorm → 4).
-fn blend_texture_channel_count() -> usize { 4 }
+fn blend_texture_channel_count() -> usize {
+    4
+}
 
 /// Returns bytes per texel for Rgba8Unorm (4 channels × 1 byte).
-fn blend_texel_bytes() -> usize { 4 }
+fn blend_texel_bytes() -> usize {
+    4
+}
 
 // ── 3-pass structure tests ────────────────────────────────────────────────────
 

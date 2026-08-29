@@ -6,8 +6,8 @@
 //!   and handle-based lookup through a generation-protected slot handle.
 //! - [`SparsePool`] for sparse slot-based storage with stable handles and free-list reuse.
 
-use std::marker::PhantomData;
 use crate::handles::Handle;
+use std::marker::PhantomData;
 
 #[derive(Clone, Copy, Debug)]
 struct DenseSlotMeta {
@@ -238,11 +238,14 @@ impl<T, H: Handle> DenseArena<T, H> {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (H, &mut T)> + '_ {
         let dense_to_slot = self.dense_to_slot.as_ptr();
         let slots = self.slots.as_ptr();
-        self.dense.iter_mut().enumerate().map(move |(dense_idx, value)| {
-            let slot_idx = unsafe { *dense_to_slot.add(dense_idx) as usize };
-            let gen = unsafe { (*slots.add(slot_idx)).generation };
-            (H::from_parts(slot_idx as u32, gen), value)
-        })
+        self.dense
+            .iter_mut()
+            .enumerate()
+            .map(move |(dense_idx, value)| {
+                let slot_idx = unsafe { *dense_to_slot.add(dense_idx) as usize };
+                let gen = unsafe { (*slots.add(slot_idx)).generation };
+                (H::from_parts(slot_idx as u32, gen), value)
+            })
     }
 }
 
@@ -350,4 +353,3 @@ impl<T, H: Handle> SparsePool<T, H> {
         !self.free_list.is_empty()
     }
 }
-

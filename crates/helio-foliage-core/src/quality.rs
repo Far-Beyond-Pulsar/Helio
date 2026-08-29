@@ -199,8 +199,14 @@ mod tests {
     fn cluster_granularity_is_a_power_of_two_of_at_least_sixteen() {
         for quality in ALL {
             let granularity = quality.cluster_granularity();
-            assert!(granularity.is_power_of_two(), "{quality:?} granularity is not a power of two");
-            assert!(granularity >= 16, "{quality:?} granularity is finer than a 4x4 cluster");
+            assert!(
+                granularity.is_power_of_two(),
+                "{quality:?} granularity is not a power of two"
+            );
+            assert!(
+                granularity >= 16,
+                "{quality:?} granularity is finer than a 4x4 cluster"
+            );
         }
     }
 
@@ -214,7 +220,10 @@ mod tests {
 
     #[test]
     fn blade_capacity_follows_the_sixteen_byte_record() {
-        assert_eq!(FoliageQuality::Medium.blade_capacity(), 24 * 1024 * 1024 / 16);
+        assert_eq!(
+            FoliageQuality::Medium.blade_capacity(),
+            24 * 1024 * 1024 / 16
+        );
         assert_eq!(FoliageQuality::Medium.blade_capacity(), 1_572_864);
         assert!(
             FoliageQuality::Medium.blade_capacity() >= 1_000_000,

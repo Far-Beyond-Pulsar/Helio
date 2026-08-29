@@ -155,12 +155,7 @@ impl VoxelMeshPass {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        Self::new_with_attachment_mode(
-            device,
-            queue,
-            surface_format,
-            AttachmentMode::Standalone,
-        )
+        Self::new_with_attachment_mode(device, queue, surface_format, AttachmentMode::Standalone)
     }
 
     /// Creates a pass that loads existing color and depth for composition.
@@ -169,12 +164,7 @@ impl VoxelMeshPass {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        Self::new_with_attachment_mode(
-            device,
-            queue,
-            surface_format,
-            AttachmentMode::Composited,
-        )
+        Self::new_with_attachment_mode(device, queue, surface_format, AttachmentMode::Composited)
     }
 
     fn new_with_attachment_mode(
@@ -380,15 +370,42 @@ impl VoxelMeshPass {
             label: Some("VoxelMesh Extract BG"),
             layout: &extract_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: brick_meta_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: voxel_data_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: vertex_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: index_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: descriptor_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: indirect_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: dirty_brick_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: normal_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: packed_tri_table_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: brick_meta_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: voxel_data_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: vertex_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: index_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: descriptor_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: indirect_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: dirty_brick_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: normal_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: packed_tri_table_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -587,11 +604,7 @@ impl VoxelMeshPass {
 
     /// Zero out the indirect draw for a brick slot so it stops being rendered.
     /// Call this when a brick is deallocated.
-    pub fn clear_brick_slot(
-        &mut self,
-        queue: &wgpu::Queue,
-        brick_slot: u32,
-    ) {
+    pub fn clear_brick_slot(&mut self, queue: &wgpu::Queue, brick_slot: u32) {
         if !self.active_bricks.set(brick_slot, false) {
             log::warn!(
                 "VoxelMeshPass: cannot clear brick slot {brick_slot}; capacity is {}",
@@ -679,24 +692,25 @@ impl RenderPass for VoxelMeshPass {
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let lights_ptr = ctx.scene.lights as *const _ as usize;
         if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
-            self.render_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("VoxelMesh Render BG"),
-                layout: &self.render_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: ctx.scene.lights.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.meshlet_params_buf.as_entire_binding(),
-                    },
-                ],
-            }));
+            self.render_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VoxelMesh Render BG"),
+                    layout: &self.render_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: ctx.scene.lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.meshlet_params_buf.as_entire_binding(),
+                        },
+                    ],
+                }));
             self.render_bind_group_key = Some((camera_ptr, lights_ptr));
         }
 

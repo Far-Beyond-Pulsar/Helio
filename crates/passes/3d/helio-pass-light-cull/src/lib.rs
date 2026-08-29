@@ -70,9 +70,7 @@ impl LightCullPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("LightCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/light_cull.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/light_cull.wgsl").into()),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -239,8 +237,12 @@ impl RenderPass for LightCullPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.tile_light_lists.write(&self.tile_light_lists, "LightCull");
-        frame.tile_light_counts.write(&self.tile_light_counts, "LightCull");
+        frame
+            .tile_light_lists
+            .write(&self.tile_light_lists, "LightCull");
+        frame
+            .tile_light_counts
+            .write(&self.tile_light_counts, "LightCull");
         frame.cluster_light_grid.write(
             libhelio::ClusterLightGrid {
                 tile_light_lists: &self.tile_light_lists,
@@ -350,8 +352,8 @@ impl RenderPass for LightCullPass {
         // Each workgroup has 256 threads, each thread handles one tile.
         let workgroups = total_tiles.div_ceil(256);
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("LightCull"),
                 timestamp_writes: None,
             });

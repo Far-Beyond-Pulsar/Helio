@@ -91,8 +91,13 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
         }
 
         // 3. Common sub-folder names used by DCC tools and asset packs.
-        for subfolder in &["textures", "Textures", "tex", "Tex", "maps", "Maps", "material", "Material"] {
-            push_unique_path(&mut base_candidates, base_dir.join(subfolder).join(file_name));
+        for subfolder in &[
+            "textures", "Textures", "tex", "Tex", "maps", "Maps", "material", "Material",
+        ] {
+            push_unique_path(
+                &mut base_candidates,
+                base_dir.join(subfolder).join(file_name),
+            );
         }
 
         // 4. Flat next to the FBX.
@@ -102,10 +107,15 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
         //    Handles cases where the texture lives beside the FBX in a parent dir.
         let mut ancestor = base_dir.to_path_buf();
         for _ in 0..3 {
-            if !ancestor.pop() { break; }
+            if !ancestor.pop() {
+                break;
+            }
             push_unique_path(&mut base_candidates, ancestor.join(file_name));
             for subfolder in &["textures", "Textures", "tex", "maps"] {
-                push_unique_path(&mut base_candidates, ancestor.join(subfolder).join(file_name));
+                push_unique_path(
+                    &mut base_candidates,
+                    ancestor.join(subfolder).join(file_name),
+                );
             }
         }
 
@@ -119,12 +129,24 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
                 if let Ok(entries) = fs::read_dir(search_dir) {
                     for entry in entries.flatten() {
                         let entry_path = entry.path();
-                        if !entry_path.is_file() { continue; }
-                        let Some(entry_stem) = entry_path.file_stem().and_then(|s| s.to_str()) else { continue };
-                        if entry_stem.to_ascii_lowercase() != stem_lower { continue; }
-                        let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) else { continue };
+                        if !entry_path.is_file() {
+                            continue;
+                        }
+                        let Some(entry_stem) = entry_path.file_stem().and_then(|s| s.to_str())
+                        else {
+                            continue;
+                        };
+                        if entry_stem.to_ascii_lowercase() != stem_lower {
+                            continue;
+                        }
+                        let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) else {
+                            continue;
+                        };
                         let ext_l = ext.to_ascii_lowercase();
-                        if matches!(ext_l.as_str(), "png" | "jpg" | "jpeg" | "tga" | "bmp" | "webp" | "tiff" | "tif") {
+                        if matches!(
+                            ext_l.as_str(),
+                            "png" | "jpg" | "jpeg" | "tga" | "bmp" | "webp" | "tiff" | "tif"
+                        ) {
                             push_unique_path(&mut base_candidates, entry_path);
                         }
                     }
@@ -408,4 +430,3 @@ mod tests {
         assert_eq!(resolved, expected);
     }
 }
-

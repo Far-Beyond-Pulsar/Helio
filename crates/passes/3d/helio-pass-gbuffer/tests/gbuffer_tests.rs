@@ -197,4 +197,3 @@ fn padding_fields_zeroed_by_default() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
     assert_eq!(g._pad0, 0);
 }
-

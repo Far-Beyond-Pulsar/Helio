@@ -29,7 +29,11 @@ fn main() {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("png") {
                     let rel = path.strip_prefix(sprites_dir).unwrap();
                     let name = rel.with_extension("").to_string_lossy().replace('\\', "/");
-                    let abs = path.canonicalize().unwrap().to_string_lossy().replace('\\', "/");
+                    let abs = path
+                        .canonicalize()
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
                     entries.push((name, abs));
                 }
             }

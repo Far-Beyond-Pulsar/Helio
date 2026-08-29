@@ -79,7 +79,6 @@ pub struct PostProcessPass {
     bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
     bloom_down_bgs: Vec<wgpu::BindGroup>,
 
-
     bloom_textures: Vec<wgpu::Texture>,
     bloom_sampled_views: Vec<wgpu::TextureView>,
     bloom_storage_views: Vec<wgpu::TextureView>,
@@ -92,7 +91,6 @@ pub struct PostProcessPass {
     format: wgpu::TextureFormat,
 
     first_frame: bool,
-
 
     // ── Bloom gating ───────────────────────────────────────────────────────
     bloom_active: bool,
@@ -148,19 +146,25 @@ impl PostProcessPass {
         format: wgpu::TextureFormat,
         user_effects_fn: Option<&str>,
     ) -> Self {
-        let initial_entries = user_effects_fn.map(|body| {
-            vec![UserEffectEntry {
-                // Legacy API: inject at FINAL position to match old pass-through
-                // behavior where user_effects was the only thing running.
-                position: UserEffectPosition::Final,
-                body: body.to_string(),
-            }]
-        }).unwrap_or_default();
+        let initial_entries = user_effects_fn
+            .map(|body| {
+                vec![UserEffectEntry {
+                    // Legacy API: inject at FINAL position to match old pass-through
+                    // behavior where user_effects was the only thing running.
+                    position: UserEffectPosition::Final,
+                    body: body.to_string(),
+                }]
+            })
+            .unwrap_or_default();
 
         let initial_src = Self::build_shader_source(&initial_entries);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&initial_src).into_owned().into()),
+            source: wgpu::ShaderSource::Wgsl(
+                helio_core::shader::resolve(&initial_src)
+                    .into_owned()
+                    .into(),
+            ),
         });
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -390,7 +394,11 @@ impl PostProcessPass {
         };
 
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
-        let bloom_extract_pipeline = mk_compute("PostProcess Bloom Extract", "cs_bloom_down_extract", &bloom_pl);
+        let bloom_extract_pipeline = mk_compute(
+            "PostProcess Bloom Extract",
+            "cs_bloom_down_extract",
+            &bloom_pl,
+        );
         let bloom_down_pipeline = mk_compute("PostProcess Bloom Down", "cs_bloom_down", &bloom_pl);
 
         let uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -437,7 +445,11 @@ impl PostProcessPass {
         };
         let noise_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess Noise"),
-            size: wgpu::Extent3d { width: noise_size, height: noise_size, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: noise_size,
+                height: noise_size,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -446,10 +458,23 @@ impl PostProcessPass {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &noise_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &noise_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             &noise_data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(noise_size), rows_per_image: Some(noise_size) },
-            wgpu::Extent3d { width: noise_size, height: noise_size, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(noise_size),
+                rows_per_image: Some(noise_size),
+            },
+            wgpu::Extent3d {
+                width: noise_size,
+                height: noise_size,
+                depth_or_array_layers: 1,
+            },
         );
         let noise_view = noise_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -468,7 +493,11 @@ impl PostProcessPass {
         // Rgba16Float texels are halfs: 0.0 = 0x0000, 1.0 = 0x3C00, little-endian.
         let fallback_fog_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess Fog Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
@@ -477,10 +506,23 @@ impl PostProcessPass {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &fallback_fog_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_fog_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let fallback_fog_view = fallback_fog_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D3),
@@ -490,7 +532,11 @@ impl PostProcessPass {
         // 1x1 zero-velocity fallback for when the graph has no GBuffer pass.
         let fallback_velocity_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess Velocity Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -499,17 +545,35 @@ impl PostProcessPass {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &fallback_velocity_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_velocity_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             &[0u8; 4],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
-        let fallback_velocity_view = fallback_velocity_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_velocity_view =
+            fallback_velocity_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // 1x1x1 identity LUT fallback (maps (0,0,0)→black, (1,1,1)→white)
         let fallback_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess LUT Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
@@ -521,10 +585,26 @@ impl PostProcessPass {
         // the identity where coord (r,g,b) returns (r,g,b). 1x1x1 can't hold
         // a true identity but it won't be sampled when lut_platform == 0.
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &fallback_lut_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_lut_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[
+                0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00,
+                0x80, 0x3C,
+            ],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(16),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let fallback_lut_view = fallback_lut_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D3),
@@ -604,7 +684,9 @@ impl PostProcessPass {
 
         for e in entries {
             let pos = e.position as usize;
-            if pos >= 4 { continue; }
+            if pos >= 4 {
+                continue;
+            }
 
             let trimmed = e.body.trim();
 
@@ -653,7 +735,9 @@ impl PostProcessPass {
         }
         let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&source).into_owned().into()),
+            source: wgpu::ShaderSource::Wgsl(
+                helio_core::shader::resolve(&source).into_owned().into(),
+            ),
         });
         self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber"),
@@ -743,7 +827,11 @@ impl PostProcessPass {
         device: &wgpu::Device,
         width: u32,
         height: u32,
-    ) -> (Vec<wgpu::Texture>, Vec<wgpu::TextureView>, Vec<wgpu::TextureView>) {
+    ) -> (
+        Vec<wgpu::Texture>,
+        Vec<wgpu::TextureView>,
+        Vec<wgpu::TextureView>,
+    ) {
         let mut textures = Vec::with_capacity(BLOOM_MIPS as usize);
         let mut sampled_views = Vec::with_capacity(BLOOM_MIPS as usize);
         let mut storage_views = Vec::with_capacity(BLOOM_MIPS as usize);
@@ -753,7 +841,11 @@ impl PostProcessPass {
             let mh = (height >> (i + 1)).max(1);
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("Bloom Mip {}", i)),
-                size: wgpu::Extent3d { width: mw, height: mh, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: mw,
+                    height: mh,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -786,8 +878,16 @@ impl PostProcessPass {
                     label: Some(&format!("PostProcess Bloom Down BG mip{}", i)),
                     layout: bloom_compute_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_sampled_views[i - 1]) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bloom_storage_views[i]) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &bloom_sampled_views[i - 1],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&bloom_storage_views[i]),
+                        },
                     ],
                 })
             })
@@ -810,16 +910,46 @@ impl PostProcessPass {
             label: Some("PostProcess Compute Main BG"),
             layout: &self.compute_main_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: postprocess_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
-                wgpu::BindGroupEntry { binding: 11, resource: self.avg_luminance_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.noise_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.noise_sampler) },
-                wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: postprocess_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.point_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.avg_luminance_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&self.noise_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self.noise_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.custom_params_buf.as_entire_binding(),
+                },
             ],
         }));
 
@@ -830,31 +960,87 @@ impl PostProcessPass {
             label: Some("PostProcess Render Main BG"),
             layout: &self.render_main_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: postprocess_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(depth_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[0]) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[1]) },
-                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[2]) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[3]) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[4]) },
-                wgpu::BindGroupEntry { binding: 11, resource: self.avg_luminance_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.noise_view) },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.noise_sampler) },
-                wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(fog_view) },
-                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(velocity_view) },
-                wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(lut_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: postprocess_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.point_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[2]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[3]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[4]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: self.avg_luminance_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&self.noise_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self.noise_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.custom_params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: wgpu::BindingResource::TextureView(fog_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: wgpu::BindingResource::TextureView(velocity_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 19,
+                    resource: wgpu::BindingResource::TextureView(lut_view),
+                },
             ],
         }));
     }
 
-
     fn mip_dims(&self, mip: u32) -> (u32, u32) {
-        ((self.width >> (mip + 1)).max(1), (self.height >> (mip + 1)).max(1))
+        (
+            (self.width >> (mip + 1)).max(1),
+            (self.height >> (mip + 1)).max(1),
+        )
     }
 }
 
@@ -891,12 +1077,16 @@ impl RenderPass for PostProcessPass {
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.width = width;
         self.height = height;
-        let (textures, sampled_views, storage_views) = Self::create_bloom_mips(device, width, height);
+        let (textures, sampled_views, storage_views) =
+            Self::create_bloom_mips(device, width, height);
         self.bloom_textures = textures;
         self.bloom_sampled_views = sampled_views;
         self.bloom_storage_views = storage_views;
         self.bloom_down_bgs = Self::make_bloom_down_bgs(
-            device, &self.bloom_compute_bgl, &self.bloom_sampled_views, &self.bloom_storage_views,
+            device,
+            &self.bloom_compute_bgl,
+            &self.bloom_sampled_views,
+            &self.bloom_storage_views,
         );
         self.compute_main_bg = None;
         self.render_main_bg = None;
@@ -908,12 +1098,17 @@ impl RenderPass for PostProcessPass {
         if self.output_to_pre_dof {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("PostProcess Pre-DOF"),
-                size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -929,7 +1124,8 @@ impl RenderPass for PostProcessPass {
         if self.first_frame {
             self.first_frame = false;
             let initial: f32 = 0.18;
-            ctx.queue.write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
+            ctx.queue
+                .write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
         }
 
         // Deferred shader rebuild: if a snippet was queued, apply it now.
@@ -939,7 +1135,8 @@ impl RenderPass for PostProcessPass {
             if changed {
                 // Convert legacy single-snippet API into a single Final entry
                 // (matching old pass-through behavior).
-                self.user_effect_entries.retain(|e| e.position != UserEffectPosition::Final);
+                self.user_effect_entries
+                    .retain(|e| e.position != UserEffectPosition::Final);
                 self.user_effect_entries.push(UserEffectEntry {
                     position: UserEffectPosition::Final,
                     body: pending.clone(),
@@ -991,10 +1188,18 @@ impl RenderPass for PostProcessPass {
             lut_view.map_or(0, |v| v as *const _ as usize),
         );
         if self.main_bg_key != Some(bg_key) {
-            self.rebuild_bind_groups(ctx.device, postprocess_buf, pre_aa_view, ctx.depth, camera_buf, fog_view, velocity_view, lut_view);
+            self.rebuild_bind_groups(
+                ctx.device,
+                postprocess_buf,
+                pre_aa_view,
+                ctx.depth,
+                camera_buf,
+                fog_view,
+                velocity_view,
+                lut_view,
+            );
             self.main_bg_key = Some(bg_key);
         }
-
 
         // Bloom extract BG
         let hdr_ptr = pre_aa_view as *const _ as usize;
@@ -1003,8 +1208,14 @@ impl RenderPass for PostProcessPass {
                 label: Some("PostProcess Bloom Extract BG"),
                 layout: &self.bloom_compute_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[1]) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.bloom_storage_views[0]) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.bloom_storage_views[0]),
+                    },
                 ],
             });
             self.bloom_extract_bg = Some((hdr_ptr, bg));
@@ -1037,10 +1248,11 @@ impl RenderPass for PostProcessPass {
         if self.bloom_active {
             // 2a. Bloom extract: HDR → mip 0
             {
-                let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("PostProcess Bloom Extract"),
-                    timestamp_writes: None,
-                });
+                let mut cpass =
+                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("PostProcess Bloom Extract"),
+                        timestamp_writes: None,
+                    });
                 cpass.set_pipeline(&self.bloom_extract_pipeline);
                 cpass.set_bind_group(0, compute_bg, &[]);
                 cpass.set_bind_group(1, extract_bg, &[]);
@@ -1055,10 +1267,11 @@ impl RenderPass for PostProcessPass {
             // 2b. Bloom downsample
             for i in 0..(BLOOM_MIPS as usize - 1) {
                 let (mw, mh) = self.mip_dims(i as u32 + 1);
-                let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
-                    timestamp_writes: None,
-                });
+                let mut cpass =
+                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
+                        timestamp_writes: None,
+                    });
                 cpass.set_pipeline(&self.bloom_down_pipeline);
                 cpass.set_bind_group(0, compute_bg, &[]);
                 cpass.set_bind_group(1, &self.bloom_down_bgs[i], &[]);
@@ -1077,22 +1290,23 @@ impl RenderPass for PostProcessPass {
             ctx.target
         };
         {
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("PostProcess Uber"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("PostProcess Uber"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);

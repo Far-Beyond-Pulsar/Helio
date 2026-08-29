@@ -7,9 +7,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::Vec3;
-use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
-use helio_default_graphs::build_default_graph;
+use helio::{
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, Renderer, RendererConfig, Scene,
+};
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
+use helio_default_graphs::build_default_graph;
 use v3_demo_common::{point_light, update_point_light};
 use winit::{
     application::ApplicationHandler,
@@ -114,14 +117,12 @@ impl ApplicationHandler for App {
             apply_limit_buckets: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
         .expect("no device");
 
         let device = Arc::new(device);
@@ -160,15 +161,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
         renderer.set_ambient([0.06, 0.06, 0.09], 1.0);
@@ -193,21 +214,27 @@ impl ApplicationHandler for App {
                         .iter()
                         .map(|v| Vec3::from_array(v.position).length())
                         .fold(0.5, f32::max);
-                    let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                        vertices: mesh.vertices,
-                        indices: mesh.indices,
-                    })).as_mesh().unwrap();
+                    let mesh_id = renderer
+                        .scene_mut()
+                        .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                            vertices: mesh.vertices,
+                            indices: mesh.indices,
+                        }))
+                        .as_mesh()
+                        .unwrap();
                     let material = mesh
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer.scene_mut().insert_material(v3_demo_common::make_material(
-                                [0.7, 0.7, 0.75, 1.0],
-                                0.6,
-                                0.0,
-                                [0.0, 0.0, 0.0],
-                                0.0,
-                            ))
+                            renderer
+                                .scene_mut()
+                                .insert_material(v3_demo_common::make_material(
+                                    [0.7, 0.7, 0.75, 1.0],
+                                    0.6,
+                                    0.0,
+                                    [0.0, 0.0, 0.0],
+                                    0.0,
+                                ))
                         });
                     let _ = v3_demo_common::insert_object(
                         &mut renderer,
@@ -224,14 +251,20 @@ impl ApplicationHandler for App {
                     scene_path,
                     error
                 );
-                let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
-                let material = renderer.scene_mut().insert_material(v3_demo_common::make_material(
-                    [0.55, 0.68, 0.9, 1.0],
-                    0.35,
-                    0.15,
-                    [0.0, 0.0, 0.0],
-                    0.0,
-                ));
+                let mesh = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+                    .as_mesh()
+                    .unwrap();
+                let material = renderer
+                    .scene_mut()
+                    .insert_material(v3_demo_common::make_material(
+                        [0.55, 0.68, 0.9, 1.0],
+                        0.35,
+                        0.15,
+                        [0.0, 0.0, 0.0],
+                        0.0,
+                    ));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     mesh,
@@ -243,15 +276,14 @@ impl ApplicationHandler for App {
         }
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
-        let point_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
-            point_light(
-                point_light_pos.to_array(),
-                [1.0, 0.95, 0.8],
-                12.0,
-                18.0,
-            ),
-            Some(helio::Movability::Movable),
-        )).as_light().unwrap();
+        let point_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light_with_movability(
+                point_light(point_light_pos.to_array(), [1.0, 0.95, 0.8], 12.0, 18.0),
+                Some(helio::Movability::Movable),
+            ))
+            .as_light()
+            .unwrap();
 
         self.state = Some(AppState {
             window,
@@ -430,6 +462,3 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
-
-
-

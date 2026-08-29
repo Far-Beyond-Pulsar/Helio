@@ -104,7 +104,11 @@ impl LensFlarePass {
         let tex_data = Self::make_atlas(atlas_size, atlas_cells);
         let flare_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("LensFlare Atlas"),
-            size: wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -113,10 +117,23 @@ impl LensFlarePass {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &flare_tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &flare_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             &tex_data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(atlas_size * 4), rows_per_image: Some(atlas_size) },
-            wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas_size * 4),
+                rows_per_image: Some(atlas_size),
+            },
+            wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
         );
         let flare_view = flare_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let flare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -222,21 +239,29 @@ impl LensFlarePass {
 
     fn uniform_entry(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
-            binding, visibility: vis,
+            binding,
+            visibility: vis,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false, min_binding_size: None,
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
             count: None,
         }
     }
 
-    fn storage_entry(binding: u32, vis: wgpu::ShaderStages, ro: bool) -> wgpu::BindGroupLayoutEntry {
+    fn storage_entry(
+        binding: u32,
+        vis: wgpu::ShaderStages,
+        ro: bool,
+    ) -> wgpu::BindGroupLayoutEntry {
         wgpu::BindGroupLayoutEntry {
-            binding, visibility: vis,
+            binding,
+            visibility: vis,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: ro },
-                has_dynamic_offset: false, min_binding_size: None,
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
             count: None,
         }
@@ -247,10 +272,10 @@ impl LensFlarePass {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LensFlare Query BGL"),
             entries: &[
-                Self::storage_entry(0, SS::COMPUTE, true),   // lights
-                Self::storage_entry(1, SS::COMPUTE, false),  // flare_queries
-                Self::storage_entry(2, SS::COMPUTE, false),  // flare_count
-                Self::storage_entry(3, SS::COMPUTE, true),   // camera
+                Self::storage_entry(0, SS::COMPUTE, true),  // lights
+                Self::storage_entry(1, SS::COMPUTE, false), // flare_queries
+                Self::storage_entry(2, SS::COMPUTE, false), // flare_count
+                Self::storage_entry(3, SS::COMPUTE, true),  // camera
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: SS::COMPUTE,
@@ -261,7 +286,7 @@ impl LensFlarePass {
                     },
                     count: None,
                 },
-                Self::uniform_entry(5, SS::COMPUTE),          // flare_uniforms
+                Self::uniform_entry(5, SS::COMPUTE), // flare_uniforms
             ],
         })
     }
@@ -271,8 +296,8 @@ impl LensFlarePass {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LensFlare Render BGL"),
             entries: &[
-                Self::storage_entry(0, SS::FRAGMENT, true),   // flare_queries
-                Self::storage_entry(1, SS::FRAGMENT, true),   // flare_count
+                Self::storage_entry(0, SS::FRAGMENT, true), // flare_queries
+                Self::storage_entry(1, SS::FRAGMENT, true), // flare_count
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: SS::FRAGMENT,
@@ -289,7 +314,7 @@ impl LensFlarePass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                Self::uniform_entry(4, SS::FRAGMENT),          // flare_uniforms
+                Self::uniform_entry(4, SS::FRAGMENT), // flare_uniforms
             ],
         })
     }
@@ -308,12 +333,30 @@ impl LensFlarePass {
             label: Some("LensFlare Query BG"),
             layout: bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: lights.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: queries.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: count.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: camera.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: queries.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: count.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: camera.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: uniforms.as_entire_binding(),
+                },
             ],
         })
     }
@@ -331,11 +374,26 @@ impl LensFlarePass {
             label: Some("LensFlare Render BG"),
             layout: bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: queries.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: count.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(atlas_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(atlas_sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: queries.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: count.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(atlas_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniforms.as_entire_binding(),
+                },
             ],
         })
     }
@@ -354,10 +412,22 @@ impl LensFlarePass {
 
         // Per-cell tint colours (warm → cool variation)
         let tints: [[f32; 3]; 16] = [
-            [1.0, 0.95, 0.90], [0.95, 0.92, 1.0], [1.0, 0.85, 0.80], [0.85, 0.90, 1.0],
-            [1.0, 1.0, 0.95], [0.90, 0.85, 1.0], [1.0, 0.80, 0.85], [0.80, 0.95, 1.0],
-            [1.0, 0.90, 0.85], [0.85, 0.95, 1.0], [1.0, 0.85, 0.75], [0.80, 0.85, 1.0],
-            [0.95, 0.95, 1.0], [1.0, 0.90, 0.95], [1.0, 1.0, 1.0],  [0.90, 0.85, 0.95],
+            [1.0, 0.95, 0.90],
+            [0.95, 0.92, 1.0],
+            [1.0, 0.85, 0.80],
+            [0.85, 0.90, 1.0],
+            [1.0, 1.0, 0.95],
+            [0.90, 0.85, 1.0],
+            [1.0, 0.80, 0.85],
+            [0.80, 0.95, 1.0],
+            [1.0, 0.90, 0.85],
+            [0.85, 0.95, 1.0],
+            [1.0, 0.85, 0.75],
+            [0.80, 0.85, 1.0],
+            [0.95, 0.95, 1.0],
+            [1.0, 0.90, 0.95],
+            [1.0, 1.0, 1.0],
+            [0.90, 0.85, 0.95],
         ];
 
         for sprite in 0..16u32 {
@@ -365,7 +435,11 @@ impl LensFlarePass {
             let row = sprite / cells;
             let ox = col * cell;
             let oy = row * cell;
-            let (_tr, _tg, _tb) = (tints[sprite as usize][0], tints[sprite as usize][1], tints[sprite as usize][2]);
+            let (_tr, _tg, _tb) = (
+                tints[sprite as usize][0],
+                tints[sprite as usize][1],
+                tints[sprite as usize][2],
+            );
 
             for py in 0..cell {
                 for px in 0..cell {
@@ -401,10 +475,16 @@ impl LensFlarePass {
                         (1, 0) => {
                             let rings = ((r * 20.0).sin() * 0.5 + 0.5) * (1.0 - r).max(0.0);
                             let core = (-r * r * 6.0).exp();
-                            (core + rings * 0.4, core * 0.9 + rings * 0.3, core * 0.85 + rings * 0.2, (core + rings * 0.4).min(1.0))
+                            (
+                                core + rings * 0.4,
+                                core * 0.9 + rings * 0.3,
+                                core * 0.85 + rings * 0.2,
+                                (core + rings * 0.4).min(1.0),
+                            )
                         }
                         (1, 1) => {
-                            let rings = ((r * 12.0 - 1.5).sin() * 0.5 + 0.5) * (1.0 - r * r).max(0.0);
+                            let rings =
+                                ((r * 12.0 - 1.5).sin() * 0.5 + 0.5) * (1.0 - r * r).max(0.0);
                             let a = rings * 0.8;
                             (a, a * 0.9, a * 0.7, a)
                         }
@@ -417,7 +497,9 @@ impl LensFlarePass {
                         (1, 3) => {
                             let inner = 0.1;
                             let outer = 0.6;
-                            let ring = 1.0 - ((r - (inner + outer) * 0.5).abs() / ((outer - inner) * 0.5)).clamp(0.0, 1.0);
+                            let ring = 1.0
+                                - ((r - (inner + outer) * 0.5).abs() / ((outer - inner) * 0.5))
+                                    .clamp(0.0, 1.0);
                             let glow = (-r * r * 3.0).exp() * 0.5;
                             let v = (ring * ring + glow).min(1.0);
                             (v, v * 0.85, v * 0.7, v)
@@ -433,7 +515,12 @@ impl LensFlarePass {
                             let falloff = 1.0 - hex_r;
                             let v = falloff.clamp(0.0, 1.0);
                             let glow = (-r * r * 8.0).exp() * 0.3;
-                            ((v + glow).min(1.0), (v * 0.85 + glow).min(1.0), (v * 0.8 + glow).min(1.0), (v + glow).min(1.0))
+                            (
+                                (v + glow).min(1.0),
+                                (v * 0.85 + glow).min(1.0),
+                                (v * 0.8 + glow).min(1.0),
+                                (v + glow).min(1.0),
+                            )
                         }
                         (2, 1) => {
                             // Octagonal aperture with bright edges
@@ -444,7 +531,12 @@ impl LensFlarePass {
                             let falloff = 1.0 - oct_r;
                             let v = falloff.clamp(0.0, 1.0);
                             let bright_edge = (1.0 - (r - 0.7).abs() / 0.15).clamp(0.0, 1.0) * 0.5;
-                            ((v + bright_edge).min(1.0), (v * 0.9).min(1.0), (v * 0.85).min(1.0), (v + bright_edge).min(1.0))
+                            (
+                                (v + bright_edge).min(1.0),
+                                (v * 0.9).min(1.0),
+                                (v * 0.85).min(1.0),
+                                (v + bright_edge).min(1.0),
+                            )
                         }
                         (2, 2) => {
                             // Hexagonal with soft glow
@@ -459,7 +551,12 @@ impl LensFlarePass {
                             // Soft circular bokeh
                             let soft = 1.0 / (1.0 + r * r * 6.0);
                             let rim = (1.0 - (r - 0.4).abs() / 0.3).clamp(0.0, 1.0) * 0.2;
-                            ((soft + rim).min(1.0), soft * 0.95, soft * 0.9, (soft + rim).min(1.0))
+                            (
+                                (soft + rim).min(1.0),
+                                soft * 0.95,
+                                soft * 0.9,
+                                (soft + rim).min(1.0),
+                            )
                         }
 
                         // Row 3: Streaks and star patterns
@@ -481,7 +578,12 @@ impl LensFlarePass {
                             // 4-point star cross
                             let cross = (-dx * dx * 20.0).exp() * (-dy * dy * 20.0).exp();
                             let sc = (-r * r * 2.0).exp();
-                            (cross + sc * 0.3, cross * 0.9 + sc * 0.25, cross * 0.85 + sc * 0.2, (cross + sc * 0.3).min(1.0))
+                            (
+                                cross + sc * 0.3,
+                                cross * 0.9 + sc * 0.25,
+                                cross * 0.85 + sc * 0.2,
+                                (cross + sc * 0.3).min(1.0),
+                            )
                         }
                         (3, 3) => {
                             // 6-point star / diffraction spikes
@@ -590,11 +692,7 @@ impl RenderPass for LensFlarePass {
         // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
         // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
         // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
-        let depth_view = ctx
-            .resources
-            .depth_sampler_view
-            .get()
-            .unwrap_or(ctx.depth);
+        let depth_view = ctx.resources.depth_sampler_view.get().unwrap_or(ctx.depth);
 
         // Rebuild bind groups when buffer/depth pointers change
         let lights_ptr = ctx.scene.lights as *const _ as usize;
@@ -610,14 +708,23 @@ impl RenderPass for LensFlarePass {
 
         if self.query_bg.is_none() {
             let qbg = Self::build_query_bg(
-                ctx.device, &self.query_bgl,
-                ctx.scene.lights, &self.flare_query_buf, &self.flare_count_buf,
-                ctx.scene.camera, depth_view, &self.uniform_buf,
+                ctx.device,
+                &self.query_bgl,
+                ctx.scene.lights,
+                &self.flare_query_buf,
+                &self.flare_count_buf,
+                ctx.scene.camera,
+                depth_view,
+                &self.uniform_buf,
             );
             let rbg = Self::build_render_bg(
-                ctx.device, &self.render_bgl,
-                &self.flare_query_buf, &self.flare_count_buf,
-                &self.flare_view, &self.flare_sampler, &self.uniform_buf,
+                ctx.device,
+                &self.render_bgl,
+                &self.flare_query_buf,
+                &self.flare_count_buf,
+                &self.flare_view,
+                &self.flare_sampler,
+                &self.uniform_buf,
             );
             self.query_bg = Some(qbg);
             self.render_bg = Some(rbg);

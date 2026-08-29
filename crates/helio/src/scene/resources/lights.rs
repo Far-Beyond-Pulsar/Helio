@@ -213,7 +213,12 @@ impl super::super::Scene {
 
         let gpu_index = record.gpu_index as usize;
         let updated = self.gpu_scene.lights.update(gpu_index, light);
-        debug_assert!(updated, "GPU light index {} out of bounds (len {}) — flush may have mis-indexed this light", gpu_index, self.gpu_scene.lights.len());
+        debug_assert!(
+            updated,
+            "GPU light index {} out of bounds (len {}) — flush may have mis-indexed this light",
+            gpu_index,
+            self.gpu_scene.lights.len()
+        );
 
         // The direct `.update()` above already patches the correct slot in the GPU
         // buffer in place, so this doesn't strictly need a full flush-time rebuild.
@@ -304,7 +309,10 @@ mod tests {
     }
 
     fn light(color: [f32; 4]) -> GpuLight {
-        GpuLight { color_intensity: color, ..Default::default() }
+        GpuLight {
+            color_intensity: color,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -313,16 +321,35 @@ mod tests {
         let mut scene = Scene::new(device, queue);
 
         scene.rebuild_light_instances(&[
-            LightRenderInput { light: light([1.0, 0.0, 0.0, 10.0]), user_tag: 111, entity_index: 11 },
-            LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 },
+            LightRenderInput {
+                light: light([1.0, 0.0, 0.0, 10.0]),
+                user_tag: 111,
+                entity_index: 11,
+            },
+            LightRenderInput {
+                light: light([0.0, 1.0, 0.0, 20.0]),
+                user_tag: 222,
+                entity_index: 22,
+            },
         ]);
 
-        let mut seen: Vec<(u64, [f32; 4])> = scene.iter_lights().map(|(_, l, tag)| (tag, l.color_intensity)).collect();
+        let mut seen: Vec<(u64, [f32; 4])> = scene
+            .iter_lights()
+            .map(|(_, l, tag)| (tag, l.color_intensity))
+            .collect();
         seen.sort_by_key(|&(tag, _)| tag);
-        assert_eq!(seen, vec![(111, [1.0, 0.0, 0.0, 10.0]), (222, [0.0, 1.0, 0.0, 20.0])]);
+        assert_eq!(
+            seen,
+            vec![(111, [1.0, 0.0, 0.0, 10.0]), (222, [0.0, 1.0, 0.0, 20.0])]
+        );
 
-        let id = scene.light_by_tag(222).expect("tag must resolve via light_by_tag");
-        assert_eq!(scene.get_light(id).unwrap().color_intensity, [0.0, 1.0, 0.0, 20.0]);
+        let id = scene
+            .light_by_tag(222)
+            .expect("tag must resolve via light_by_tag");
+        assert_eq!(
+            scene.get_light(id).unwrap().color_intensity,
+            [0.0, 1.0, 0.0, 20.0]
+        );
     }
 
     #[test]
@@ -331,17 +358,32 @@ mod tests {
         let mut scene = Scene::new(device, queue);
 
         scene.rebuild_light_instances(&[
-            LightRenderInput { light: light([1.0, 0.0, 0.0, 10.0]), user_tag: 111, entity_index: 11 },
-            LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 },
+            LightRenderInput {
+                light: light([1.0, 0.0, 0.0, 10.0]),
+                user_tag: 111,
+                entity_index: 11,
+            },
+            LightRenderInput {
+                light: light([0.0, 1.0, 0.0, 20.0]),
+                user_tag: 222,
+                entity_index: 22,
+            },
         ]);
         assert_eq!(scene.iter_lights().count(), 2);
 
         // Tag 111's light disappears (disabled/removed on the SceneDB side) --
         // the next rebuild simply doesn't include it, same as a despawned
         // entity vanishing from a World::query result.
-        scene.rebuild_light_instances(&[LightRenderInput { light: light([0.0, 1.0, 0.0, 20.0]), user_tag: 222, entity_index: 22 }]);
+        scene.rebuild_light_instances(&[LightRenderInput {
+            light: light([0.0, 1.0, 0.0, 20.0]),
+            user_tag: 222,
+            entity_index: 22,
+        }]);
 
-        assert!(scene.light_by_tag(111).is_none(), "absence from the rebuild must be enough, no explicit remove_light call needed");
+        assert!(
+            scene.light_by_tag(111).is_none(),
+            "absence from the rebuild must be enough, no explicit remove_light call needed"
+        );
         assert!(scene.light_by_tag(222).is_some());
         assert_eq!(scene.iter_lights().count(), 1);
     }
@@ -361,12 +403,24 @@ mod tests {
         bright.position_range[3] = 100.0; // range
         bright.shadow_index = 0; // requests shadows (anything != u32::MAX)
 
-        scene.rebuild_light_instances(&[LightRenderInput { light: bright, user_tag: 42, entity_index: 4 }]);
+        scene.rebuild_light_instances(&[LightRenderInput {
+            light: bright,
+            user_tag: 42,
+            entity_index: 4,
+        }]);
         scene.flush();
 
-        let id = scene.light_by_tag(42).expect("light must still be present after flush");
-        let after = scene.get_light(id).expect("light must be readable after flush");
-        assert_ne!(after.shadow_index, u32::MAX, "a lone, shadow-requesting light must win a shadow atlas slot");
+        let id = scene
+            .light_by_tag(42)
+            .expect("light must still be present after flush");
+        let after = scene
+            .get_light(id)
+            .expect("light must be readable after flush");
+        assert_ne!(
+            after.shadow_index,
+            u32::MAX,
+            "a lone, shadow-requesting light must win a shadow atlas slot"
+        );
     }
 
     #[test]
@@ -380,9 +434,21 @@ mod tests {
         let mut scene = Scene::new(device, queue);
 
         scene.rebuild_light_instances(&[
-            LightRenderInput { light: light([1.0, 0.0, 0.0, 1.0]), user_tag: 111, entity_index: 55 },
-            LightRenderInput { light: light([0.0, 1.0, 0.0, 1.0]), user_tag: 222, entity_index: 77 },
-            LightRenderInput { light: light([0.0, 0.0, 1.0, 1.0]), user_tag: 333, entity_index: 99 },
+            LightRenderInput {
+                light: light([1.0, 0.0, 0.0, 1.0]),
+                user_tag: 111,
+                entity_index: 55,
+            },
+            LightRenderInput {
+                light: light([0.0, 1.0, 0.0, 1.0]),
+                user_tag: 222,
+                entity_index: 77,
+            },
+            LightRenderInput {
+                light: light([0.0, 0.0, 1.0, 1.0]),
+                user_tag: 333,
+                entity_index: 99,
+            },
         ]);
         scene.flush();
 
@@ -398,8 +464,10 @@ mod tests {
                 [0.0, 0.0, 1.0, _] => 99,
                 other => panic!("unexpected light color in this test: {other:?}"),
             };
-            assert_eq!(entity_index, expected, "light/entity_index pair at the same buffer position must agree");
+            assert_eq!(
+                entity_index, expected,
+                "light/entity_index pair at the same buffer position must agree"
+            );
         }
     }
 }
-

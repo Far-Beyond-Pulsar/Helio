@@ -21,7 +21,12 @@ impl super::super::Scene {
                 .get(input.material)
                 .map(|m| (m.gpu.material_class, m.graph_hash))
                 .unwrap_or((0, 0));
-            (class, graph_hash, input.mesh_key, input.instance.material_id)
+            (
+                class,
+                graph_hash,
+                input.mesh_key,
+                input.instance.material_id,
+            )
         });
 
         let mut instances = Vec::with_capacity(inputs.len());
@@ -117,8 +122,12 @@ impl super::super::Scene {
         self.gpu_scene.draw_calls.set_data(draw_calls.clone());
         self.gpu_scene.indirect.set_data(indirect);
         self.gpu_scene.visibility.set_data(visibility);
-        self.gpu_scene.compacted_indices.set_data(vec![0; inputs.len()]);
-        self.gpu_scene.compacted_indices_2.set_data(vec![0; inputs.len()]);
+        self.gpu_scene
+            .compacted_indices
+            .set_data(vec![0; inputs.len()]);
+        self.gpu_scene
+            .compacted_indices_2
+            .set_data(vec![0; inputs.len()]);
 
         let mut static_indirect = Vec::new();
         let mut movable_indirect = Vec::new();
@@ -140,8 +149,12 @@ impl super::super::Scene {
         }
         self.gpu_scene.shadow_static_draw_count = static_indirect.len() as u32;
         self.gpu_scene.shadow_movable_draw_count = movable_indirect.len() as u32;
-        self.gpu_scene.shadow_static_indirect.set_data(static_indirect);
-        self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
+        self.gpu_scene
+            .shadow_static_indirect
+            .set_data(static_indirect);
+        self.gpu_scene
+            .shadow_movable_indirect
+            .set_data(movable_indirect);
         self.gpu_scene.static_objects_generation =
             self.gpu_scene.static_objects_generation.wrapping_add(1);
         // `flush()` must not immediately replace this transient frame with
@@ -217,7 +230,12 @@ impl super::super::Scene {
                 .get(r.material)
                 .map(|m| (m.gpu.material_class, m.graph_hash))
                 .unwrap_or((0, 0));
-            (class, graph_hash, r.instance.mesh_id, r.instance.material_id)
+            (
+                class,
+                graph_hash,
+                r.instance.mesh_id,
+                r.instance.material_id,
+            )
         });
 
         let mut instances: Vec<GpuInstanceData> = Vec::with_capacity(n);
@@ -227,15 +245,14 @@ impl super::super::Scene {
         let mut visibility: Vec<u32> = Vec::with_capacity(n);
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
-            // Track the (material_class, graph_hash) of each draw group for range building.
-            // group_transparent tracks whether the group's material has FLAG_TRANSPARENT_ONLY.
-            // group_forward tracks whether the group's material has FLAG_FORWARD_SHADING.
-            let mut group_keys: Vec<(u32, u64)> = Vec::new();
-            let mut group_transparent: Vec<bool> = Vec::new();
-            let mut group_forward: Vec<bool> = Vec::new();
+        // Track the (material_class, graph_hash) of each draw group for range building.
+        // group_transparent tracks whether the group's material has FLAG_TRANSPARENT_ONLY.
+        // group_forward tracks whether the group's material has FLAG_FORWARD_SHADING.
+        let mut group_keys: Vec<(u32, u64)> = Vec::new();
+        let mut group_transparent: Vec<bool> = Vec::new();
+        let mut group_forward: Vec<bool> = Vec::new();
 
         let group_hidden = self.group_hidden;
-
 
         let mut i = 0;
         while i < order.len() {
@@ -287,10 +304,14 @@ impl super::super::Scene {
             });
             group_keys.push((class, graph_hash));
             // Determine transparency and forward-shading from the material flags
-            let is_transparent = self.materials.get(r0.material)
+            let is_transparent = self
+                .materials
+                .get(r0.material)
                 .map(|m| (m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0)
                 .unwrap_or(false);
-            let is_forward = self.materials.get(r0.material)
+            let is_forward = self
+                .materials
+                .get(r0.material)
                 .map(|m| (m.gpu.flags & libhelio::FLAG_FORWARD_SHADING) != 0)
                 .unwrap_or(false);
             group_transparent.push(is_transparent);
@@ -359,8 +380,12 @@ impl super::super::Scene {
         self.gpu_scene.draw_calls.set_data(draw_calls);
         self.gpu_scene.indirect.set_data(indirect);
         self.gpu_scene.visibility.set_data(visibility);
-        self.gpu_scene.compacted_indices.set_data(compacted_indices_capacity);
-        self.gpu_scene.compacted_indices_2.set_data(compacted_indices_2_capacity);
+        self.gpu_scene
+            .compacted_indices
+            .set_data(compacted_indices_capacity);
+        self.gpu_scene
+            .compacted_indices_2
+            .set_data(compacted_indices_2_capacity);
         self.rebuild_shadow_partition_buffers();
     }
 

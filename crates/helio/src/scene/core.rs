@@ -373,10 +373,10 @@ impl Scene {
             objects: DenseArena::new(),
             objects_by_tag: HashMap::new(),
             lights_by_tag: HashMap::new(),
-            objects_dirty: true,             // rebuild on first flush
-            lights_dirty: true,               // rebuild movable-lights buffer on first flush
-            static_objects_dirty: true,      // rebuild static shadow atlas on first flush
-            bake_invalidated: false,         // no bake configured yet
+            objects_dirty: true,        // rebuild on first flush
+            lights_dirty: true,         // rebuild movable-lights buffer on first flush
+            static_objects_dirty: true, // rebuild static shadow atlas on first flush
+            bake_invalidated: false,    // no bake configured yet
             prev_view_proj: glam::Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,

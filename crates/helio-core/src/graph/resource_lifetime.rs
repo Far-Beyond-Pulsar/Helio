@@ -64,7 +64,10 @@ impl RenderGraph {
             let mut last_read = w.pass_index;
             for (j, builder) in builders.iter().enumerate() {
                 for d in builder.declarations() {
-                    if d.access == crate::graph::ResourceAccess::Read && d.name == w.name && j > last_read {
+                    if d.access == crate::graph::ResourceAccess::Read
+                        && d.name == w.name
+                        && j > last_read
+                    {
                         last_read = j;
                     }
                 }
@@ -74,9 +77,10 @@ impl RenderGraph {
                 crate::graph::ResourceSize::MatchSurface => (self.internal_w, self.internal_h),
                 crate::graph::ResourceSize::Output => (self.output_w, self.output_h),
                 crate::graph::ResourceSize::Absolute { width, height } => (width, height),
-                crate::graph::ResourceSize::Scaled { divisor } => {
-                    (self.output_w / divisor.max(1), self.output_h / divisor.max(1))
-                }
+                crate::graph::ResourceSize::Scaled { divisor } => (
+                    self.output_w / divisor.max(1),
+                    self.output_h / divisor.max(1),
+                ),
                 crate::graph::ResourceSize::ScaledInternal { divisor } => (
                     (self.internal_w / divisor.max(1)).max(1),
                     (self.internal_h / divisor.max(1)).max(1),
@@ -91,18 +95,20 @@ impl RenderGraph {
                 1
             };
 
-            self.resources.entry(w.name.clone()).or_insert(ResourceLifetime {
-                first_write_pass: w.pass_index,
-                last_read_pass: last_read,
-                format: fmt,
-                width,
-                height,
-                depth_or_array_layers: w.layers.max(1),
-                mip_level_count,
-                extra_usage: w.extra_usage,
-                alias_group: None,
-                chain_local: false,
-            });
+            self.resources
+                .entry(w.name.clone())
+                .or_insert(ResourceLifetime {
+                    first_write_pass: w.pass_index,
+                    last_read_pass: last_read,
+                    format: fmt,
+                    width,
+                    height,
+                    depth_or_array_layers: w.layers.max(1),
+                    mip_level_count,
+                    extra_usage: w.extra_usage,
+                    alias_group: None,
+                    chain_local: false,
+                });
         }
     }
 
@@ -152,10 +158,13 @@ impl RenderGraph {
             self.pool.allocate(&self.device, tex_desc);
         }
 
-        let mut actions: Vec<Vec<PrePassAction>> = (0..self.passes.len()).map(|_| Vec::new()).collect();
+        let mut actions: Vec<Vec<PrePassAction>> =
+            (0..self.passes.len()).map(|_| Vec::new()).collect();
         for (name, rl) in &self.resources {
             let pi = rl.first_write_pass;
-            if pi >= actions.len() { continue; }
+            if pi >= actions.len() {
+                continue;
+            }
             if let Some(view) = self.pool.get_view(name) {
                 actions[pi].push(PrePassAction::Route {
                     name: name.clone(),
@@ -182,11 +191,25 @@ impl RenderGraph {
                 }
             }
 
-            if let (Some(a), Some(n), Some(o), Some(e)) = (albedo_idx, normal_idx, orm_idx, emissive_idx) {
-                let albedo_v = match &actions[pi][a] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
-                let normal_v = match &actions[pi][n] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
-                let orm_v = match &actions[pi][o] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
-                let emissive_v = match &actions[pi][e] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
+            if let (Some(a), Some(n), Some(o), Some(e)) =
+                (albedo_idx, normal_idx, orm_idx, emissive_idx)
+            {
+                let albedo_v = match &actions[pi][a] {
+                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
+                    _ => unreachable!(),
+                };
+                let normal_v = match &actions[pi][n] {
+                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
+                    _ => unreachable!(),
+                };
+                let orm_v = match &actions[pi][o] {
+                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
+                    _ => unreachable!(),
+                };
+                let emissive_v = match &actions[pi][e] {
+                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
+                    _ => unreachable!(),
+                };
 
                 let mut indices = vec![a, n, o, e];
                 indices.sort_by(|a, b| b.cmp(a));

@@ -19,8 +19,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig,
-    Scene, SceneActor, SublevelDescriptor, SublevelId,
+    DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
+    SceneActor, SublevelDescriptor, SublevelId,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, point_light, sphere_mesh};
@@ -156,15 +156,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         // ── Hub room: 12m x 4m x 12m box shell, walls facing inward ──────────
@@ -175,19 +195,97 @@ impl ApplicationHandler for App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let floor = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.05, 6.0]))).as_mesh().unwrap();
-        let ceiling = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.05, 6.0]))).as_mesh().unwrap();
-        let wall_n = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 2.0, 0.05]))).as_mesh().unwrap();
-        let wall_s = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 2.0, 0.05]))).as_mesh().unwrap();
-        let wall_e = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 2.0, 6.0]))).as_mesh().unwrap();
-        let wall_w = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 2.0, 6.0]))).as_mesh().unwrap();
+        let floor = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 0.05, 6.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let ceiling = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 0.05, 6.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_n = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 2.0, 0.05],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_s = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 2.0, 0.05],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_e = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.05, 2.0, 6.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_w = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.05, 2.0, 6.0],
+            )))
+            .as_mesh()
+            .unwrap();
 
-        let _ = v3_demo_common::insert_object(&mut renderer, floor, wall_mat, glam::Mat4::IDENTITY, 9.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, ceiling, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.0, 0.0)), 9.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, wall_n, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, -6.0)), 6.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, wall_s, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, 6.0)), 6.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, wall_e, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(6.0, 2.0, 0.0)), 6.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, wall_w, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(-6.0, 2.0, 0.0)), 6.0);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            floor,
+            wall_mat,
+            glam::Mat4::IDENTITY,
+            9.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            ceiling,
+            wall_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.0, 0.0)),
+            9.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_n,
+            wall_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, -6.0)),
+            6.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_s,
+            wall_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, 6.0)),
+            6.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_e,
+            wall_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(6.0, 2.0, 0.0)),
+            6.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_w,
+            wall_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-6.0, 2.0, 0.0)),
+            6.0,
+        );
 
         // ── Floating platform: registered as a sublevel ──────────────────────
         // Every mesh below is authored in the platform's own *local* space
@@ -201,10 +299,28 @@ impl ApplicationHandler for App {
             [0.05, 0.35, 0.9],
             1.2,
         ));
-        let deck_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.08, 1.4]))).as_mesh().unwrap();
-        let pillar_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.25))).as_mesh().unwrap();
+        let deck_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.4, 0.08, 1.4],
+            )))
+            .as_mesh()
+            .unwrap();
+        let pillar_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.25)))
+            .as_mesh()
+            .unwrap();
 
-        insert_grouped_object(&mut renderer, deck_mesh, platform_mat, glam::Mat4::IDENTITY, 2.0, PLATFORM_GROUP);
+        insert_grouped_object(
+            &mut renderer,
+            deck_mesh,
+            platform_mat,
+            glam::Mat4::IDENTITY,
+            2.0,
+            PLATFORM_GROUP,
+        );
         insert_grouped_object(
             &mut renderer,
             pillar_mesh,
@@ -221,7 +337,14 @@ impl ApplicationHandler for App {
         // per frame (see `AppState::render`). All share one mesh + material,
         // so they also batch into a single instanced draw call — this swarm
         // costs one GPU draw, not a thousand.
-        let stud_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.022, 0.022, 0.022]))).as_mesh().unwrap();
+        let stud_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.022, 0.022, 0.022],
+            )))
+            .as_mesh()
+            .unwrap();
         let stud_mat = renderer.scene_mut().insert_material(make_material(
             [0.85, 0.9, 1.0, 1.0],
             0.4,

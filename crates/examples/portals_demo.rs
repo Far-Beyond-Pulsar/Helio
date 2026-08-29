@@ -28,8 +28,8 @@ use helio::{
     required_wgpu_limits, Camera, DebugDrawState, LightId, ObjectDescriptor, PortalDescriptor,
     PortalId, Renderer, RendererConfig, Scene, SceneActor,
 };
-use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
 use helio_default_graphs::build_default_graph;
+use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
 use v3_demo_common::{box_mesh, make_material, point_light};
 
 use winit::{
@@ -176,15 +176,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         let mat = renderer.scene_mut().insert_material(make_material(
@@ -198,10 +218,38 @@ impl ApplicationHandler for App {
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18) — same
         // shell as indoor_corridor.rs. No end walls this time: the portals
         // themselves are what closes the hallway off visually.
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]))).as_mesh().unwrap();
-        let ceiling = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]))).as_mesh().unwrap();
-        let wall_l = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]))).as_mesh().unwrap();
-        let wall_r = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]))).as_mesh().unwrap();
+        let floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [HALF_WIDTH, 0.02, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let ceiling = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [HALF_WIDTH, 0.02, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_l = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.02, HALF_HEIGHT, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_r = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.02, HALF_HEIGHT, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
 
         // Rooms beyond each end of the corridor, reachable only through the
         // portals: through the near portal you see the far (blue) room, through
@@ -209,35 +257,103 @@ impl ApplicationHandler for App {
         // open ends (z = ±18) so the mapped duplicate never overlaps the real
         // corridor — that overlap is what the fragment z-clip exists to avoid.
         let room_half_len = 6.0;
-        let far_room_mat = renderer.scene_mut().insert_material(make_material([0.3, 0.55, 0.95, 1.0], 0.7, 0.0, [0.1, 0.5, 1.0], 0.4));
-        let near_room_mat = renderer.scene_mut().insert_material(make_material([0.95, 0.6, 0.25, 1.0], 0.7, 0.0, [1.0, 0.5, 0.1], 0.4));
-        let room_floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, room_half_len]))).as_mesh().unwrap();
-        let room_wall = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, room_half_len]))).as_mesh().unwrap();
+        let far_room_mat = renderer.scene_mut().insert_material(make_material(
+            [0.3, 0.55, 0.95, 1.0],
+            0.7,
+            0.0,
+            [0.1, 0.5, 1.0],
+            0.4,
+        ));
+        let near_room_mat = renderer.scene_mut().insert_material(make_material(
+            [0.95, 0.6, 0.25, 1.0],
+            0.7,
+            0.0,
+            [1.0, 0.5, 0.1],
+            0.4,
+        ));
+        let room_floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [HALF_WIDTH, 0.02, room_half_len],
+            )))
+            .as_mesh()
+            .unwrap();
+        let room_wall = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.02, HALF_HEIGHT, room_half_len],
+            )))
+            .as_mesh()
+            .unwrap();
 
         let mut insert_always = |mesh, material, transform: glam::Mat4, radius: f32| {
-            let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh,
-                material,
-                transform,
-                bounds: [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius],
-                flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh,
+                    material,
+                    transform,
+                    bounds: [
+                        transform.w_axis.x,
+                        transform.w_axis.y,
+                        transform.w_axis.z,
+                        radius,
+                    ],
+                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
+                    groups: helio::GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
         };
         insert_always(floor, mat, glam::Mat4::IDENTITY, HALF_LENGTH);
-        insert_always(ceiling, mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)), HALF_LENGTH);
-        insert_always(wall_l, mat, glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)), HALF_LENGTH);
-        insert_always(wall_r, mat, glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)), HALF_LENGTH);
+        insert_always(
+            ceiling,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)),
+            HALF_LENGTH,
+        );
+        insert_always(
+            wall_l,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)),
+            HALF_LENGTH,
+        );
+        insert_always(
+            wall_r,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)),
+            HALF_LENGTH,
+        );
         for (room_mat, zc) in [
             (far_room_mat, -(HALF_LENGTH + room_half_len)),
             (near_room_mat, HALF_LENGTH + room_half_len),
         ] {
-            insert_always(room_floor, room_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, zc)), room_half_len);
-            insert_always(room_floor, room_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, zc)), room_half_len);
-            insert_always(room_wall, room_mat, glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, zc)), room_half_len);
-            insert_always(room_wall, room_mat, glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, zc)), room_half_len);
+            insert_always(
+                room_floor,
+                room_mat,
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, zc)),
+                room_half_len,
+            );
+            insert_always(
+                room_floor,
+                room_mat,
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, zc)),
+                room_half_len,
+            );
+            insert_always(
+                room_wall,
+                room_mat,
+                glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, zc)),
+                room_half_len,
+            );
+            insert_always(
+                room_wall,
+                room_mat,
+                glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, zc)),
+                room_half_len,
+            );
         }
 
         // Evenly spaced ceiling lights so there's plenty of detail for the
@@ -262,25 +378,91 @@ impl ApplicationHandler for App {
         // Colour-coded markers at each end so it's obvious at a glance which
         // end you're looking at through a portal: warm amber in the +Z room,
         // cool blue in the -Z room.
-        let near_mat = renderer.scene_mut().insert_material(make_material([1.0, 0.6, 0.2, 1.0], 0.6, 0.0, [1.0, 0.5, 0.1], 2.0));
-        let far_mat = renderer.scene_mut().insert_material(make_material([0.2, 0.6, 1.0, 1.0], 0.6, 0.0, [0.1, 0.5, 1.0], 2.0));
-        let marker_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.3, 0.3, 0.05]))).as_mesh().unwrap();
+        let near_mat = renderer.scene_mut().insert_material(make_material(
+            [1.0, 0.6, 0.2, 1.0],
+            0.6,
+            0.0,
+            [1.0, 0.5, 0.1],
+            2.0,
+        ));
+        let far_mat = renderer.scene_mut().insert_material(make_material(
+            [0.2, 0.6, 1.0, 1.0],
+            0.6,
+            0.0,
+            [0.1, 0.5, 1.0],
+            2.0,
+        ));
+        let marker_mesh = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.3, 0.3, 0.05],
+            )))
+            .as_mesh()
+            .unwrap();
         let mut insert_always_marker = |mesh, material, transform: glam::Mat4, radius: f32| {
-            let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh,
-                material,
-                transform,
-                bounds: [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius],
-                flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh,
+                    material,
+                    transform,
+                    bounds: [
+                        transform.w_axis.x,
+                        transform.w_axis.y,
+                        transform.w_axis.z,
+                        radius,
+                    ],
+                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
+                    groups: helio::GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
         };
-        insert_always_marker(marker_mesh, near_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len)), 0.5);
-        insert_always_marker(marker_mesh, far_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len))), 0.5);
-        light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len], [1.0, 0.6, 0.2], 2.5, 4.0))).as_light().unwrap());
-        light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len)], [0.2, 0.6, 1.0], 2.5, 4.0))).as_light().unwrap());
+        insert_always_marker(
+            marker_mesh,
+            near_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(
+                0.0,
+                HALF_HEIGHT,
+                HALF_LENGTH + room_half_len,
+            )),
+            0.5,
+        );
+        insert_always_marker(
+            marker_mesh,
+            far_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(
+                0.0,
+                HALF_HEIGHT,
+                -(HALF_LENGTH + room_half_len),
+            )),
+            0.5,
+        );
+        light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len],
+                    [1.0, 0.6, 0.2],
+                    2.5,
+                    4.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len)],
+                    [0.2, 0.6, 1.0],
+                    2.5,
+                    4.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
         // Room lighting so the mapped duplicate is fully lit at its mapped
         // position (the deferred pass lights it where it's drawn, z ≈ ±24).
         for &z in &[-27.0, -21.0, 21.0, 27.0] {
@@ -499,7 +681,12 @@ impl AppState {
         // same portal, unaffected by how it's drawn.
         let scene = self.renderer.scene_mut();
         if let Some(pair) = scene.portal_pair(self.portal_near) {
-            if helio::crossing_detected(prev_pos, self.cam_pos, &pair.a, glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT)) {
+            if helio::crossing_detected(
+                prev_pos,
+                self.cam_pos,
+                &pair.a,
+                glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT),
+            ) {
                 let (new_pos, new_fwd) = pair.teleport_ray(self.cam_pos, forward);
                 self.cam_pos = new_pos;
                 forward = new_fwd;
@@ -509,7 +696,12 @@ impl AppState {
             }
         }
         if let Some(pair) = scene.portal_pair(self.portal_far) {
-            if helio::crossing_detected(prev_pos, self.cam_pos, &pair.a, glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT)) {
+            if helio::crossing_detected(
+                prev_pos,
+                self.cam_pos,
+                &pair.a,
+                glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT),
+            ) {
                 let (new_pos, new_fwd) = pair.teleport_ray(self.cam_pos, forward);
                 self.cam_pos = new_pos;
                 forward = new_fwd;

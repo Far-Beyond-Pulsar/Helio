@@ -83,22 +83,23 @@ fn intersect_box(ray_origin: vec3<f32>, ray_direction: vec3<f32>, bounds_min: ve
   return vec2<f32>(near_distance, far_distance);
 }
 
-fn sample_cloud(world_position: vec3<f32>) -> vec2<f32> {
+fn sample_cloud(world_position: vec3<f32>) -> vec3<f32> {
   let bounds_min = params.bounds_min_density.xyz;
   let bounds_max = params.bounds_max_shadow.xyz;
   let uv = (world_position - bounds_min) / (bounds_max - bounds_min);
 
   if (any(uv < vec3<f32>(0.0)) || any(uv > vec3<f32>(1.0))) {
-    return vec2<f32>(0.0);
+    return vec3<f32>(0.0);
   }
 
   let sample_value = textureSampleLevel(cloud_volume, volume_sampler, uv, 0.0);
   let base_density = sample_value.r;
   let fine_noise = sample_value.g;
+  let thickness = sample_value.a; // baked in simulate.wgsl w channel
   let edge_weight = clamp(4.0 * base_density * (1.0 - base_density), 0.0, 1.0);
   let erosion = (0.53 - fine_noise) * params.camera_up_detail.w * edge_weight * 0.44;
   let shaped_density = max(0.0, base_density - erosion);
-  return vec2<f32>(shaped_density * params.bounds_min_density.w, fine_noise);
+  return vec3<f32>(shaped_density * params.bounds_min_density.w, fine_noise, thickness);
 }
 
 fn cloud_gradient(world_position: vec3<f32>, center_density: f32) -> vec3<f32> {

@@ -201,12 +201,7 @@ fn compute_bounds(vertices: &[GpuTerrainVertex], indices: &[u32]) -> GpuTerrainM
             normalize(cross(sub(b, a), sub(c, a)))
         })
         .collect();
-    let Some(axis) = normalize(
-        normals
-            .iter()
-            .copied()
-            .fold([0.0; 3], add),
-    ) else {
+    let Some(axis) = normalize(normals.iter().copied().fold([0.0; 3], add)) else {
         return disabled_bounds(center, radius);
     };
     let min_dot = normals

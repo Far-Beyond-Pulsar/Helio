@@ -132,10 +132,22 @@ struct QuadVertex {
 
 // Y-up world space; v=0 at the top of the quad to match texture-space UVs.
 const QUAD_VERTICES: [QuadVertex; 4] = [
-    QuadVertex { pos: [-0.5, -0.5], uv: [0.0, 1.0] },
-    QuadVertex { pos: [0.5, -0.5], uv: [1.0, 1.0] },
-    QuadVertex { pos: [-0.5, 0.5], uv: [0.0, 0.0] },
-    QuadVertex { pos: [0.5, 0.5], uv: [1.0, 0.0] },
+    QuadVertex {
+        pos: [-0.5, -0.5],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        pos: [0.5, -0.5],
+        uv: [1.0, 1.0],
+    },
+    QuadVertex {
+        pos: [-0.5, 0.5],
+        uv: [0.0, 0.0],
+    },
+    QuadVertex {
+        pos: [0.5, 0.5],
+        uv: [1.0, 0.0],
+    },
 ];
 const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 1, 3];
 
@@ -214,7 +226,11 @@ struct GpuCulling {
 }
 
 impl SpriteBatchPass {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sprite Batch Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite.wgsl").into()),
@@ -282,8 +298,16 @@ impl SpriteBatchPass {
             array_stride: std::mem::size_of::<QuadVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 8,
+                    shader_location: 1,
+                },
             ],
         };
 
@@ -371,8 +395,16 @@ impl SpriteBatchPass {
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8, 255, 255, 255],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -469,7 +501,14 @@ impl SpriteBatchPass {
     /// Pack sprites that don't already share a sheet size into same-size
     /// atlas pages before calling this (a texture-array layer boundary is
     /// not a UV-rect boundary — `uv_rect` still addresses within one layer).
-    pub fn add_atlas_layer(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba8: &[u8]) -> u32 {
+    pub fn add_atlas_layer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba8: &[u8],
+    ) -> u32 {
         assert_eq!(
             rgba8.len() as u32,
             width * height * 4,
@@ -483,11 +522,14 @@ impl SpriteBatchPass {
             self.atlas_height = height;
             self.atlas_layer_capacity = 4;
             self.atlas_layer_count = 0;
-            self.atlas_texture = create_atlas_array_texture(device, width, height, self.atlas_layer_capacity);
-            self.atlas_view = self.atlas_texture.create_view(&wgpu::TextureViewDescriptor {
-                dimension: Some(wgpu::TextureViewDimension::D2Array),
-                ..Default::default()
-            });
+            self.atlas_texture =
+                create_atlas_array_texture(device, width, height, self.atlas_layer_capacity);
+            self.atlas_view = self
+                .atlas_texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
             self.atlas_using_fallback = false;
             self.bind_group = None;
         } else {
@@ -514,12 +556,24 @@ impl SpriteBatchPass {
             wgpu::TexelCopyTextureInfo {
                 texture: &self.atlas_texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             rgba8,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         self.atlas_layer_count += 1;
         layer
@@ -527,7 +581,8 @@ impl SpriteBatchPass {
 
     fn grow_atlas_array(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let new_capacity = self.atlas_layer_capacity * 2;
-        let new_texture = create_atlas_array_texture(device, self.atlas_width, self.atlas_height, new_capacity);
+        let new_texture =
+            create_atlas_array_texture(device, self.atlas_width, self.atlas_height, new_capacity);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Sprite Atlas Array Grow"),
         });
@@ -544,15 +599,21 @@ impl SpriteBatchPass {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::Extent3d { width: self.atlas_width, height: self.atlas_height, depth_or_array_layers: self.atlas_layer_count },
+            wgpu::Extent3d {
+                width: self.atlas_width,
+                height: self.atlas_height,
+                depth_or_array_layers: self.atlas_layer_count,
+            },
         );
         queue.submit([encoder.finish()]);
 
         self.atlas_texture = new_texture;
-        self.atlas_view = self.atlas_texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
+        self.atlas_view = self
+            .atlas_texture
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
         self.atlas_layer_capacity = new_capacity;
         self.bind_group = None;
     }
@@ -564,17 +625,40 @@ impl SpriteBatchPass {
     ///
     /// The bind group is only valid once the pass can draw, so GPU culling
     /// must be wired via [`use_gpu_culling`](Self::use_gpu_culling) first.
-    pub fn set_atlas_array(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, sampler: &wgpu::Sampler) {
-        let gpu = self.gpu_culling.as_ref().expect("set_atlas_array: call use_gpu_culling() first");
+    pub fn set_atlas_array(
+        &mut self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) {
+        let gpu = self
+            .gpu_culling
+            .as_ref()
+            .expect("set_atlas_array: call use_gpu_culling() first");
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Batch BG"),
             layout: &self.bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: self.instances_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: gpu.draw_order_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.instances_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: gpu.draw_order_buf.as_entire_binding(),
+                },
             ],
         }));
     }
@@ -642,8 +726,15 @@ impl SpriteBatchPass {
     /// each frame). After this, `prepare()` no longer does any CPU culling or
     /// sorting and `execute()` issues a single `draw_indexed_indirect` — the
     /// CPU never learns the visible count.
-    pub fn use_gpu_culling(&mut self, draw_order_buf: Arc<wgpu::Buffer>, indirect_buf: Arc<wgpu::Buffer>) {
-        self.gpu_culling = Some(GpuCulling { draw_order_buf, indirect_buf });
+    pub fn use_gpu_culling(
+        &mut self,
+        draw_order_buf: Arc<wgpu::Buffer>,
+        indirect_buf: Arc<wgpu::Buffer>,
+    ) {
+        self.gpu_culling = Some(GpuCulling {
+            draw_order_buf,
+            indirect_buf,
+        });
         self.bind_group = None;
     }
 
@@ -653,15 +744,26 @@ impl SpriteBatchPass {
     }
 }
 
-fn create_atlas_array_texture(device: &wgpu::Device, width: u32, height: u32, layers: u32) -> wgpu::Texture {
+fn create_atlas_array_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    layers: u32,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Sprite Atlas Array"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: layers },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: layers,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: ATLAS_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
 }
@@ -691,7 +793,10 @@ impl RenderPass for SpriteBatchPass {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
             })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Sprite Batch Pass"),
@@ -712,12 +817,17 @@ impl RenderPass for SpriteBatchPass {
 
         if self.camera_dirty {
             self.camera_dirty = false;
-            let half_extent = self.camera_half_extent.unwrap_or([ctx.width as f32 * 0.5, ctx.height as f32 * 0.5]);
+            let half_extent = self
+                .camera_half_extent
+                .unwrap_or([ctx.width as f32 * 0.5, ctx.height as f32 * 0.5]);
             let [cx, cy] = self.camera_center;
             let [hx, hy] = half_extent;
             // Y-up world space; a Y-down convention would swap `cy - hy`/`cy + hy`.
-            let view_proj = glam::Mat4::orthographic_rh(cx - hx, cx + hx, cy - hy, cy + hy, -1.0, 1.0);
-            let uniform = CameraUniform { view_proj: view_proj.to_cols_array_2d() };
+            let view_proj =
+                glam::Mat4::orthographic_rh(cx - hx, cx + hx, cy - hy, cy + hy, -1.0, 1.0);
+            let uniform = CameraUniform {
+                view_proj: view_proj.to_cols_array_2d(),
+            };
             ctx.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
         }
 
@@ -775,11 +885,26 @@ impl RenderPass for SpriteBatchPass {
                 label: Some("Sprite Batch BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.atlas_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: self.instances_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: gpu.draw_order_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.instances_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: gpu.draw_order_buf.as_entire_binding(),
+                    },
                 ],
             }));
         }

@@ -125,7 +125,10 @@ fn all_x_coordinates_within_atlas_width() {
             assert!(
                 x < ATLAS_W,
                 "probe_atlas_x({},{}) = {} out of bounds (ATLAS_W={})",
-                px, dx, x, ATLAS_W
+                px,
+                dx,
+                x,
+                ATLAS_W
             );
         }
     }
@@ -140,7 +143,11 @@ fn all_y_coordinates_within_atlas_height() {
                 assert!(
                     y < ATLAS_H,
                     "probe_atlas_y({},{},{}) = {} out of bounds (ATLAS_H={})",
-                    py, pz, dy, y, ATLAS_H
+                    py,
+                    pz,
+                    dy,
+                    y,
+                    ATLAS_H
                 );
             }
         }
@@ -261,7 +268,13 @@ fn all_texel_coordinates_are_unique() {
                         assert!(
                             seen.insert((x, y)),
                             "Collision at ({},{}) for probe ({},{},{}) dir ({},{})",
-                            x, y, px, py, pz, dx, dy
+                            x,
+                            y,
+                            px,
+                            py,
+                            pz,
+                            dx,
+                            dy
                         );
                     }
                 }

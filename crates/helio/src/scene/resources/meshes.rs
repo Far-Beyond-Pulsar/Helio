@@ -46,7 +46,8 @@ impl super::super::Scene {
         vertex_handle: pulsar_scenedb::gpu::VarLenHandle,
         index_handle: pulsar_scenedb::gpu::VarLenHandle,
     ) -> MeshId {
-        self.mesh_pool.adopt_static_slice(vertex_handle, index_handle)
+        self.mesh_pool
+            .adopt_static_slice(vertex_handle, index_handle)
     }
 
     /// See [`crate::mesh::MeshPool::forget_adopted_slice`].
@@ -167,4 +168,3 @@ impl super::super::Scene {
         self.mesh_pool.dynamic_buffers()
     }
 }
-

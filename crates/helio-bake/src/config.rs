@@ -94,8 +94,8 @@ impl Default for BakeConfig {
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::default()),
             cpu_lightmap: Some(CpuLightmapConfig {
-                resolution:    1024,
-                ambient_fill:  [0.06, 0.06, 0.06],
+                resolution: 1024,
+                ambient_fill: [0.06, 0.06, 0.06],
             }),
             lightmap: None,
             probes: None,
@@ -116,7 +116,7 @@ impl BakeConfig {
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::fast()),
             cpu_lightmap: Some(CpuLightmapConfig {
-                resolution:   1024,
+                resolution: 1024,
                 ambient_fill: [0.06, 0.06, 0.06],
             }),
             lightmap: None,
@@ -136,10 +136,10 @@ impl BakeConfig {
             ao: Some(nebula::ao::AoConfig::default()),
             cpu_lightmap: None,
             lightmap: Some(nebula::light::LightmapConfig {
-                resolution:         1024,
-                samples_per_texel:  64,
-                bounce_count:       2,
-                denoise:            true,
+                resolution: 1024,
+                samples_per_texel: 64,
+                bounce_count: 2,
+                denoise: true,
                 ..nebula::light::LightmapConfig::default()
             }),
             probes: None,

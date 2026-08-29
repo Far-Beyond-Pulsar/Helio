@@ -13,7 +13,10 @@ pub(crate) struct CachedPass {
 
 /// An action to perform on FrameResources before a pass executes.
 pub(crate) enum PrePassAction {
-    Route { name: String, view: wgpu::TextureView },
+    Route {
+        name: String,
+        view: wgpu::TextureView,
+    },
     Gbuffer {
         albedo: wgpu::TextureView,
         normal: wgpu::TextureView,
@@ -78,14 +81,20 @@ fn compute_chains(
             while j < len && transparent[j] {
                 j += 1;
             }
-            if j >= len { break; }
+            if j >= len {
+                break;
+            }
             let same_attachments = match (&attachments[i], &attachments[j]) {
                 (Some(a), Some(b)) => a == b,
                 _ => false,
             };
-            if !same_attachments { break; }
+            if !same_attachments {
+                break;
+            }
             let can_fuse = writes[i].iter().any(|w| reads[j].contains(w));
-            if !can_fuse { break; }
+            if !can_fuse {
+                break;
+            }
             i = j;
         }
         let chain_len = i + 1 - chain_start;
@@ -106,7 +115,8 @@ impl RenderGraph {
         let len = self.passes.len();
         let no_transparent = vec![false; len];
         let dummy_signature: Vec<Option<Vec<usize>>> = vec![Some(vec![0]); len];
-        self.subpass_chains = compute_chains(&writes_set, &reads_set, &no_transparent, &dummy_signature);
+        self.subpass_chains =
+            compute_chains(&writes_set, &reads_set, &no_transparent, &dummy_signature);
     }
 
     /// Same as `detect_subpass_chains`, but `attachments[i]` gives the exact set
@@ -128,8 +138,16 @@ impl RenderGraph {
             pass.declare_resources(&mut builder);
             for d in builder.declarations() {
                 match d.access {
-                    crate::graph::ResourceAccess::Read => { if !r.contains(&d.name) { r.push(d.name); } }
-                    crate::graph::ResourceAccess::Write => { if !w.contains(&d.name) { w.push(d.name); } }
+                    crate::graph::ResourceAccess::Read => {
+                        if !r.contains(&d.name) {
+                            r.push(d.name);
+                        }
+                    }
+                    crate::graph::ResourceAccess::Write => {
+                        if !w.contains(&d.name) {
+                            w.push(d.name);
+                        }
+                    }
                 }
             }
             writes_set.push(w);
@@ -157,7 +175,10 @@ mod chain_tests {
         let reads = vec![vec![], vec!["a"]];
         let transparent = vec![false, false];
         let attachments = vec![sig(&[1]), sig(&[1])];
-        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..2]);
+        assert_eq!(
+            compute_chains(&writes, &reads, &transparent, &attachments),
+            vec![0..2]
+        );
     }
 
     #[test]
@@ -175,7 +196,10 @@ mod chain_tests {
         let reads = vec![vec![], vec![], vec!["a"]];
         let transparent = vec![false, true, false];
         let attachments = vec![sig(&[1]), none(), sig(&[1])];
-        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..3]);
+        assert_eq!(
+            compute_chains(&writes, &reads, &transparent, &attachments),
+            vec![0..3]
+        );
     }
 
     #[test]
@@ -184,7 +208,10 @@ mod chain_tests {
         let reads = vec![vec![], vec![], vec![], vec!["a"]];
         let transparent = vec![false, true, true, false];
         let attachments = vec![sig(&[1]), none(), none(), sig(&[1])];
-        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..4]);
+        assert_eq!(
+            compute_chains(&writes, &reads, &transparent, &attachments),
+            vec![0..4]
+        );
     }
 
     #[test]
@@ -247,6 +274,9 @@ mod chain_tests {
         let reads = vec![vec![], vec!["gbuffer"]];
         let transparent = vec![false, false];
         let attachments = vec![sig(&[1, 2, 3, 4, 5]), sig(&[1, 2, 3, 4, 5])];
-        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..2]);
+        assert_eq!(
+            compute_chains(&writes, &reads, &transparent, &attachments),
+            vec![0..2]
+        );
     }
 }

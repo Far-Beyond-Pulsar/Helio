@@ -38,15 +38,20 @@ pub fn select_hdr_surface_format(
     mode: libhelio::HdrOutputMode,
 ) -> wgpu::TextureFormat {
     let preferred = match mode {
-        libhelio::HdrOutputMode::Ldr => {
-            caps.formats.iter().find(|f| f.is_srgb()).copied()
-        }
+        libhelio::HdrOutputMode::Ldr => caps.formats.iter().find(|f| f.is_srgb()).copied(),
         libhelio::HdrOutputMode::Hdr10
         | libhelio::HdrOutputMode::ScRgb
-        | libhelio::HdrOutputMode::Passthrough => {
-            caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba16Float).copied()
-                .or_else(|| caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba32Float).copied())
-        }
+        | libhelio::HdrOutputMode::Passthrough => caps
+            .formats
+            .iter()
+            .find(|f| **f == wgpu::TextureFormat::Rgba16Float)
+            .copied()
+            .or_else(|| {
+                caps.formats
+                    .iter()
+                    .find(|f| **f == wgpu::TextureFormat::Rgba32Float)
+                    .copied()
+            }),
     };
     preferred.unwrap_or(caps.formats[0])
 }
@@ -93,7 +98,9 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
 ///
 /// Returns a disabled token when nothing experimental is requested, so a device that
 /// does not need them is not opted in.
-pub fn required_experimental_features(adapter_features: wgpu::Features) -> wgpu::ExperimentalFeatures {
+pub fn required_experimental_features(
+    adapter_features: wgpu::Features,
+) -> wgpu::ExperimentalFeatures {
     let requested = required_wgpu_features(adapter_features);
     if requested.intersects(wgpu::Features::all_experimental_mask()) {
         // SAFETY: wgpu asks callers to acknowledge that experimental features may
@@ -415,7 +422,7 @@ impl RendererConfig {
     /// ```
     pub fn with_tsr_quality(mut self, quality: helio_pass_tsr::TsrQuality) -> Self {
         self.render_scale = quality.render_scale();
-        self.tsr_quality  = Some(quality);
+        self.tsr_quality = Some(quality);
         self
     }
 

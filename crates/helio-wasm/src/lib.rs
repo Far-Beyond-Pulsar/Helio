@@ -41,8 +41,8 @@ pub use runner::launch;
 pub use runner::launch_android;
 
 use std::collections::HashSet;
-pub use winit::keyboard::KeyCode;
 pub use winit::event::MouseButton;
+pub use winit::keyboard::KeyCode;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

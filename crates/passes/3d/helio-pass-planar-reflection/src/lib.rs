@@ -58,10 +58,7 @@ impl PlanarReflectionPass {
 
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Planar BGL0"),
-            entries: &[
-                buffer_camera_entry(0),
-                buffer_uniform_entry(1),
-            ],
+            entries: &[buffer_camera_entry(0), buffer_uniform_entry(1)],
         });
 
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

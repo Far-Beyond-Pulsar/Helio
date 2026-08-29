@@ -9,30 +9,30 @@
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ShaderSkyUniforms {
-    sun_direction: [f32; 3],      //  0..12
-    sun_intensity: f32,            // 12..16
-    rayleigh_scatter: [f32; 3],   // 16..28
-    rayleigh_h_scale: f32,         // 28..32
-    mie_scatter: f32,              // 32..36
-    mie_h_scale: f32,              // 36..40
-    mie_g: f32,                    // 40..44
-    sun_disk_cos: f32,             // 44..48
-    earth_radius: f32,             // 48..52
-    atm_radius: f32,               // 52..56
-    exposure: f32,                 // 56..60
-    clouds_enabled: u32,           // 60..64
-    cloud_coverage: f32,           // 64..68
-    cloud_density: f32,            // 68..72
-    cloud_base: f32,               // 72..76
-    cloud_top: f32,                // 76..80
-    cloud_wind_x: f32,             // 80..84
-    cloud_wind_z: f32,             // 84..88
-    cloud_speed: f32,              // 88..92
-    time_sky: f32,                 // 92..96
-    skylight_intensity: f32,       // 96..100
-    _pad0: f32,                    // 100..104
-    _pad1: f32,                    // 104..108
-    _pad2: f32,                    // 108..112
+    sun_direction: [f32; 3],    //  0..12
+    sun_intensity: f32,         // 12..16
+    rayleigh_scatter: [f32; 3], // 16..28
+    rayleigh_h_scale: f32,      // 28..32
+    mie_scatter: f32,           // 32..36
+    mie_h_scale: f32,           // 36..40
+    mie_g: f32,                 // 40..44
+    sun_disk_cos: f32,          // 44..48
+    earth_radius: f32,          // 48..52
+    atm_radius: f32,            // 52..56
+    exposure: f32,              // 56..60
+    clouds_enabled: u32,        // 60..64
+    cloud_coverage: f32,        // 64..68
+    cloud_density: f32,         // 68..72
+    cloud_base: f32,            // 72..76
+    cloud_top: f32,             // 76..80
+    cloud_wind_x: f32,          // 80..84
+    cloud_wind_z: f32,          // 84..88
+    cloud_speed: f32,           // 88..92
+    time_sky: f32,              // 92..96
+    skylight_intensity: f32,    // 96..100
+    _pad0: f32,                 // 100..104
+    _pad1: f32,                 // 104..108
+    _pad2: f32,                 // 108..112
 }
 
 /// Mirror of the private `earth_like()` constructor.

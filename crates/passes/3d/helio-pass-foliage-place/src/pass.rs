@@ -11,11 +11,10 @@ use helio_foliage_core::{
 use crate::residency::TileRing;
 use crate::uniforms::{FoliageCullUniforms, PlaceUniforms};
 use crate::{
-    foliage_frame_is_present, COUNTER_PLACEMENT_OVERFLOW, COUNTER_PLACED_BLADES,
+    foliage_frame_is_present, COUNTER_PLACED_BLADES, COUNTER_PLACEMENT_OVERFLOW,
     COUNTER_VISIBLE_OVERFLOW, DEFAULT_WPO_EXTENT_METERS, FOLIAGE_COUNTER_COUNT,
     FOLIAGE_LOD_FADE_BAND_METERS, FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY,
-    MAX_BLADES_PER_TILE,
-    MAX_CANDIDATES_PER_TILE,
+    MAX_BLADES_PER_TILE, MAX_CANDIDATES_PER_TILE,
 };
 
 const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
@@ -756,7 +755,8 @@ impl FoliagePlacePass {
     /// is a perimeter strip and this is a handful of small writes.
     fn upload_tile_headers(&mut self, ctx: &PrepareContext, generation: u32) {
         self.dirty_scratch.clear();
-        self.dirty_scratch.extend_from_slice(self.ring.dirty_slots());
+        self.dirty_scratch
+            .extend_from_slice(self.ring.dirty_slots());
         if self.dirty_scratch.is_empty() {
             return;
         }
@@ -1011,8 +1011,7 @@ impl RenderPass for FoliagePlacePass {
         // Frame 0 has no pyramid, and an untouched depth texture reads back as 0.0, which
         // the near-is-0.0 convention would treat as "everything is occluded". Same guard
         // as `vg_cull.wgsl`, and the same reason.
-        let hiz_valid =
-            (ctx.frame_num > 0 && ctx.frame_resources.hiz.get().is_some()) as u32;
+        let hiz_valid = (ctx.frame_num > 0 && ctx.frame_resources.hiz.get().is_some()) as u32;
 
         ctx.write_buffer(
             &self.cull_uniforms,
@@ -1334,6 +1333,9 @@ mod tests {
         assert_eq!(TYPE_BYTES, 96);
         assert_eq!(LAYER_BYTES, 32);
         assert_eq!(MAX_FOLIAGE_TYPES, 256, "the 8-bit type id caps this");
-        assert_eq!(MAX_FOLIAGE_LAYERS, 64, "the fixed layer buffer is sized to this");
+        assert_eq!(
+            MAX_FOLIAGE_LAYERS, 64,
+            "the fixed layer buffer is sized to this"
+        );
     }
 }

@@ -3,10 +3,12 @@ use std::sync::Arc;
 use glam::Vec3;
 use nebula::prelude::{BakeContext, BakePass, NullReporter, SceneGeometry};
 
-use crate::cache::{BakeCache, CachedAo, CachedAtlasRegion, CachedLightmap, CachedProbes, CachedPvs};
+use crate::cache::{
+    BakeCache, CachedAo, CachedAtlasRegion, CachedLightmap, CachedProbes, CachedPvs,
+};
 use crate::config::BakeConfig;
-use crate::data::BakedData;
 use crate::cpu_lightmap;
+use crate::data::BakedData;
 
 // ── Error type ─────────────────────────────────────────────────────────────────
 
@@ -52,16 +54,20 @@ pub fn run_bake_blocking(
     cache.ensure_dir()?;
 
     // ── Determine which passes need work ──────────────────────────────────────
-    let need_ao      = config.ao.is_some()          && cache.load_ao()?.is_none();
-    let need_cpu_lm  = config.cpu_lightmap.is_some() && cache.load_lightmap()?.is_none();
-    let need_lm      = config.lightmap.is_some()     && cache.load_lightmap()?.is_none() && !need_cpu_lm;
-    let need_probes  = config.probes.is_some()       && cache.load_probes()?.is_none();
-    let need_pvs     = config.pvs.is_some()          && cache.load_pvs()?.is_none();
+    let need_ao = config.ao.is_some() && cache.load_ao()?.is_none();
+    let need_cpu_lm = config.cpu_lightmap.is_some() && cache.load_lightmap()?.is_none();
+    let need_lm = config.lightmap.is_some() && cache.load_lightmap()?.is_none() && !need_cpu_lm;
+    let need_probes = config.probes.is_some() && cache.load_probes()?.is_none();
+    let need_pvs = config.pvs.is_some() && cache.load_pvs()?.is_none();
 
     // ── CPU lightmap (our baker — no Nebula GPU context needed) ───────────────
     if need_cpu_lm {
         let cfg = config.cpu_lightmap.as_ref().unwrap();
-        log::info!("[helio-bake] CPU lightmap bake: {}×{} atlas…", cfg.resolution, cfg.resolution);
+        log::info!(
+            "[helio-bake] CPU lightmap bake: {}×{} atlas…",
+            cfg.resolution,
+            cfg.resolution
+        );
         let cached = cpu_lightmap::bake_lightmap(scene, cfg.resolution, cfg.ambient_fill);
         cache.save_lightmap(&cached)?;
         log::info!("[helio-bake] CPU lightmap done.");
@@ -79,7 +85,11 @@ pub fn run_bake_blocking(
     if need_ao || need_lm || need_probes || need_pvs {
         log::info!(
             "[helio-bake] Starting GPU bake for '{}' (ao={}, lightmap={}, probes={}, pvs={})",
-            config.scene_name, need_ao, need_lm, need_probes, need_pvs
+            config.scene_name,
+            need_ao,
+            need_lm,
+            need_probes,
+            need_pvs
         );
 
         pollster::block_on(async {
@@ -94,9 +104,15 @@ pub fn run_bake_blocking(
             // AO
             if need_ao {
                 let ao_cfg = config.ao.as_ref().unwrap();
-                log::info!("[helio-bake] Baking AO ({}×{}, {} rays)…",
-                    ao_cfg.resolution, ao_cfg.resolution, ao_cfg.ray_count);
-                let out = nebula::ao::AoBaker.execute(scene, ao_cfg, &ctx, &NullReporter).await?;
+                log::info!(
+                    "[helio-bake] Baking AO ({}×{}, {} rays)…",
+                    ao_cfg.resolution,
+                    ao_cfg.resolution,
+                    ao_cfg.ray_count
+                );
+                let out = nebula::ao::AoBaker
+                    .execute(scene, ao_cfg, &ctx, &NullReporter)
+                    .await?;
                 let cached = CachedAo {
                     width: out.width,
                     height: out.height,
@@ -109,19 +125,29 @@ pub fn run_bake_blocking(
             // Lightmap
             if need_lm {
                 let lm_cfg = config.lightmap.as_ref().unwrap();
-                log::info!("[helio-bake] Baking lightmap ({}×{}, {}spp)…",
-                    lm_cfg.resolution, lm_cfg.resolution, lm_cfg.samples_per_texel);
-                let out = nebula::light::LightmapBaker.execute(scene, lm_cfg, &ctx, &NullReporter).await?;
-                let regions: Vec<CachedAtlasRegion> = out.atlas_regions.iter().map(|r| {
-                    let bytes = r.mesh_id.as_bytes();
-                    let hi = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                    let lo = u64::from_le_bytes(bytes[8..].try_into().unwrap());
-                    CachedAtlasRegion {
-                        mesh_id: [hi, lo],
-                        uv_offset: r.uv_offset,
-                        uv_scale: r.uv_scale,
-                    }
-                }).collect();
+                log::info!(
+                    "[helio-bake] Baking lightmap ({}×{}, {}spp)…",
+                    lm_cfg.resolution,
+                    lm_cfg.resolution,
+                    lm_cfg.samples_per_texel
+                );
+                let out = nebula::light::LightmapBaker
+                    .execute(scene, lm_cfg, &ctx, &NullReporter)
+                    .await?;
+                let regions: Vec<CachedAtlasRegion> = out
+                    .atlas_regions
+                    .iter()
+                    .map(|r| {
+                        let bytes = r.mesh_id.as_bytes();
+                        let hi = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                        let lo = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+                        CachedAtlasRegion {
+                            mesh_id: [hi, lo],
+                            uv_offset: r.uv_offset,
+                            uv_scale: r.uv_scale,
+                        }
+                    })
+                    .collect();
                 let cached = CachedLightmap {
                     width: out.width,
                     height: out.height,
@@ -137,8 +163,12 @@ pub fn run_bake_blocking(
             // Probes
             if need_probes {
                 let spec = config.probes.as_ref().unwrap();
-                log::info!("[helio-bake] Baking {} probe(s) ({}px faces, {} mips)…",
-                    spec.positions.len(), spec.config.face_resolution, spec.config.specular_mip_levels);
+                log::info!(
+                    "[helio-bake] Baking {} probe(s) ({}px faces, {} mips)…",
+                    spec.positions.len(),
+                    spec.config.face_resolution,
+                    spec.config.specular_mip_levels
+                );
 
                 let mut all_face_data: Vec<u8> = Vec::new();
                 let mut bytes_per_probe = 0usize;
@@ -151,20 +181,24 @@ pub fn run_bake_blocking(
                 for (i, pos) in spec.positions.iter().enumerate() {
                     let pos_v = Vec3::from(*pos);
                     let (refl, irr) = nebula::probe::ProbeBaker::bake_at(
-                        pos_v, scene, &spec.config, &ctx, &NullReporter,
-                    ).await?;
+                        pos_v,
+                        scene,
+                        &spec.config,
+                        &ctx,
+                        &NullReporter,
+                    )
+                    .await?;
 
                     if i == 0 {
-                        bytes_per_probe  = refl.face_data.len();
-                        face_resolution  = refl.face_resolution;
-                        mip_levels       = refl.mip_levels;
-                        is_rgbe          = refl.is_rgbe;
+                        bytes_per_probe = refl.face_data.len();
+                        face_resolution = refl.face_resolution;
+                        mip_levels = refl.mip_levels;
+                        is_rgbe = refl.is_rgbe;
                     }
                     all_face_data.extend_from_slice(&refl.face_data);
 
-                    let sh: Vec<[f32; 3]> = irr.coefficients.iter()
-                        .map(|c| [c.r, c.g, c.b])
-                        .collect();
+                    let sh: Vec<[f32; 3]> =
+                        irr.coefficients.iter().map(|c| [c.r, c.g, c.b]).collect();
                     all_sh.push(sh);
                 }
 
@@ -184,9 +218,14 @@ pub fn run_bake_blocking(
             // PVS
             if need_pvs {
                 let pvs_cfg = config.pvs.as_ref().unwrap();
-                log::info!("[helio-bake] Baking PVS (cell_size={}, ray_budget={})…",
-                    pvs_cfg.cell_size, pvs_cfg.ray_budget);
-                let out = nebula::visibility::PvsBaker.execute(scene, pvs_cfg, &ctx, &NullReporter).await?;
+                log::info!(
+                    "[helio-bake] Baking PVS (cell_size={}, ray_budget={})…",
+                    pvs_cfg.cell_size,
+                    pvs_cfg.ray_budget
+                );
+                let out = nebula::visibility::PvsBaker
+                    .execute(scene, pvs_cfg, &ctx, &NullReporter)
+                    .await?;
                 let cached = CachedPvs {
                     world_min: out.world_min,
                     world_max: out.world_max,
@@ -203,14 +242,33 @@ pub fn run_bake_blocking(
             Ok::<(), BakeError>(())
         })?;
     } else {
-        log::info!("[helio-bake] All passes for '{}' loaded from cache.", config.scene_name);
+        log::info!(
+            "[helio-bake] All passes for '{}' loaded from cache.",
+            config.scene_name
+        );
     }
 
     // ── Upload cached data to Helio's GPU device ───────────────────────────────
-    let ao = if config.ao.is_some() { cache.load_ao()? } else { None };
-    let lm = if config.lightmap.is_some() { cache.load_lightmap()? } else { None };
-    let probes = if config.probes.is_some() { cache.load_probes()? } else { None };
-    let pvs = if config.pvs.is_some() { cache.load_pvs()? } else { None };
+    let ao = if config.ao.is_some() {
+        cache.load_ao()?
+    } else {
+        None
+    };
+    let lm = if config.lightmap.is_some() {
+        cache.load_lightmap()?
+    } else {
+        None
+    };
+    let probes = if config.probes.is_some() {
+        cache.load_probes()?
+    } else {
+        None
+    };
+    let pvs = if config.pvs.is_some() {
+        cache.load_pvs()?
+    } else {
+        None
+    };
 
     BakedData::upload_to_gpu(helio_device, helio_queue, ao, lm, probes, pvs)
 }

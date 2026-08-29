@@ -503,13 +503,21 @@ impl Renderer {
     /// Access the gbuffer template registry (preserved across graph rebuilds).
     /// Register custom surface templates here instead of through the pass
     /// directly to ensure they survive window resize.
-    pub fn template_registry_mut(&mut self) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.template_registry.write().unwrap_or_else(|e| e.into_inner())
+    pub fn template_registry_mut(
+        &mut self,
+    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
+        self.template_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Access the transparent template registry for alpha-blended materials.
-    pub fn transparent_template_registry_mut(&mut self) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.transparent_template_registry.write().unwrap_or_else(|e| e.into_inner())
+    pub fn transparent_template_registry_mut(
+        &mut self,
+    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
+        self.transparent_template_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Sync the renderer's template registries into the GpuScene so passes
@@ -588,7 +596,9 @@ impl Renderer {
 
     #[cfg(feature = "bake")]
     pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
-        let scene = self.scene.build_static_bake_scene(&self.device, &self.queue);
+        let scene = self
+            .scene
+            .build_static_bake_scene(&self.device, &self.queue);
         self.configure_bake(helio_bake::BakeRequest { scene, config });
     }
 
@@ -743,7 +753,11 @@ impl Renderer {
         }
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("IES Texture Array"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -764,7 +778,11 @@ impl Renderer {
                 bytes_per_row: Some(width),
                 rows_per_image: Some(height),
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         let view = tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),

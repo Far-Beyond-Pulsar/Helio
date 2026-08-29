@@ -157,7 +157,11 @@ struct CompositeUniforms {
 fn create_storage_texture(device: &wgpu::Device, label: &str, w: u32, h: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -171,7 +175,11 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -180,7 +188,11 @@ fn uniform_entry_vis(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::Bind
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -189,7 +201,11 @@ fn storage_read_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -211,13 +227,22 @@ fn sampled_tex_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::Bind
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         count: None,
     }
 }
 
 fn sampler_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry { binding, visibility, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None }
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
 }
 
 /// Compute-only: scene build → jump-flood distance field → cascade levels.
@@ -316,7 +341,12 @@ impl RadianceCascades2DPass {
         });
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Scene BGL"),
-            entries: &[uniform_entry(0), storage_read_entry(1), storage_read_entry(2), storage_tex_write_entry(3)],
+            entries: &[
+                uniform_entry(0),
+                storage_read_entry(1),
+                storage_read_entry(2),
+                storage_tex_write_entry(3),
+            ],
         });
         let scene_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC Scene PL"),
@@ -341,10 +371,22 @@ impl RadianceCascades2DPass {
             label: Some("RC Scene BG"),
             layout: &scene_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: scene_uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: occupancy_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: emitters_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&scene_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: scene_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: occupancy_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: emitters_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
             ],
         });
 
@@ -359,11 +401,23 @@ impl RadianceCascades2DPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&jfa_dims_buf, 0, bytemuck::bytes_of(&DimsUniform { dims: [scene_w as f32, scene_h as f32], _pad0: 0.0, _pad1: 0.0 }));
+        queue.write_buffer(
+            &jfa_dims_buf,
+            0,
+            bytemuck::bytes_of(&DimsUniform {
+                dims: [scene_w as f32, scene_h as f32],
+                _pad0: 0.0,
+                _pad1: 0.0,
+            }),
+        );
 
         let seed_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC JFA Seed BGL"),
-            entries: &[uniform_entry(0), sampled_tex_entry(1, wgpu::ShaderStages::COMPUTE), storage_tex_write_entry(2)],
+            entries: &[
+                uniform_entry(0),
+                sampled_tex_entry(1, wgpu::ShaderStages::COMPUTE),
+                storage_tex_write_entry(2),
+            ],
         });
         let seed_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC JFA Seed PL"),
@@ -383,15 +437,29 @@ impl RadianceCascades2DPass {
             label: Some("RC JFA Seed BG"),
             layout: &seed_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: jfa_dims_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scene_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&jfa_a_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: jfa_dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&jfa_a_view),
+                },
             ],
         });
 
         let step_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC JFA Step BGL"),
-            entries: &[uniform_entry(0), uniform_entry(1), sampled_tex_entry(2, wgpu::ShaderStages::COMPUTE), storage_tex_write_entry(3)],
+            entries: &[
+                uniform_entry(0),
+                uniform_entry(1),
+                sampled_tex_entry(2, wgpu::ShaderStages::COMPUTE),
+                storage_tex_write_entry(3),
+            ],
         });
         let step_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC JFA Step PL"),
@@ -417,23 +485,52 @@ impl RadianceCascades2DPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&buf, 0, bytemuck::bytes_of(&JfaUniform { offset, _pad0: 0.0, _pad1: 0.0, _pad2: 0.0 }));
-            let (input_view, output_view) = if i % 2 == 0 { (&jfa_a_view, &jfa_b_view) } else { (&jfa_b_view, &jfa_a_view) };
+            queue.write_buffer(
+                &buf,
+                0,
+                bytemuck::bytes_of(&JfaUniform {
+                    offset,
+                    _pad0: 0.0,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                }),
+            );
+            let (input_view, output_view) = if i % 2 == 0 {
+                (&jfa_a_view, &jfa_b_view)
+            } else {
+                (&jfa_b_view, &jfa_a_view)
+            };
             jfa_step_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("RC JFA Step BG"),
                 layout: &step_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: jfa_dims_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(input_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(output_view) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: jfa_dims_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(input_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(output_view),
+                    },
                 ],
             }));
         }
         // After `jfa_passes` alternating writes starting from "seed wrote A,
         // pass 0 writes B", the final write lands in B if `jfa_passes` is
         // odd, A if even.
-        let jfa_final_view = if jfa_passes % 2 == 0 { &jfa_a_view } else { &jfa_b_view };
+        let jfa_final_view = if jfa_passes % 2 == 0 {
+            &jfa_a_view
+        } else {
+            &jfa_b_view
+        };
 
         // ── Distance field ──────────────────────────────────────────────
         let dist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -442,7 +539,11 @@ impl RadianceCascades2DPass {
         });
         let dist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Distance BGL"),
-            entries: &[uniform_entry(0), sampled_tex_entry(1, wgpu::ShaderStages::COMPUTE), storage_tex_write_entry(2)],
+            entries: &[
+                uniform_entry(0),
+                sampled_tex_entry(1, wgpu::ShaderStages::COMPUTE),
+                storage_tex_write_entry(2),
+            ],
         });
         let dist_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC Distance PL"),
@@ -461,9 +562,18 @@ impl RadianceCascades2DPass {
             label: Some("RC Distance BG"),
             layout: &dist_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: jfa_dims_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(jfa_final_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dist_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: jfa_dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(jfa_final_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&dist_view),
+                },
             ],
         });
 
@@ -503,13 +613,24 @@ impl RadianceCascades2DPass {
         // therefore always the *other* texture from this iteration's own
         // output, except the very first iteration (the top cascade), which
         // has no coarser level to merge and reads an unused 1x1 dummy.
-        let mut cascade_bind_groups: Vec<Option<wgpu::BindGroup>> = (0..cascade_count).map(|_| None).collect();
+        let mut cascade_bind_groups: Vec<Option<wgpu::BindGroup>> =
+            (0..cascade_count).map(|_| None).collect();
         for k in 0..cascade_count {
             let i = cascade_count - 1 - k;
             let is_top = i == cascade_count - 1;
             let out_is_a = k % 2 == 0;
-            let out_view = if out_is_a { &cascade_a_view } else { &cascade_b_view };
-            let last_view = if is_top { &dummy_last_view } else if out_is_a { &cascade_b_view } else { &cascade_a_view };
+            let out_view = if out_is_a {
+                &cascade_a_view
+            } else {
+                &cascade_b_view
+            };
+            let last_view = if is_top {
+                &dummy_last_view
+            } else if out_is_a {
+                &cascade_b_view
+            } else {
+                &cascade_a_view
+            };
 
             let cu = CascadeUniforms {
                 cascade_index: i as f32,
@@ -532,26 +653,52 @@ impl RadianceCascades2DPass {
             });
             queue.write_buffer(&buf, 0, bytemuck::bytes_of(&cu));
 
-            cascade_bind_groups[i as usize] = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("RC Cascade BG"),
-                layout: &cascade_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scene_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dist_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(last_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(out_view) },
-                ],
-            }));
+            cascade_bind_groups[i as usize] =
+                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("RC Cascade BG"),
+                    layout: &cascade_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&scene_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&dist_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(last_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(out_view),
+                        },
+                    ],
+                }));
         }
-        let cascade_bind_groups: Vec<wgpu::BindGroup> = cascade_bind_groups.into_iter().map(|o| o.unwrap()).collect();
+        let cascade_bind_groups: Vec<wgpu::BindGroup> = cascade_bind_groups
+            .into_iter()
+            .map(|o| o.unwrap())
+            .collect();
 
         // Final iteration is k = cascade_count-1 (i = 0); its output parity
         // tells us which physical texture holds the finished cascade-0
         // result.
         let cascade_final_is_a = (cascade_count - 1) % 2 == 0;
-        let final_radiance_view = if cascade_final_is_a { cascade_a_view } else { cascade_b_view };
+        let final_radiance_view = if cascade_final_is_a {
+            cascade_a_view
+        } else {
+            cascade_b_view
+        };
 
         Self {
             scene_w,
@@ -639,31 +786,46 @@ impl RenderPass for RadianceCascades2DPass {
         let wg_y = dispatch_count(self.scene_h);
 
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("RC Scene Build"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC Scene Build"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.scene_pipeline);
             pass.set_bind_group(0, &self.scene_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("RC JFA Seed"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC JFA Seed"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.seed_pipeline);
             pass.set_bind_group(0, &self.seed_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         for bg in &self.jfa_step_bind_groups {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("RC JFA Step"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC JFA Step"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.step_pipeline);
             pass.set_bind_group(0, bg, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("RC Distance Field"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC Distance Field"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.dist_pipeline);
             pass.set_bind_group(0, &self.dist_bind_group, &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         for i in (0..self.cascade_count).rev() {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("RC Cascade"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC Cascade"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.cascade_pipeline);
             pass.set_bind_group(0, &self.cascade_bind_groups[i as usize], &[]);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
@@ -711,7 +873,11 @@ impl RadianceCascadesCompositePass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&CompositeUniforms { ambient, exposure }));
+        queue.write_buffer(
+            &uniform_buf,
+            0,
+            bytemuck::bytes_of(&CompositeUniforms { ambient, exposure }),
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("RC Composite Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -726,9 +892,18 @@ impl RadianceCascadesCompositePass {
             label: Some("RC Composite BG"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(radiance_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(radiance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -739,7 +914,12 @@ impl RadianceCascadesCompositePass {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("RC Composite Pipeline"),
             layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default() },
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
@@ -748,21 +928,36 @@ impl RadianceCascadesCompositePass {
                     // Multiply blend against the existing target contents —
                     // no framebuffer texture read needed.
                     blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Dst, dst_factor: wgpu::BlendFactor::Zero, operation: wgpu::BlendOperation::Add },
-                        alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::Zero, operation: wgpu::BlendOperation::Add },
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Dst,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
         });
 
-        Self { pipeline, bind_group }
+        Self {
+            pipeline,
+            bind_group,
+        }
     }
 }
 
@@ -782,7 +977,10 @@ impl RenderPass for RadianceCascadesCompositePass {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("RC Composite Pass"),

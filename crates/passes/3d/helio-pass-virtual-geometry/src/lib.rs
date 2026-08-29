@@ -39,8 +39,14 @@ impl VirtualGeometryDebugStats {
     }
 
     pub fn selected_lod_range(self) -> Option<(u32, u32)> {
-        let first = self.lod_object_counts.iter().position(|&count| count != 0)? as u32;
-        let last = self.lod_object_counts.iter().rposition(|&count| count != 0)? as u32;
+        let first = self
+            .lod_object_counts
+            .iter()
+            .position(|&count| count != 0)? as u32;
+        let last = self
+            .lod_object_counts
+            .iter()
+            .rposition(|&count| count != 0)? as u32;
         Some((first, last))
     }
 
@@ -305,8 +311,8 @@ pub(crate) struct CullUniforms {
 #[cfg(test)]
 mod tests {
     use super::{
-        select_object_lod, CullUniforms, InstanceCullData, LodQuality,
-        VirtualGeometryBudget, VirtualGeometryDebugStats, DEFAULT_MAX_PUBLISHED_MESHLETS,
+        select_object_lod, CullUniforms, InstanceCullData, LodQuality, VirtualGeometryBudget,
+        VirtualGeometryDebugStats, DEFAULT_MAX_PUBLISHED_MESHLETS,
     };
     use helio_core::GpuInstanceData;
 
@@ -332,10 +338,16 @@ mod tests {
     #[test]
     fn default_publication_budget_is_144_mib_plus_counters() {
         let budget = VirtualGeometryBudget::default();
-        assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
+        assert_eq!(
+            budget.max_published_meshlets(),
+            DEFAULT_MAX_PUBLISHED_MESHLETS
+        );
         assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 48);
         assert_eq!(budget.clamp_draw_count(65_536), 65_536);
-        assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
+        assert_eq!(
+            budget.clamp_draw_count(u32::MAX),
+            DEFAULT_MAX_PUBLISHED_MESHLETS
+        );
     }
 
     #[test]
@@ -380,7 +392,11 @@ mod tests {
         assert_eq!(cull.cull_flags >> 1 & 1, 1, "no flags = opaque");
 
         let cull_alpha = InstanceCullData::from_instance(&instance, 1 << 2);
-        assert_eq!(cull_alpha.cull_flags >> 1 & 1, 0, "FLAG_ALPHA_TEST clears opaque");
+        assert_eq!(
+            cull_alpha.cull_flags >> 1 & 1,
+            0,
+            "FLAG_ALPHA_TEST clears opaque"
+        );
     }
 
     #[test]
@@ -434,10 +450,9 @@ mod tests {
 
     #[test]
     fn debug_stats_decode_the_gpu_counter_layout() {
-        let stats = VirtualGeometryDebugStats::from_counters(&[
-            100, 23, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6,
-        ])
-        .expect("complete counter layout");
+        let stats =
+            VirtualGeometryDebugStats::from_counters(&[100, 23, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6])
+                .expect("complete counter layout");
 
         assert_eq!(stats.visible_meshlets, 123);
         assert_eq!(stats.rejected_meshlets, 4);

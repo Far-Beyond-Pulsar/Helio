@@ -437,16 +437,50 @@ impl RenderPass for VolumetricFogPass {
                     label: Some("Volumetric Fog Inject BG"),
                     layout: &self.inject_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.fog_uniform_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.globals_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: lights_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: shadow_matrices.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(shadow_atlas) },
-                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.scatter_view[history_idx]) },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.scatter_view[write_idx]) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: camera_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.fog_uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.globals_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: lights_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: shadow_matrices.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(shadow_atlas),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.scatter_view[history_idx],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.scatter_view[write_idx],
+                            ),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 10,
                             resource: wgpu::BindingResource::TextureView(&depth_view),
@@ -460,8 +494,14 @@ impl RenderPass for VolumetricFogPass {
                 label: Some("Volumetric Fog Integrate Group0 BG"),
                 layout: &self.integrate_g0_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.fog_uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.fog_uniform_buf.as_entire_binding(),
+                    },
                 ],
             }));
         }

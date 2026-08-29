@@ -72,19 +72,26 @@ pub enum ResourceSize {
     MatchSurface,
     /// Match the full output/display resolution
     Output,
-    Absolute { width: u32, height: u32 },
+    Absolute {
+        width: u32,
+        height: u32,
+    },
     /// Output resolution divided by `divisor`.
     ///
     /// Note this divides the *output* resolution, not the internal one. An effect
     /// buffer that gets sampled alongside `depth` or the gbuffer almost certainly
     /// wants [`ScaledInternal`](Self::ScaledInternal) instead — those live at the
     /// internal resolution, which differs from output whenever render_scale != 1.
-    Scaled { divisor: u32 },
+    Scaled {
+        divisor: u32,
+    },
     /// Internal render resolution divided by `divisor`.
     ///
     /// The right choice for reduced-resolution effect buffers that pair with
     /// internal-resolution inputs (depth, gbuffer), since it scales with them.
-    ScaledInternal { divisor: u32 },
+    ScaledInternal {
+        divisor: u32,
+    },
 }
 
 /// Resource access mode.
@@ -149,7 +156,12 @@ impl ResourceBuilder {
     }
 
     /// Write a color texture using a raw `wgpu::TextureFormat`.
-    pub fn write_color_raw(&mut self, name: &'static str, format: wgpu::TextureFormat, size: ResourceSize) {
+    pub fn write_color_raw(
+        &mut self,
+        name: &'static str,
+        format: wgpu::TextureFormat,
+        size: ResourceSize,
+    ) {
         self.write_color(name, ResourceFormat::from(format), size);
     }
 
@@ -254,11 +266,7 @@ impl GraphTexturePool {
     }
 
     /// Allocate a texture. If `alias_group` matches a released texture, reuses it.
-    pub fn allocate(
-        &mut self,
-        device: &wgpu::Device,
-        desc: TextureDescriptor,
-    ) -> &GraphTexture {
+    pub fn allocate(&mut self, device: &wgpu::Device, desc: TextureDescriptor) -> &GraphTexture {
         let array_layers = if self.xr_active {
             desc.depth_or_array_layers.max(1).max(2)
         } else {
@@ -293,7 +301,11 @@ impl GraphTexturePool {
         };
 
         let idx = self.textures.len();
-        self.textures.push(GraphTexture { texture, view, desc: desc.clone() });
+        self.textures.push(GraphTexture {
+            texture,
+            view,
+            desc: desc.clone(),
+        });
         self.name_map.insert(desc.name.clone(), idx);
 
         if let Some(group) = &desc.alias_group {
@@ -308,7 +320,9 @@ impl GraphTexturePool {
     }
 
     pub fn get_texture(&self, name: &str) -> Option<&wgpu::Texture> {
-        self.name_map.get(name).map(|&idx| &self.textures[idx].texture)
+        self.name_map
+            .get(name)
+            .map(|&idx| &self.textures[idx].texture)
     }
 
     /// Release a texture in an alias group, decrementing its ref count.
@@ -340,7 +354,13 @@ pub struct ResourceAllocator {
 
 impl ResourceAllocator {
     pub fn new(internal_w: u32, internal_h: u32, output_w: u32, output_h: u32) -> Self {
-        Self { pool: GraphTexturePool::new(), internal_w, internal_h, output_w, output_h }
+        Self {
+            pool: GraphTexturePool::new(),
+            internal_w,
+            internal_h,
+            output_w,
+            output_h,
+        }
     }
 
     pub fn allocate(&mut self, device: &wgpu::Device, desc: TextureDescriptor) -> &GraphTexture {
@@ -348,29 +368,54 @@ impl ResourceAllocator {
     }
 
     pub fn allocate_color(
-        &mut self, device: &wgpu::Device, name: &'static str,
-        format: wgpu::TextureFormat, size: ResSize, alias_group: Option<&'static str>,
+        &mut self,
+        device: &wgpu::Device,
+        name: &'static str,
+        format: wgpu::TextureFormat,
+        size: ResSize,
+        alias_group: Option<&'static str>,
     ) -> &GraphTexture {
         let (w, h) = self.resolve_size(size);
-        self.allocate(device, TextureDescriptor {
-            name: name.to_string(), format, width: w, height: h,
-            depth_or_array_layers: 1, mip_level_count: 1, sample_count: 1,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            alias_group: alias_group.map(|s| s.to_string()),
-        })
+        self.allocate(
+            device,
+            TextureDescriptor {
+                name: name.to_string(),
+                format,
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                alias_group: alias_group.map(|s| s.to_string()),
+            },
+        )
     }
 
     pub fn allocate_depth(
-        &mut self, device: &wgpu::Device, name: &'static str,
-        size: ResSize, alias_group: Option<&'static str>,
+        &mut self,
+        device: &wgpu::Device,
+        name: &'static str,
+        size: ResSize,
+        alias_group: Option<&'static str>,
     ) -> &GraphTexture {
         let (w, h) = self.resolve_size(size);
-        self.allocate(device, TextureDescriptor {
-            name: name.to_string(), format: wgpu::TextureFormat::Depth32Float, width: w, height: h,
-            depth_or_array_layers: 1, mip_level_count: 1, sample_count: 1,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            alias_group: alias_group.map(|s| s.to_string()),
-        })
+        self.allocate(
+            device,
+            TextureDescriptor {
+                name: name.to_string(),
+                format: wgpu::TextureFormat::Depth32Float,
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                alias_group: alias_group.map(|s| s.to_string()),
+            },
+        )
     }
 
     fn resolve_size(&self, size: ResSize) -> (u32, u32) {

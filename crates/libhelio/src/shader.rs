@@ -142,7 +142,9 @@ fn sample_decal_texture(texture_index: u32, uv: vec2<f32>) -> vec4<f32> {
         // Samplers follow the textures: base = max_textures.
         assert!(fixed.contains("@group(1) @binding(2) var scene_sampler_0"));
         assert!(fixed.contains("@group(1) @binding(3) var scene_sampler_1"));
-        assert!(fixed.contains("case 1u: { return textureSampleLevel(scene_texture_1, scene_sampler_1, uv, 0.0); }"));
+        assert!(fixed.contains(
+            "case 1u: { return textureSampleLevel(scene_texture_1, scene_sampler_1, uv, 0.0); }"
+        ));
         assert!(fixed.contains("default: { return vec4<f32>(1.0); }"));
     }
 }

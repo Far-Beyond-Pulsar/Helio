@@ -165,12 +165,12 @@ impl ForwardLitPass {
         let wgsl_source: &'static str = if base_src_raw.contains("//!use pbr_eval") {
             // Insert PBR_EVAL after the `enable` directive (must come before
             // any declarations in WGSL but after the enable line).
-            let insert_pos = base_src_raw.find("enable ").and_then(|i| {
-                base_src_raw[i..].find(';').map(|j| i + j + 1)
-            }).unwrap_or(0);
-            let mut resolved = String::with_capacity(
-                base_src_raw.len() + libhelio::shader::PBR_EVAL.len(),
-            );
+            let insert_pos = base_src_raw
+                .find("enable ")
+                .and_then(|i| base_src_raw[i..].find(';').map(|j| i + j + 1))
+                .unwrap_or(0);
+            let mut resolved =
+                String::with_capacity(base_src_raw.len() + libhelio::shader::PBR_EVAL.len());
             resolved.push_str(&base_src_raw[..insert_pos]);
             resolved.push('\n');
             resolved.push_str(libhelio::shader::PBR_EVAL);
@@ -223,12 +223,18 @@ impl ForwardLitPass {
                 None
             };
             let guard = shared_arc.as_ref().map(|a| a.read().unwrap());
-            let template = guard.as_ref().and_then(|g| g.get(key.template_id)).unwrap_or_else(|| {
-                if key.template_id >= 5 {
-                    log::debug!("[ForwardLit] template class {} not found, falling back to class 0", key.template_id);
-                }
-                &self.local_class0
-            });
+            let template = guard
+                .as_ref()
+                .and_then(|g| g.get(key.template_id))
+                .unwrap_or_else(|| {
+                    if key.template_id >= 5 {
+                        log::debug!(
+                            "[ForwardLit] template class {} not found, falling back to class 0",
+                            key.template_id
+                        );
+                    }
+                    &self.local_class0
+                });
             let module = self.shader_cache.get_or_compile(
                 device,
                 key,
@@ -368,7 +374,11 @@ impl RenderPass for ForwardLitPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: if self.render_all_opaque { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load },
+                    load: if self.render_all_opaque {
+                        wgpu::LoadOp::Clear(1.0)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -423,7 +433,11 @@ impl RenderPass for ForwardLitPass {
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
-        let transforms_ptr = ctx.scene.transforms.map(|b| b as *const _ as usize).unwrap_or(0);
+        let transforms_ptr = ctx
+            .scene
+            .transforms
+            .map(|b| b as *const _ as usize)
+            .unwrap_or(0);
 
         let cluster = ctx.resources.cluster_light_grid.get();
         let tile_lists_ptr = cluster
@@ -540,10 +554,7 @@ impl RenderPass for ForwardLitPass {
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        pass.set_index_buffer(
-            ms.mesh_buffers.indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        pass.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
 
         if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
             if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
@@ -574,7 +585,8 @@ impl RenderPass for ForwardLitPass {
                 graph_hash: 0,
                 feature_flags: if self.render_all_opaque { 1 } else { 0 },
             };
-            let pipeline = self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
+            let pipeline =
+                self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
             pass.set_pipeline(pipeline);
             #[cfg(not(target_arch = "wasm32"))]
             pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
@@ -601,7 +613,12 @@ impl RenderPass for ForwardLitPass {
                     .get(&graph_hash)
                     .map(|s| s.as_str())
                     .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl, self.render_all_opaque);
+                let pipeline = self.get_or_create_pipeline(
+                    &ctx.device,
+                    key,
+                    graph_wgsl,
+                    self.render_all_opaque,
+                );
                 pass.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 pass.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);

@@ -37,8 +37,8 @@ pub use context::{create_wgpu_device, create_wgpu_instance};
 pub use error::XrError;
 pub use graphics::WgpuGraphics;
 pub use input::{ControllerState, XrInput};
-pub use openxr::Time;
 pub use instance::XrInstance;
+pub use openxr::Time;
 pub use session::{LocatedViews, SessionEvent, XrSession};
 pub use swapchain::XrSwapchain;
 

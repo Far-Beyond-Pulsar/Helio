@@ -109,7 +109,12 @@ pub const DRAW_INDIRECT_STRIDE: u64 = 16;
 /// recoverable; an undefined index into the tile table is not.
 #[inline]
 pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
-    blade_index / if blades_per_tile == 0 { 1 } else { blades_per_tile }
+    blade_index
+        / if blades_per_tile == 0 {
+            1
+        } else {
+            blades_per_tile
+        }
 }
 
 // ── Packed `visible_blades[]` entry ─────────────────────────────────────────────
@@ -555,8 +560,7 @@ impl FoliageGBufferPass {
         // the two sides to disagree. `max(1)` keeps a degenerate (test-sized) buffer
         // from producing a zero stride that silently aliases all four regions onto
         // region 0.
-        let region_stride =
-            ((visible_blades.size() / (LOD_COUNT as u64 * 4)) as u32).max(1);
+        let region_stride = ((visible_blades.size() / (LOD_COUNT as u64 * 4)) as u32).max(1);
 
         // ── Buffers ───────────────────────────────────────────────────────────
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -840,7 +844,10 @@ impl FoliageGBufferPass {
     ///
     /// Public so the LOD ladder's vertex counts can be asserted against
     /// [`LOD_VERTEX_COUNTS`] without a GPU.
-    pub fn lod_uniforms(region_stride: u32, cluster_granularity: u32) -> [FoliageLodUniform; LOD_COUNT] {
+    pub fn lod_uniforms(
+        region_stride: u32,
+        cluster_granularity: u32,
+    ) -> [FoliageLodUniform; LOD_COUNT] {
         // The clump card's width is a *coverage* quantity, not a style choice, so it is
         // derived rather than hardcoded. The producer emits one L3 card per cluster, so
         // that card stands in for `cluster_granularity` blades and must cover their
@@ -1033,7 +1040,11 @@ impl RenderPass for FoliageGBufferPass {
 
         // ── Per-LOD constants (once) ──────────────────────────────────────────
         if !self.lod_uniforms_written {
-            for (lod, uniform) in Self::lod_uniforms(self.region_stride, self.quality.cluster_granularity()).iter().enumerate() {
+            for (lod, uniform) in
+                Self::lod_uniforms(self.region_stride, self.quality.cluster_granularity())
+                    .iter()
+                    .enumerate()
+            {
                 ctx.write_buffer(
                     &self.lod_buf,
                     lod as u64 * LOD_UNIFORM_STRIDE as u64,
@@ -1058,8 +1069,15 @@ impl RenderPass for FoliageGBufferPass {
         let globals = FoliageGlobals {
             screen_size: [ctx.width as f32, ctx.height as f32],
             frame: ctx.frame_num as u32,
-            flags: if interaction_valid { FLAG_INTERACTION_VALID } else { 0 }
-                | if debug_lod_enabled() { FLAG_DEBUG_LOD } else { 0 },
+            flags: if interaction_valid {
+                FLAG_INTERACTION_VALID
+            } else {
+                0
+            } | if debug_lod_enabled() {
+                FLAG_DEBUG_LOD
+            } else {
+                0
+            },
             camera_ring: [0.0, 0.0, 0.0, self.quality.ring_radius()],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.

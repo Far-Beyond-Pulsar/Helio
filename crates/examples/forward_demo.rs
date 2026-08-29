@@ -9,7 +9,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneActor,
 };
 use helio_default_graphs::build_forward_opaque_graph;
 use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
@@ -157,15 +158,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_forward_opaque_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_forward_opaque_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_editor_mode(true);
 
@@ -177,23 +198,80 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
-        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4))).as_mesh().unwrap();
-        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3))).as_mesh().unwrap();
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0))).as_mesh().unwrap();
+        let cube1 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .as_mesh()
+            .unwrap();
+        let cube2 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
+            .as_mesh()
+            .unwrap();
+        let cube3 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
+            .as_mesh()
+            .unwrap();
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
+            .as_mesh()
+            .unwrap();
 
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::from_translation(glam::Vec3::new( 2.0,  0.3,  0.5)), 0.3);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube1,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
+            0.5,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube2,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
+            0.4,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube3,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
+            0.3,
+        );
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0))).as_light().unwrap();
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0)));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0)));
+        let light_p0_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                p0_init,
+                [1.0, 0.55, 0.15],
+                6.0,
+                5.0,
+            )))
+            .as_light()
+            .unwrap();
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                p1,
+                [0.25, 0.5, 1.0],
+                5.0,
+                6.0,
+            )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                p2,
+                [1.0, 0.3, 0.5],
+                5.0,
+                6.0,
+            )));
         self.state = Some(AppState {
             window,
             surface,

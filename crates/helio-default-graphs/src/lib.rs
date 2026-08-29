@@ -3,16 +3,17 @@ use std::sync::Arc;
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
 use helio::RendererConfig;
+use helio_foliage_core::FoliageQuality;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
-use helio_foliage_core::FoliageQuality;
-use helio_pass_flare::LensFlarePass;
-use helio_pass_forward_lit::ForwardLitPass;
-use helio_pass_foliage_gbuffer::FoliageGBufferPass;
-use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
+use helio_pass_dof::DofPass;
+use helio_pass_flare::LensFlarePass;
+use helio_pass_foliage_gbuffer::FoliageGBufferPass;
+use helio_pass_foliage_place::FoliagePlacePass;
+use helio_pass_forward_lit::ForwardLitPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_hiz::HiZBuildPass;
@@ -24,12 +25,11 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_portal_cull::PortalCullPass;
-use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
-use helio_pass_dof::DofPass;
 use helio_pass_planetary_voxel::{
     PlanetaryRenderError, PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass,
 };
+use helio_pass_portal_cull::PortalCullPass;
+use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
@@ -233,13 +233,15 @@ fn add_geometry_passes(
     // check and depth self-occlusion both have something correct to test
     // against. See helio-pass-portal-instances' shaders for why this exists.
     if config.enable_portals {
-        if let Some((indirect_buf, compacted_buf, compacted_chains_buf)) = graph.find_pass::<PortalCullPass>().map(|p| {
-            (
-                Arc::clone(&p.portal_indirect_buf),
-                Arc::clone(&p.portal_compacted_indices_buf),
-                Arc::clone(&p.portal_compacted_chains_buf),
-            )
-        }) {
+        if let Some((indirect_buf, compacted_buf, compacted_chains_buf)) =
+            graph.find_pass::<PortalCullPass>().map(|p| {
+                (
+                    Arc::clone(&p.portal_indirect_buf),
+                    Arc::clone(&p.portal_compacted_indices_buf),
+                    Arc::clone(&p.portal_compacted_chains_buf),
+                )
+            })
+        {
             graph.add_pass(Box::new(PortalMaskPass::new(device)));
             graph.add_pass(Box::new(PortalInstancePass::new(
                 device,
@@ -340,7 +342,10 @@ fn add_late_passes(
     // editor/game-mode toggle. See that pass's docs for why it isn't wired to
     // `Renderer::is_editor_mode()` automatically.
     if config.enable_portals {
-        graph.add_pass(Box::new(PortalEditorOverlayPass::new(device, config.surface_format)));
+        graph.add_pass(Box::new(PortalEditorOverlayPass::new(
+            device,
+            config.surface_format,
+        )));
     }
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
@@ -663,7 +668,12 @@ fn build_default_graph_internal(
     // Transparent pass — alpha-blended geometry (simple fixed shader).
     let camera_buf = scene.gpu_scene().camera.buffer();
     let instances_buf = scene.gpu_scene().instances.buffer();
-    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
+        device,
+        camera_buf,
+        instances_buf,
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,
@@ -706,7 +716,11 @@ fn build_default_graph_internal(
     // Cinematic bokeh DOF — runs after the main uber-shader, reads "pre_dof"
     // (written by PostProcessPass) and writes the final output to ctx.target.
     graph.add_pass(Box::new(DofPass::new(
-        device, queue, config.width, config.height, config.surface_format,
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
     )));
 
     add_final_passes(
@@ -1407,7 +1421,12 @@ fn build_forward_graph_internal(
     // Transparent pass — alpha-blended geometry (simple fixed shader).
     let camera_buf = scene.gpu_scene().camera.buffer();
     let instances_buf = scene.gpu_scene().instances.buffer();
-    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
+        device,
+        camera_buf,
+        instances_buf,
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,

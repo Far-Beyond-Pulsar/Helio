@@ -3,9 +3,9 @@ use helio_voxel_core::{
     GpuVoxelEdit, GpuVoxelMaterial, GpuVoxelVolume, VoxelEdit, VoxelOctree, EDIT_RING_CAPACITY,
 };
 
+use super::types::VoxelVolumeDescriptor;
 use crate::handles::VoxelVolumeId;
 use helio_core::GpuScene;
-use super::types::VoxelVolumeDescriptor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelMode {
@@ -14,7 +14,9 @@ pub enum VoxelMode {
 }
 
 impl Default for VoxelMode {
-    fn default() -> Self { VoxelMode::Auto }
+    fn default() -> Self {
+        VoxelMode::Auto
+    }
 }
 
 #[derive(Debug)]
@@ -33,11 +35,7 @@ pub struct VoxelVolumeRecord {
 }
 
 impl VoxelVolumeRecord {
-    pub fn new(
-        id: VoxelVolumeId,
-        gpu_slot: u32,
-        descriptor: &VoxelVolumeDescriptor,
-    ) -> Self {
+    pub fn new(id: VoxelVolumeId, gpu_slot: u32, descriptor: &VoxelVolumeDescriptor) -> Self {
         let octree = VoxelOctree::new(descriptor.voxel_size, descriptor.root_extent);
         Self {
             id,
@@ -46,7 +44,9 @@ impl VoxelVolumeRecord {
             meshlet_offset: 0,
             meshlet_count: 0,
             local_to_world: descriptor.local_to_world,
-            movability: descriptor.movability.unwrap_or(libhelio::Movability::Static),
+            movability: descriptor
+                .movability
+                .unwrap_or(libhelio::Movability::Static),
             mode: descriptor.mode.unwrap_or(VoxelMode::Auto),
             edit_cooldown: 0,
             dirty: true,
@@ -105,11 +105,7 @@ impl VoxelVolumeRecord {
     }
 
     pub fn edit(&mut self, edit: &VoxelEdit) {
-        let center = [
-            edit.center.x,
-            edit.center.y,
-            edit.center.z,
-        ];
+        let center = [edit.center.x, edit.center.y, edit.center.z];
         self.octree.root.mark_sphere_dirty(center, edit.radius);
         self.dirty = true;
         self.edit_cooldown = 0;

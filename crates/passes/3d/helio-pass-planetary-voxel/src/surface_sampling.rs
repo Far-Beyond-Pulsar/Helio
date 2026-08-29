@@ -1,11 +1,11 @@
 use crate::{
-    EXTRACTION_SAMPLE_COUNT, PlanetaryVoxelResidency, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
-    TRANSITION_FACE_SAMPLE_EDGE, transition_face_integer_basis,
+    transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{
-    AddressError, GpuPageMeta, PAGE_EDGE, PageKey, PlanetId, PlanetPageKey, SourceGeneration,
-    TRANSITION_FACE_MASK, TransitionFace,
+    AddressError, GpuPageMeta, PageKey, PlanetId, PlanetPageKey, SourceGeneration, TransitionFace,
+    PAGE_EDGE, TRANSITION_FACE_MASK,
 };
 use std::collections::BTreeSet;
 
@@ -467,7 +467,7 @@ pub enum SurfaceSamplingError {
 mod tests {
     use super::*;
     use helio_planet_voxel_core::{
-        CellWord, PAGE_CELL_COUNT, PageUpload, PlanetFrameUniform, PlanetPosition,
+        CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
     };
     use std::sync::mpsc;
 

@@ -63,7 +63,7 @@ impl Scene {
     /// These reflect the GPU buffer occupancy (unique geometry, not instanced totals).
     pub fn mesh_stats(&self) -> (usize, usize, usize) {
         let verts = self.mesh_pool.total_vertex_count();
-        let tris  = self.mesh_pool.total_index_count() / 3;
+        let tris = self.mesh_pool.total_index_count() / 3;
         let meshes = self.mesh_pool.unique_mesh_count();
         (verts, tris, meshes)
     }
@@ -77,7 +77,9 @@ impl Scene {
         let mut drawn_verts: usize = 0;
         let mut drawn_tris: usize = 0;
         for i in 0..self.objects.dense_len() {
-            let Some(obj) = self.objects.get_dense(i) else { continue };
+            let Some(obj) = self.objects.get_dense(i) else {
+                continue;
+            };
             drawn_tris += (obj.draw.index_count / 3) as usize;
             if let Some(rec) = self.mesh_pool.get(obj.mesh) {
                 drawn_verts += rec.slice.vertex_count as usize;

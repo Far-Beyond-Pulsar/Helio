@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use crate::common::{insert_object, make_material, plane_mesh};
 use glam::Vec3;
 use helio::{Camera, Renderer, TonemapOperator};
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use crate::common::{make_material, plane_mesh, insert_object};
+use std::sync::Arc;
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
@@ -17,17 +17,31 @@ pub struct Demo {
 }
 
 impl HelioWasmApp for Demo {
-    fn title() -> &'static str { "Helio — IES Light Profiles" }
+    fn title() -> &'static str {
+        "Helio — IES Light Profiles"
+    }
 
-    fn render_scale() -> f32 { 1.0 }
+    fn render_scale() -> f32 {
+        1.0
+    }
 
-    fn init(renderer: &mut Renderer, device: Arc<wgpu::Device>,
-            queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
+    fn init(
+        renderer: &mut Renderer,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        _w: u32,
+        _h: u32,
+    ) -> Self {
         let floor_mat = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.15, 0.16, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.15, 0.15, 0.16, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
-        let ground = renderer.scene_mut().insert_actor(
-            helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
         let _ = insert_object(renderer, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
 
         let light_ids: [helio::LightId; 3] = std::array::from_fn(|i| {
@@ -53,7 +67,11 @@ impl HelioWasmApp for Demo {
                 1 => 0.92,
                 _ => 0.80,
             };
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(light)).as_light().unwrap()
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(light))
+                .as_light()
+                .unwrap()
         });
 
         // Upload a 2-layer IES texture array
@@ -77,24 +95,55 @@ impl HelioWasmApp for Demo {
         }
         let ies_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Demo IES Textures"),
-            size: wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 2 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &ies_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
             &ies_pixels[..(IES_W * IES_H) as usize],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
-            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(IES_W),
+                rows_per_image: Some(IES_H),
+            },
+            wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 1,
+            },
         );
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &ies_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 1 },
+                aspect: wgpu::TextureAspect::All,
+            },
             &ies_pixels[(IES_W * IES_H) as usize..],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
-            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(IES_W),
+                rows_per_image: Some(IES_H),
+            },
+            wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 1,
+            },
         );
         let ies_view = ies_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -112,8 +161,13 @@ impl HelioWasmApp for Demo {
         }
     }
 
-    fn update(&mut self, renderer: &mut Renderer, dt: f32,
-              _elapsed: f32, input: &InputState) -> Camera {
+    fn update(
+        &mut self,
+        renderer: &mut Renderer,
+        dt: f32,
+        _elapsed: f32,
+        input: &InputState,
+    ) -> Camera {
         self.cam_yaw += input.mouse_delta.0 * LOOK_SENS;
         self.cam_pitch = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.55, 1.55);
         let (sy, cy) = self.cam_yaw.sin_cos();
@@ -121,18 +175,38 @@ impl HelioWasmApp for Demo {
         let fwd = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&KeyCode::KeyW) { self.cam_pos += fwd * FLY_SPEED * dt; }
-        if input.keys.contains(&KeyCode::KeyS) { self.cam_pos -= fwd * FLY_SPEED * dt; }
-        if input.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
-        if input.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
-        if input.keys.contains(&KeyCode::Space) { self.cam_pos.y += FLY_SPEED * dt; }
-        if input.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos.y -= FLY_SPEED * dt; }
+        if input.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&KeyCode::Space) {
+            self.cam_pos.y += FLY_SPEED * dt;
+        }
+        if input.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos.y -= FLY_SPEED * dt;
+        }
 
         // Toggle IES on keypress
-        if input.keys.contains(&KeyCode::Digit1) { self.ies_enabled[0] = !self.ies_enabled[0]; }
-        if input.keys.contains(&KeyCode::Digit2) { self.ies_enabled[1] = !self.ies_enabled[1]; }
-        if input.keys.contains(&KeyCode::Digit3) { self.ies_enabled[2] = !self.ies_enabled[2]; }
-        if input.keys.contains(&KeyCode::KeyG) { self.gobo_enabled = !self.gobo_enabled; }
+        if input.keys.contains(&KeyCode::Digit1) {
+            self.ies_enabled[0] = !self.ies_enabled[0];
+        }
+        if input.keys.contains(&KeyCode::Digit2) {
+            self.ies_enabled[1] = !self.ies_enabled[1];
+        }
+        if input.keys.contains(&KeyCode::Digit3) {
+            self.ies_enabled[2] = !self.ies_enabled[2];
+        }
+        if input.keys.contains(&KeyCode::KeyG) {
+            self.gobo_enabled = !self.gobo_enabled;
+        }
 
         for (i, &enabled) in self.ies_enabled.iter().enumerate() {
             let mut light = helio::GpuLight::default();
@@ -158,19 +232,27 @@ impl HelioWasmApp for Demo {
                 _ => 0.80,
             };
             if enabled {
-                light.ies_profile_index = 0;  // layer 0 = spotlight gradient
-                light.ies_angle_scale = match i { 0 => 0.5, 1 => 1.0, _ => 2.0 };
+                light.ies_profile_index = 0; // layer 0 = spotlight gradient
+                light.ies_angle_scale = match i {
+                    0 => 0.5,
+                    1 => 1.0,
+                    _ => 2.0,
+                };
             }
             if self.gobo_enabled {
-                light.light_function_index = 1;  // layer 1 = checkerboard gobo
+                light.light_function_index = 1; // layer 1 = checkerboard gobo
             }
             let _ = renderer.scene_mut().update_light(self.light_ids[i], light);
         }
 
         let camera = Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + fwd, Vec3::Y,
+            self.cam_pos,
+            self.cam_pos + fwd,
+            Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            input.aspect_ratio(), 0.1, 200.0,
+            input.aspect_ratio(),
+            0.1,
+            200.0,
         );
         camera
     }

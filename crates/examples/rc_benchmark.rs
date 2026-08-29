@@ -13,7 +13,8 @@ mod v3_demo_common;
 use v3_demo_common::{box_mesh, insert_object, make_material, point_light};
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 
@@ -142,15 +143,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
 
@@ -186,7 +207,14 @@ impl ApplicationHandler for App {
 
         // ── Geometry ───────────────────────────────────────────────────────────────
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
+            let m = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [hx, hy, hz],
+                )))
+                .as_mesh()
+                .unwrap();
             let _ = insert_object(
                 &mut renderer,
                 m,
@@ -210,7 +238,13 @@ impl ApplicationHandler for App {
         // ── Lights ───────────────────────────────────────────────────────────────
         let light_ids: [LightId; 3] = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng))).as_light().unwrap())
+            .map(|&(pos, col, int, rng)| {
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
+                    .as_light()
+                    .unwrap()
+            })
             .collect::<Vec<_>>()
             .try_into()
             .expect("3 lights");
@@ -434,6 +468,3 @@ impl AppState {
         self.queue.present(output);
     }
 }
-
-
-

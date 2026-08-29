@@ -86,11 +86,20 @@ fn the_type_table_uploads_only_when_the_generation_moves() {
     };
 
     let first = decide_frame(Some(tables), None);
-    assert!(first.upload_types, "the first frame has nothing uploaded yet");
+    assert!(
+        first.upload_types,
+        "the first frame has nothing uploaded yet"
+    );
 
     let steady = decide_frame(Some(tables), Some(12));
-    assert!(!steady.upload_types, "an unchanged generation must not re-upload");
-    assert!(steady.upload_wind, "but wind moves every frame — both timestamps do");
+    assert!(
+        !steady.upload_types,
+        "an unchanged generation must not re-upload"
+    );
+    assert!(
+        steady.upload_wind,
+        "but wind moves every frame — both timestamps do"
+    );
 
     let edited = decide_frame(
         Some(FoliageTables {

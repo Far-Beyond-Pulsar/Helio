@@ -317,3 +317,7 @@ path = "cloud_engine.rs"
 [[bin]]
 name = "cloud_engine_curve"
 path = "cloud_engine_curve.rs"
+
+[[bin]]
+name = "procedural_clouds_demo"
+path = "procedural_clouds_demo.rs"

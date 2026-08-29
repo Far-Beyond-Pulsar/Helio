@@ -51,8 +51,11 @@ const NOISE_DIM: u32 = 4;
 
 #[test]
 fn ssao_camera_uniform_size_is_272() {
-    assert_eq!(mem::size_of::<SsaoCameraUniform>(), 272,
-        "4×mat4(256) + vec3(12) + pad(4) = 272");
+    assert_eq!(
+        mem::size_of::<SsaoCameraUniform>(),
+        272,
+        "4×mat4(256) + vec3(12) + pad(4) = 272"
+    );
 }
 
 #[test]
@@ -154,7 +157,7 @@ fn hemisphere_sample(i: usize, n: usize) -> [f32; 3] {
     let x = theta.sin() * phi.cos();
     let y = theta.sin() * phi.sin();
     let z = theta.cos(); // z >= 0 for upper hemisphere
-    // Scale to bring closer to origin for importance sampling
+                         // Scale to bring closer to origin for importance sampling
     let scale = {
         let t = i as f32 / n as f32;
         0.1 + 0.9 * t * t
@@ -181,25 +184,48 @@ fn hemisphere_sample_length_below_one() {
 
 #[test]
 fn hemisphere_sample_count_matches_kernel_size() {
-    let samples: Vec<_> = (0..KERNEL_SIZE).map(|i| hemisphere_sample(i, KERNEL_SIZE)).collect();
+    let samples: Vec<_> = (0..KERNEL_SIZE)
+        .map(|i| hemisphere_sample(i, KERNEL_SIZE))
+        .collect();
     assert_eq!(samples.len(), KERNEL_SIZE);
 }
 
 #[test]
 fn ssao_radius_positive_non_zero() {
-    let u = SsaoUniform { radius: 0.5, bias: 0.025, power: 2.0, samples: 64, noise_scale: [1.0; 2], _pad: [0.0; 2] };
+    let u = SsaoUniform {
+        radius: 0.5,
+        bias: 0.025,
+        power: 2.0,
+        samples: 64,
+        noise_scale: [1.0; 2],
+        _pad: [0.0; 2],
+    };
     assert!(u.radius > 0.0f32);
 }
 
 #[test]
 fn ssao_bias_small_positive() {
-    let u = SsaoUniform { radius: 0.5, bias: 0.025, power: 2.0, samples: 64, noise_scale: [1.0; 2], _pad: [0.0; 2] };
+    let u = SsaoUniform {
+        radius: 0.5,
+        bias: 0.025,
+        power: 2.0,
+        samples: 64,
+        noise_scale: [1.0; 2],
+        _pad: [0.0; 2],
+    };
     assert!(u.bias > 0.0f32 && u.bias < 0.1f32);
 }
 
 #[test]
 fn ssao_samples_u32_not_i32() {
-    let u = SsaoUniform { radius: 0.5, bias: 0.025, power: 2.0, samples: 64, noise_scale: [1.0; 2], _pad: [0.0; 2] };
+    let u = SsaoUniform {
+        radius: 0.5,
+        bias: 0.025,
+        power: 2.0,
+        samples: 64,
+        noise_scale: [1.0; 2],
+        _pad: [0.0; 2],
+    };
     // Ensure samples field is u32 (no sign issues)
     assert_eq!(u.samples, 64u32);
 }

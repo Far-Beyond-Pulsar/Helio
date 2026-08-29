@@ -179,19 +179,23 @@ impl RadiantTemplateRegistry {
     /// so users can reference them by the constants from `libhelio`.
     fn register_default_templates(&mut self) {
         self.register_partial_str_with_id(
-            MATERIAL_CLASS_CLEAR_COAT, "clear_coat",
+            MATERIAL_CLASS_CLEAR_COAT,
+            "clear_coat",
             include_str!("../../templates/clear_coat.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
-            MATERIAL_CLASS_SUBSURFACE, "subsurface",
+            MATERIAL_CLASS_SUBSURFACE,
+            "subsurface",
             include_str!("../../templates/subsurface.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
-            MATERIAL_CLASS_ANISOTROPIC, "anisotropic",
+            MATERIAL_CLASS_ANISOTROPIC,
+            "anisotropic",
             include_str!("../../templates/anisotropic.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
-            MATERIAL_CLASS_SKIN, "skin",
+            MATERIAL_CLASS_SKIN,
+            "skin",
             include_str!("../../templates/skin.wgsl").to_string(),
         );
     }
@@ -216,10 +220,8 @@ impl RadiantTemplateRegistry {
     /// Override an existing class with a new WGSL source (used by TransparentPass
     /// to replace the default gbuffer base with its own transparent base shader).
     pub fn override_class(&mut self, class: u32, name: &'static str, wgsl_source: &'static str) {
-        self.templates.insert(class, RadiantTemplate {
-            name,
-            wgsl_source,
-        });
+        self.templates
+            .insert(class, RadiantTemplate { name, wgsl_source });
     }
 
     /// Load a template from a WGSL file on disk. The template should contain

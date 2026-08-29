@@ -113,7 +113,8 @@ fn every_wgsl_shader_parses_and_validates() {
             }
         };
 
-        if let Err(e) = Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module)
+        if let Err(e) =
+            Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module)
         {
             failures.push(format!(
                 "{}:{}",

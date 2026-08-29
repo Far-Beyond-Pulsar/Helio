@@ -21,16 +21,19 @@
 
 mod v3_demo_common;
 
-use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, HelioAction, HelioCommandBridge,
-    LightId, MeshId, ObjectId, Renderer, RendererConfig, Scene, WaterHitboxDescriptor,
-    WaterHitboxId, BakeConfig,
-};
-use helio_pass_perf_overlay::PerfOverlayMode;
-use helio_default_graphs::build_default_graph;
-use helio_pass_water_sim::WaterSimPass;
 use helio::Movability;
-use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
+use helio::{
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
+    Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, ObjectId, Renderer,
+    RendererConfig, Scene, WaterHitboxDescriptor, WaterHitboxId,
+};
+use helio_default_graphs::build_default_graph;
+use helio_pass_perf_overlay::PerfOverlayMode;
+use helio_pass_water_sim::WaterSimPass;
+use v3_demo_common::{
+    box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light,
+    sphere_mesh,
+};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -125,7 +128,14 @@ fn ball_aabb(
     };
     let (old_min, old_max) = to_sim(old_pos);
     let (new_min, new_max) = to_sim(new_pos);
-    WaterHitboxDescriptor { old_min, old_max, new_min, new_max, edge_softness: 0.15, strength: 1.2 }
+    WaterHitboxDescriptor {
+        old_min,
+        old_max,
+        new_min,
+        new_max,
+        edge_softness: 0.15,
+        strength: 1.2,
+    }
 }
 
 fn main() {
@@ -273,7 +283,7 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
-                .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_shadow_quality(helio::ShadowQuality::Ultra);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -284,15 +294,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_editor_mode(true);
 
@@ -320,33 +350,33 @@ impl ApplicationHandler for App {
         // === QUALITY WATER POOL ===
         // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
-            bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
-            bounds_max: [6.0, 3.0, 6.0],    // tall enough for 50cm waves above surface
-            surface_height: 2.2,  // Water surface higher in the pool for visibility
+            bounds_min: [-6.0, 0.3, -6.0], // 12x12 meter pool, slightly raised
+            bounds_max: [6.0, 3.0, 6.0],   // tall enough for 50cm waves above surface
+            surface_height: 2.2,           // Water surface higher in the pool for visibility
 
             // DRAMATIC WAVE PARAMETERS (big rolling swell with visible crests)
-            wave_amplitude: 0.5,       // 50cm waves — big, unmistakable motion
-            wave_frequency: 0.5,       // Longer period for visible swell propagation
-            wave_speed: 6.0,           // Fast, energetic wave motion
+            wave_amplitude: 0.5,        // 50cm waves — big, unmistakable motion
+            wave_frequency: 0.5,        // Longer period for visible swell propagation
+            wave_speed: 6.0,            // Fast, energetic wave motion
             wave_direction: [0.6, 0.3], // Diagonal travel for visual interest
-            wave_steepness: 0.6,       // Sharp crests that catch the light and trigger foam
+            wave_steepness: 0.6,        // Sharp crests that catch the light and trigger foam
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
-            water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
-            extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
+            water_color: [0.05, 0.20, 0.30], // Light blue-green for clear water
+            extinction: [0.08, 0.04, 0.02], // Very low absorption for crystal clear water (reduced by ~55%)
 
             // FOAM PARAMETERS (dramatic whitecaps on big swells)
-            foam_threshold: 0.4,       // Foam appears early — catches every crest
-            foam_amount: 0.85,         // Heavy foam coverage for dramatic effect
+            foam_threshold: 0.4, // Foam appears early — catches every crest
+            foam_amount: 0.85,   // Heavy foam coverage for dramatic effect
 
             // REFLECTION & REFRACTION (physically accurate)
-            reflection_strength: 0.65,  // Lowered reflectivity for a cleaner pool look
+            reflection_strength: 0.65, // Lowered reflectivity for a cleaner pool look
             // Multiplier on the physically-derived displacement (IOR x surface
             // tilt x path length). This was 0.0 to suppress the old constant
             // screen-space offset, which distorted the shallow edges as hard as
             // the deep centre; the current model scales with depth on its own.
             refraction_strength: 1.0,
-            fresnel_power: 5.0,         // Physically-based fresnel (water IOR ~1.333)
+            fresnel_power: 5.0, // Physically-based fresnel (water IOR ~1.333)
 
             // CAUSTICS
             // Intensity is scaled up for this scene: at 0.035 m amplitude over a
@@ -370,7 +400,9 @@ impl ApplicationHandler for App {
             // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
             ..Default::default()
         };
-        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::water_volume(pool));
         // Crank up wind for dramatic wave motion
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
             sim.set_wind([0.6, 0.4], 3.5);
@@ -386,8 +418,12 @@ impl ApplicationHandler for App {
         let ball_start = glam::Vec3::new(0.0, WATER_SURFACE + 4.0, 0.0);
         // Give it a diagonal horizontal kick so it travels across the pool
         let ball_start_vel = glam::Vec3::new(1.8, 0.0, 1.2);
-        let ball_mesh_id = renderer.scene_mut()
-            .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], BALL_RADIUS)))
+        let ball_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(sphere_mesh(
+                [0.0, 0.0, 0.0],
+                BALL_RADIUS,
+            )))
             .as_mesh()
             .unwrap();
         let ball_mat = renderer.scene_mut().insert_material(make_material(
@@ -409,22 +445,87 @@ impl ApplicationHandler for App {
 
         let ball_hitbox_id = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ)))
+            .insert_actor(helio::SceneActor::water_hitbox(ball_aabb(
+                ball_start,
+                ball_start,
+                BALL_RADIUS,
+                WATER_SURFACE,
+                POOL_HALF_XZ,
+            )))
             .as_water_hitbox()
             .expect("ball hitbox");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-        let _floor =            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0))).as_mesh().unwrap();
-        let _wall_back =        renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]))).as_mesh().unwrap();
-        let _wall_front =       renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]))).as_mesh().unwrap();
-        let _aisle_ceil_l =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]))).as_mesh().unwrap();
-        let _nave_ceiling =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]))).as_mesh().unwrap();
-        let _aisle_ceil_r =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]))).as_mesh().unwrap();
-        let _wall_left_outer =  renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
-        let _wall_right_outer = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
-        let _ =
-            v3_demo_common::insert_object_with_movability(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0, Some(Movability::Static));
+        let _floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0)))
+            .as_mesh()
+            .unwrap();
+        let _wall_back = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_front = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _aisle_ceil_l = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _nave_ceiling = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 0.18, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _aisle_ceil_r = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_left_outer = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_right_outer = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _ = v3_demo_common::insert_object_with_movability(
+            &mut renderer,
+            _floor,
+            mat,
+            glam::Mat4::IDENTITY,
+            11.0,
+            Some(Movability::Static),
+        );
         let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _nave_ceiling,
@@ -495,8 +596,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-                let id = renderer.scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.25, 5.5, half_len.max(0.1)],
+                    )))
                     .as_mesh()
                     .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
@@ -515,8 +620,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = renderer.scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.25, 5.5, half_len.max(0.1)],
+                    )))
                     .as_mesh()
                     .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
@@ -535,7 +644,14 @@ impl ApplicationHandler for App {
         let _columns: Vec<MeshId> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
+                let l = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.65, 10.0, 0.65],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     l,
@@ -544,7 +660,14 @@ impl ApplicationHandler for App {
                     10.0,
                     Some(Movability::Static),
                 );
-                let r = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
+                let r = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.65, 10.0, 0.65],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     r,
@@ -558,10 +681,38 @@ impl ApplicationHandler for App {
             .collect();
 
         // Altar: at far end (z = -26)
-        let _altar_step = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]))).as_mesh().unwrap();
-        let _altar_plinth = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]))).as_mesh().unwrap();
-        let _cross_vert = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]))).as_mesh().unwrap();
-        let _cross_horiz = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]))).as_mesh().unwrap();
+        let _altar_step = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [5.5, 0.20, 3.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _altar_plinth = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [3.0, 0.45, 1.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cross_vert = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.18, 2.2, 0.18],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cross_horiz = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.18, 0.18],
+            )))
+            .as_mesh()
+            .unwrap();
         let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _altar_step,
@@ -599,7 +750,14 @@ impl ApplicationHandler for App {
         let _pews_left: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.5, 0.45, 0.5],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
@@ -614,7 +772,14 @@ impl ApplicationHandler for App {
         let _pews_right: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.5, 0.45, 0.5],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
@@ -638,7 +803,14 @@ impl ApplicationHandler for App {
         let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.06, 2.0, 0.06],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
@@ -653,7 +825,14 @@ impl ApplicationHandler for App {
         let _chandelier_rings: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.2, 0.12, 1.2],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
@@ -669,34 +848,38 @@ impl ApplicationHandler for App {
         // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
         let mut chandelier_light_ids = Vec::new();
         for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
-                point_light(
-                    [0.0_f32, 15.0, z],
-                    [1.0, 0.92, 0.78],
-                    8.0,
-                    22.0,
-                ),
-                Some(Movability::Static), // Static for high-quality baking
-            )).as_light().unwrap());
+            chandelier_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light_with_movability(
+                        point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
+                        Some(Movability::Static), // Static for high-quality baking
+                    ))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         // Stained glass shafts — static for baking, no need to store ids for updates
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
-                point_light([x, y, z], [r, g, b], 1.8, 8.0),
-                Some(Movability::Static), // Static for baking
-            ));
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light_with_movability(
+                    point_light([x, y, z], [r, g, b], 1.8, 8.0),
+                    Some(Movability::Static), // Static for baking
+                ));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
-            candle_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
-                point_light(
-                    [x, y, z],
-                    [1.0, 0.6, 0.15],
-                    1.2,
-                    4.0,
-                ),
-                Some(Movability::Static), // Static for high-quality baking
-            )).as_light().unwrap());
+            candle_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light_with_movability(
+                        point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
+                        Some(Movability::Static), // Static for high-quality baking
+                    ))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -717,12 +900,10 @@ impl ApplicationHandler for App {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
                     match line {
-                        Ok(cmd) if !cmd.trim().is_empty() => {
-                            match bridge.run(&cmd) {
-                                Ok(()) => println!("OK: {}", cmd),
-                                Err(e) => println!("ERR: {} -> {}", cmd, e),
-                            }
-                        }
+                        Ok(cmd) if !cmd.trim().is_empty() => match bridge.run(&cmd) {
+                            Ok(()) => println!("OK: {}", cmd),
+                            Err(e) => println!("ERR: {} -> {}", cmd, e),
+                        },
                         _ => {}
                     }
                 }
@@ -838,7 +1019,9 @@ impl ApplicationHandler for App {
                     PerfOverlayMode::PassOutput => PerfOverlayMode::Disabled,
                 };
                 if let Ok(mut renderer) = state.renderer.lock() {
-                    if let Some(pass) = renderer.find_pass_mut::<helio_pass_perf_overlay::PerfOverlayPass>() {
+                    if let Some(pass) =
+                        renderer.find_pass_mut::<helio_pass_perf_overlay::PerfOverlayPass>()
+                    {
                         pass.set_mode(state.perf_overlay_mode);
                     }
                 }
@@ -857,7 +1040,9 @@ impl ApplicationHandler for App {
             } => {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
                 if let Ok(mut renderer) = state.renderer.lock() {
-                    if let Some(pass) = renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                    if let Some(pass) =
+                        renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+                    {
                         pass.set_enabled(state.debug_overlay_enabled);
                     }
                 }
@@ -973,7 +1158,13 @@ impl AppState {
             );
             let _ = renderer.scene_mut().update_water_hitbox(
                 self.ball_hitbox_id,
-                ball_aabb(self.ball_prev_pos, self.ball_pos, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ),
+                ball_aabb(
+                    self.ball_prev_pos,
+                    self.ball_pos,
+                    BALL_RADIUS,
+                    WATER_SURFACE,
+                    POOL_HALF_XZ,
+                ),
             );
         }
     }
@@ -1103,7 +1294,13 @@ impl AppState {
         );
         let _ = renderer.scene_mut().update_water_hitbox(
             self.ball_hitbox_id,
-            ball_aabb(prev_pos, self.ball_pos, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ),
+            ball_aabb(
+                prev_pos,
+                self.ball_pos,
+                BALL_RADIUS,
+                WATER_SURFACE,
+                POOL_HALF_XZ,
+            ),
         );
         self.ball_prev_pos = prev_pos;
         // ---------------------------------------------------------------------
@@ -1121,6 +1318,3 @@ impl AppState {
         self.queue.present(output);
     }
 }
-
-
-

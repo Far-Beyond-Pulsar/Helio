@@ -193,11 +193,7 @@ impl Scene {
     ///
     /// The left eye is also cached CPU-side (position/forward) and becomes this
     /// frame's `prev_view_proj` for temporal effects.
-    pub fn update_stereo_cameras(
-        &mut self,
-        left: &GpuCameraUniforms,
-        right: &GpuCameraUniforms,
-    ) {
+    pub fn update_stereo_cameras(&mut self, left: &GpuCameraUniforms, right: &GpuCameraUniforms) {
         self.gpu_scene
             .camera
             .update_stereo(&self.gpu_scene.queue, left, right);

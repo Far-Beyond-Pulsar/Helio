@@ -13,7 +13,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, HelioAction, HelioCommandBridge, LightId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
@@ -139,7 +140,7 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
-                .with_shadow_quality(helio::ShadowQuality::High);
+            .with_shadow_quality(helio::ShadowQuality::High);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -150,19 +151,41 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
-        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(sky));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::Sky(sky));
 
         // Ocean water volume — mid-ocean night, Beaufort 4 (~25 km/h)
         let ocean = helio::WaterVolumeDescriptor {
@@ -212,7 +235,9 @@ impl ApplicationHandler for App {
 
             ..Default::default()
         };
-        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(ocean));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::water_volume(ocean));
 
         let mat_platform = renderer.scene_mut().insert_material(make_material(
             [0.2, 0.2, 0.2, 1.0],
@@ -233,7 +258,10 @@ impl ApplicationHandler for App {
         // Platform base
         let platform_mesh = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [14.0, 0.8, 20.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [14.0, 0.8, 20.0],
+            )))
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
@@ -254,7 +282,10 @@ impl ApplicationHandler for App {
         for (x, y, z) in leg_positions {
             let leg_mesh = renderer
                 .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.9, 4.2, 0.9])))
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [0.9, 4.2, 0.9],
+                )))
                 .as_mesh()
                 .unwrap();
             let _ = v3_demo_common::insert_object(
@@ -269,7 +300,10 @@ impl ApplicationHandler for App {
         // Central tower
         let tower_mesh = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 5.5, 2.5])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 5.5, 2.5],
+            )))
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
@@ -296,12 +330,15 @@ impl ApplicationHandler for App {
                     h if h < 0.83 => [1.0, 0.9, 0.25],
                     _ => [0.8, 0.3, 0.6],
                 };
-                _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                    pos,
-                    color,
-                    40.0,
-                    10.5,
-                ))).as_light().unwrap());
+                _light_ids.push(
+                    renderer
+                        .scene_mut()
+                        .insert_actor(helio::SceneActor::light(point_light(
+                            pos, color, 40.0, 10.5,
+                        )))
+                        .as_light()
+                        .unwrap(),
+                );
             }
         }
 
@@ -310,12 +347,18 @@ impl ApplicationHandler for App {
             let angle = i as f32 * std::f32::consts::TAU / 12.0;
             let x = angle.cos() * 11.0;
             let z = angle.sin() * 14.5;
-            _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [x, 6.5, z],
-                [1.0, 0.9, 0.75],
-                25.0,
-                15.0,
-            ))).as_light().unwrap());
+            _light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        [x, 6.5, z],
+                        [1.0, 0.9, 0.75],
+                        25.0,
+                        15.0,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
 
         // Optional faint moon as directional component-like sky bloom (general ambient control)

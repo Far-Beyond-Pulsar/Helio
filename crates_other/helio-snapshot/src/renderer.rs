@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    Camera, DebugDrawState, GpuLight, GpuMaterial, GroupMask, LightType,
-    ObjectDescriptor, Renderer, RendererConfig, Scene, SceneActor,
+    Camera, DebugDrawState, GpuLight, GpuMaterial, GroupMask, LightType, ObjectDescriptor,
+    Renderer, RendererConfig, Scene, SceneActor,
 };
-use helio_default_graphs::build_default_graph_external;
 use helio_asset_compat::{load_scene_file_with_config, upload_scene, LoadConfig};
+use helio_default_graphs::build_default_graph_external;
 use thiserror::Error;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -164,8 +164,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // ── 5. Build Helio renderer ───────────────────────────────────────────────
     // Use new_with_external_device so the graph uses deferred (non-blocking)
     // GPU timestamp readback — we drive polling ourselves after the frame.
-    let renderer_cfg = RendererConfig::new(cfg.width, cfg.height, FORMAT)
-        .with_render_scale(1.0);
+    let renderer_cfg = RendererConfig::new(cfg.width, cfg.height, FORMAT).with_render_scale(1.0);
     let helio_scene = Scene::new(device.clone(), queue.clone());
     let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Debug Camera Buffer"),
@@ -176,20 +175,40 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Cull Stats Buffer"),
         size: 32,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-    let graph = build_default_graph_external(&device, &queue, &helio_scene, renderer_cfg, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+    let graph = build_default_graph_external(
+        &device,
+        &queue,
+        &helio_scene,
+        renderer_cfg,
+        debug_state.clone(),
+        &debug_camera_buf,
+        &cull_stats_buf,
+        None,
+    );
     let mut renderer = Renderer::new_with_external_device(
-        device.clone(), queue.clone(),
-        renderer_cfg.surface_format, renderer_cfg.width, renderer_cfg.height, renderer_cfg.render_scale,
-        renderer_cfg, helio_scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+        device.clone(),
+        queue.clone(),
+        renderer_cfg.surface_format,
+        renderer_cfg.width,
+        renderer_cfg.height,
+        renderer_cfg.render_scale,
+        renderer_cfg,
+        helio_scene,
+        graph,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
     );
 
     // ── 6. Upload all meshes + materials via helio-asset-compat ──────────────
-    let uploaded = upload_scene(&mut renderer, &scene)
-        .map_err(|e| SnapshotError::Render(e.to_string()))?;
+    let uploaded =
+        upload_scene(&mut renderer, &scene).map_err(|e| SnapshotError::Render(e.to_string()))?;
 
     // ── 7. Insert a fallback material for meshes with no material ─────────────
     let fallback_mat = renderer.scene_mut().insert_material(GpuMaterial {
@@ -217,69 +236,75 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         let transform = mesh.node_transform;
         let world_center = transform.transform_point3(Vec3::ZERO);
 
-        renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-            mesh: mesh_id,
-            material: material_id,
-            transform,
-            bounds: [world_center.x, world_center.y, world_center.z, radius],
-            flags: 3, // casts + receives shadow
-            groups: GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+        renderer
+            .scene_mut()
+            .insert_actor(SceneActor::object(ObjectDescriptor {
+                mesh: mesh_id,
+                material: material_id,
+                transform,
+                bounds: [world_center.x, world_center.y, world_center.z, radius],
+                flags: 3, // casts + receives shadow
+                groups: GroupMask::NONE,
+                movability: None,
+                user_tag: 0,
+            }));
     }
 
     // ── 9. Two-light rig: key (warm directional) + fill (cool fill) ───────────
-    renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
-        position_range: [0.0, 0.0, 0.0, f32::MAX],
-        direction_outer: [-0.5_f32.sqrt(), -0.5_f32.sqrt(), 0.0, 0.0],
-        color_intensity: [1.0, 0.98, 0.95, 3.0],
-        shadow_index: 0,
-        light_type: LightType::Directional as u32,
-        inner_angle: 0.0,
-        _pad: 0,
-        god_rays_enabled: 0,
-        god_rays_density: 1.0,
-        god_rays_weight: 0.6,
-        god_rays_decay: 1.0,
-        god_rays_exposure: 0.7,
-        flare_enabled: 0,
-        flare_type: 0,
-        flare_intensity: 0.0,
-        flare_scale: 0.0,
-        flare_tint_r: 0.0,
-        flare_tint_g: 0.0,
-        flare_tint_b: 0.0,
-        ies_profile_index: -1,
-        light_function_index: -1,
-        ies_angle_scale: 0.0,
-        ies_angle_offset: 0.0,
-    }));
-    renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
-        position_range: [0.0, 0.0, 0.0, f32::MAX],
-        direction_outer: [0.5_f32.sqrt(), 0.5_f32.sqrt(), 0.0, 0.0],
-        color_intensity: [0.5, 0.6, 0.8, 1.2],
-        shadow_index: u32::MAX,
-        light_type: LightType::Directional as u32,
-        inner_angle: 0.0,
-        _pad: 0,
-        god_rays_enabled: 0,
-        god_rays_density: 1.0,
-        god_rays_weight: 0.6,
-        god_rays_decay: 1.0,
-        god_rays_exposure: 0.7,
-        flare_enabled: 0,
-        flare_type: 0,
-        flare_intensity: 0.0,
-        flare_scale: 0.0,
-        flare_tint_r: 0.0,
-        flare_tint_g: 0.0,
-        flare_tint_b: 0.0,
-        ies_profile_index: -1,
-        light_function_index: -1,
-        ies_angle_scale: 0.0,
-        ies_angle_offset: 0.0,
-    }));
+    renderer
+        .scene_mut()
+        .insert_actor(SceneActor::light(GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [-0.5_f32.sqrt(), -0.5_f32.sqrt(), 0.0, 0.0],
+            color_intensity: [1.0, 0.98, 0.95, 3.0],
+            shadow_index: 0,
+            light_type: LightType::Directional as u32,
+            inner_angle: 0.0,
+            _pad: 0,
+            god_rays_enabled: 0,
+            god_rays_density: 1.0,
+            god_rays_weight: 0.6,
+            god_rays_decay: 1.0,
+            god_rays_exposure: 0.7,
+            flare_enabled: 0,
+            flare_type: 0,
+            flare_intensity: 0.0,
+            flare_scale: 0.0,
+            flare_tint_r: 0.0,
+            flare_tint_g: 0.0,
+            flare_tint_b: 0.0,
+            ies_profile_index: -1,
+            light_function_index: -1,
+            ies_angle_scale: 0.0,
+            ies_angle_offset: 0.0,
+        }));
+    renderer
+        .scene_mut()
+        .insert_actor(SceneActor::light(GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [0.5_f32.sqrt(), 0.5_f32.sqrt(), 0.0, 0.0],
+            color_intensity: [0.5, 0.6, 0.8, 1.2],
+            shadow_index: u32::MAX,
+            light_type: LightType::Directional as u32,
+            inner_angle: 0.0,
+            _pad: 0,
+            god_rays_enabled: 0,
+            god_rays_density: 1.0,
+            god_rays_weight: 0.6,
+            god_rays_decay: 1.0,
+            god_rays_exposure: 0.7,
+            flare_enabled: 0,
+            flare_type: 0,
+            flare_intensity: 0.0,
+            flare_scale: 0.0,
+            flare_tint_r: 0.0,
+            flare_tint_g: 0.0,
+            flare_tint_b: 0.0,
+            ies_profile_index: -1,
+            light_function_index: -1,
+            ies_angle_scale: 0.0,
+            ies_angle_offset: 0.0,
+        }));
 
     renderer.scene_mut().flush();
 
@@ -302,9 +327,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn compute_aabb(
-    scene: &helio_asset_compat::ConvertedScene,
-) -> Result<(Vec3, Vec3), SnapshotError> {
+fn compute_aabb(scene: &helio_asset_compat::ConvertedScene) -> Result<(Vec3, Vec3), SnapshotError> {
     let mut aabb_min = Vec3::splat(f32::MAX);
     let mut aabb_max = Vec3::splat(f32::MIN);
 
@@ -342,11 +365,11 @@ fn build_camera(center: Vec3, radius: f32, cfg: &SnapshotConfig) -> Camera {
 fn view_dir_and_up(dir: ViewDirection) -> (Vec3, Vec3) {
     match dir {
         ViewDirection::Isometric => (Vec3::new(1.0, 0.8, 1.0).normalize(), Vec3::Y),
-        ViewDirection::Front  => (Vec3::Z,   Vec3::Y),
-        ViewDirection::Back   => (-Vec3::Z,  Vec3::Y),
-        ViewDirection::Right  => (Vec3::X,   Vec3::Y),
-        ViewDirection::Left   => (-Vec3::X,  Vec3::Y),
-        ViewDirection::Top    => (Vec3::Y,   Vec3::Z),
+        ViewDirection::Front => (Vec3::Z, Vec3::Y),
+        ViewDirection::Back => (-Vec3::Z, Vec3::Y),
+        ViewDirection::Right => (Vec3::X, Vec3::Y),
+        ViewDirection::Left => (-Vec3::X, Vec3::Y),
+        ViewDirection::Top => (Vec3::Y, Vec3::Z),
         ViewDirection::Bottom => (-Vec3::Y, -Vec3::Z),
     }
 }
@@ -381,21 +404,27 @@ async fn readback_rgba(
                 rows_per_image: None,
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([encoder.finish()]);
 
     // Map and wait.
     let slice = staging.slice(..);
     let (tx, rx) = futures_channel::oneshot::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
     device.poll(wgpu::PollType::wait_indefinitely());
     rx.await.unwrap()?;
 
     // Strip the 256-byte row padding before building the image.
-    let data = slice.get_mapped_range().map_err(|_| {
-        SnapshotError::Render("readback buffer mapping failed".into())
-    })?;
+    let data = slice
+        .get_mapped_range()
+        .map_err(|_| SnapshotError::Render("readback buffer mapping failed".into()))?;
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height {
         let start = (row * bytes_per_row) as usize;
@@ -418,15 +447,15 @@ fn align_up(n: u32, align: u32) -> u32 {
 /// of ViewDirection.
 fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
     let forward = (target - camera.position).normalize();
-    let right   = forward.cross(Vec3::Y).normalize();
-    let up      = right.cross(forward).normalize();
+    let right = forward.cross(Vec3::Y).normalize();
+    let up = right.cross(forward).normalize();
 
     // Key: slightly right + elevated, in the forward hemisphere
-    let key_dir  = (forward + right * 0.45 + up * 0.55).normalize();
+    let key_dir = (forward + right * 0.45 + up * 0.55).normalize();
     // Fill: mirrored left, lower elevation
     let fill_dir = (forward - right * 0.55 + up * 0.20).normalize();
     // Rim: from behind, adds depth separation
-    let rim_dir  = (-forward + up * 0.30).normalize();
+    let rim_dir = (-forward + up * 0.30).normalize();
 
     (key_dir, fill_dir, rim_dir)
 }
@@ -450,12 +479,12 @@ fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
 /// }
 /// ```
 pub struct SnapshotBatch {
-    device:         Arc<wgpu::Device>,
-    queue:          Arc<wgpu::Queue>,
-    renderer:       Renderer,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    renderer: Renderer,
     target_texture: wgpu::Texture,
-    target_view:    wgpu::TextureView,
-    config:         SnapshotConfig,
+    target_view: wgpu::TextureView,
+    config: SnapshotConfig,
 }
 
 impl SnapshotBatch {
@@ -494,7 +523,7 @@ impl SnapshotBatch {
             .await?;
 
         let device = Arc::new(device);
-        let queue  = Arc::new(queue);
+        let queue = Arc::new(queue);
 
         const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -514,8 +543,8 @@ impl SnapshotBatch {
         });
         let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let renderer_cfg = RendererConfig::new(config.width, config.height, FORMAT)
-            .with_render_scale(1.0);
+        let renderer_cfg =
+            RendererConfig::new(config.width, config.height, FORMAT).with_render_scale(1.0);
         let helio_scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -526,18 +555,45 @@ impl SnapshotBatch {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph_external(&device, &queue, &helio_scene, renderer_cfg, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph_external(
+            &device,
+            &queue,
+            &helio_scene,
+            renderer_cfg,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let renderer = Renderer::new_with_external_device(
-            device.clone(), queue.clone(),
-            renderer_cfg.surface_format, renderer_cfg.width, renderer_cfg.height, renderer_cfg.render_scale,
-            renderer_cfg, helio_scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            renderer_cfg.surface_format,
+            renderer_cfg.width,
+            renderer_cfg.height,
+            renderer_cfg.render_scale,
+            renderer_cfg,
+            helio_scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
-        Ok(Self { device, queue, renderer, target_texture, target_view, config })
+        Ok(Self {
+            device,
+            queue,
+            renderer,
+            target_texture,
+            target_view,
+            config,
+        })
     }
 
     /// Render `model_path` and return an RGBA image.
@@ -575,63 +631,72 @@ impl SnapshotBatch {
             emissive: [0.0; 4],
             roughness_metallic: [0.6, 0.0, 1.5, 0.0],
             tex_base_color: GpuMaterial::NO_TEXTURE,
-            tex_normal:     GpuMaterial::NO_TEXTURE,
-            tex_roughness:  GpuMaterial::NO_TEXTURE,
-            tex_emissive:   GpuMaterial::NO_TEXTURE,
-            tex_occlusion:  GpuMaterial::NO_TEXTURE,
-            workflow: 0, flags: 0, material_class: 0, class_params: [0.0; 4],
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
         });
 
         for (i, mesh) in scene.meshes.iter().enumerate() {
-            let Some(&mesh_id) = uploaded.mesh_ids.get(i) else { continue };
-            let material_id  = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
-            let transform    = mesh.node_transform;
+            let Some(&mesh_id) = uploaded.mesh_ids.get(i) else {
+                continue;
+            };
+            let material_id = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
+            let transform = mesh.node_transform;
             let world_center = transform.transform_point3(Vec3::ZERO);
 
-            self.renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh: mesh_id,
-                material: material_id,
-                transform,
-                bounds: [world_center.x, world_center.y, world_center.z, radius],
-                flags: 3,
-                groups: GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+            self.renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh: mesh_id,
+                    material: material_id,
+                    transform,
+                    bounds: [world_center.x, world_center.y, world_center.z, radius],
+                    flags: 3,
+                    groups: GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
         }
 
         // ── Camera-relative three-point light rig ─────────────────────────────
         let (key_dir, fill_dir, rim_dir) = camera_light_rig(&camera, center);
         for (dir, color, intensity, shadow) in [
-            (key_dir,  [1.00_f32, 0.97, 0.92], 3.5_f32, 0_u32),
-            (fill_dir, [0.55, 0.65, 0.85],     1.2,     u32::MAX),
-            (rim_dir,  [0.90, 0.95, 1.00],     0.8,     u32::MAX),
+            (key_dir, [1.00_f32, 0.97, 0.92], 3.5_f32, 0_u32),
+            (fill_dir, [0.55, 0.65, 0.85], 1.2, u32::MAX),
+            (rim_dir, [0.90, 0.95, 1.00], 0.8, u32::MAX),
         ] {
-            self.renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
-                position_range:      [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer:     [dir.x, dir.y, dir.z, 0.0],
-                color_intensity:     [color[0], color[1], color[2], intensity],
-                shadow_index:        shadow,
-                light_type:          LightType::Directional as u32,
-                inner_angle:         0.0,
-                _pad:                0,
-                god_rays_enabled:    0,
-                god_rays_density:    1.0,
-                god_rays_weight:     0.6,
-                god_rays_decay:      1.0,
-                god_rays_exposure:   0.7,
-                flare_enabled:        0,
-                flare_type:           0,
-                flare_intensity:      0.0,
-                flare_scale:          0.0,
-                flare_tint_r:         0.0,
-                flare_tint_g:         0.0,
-                flare_tint_b:         0.0,
-                ies_profile_index:    -1,
-                light_function_index: -1,
-                ies_angle_scale:      0.0,
-                ies_angle_offset:     0.0,
-            }));
+            self.renderer
+                .scene_mut()
+                .insert_actor(SceneActor::light(GpuLight {
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [dir.x, dir.y, dir.z, 0.0],
+                    color_intensity: [color[0], color[1], color[2], intensity],
+                    shadow_index: shadow,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    god_rays_enabled: 0,
+                    god_rays_density: 1.0,
+                    god_rays_weight: 0.6,
+                    god_rays_decay: 1.0,
+                    god_rays_exposure: 0.7,
+                    flare_enabled: 0,
+                    flare_type: 0,
+                    flare_intensity: 0.0,
+                    flare_scale: 0.0,
+                    flare_tint_r: 0.0,
+                    flare_tint_g: 0.0,
+                    flare_tint_b: 0.0,
+                    ies_profile_index: -1,
+                    light_function_index: -1,
+                    ies_angle_scale: 0.0,
+                    ies_angle_offset: 0.0,
+                }));
         }
 
         self.renderer.scene_mut().flush();
@@ -650,7 +715,8 @@ impl SnapshotBatch {
             &self.target_texture,
             self.config.width,
             self.config.height,
-        ).await?;
+        )
+        .await?;
 
         // Scene::clear() — no ID tracking needed; Helio's cascade handles
         // objects → meshes → materials → textures → lights automatically.

@@ -23,7 +23,9 @@ impl Scene {
 
     /// Remove a post-process volume from the scene.
     pub fn remove_post_process_volume(&mut self, id: PostProcessVolumeId) -> Result<()> {
-        let DenseRemove { dense_index, moved, .. } = self
+        let DenseRemove {
+            dense_index, moved, ..
+        } = self
             .pp_volumes
             .remove(id)
             .ok_or_else(|| invalid("post-process volume"))?;
@@ -79,9 +81,7 @@ impl Scene {
         self.pp_volumes_dirty_range
     }
 
-    pub(crate) fn consume_post_process_volumes_dirty_range(
-        &mut self,
-    ) -> Option<(usize, usize)> {
+    pub(crate) fn consume_post_process_volumes_dirty_range(&mut self) -> Option<(usize, usize)> {
         self.pp_volumes_dirty_range.take()
     }
 

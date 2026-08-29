@@ -709,9 +709,7 @@ impl ApplicationHandler for App {
                                                         bounds: [wx, wy, wz, radius],
                                                         flags: 0,
                                                         groups: helio::GroupMask::NONE,
-                                                        movability: Some(
-                                                            helio::Movability::Static,
-                                                        ),
+                                                        movability: Some(helio::Movability::Static),
                                                     },
                                                 ),
                                             );

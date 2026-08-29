@@ -8,8 +8,8 @@ use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 use glam::{Mat4, Vec3};
 use helio_core::{GpuLight, SkyContext};
 use libhelio::{
-    GpuWaterVolume, PostProcessVolumeDescriptor, ReflectionCaptureMobility,
-    ReflectionCaptureShape, SkyActor,
+    GpuWaterVolume, PostProcessVolumeDescriptor, ReflectionCaptureMobility, ReflectionCaptureShape,
+    SkyActor,
 };
 
 /// Result of inserting a typed scene actor.
@@ -833,11 +833,8 @@ impl DecalActor {
 impl SceneActorTrait for DecalActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.decal_id.is_none() {
-            self.decal_id = Some(scene.insert_decal_with_tag(
-                self.decal,
-                self.user_tag,
-                self.movability,
-            ));
+            self.decal_id =
+                Some(scene.insert_decal_with_tag(self.decal, self.user_tag, self.movability));
         }
     }
 
@@ -903,8 +900,8 @@ impl ReflectionCaptureDescriptor {
     pub fn boxed(transform: Mat4, extents: [f32; 3]) -> Self {
         // Influence radius still bounds the box for the coarse distance
         // rejection the shader does before the per-shape test.
-        let radius = (extents[0] * extents[0] + extents[1] * extents[1] + extents[2] * extents[2])
-            .sqrt();
+        let radius =
+            (extents[0] * extents[0] + extents[1] * extents[1] + extents[2] * extents[2]).sqrt();
         Self {
             shape: ReflectionCaptureShape::Box,
             transform,

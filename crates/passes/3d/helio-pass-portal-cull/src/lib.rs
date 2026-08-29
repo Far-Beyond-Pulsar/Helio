@@ -127,16 +127,19 @@ impl PortalCullPass {
         let portal_indirect_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull/PortalIndirect"),
             size: (PORTAL_DRAW_CAPACITY as u64) * 20,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let compacted_len = (PORTAL_DRAW_CAPACITY as u64) * (PORTAL_GROUP_CHAIN_CAPACITY as u64);
-        let portal_compacted_indices_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PortalCull/CompactedIndices"),
-            size: compacted_len * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        }));
+        let portal_compacted_indices_buf =
+            Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("PortalCull/CompactedIndices"),
+                size: compacted_len * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
         let portal_compacted_chains_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull/CompactedChains"),
             size: compacted_len * 4,
@@ -161,7 +164,7 @@ impl PortalCullPass {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalCull BGL"),
             entries: &[
-                storage_entry(0, true),  // camera
+                storage_entry(0, true), // camera
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -172,14 +175,14 @@ impl PortalCullPass {
                     },
                     count: None,
                 },
-                storage_entry(2, true),  // instances
-                storage_entry(3, true),  // draw_calls
-                storage_entry(4, true),  // coordinate_spaces
-                storage_entry(5, true),  // portal_views
-                storage_entry(6, false), // portal_indirect
-                storage_entry(7, false), // portal_compacted_indices
-                storage_entry(8, false), // portal_stats
-                storage_entry(9, true),  // portal_chains
+                storage_entry(2, true),   // instances
+                storage_entry(3, true),   // draw_calls
+                storage_entry(4, true),   // coordinate_spaces
+                storage_entry(5, true),   // portal_views
+                storage_entry(6, false),  // portal_indirect
+                storage_entry(7, false),  // portal_compacted_indices
+                storage_entry(8, false),  // portal_stats
+                storage_entry(9, true),   // portal_chains
                 storage_entry(10, false), // portal_compacted_chains
             ],
         });
@@ -271,7 +274,8 @@ impl RenderPass for PortalCullPass {
         // `select` uses these as its live atomic claim counters, and the
         // readback below needs exactly this frame's totals.
         let zeros = vec![0u32; PORTAL_DRAW_CAPACITY as usize];
-        ctx.queue.write_buffer(&self.portal_stats_buf, 0, bytemuck::cast_slice(&zeros));
+        ctx.queue
+            .write_buffer(&self.portal_stats_buf, 0, bytemuck::cast_slice(&zeros));
         Ok(())
     }
 
@@ -279,7 +283,9 @@ impl RenderPass for PortalCullPass {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
             log::info!(
                 "[PortalCull] frame={} draw_count={} chain_count={}",
-                ctx.frame_num, self.draw_count, self.chain_count,
+                ctx.frame_num,
+                self.draw_count,
+                self.chain_count,
             );
         }
         if self.draw_count == 0 || self.chain_count == 0 {
@@ -299,17 +305,50 @@ impl RenderPass for PortalCullPass {
                 label: Some("PortalCull BG"),
                 layout: &self.bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.uniform_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: ctx.scene.instances.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: ctx.scene.draw_calls.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: ctx.scene.coordinate_spaces.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: ctx.scene.portal_views.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: self.portal_indirect_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: self.portal_compacted_indices_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.portal_stats_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: ctx.scene.portal_chains.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 10, resource: self.portal_compacted_chains_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: ctx.scene.portal_views.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.portal_indirect_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.portal_compacted_indices_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.portal_stats_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: self.portal_compacted_chains_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -319,15 +358,21 @@ impl RenderPass for PortalCullPass {
         let chain_workgroups = self.chain_count;
 
         {
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }
-                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PortalCull Select"), timestamp_writes: None });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("PortalCull Select"),
+                    timestamp_writes: None,
+                });
             pass.set_pipeline(&self.select_pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(draw_workgroups, chain_workgroups, 1);
         }
         {
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }
-                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PortalCull Finalize"), timestamp_writes: None });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("PortalCull Finalize"),
+                    timestamp_writes: None,
+                });
             pass.set_pipeline(&self.finalize_pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(draw_workgroups.div_ceil(64), 1, 1);
@@ -356,7 +401,9 @@ impl RenderPass for PortalCullPass {
                         .slice(..)
                         .get_mapped_range()
                         .expect("portal stats mapped range");
-                    let mut counts = Vec::with_capacity((self.draw_count as usize).min(PORTAL_DRAW_CAPACITY as usize));
+                    let mut counts = Vec::with_capacity(
+                        (self.draw_count as usize).min(PORTAL_DRAW_CAPACITY as usize),
+                    );
                     for chunk in data.chunks_exact(4).take(self.draw_count as usize) {
                         counts.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                     }
@@ -369,8 +416,13 @@ impl RenderPass for PortalCullPass {
         }
         if ctx.frame_num % 60 == 0 {
             let size = (PORTAL_DRAW_CAPACITY as u64) * 4;
-            unsafe { &mut *ctx.encoder_ptr }
-                .copy_buffer_to_buffer(&self.portal_stats_buf, 0, &self.portal_stats_staging, 0, size);
+            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                &self.portal_stats_buf,
+                0,
+                &self.portal_stats_staging,
+                0,
+                size,
+            );
             self.copy_pending = true;
         }
         Ok(())

@@ -135,7 +135,10 @@ fn perspective_depth_is_monotonically_increasing() {
     let far = 100.0_f32;
     let m = perspective_rh(PI / 2.0, 1.0, near, far);
     let zs = [0.1_f32, 1.0, 10.0, 50.0, 100.0];
-    let ndcs: Vec<f32> = zs.iter().map(|&d| perspective_project(&m, 0.0, 0.0, -d).2).collect();
+    let ndcs: Vec<f32> = zs
+        .iter()
+        .map(|&d| perspective_project(&m, 0.0, 0.0, -d).2)
+        .collect();
     for w in ndcs.windows(2) {
         assert!(w[1] > w[0], "depth not increasing: {} > {}", w[0], w[1]);
     }
@@ -257,8 +260,8 @@ fn ortho_depth_is_linear() {
     // Unlike perspective, orthographic depth is a linear function of view z.
     let m = ortho_rh(10.0, 10.0, 0.0, 100.0);
     // Check linearity by verifying three evenly-spaced z values give evenly-spaced ndc_z.
-    let z0 = ortho_project(&m, 0.0, 0.0, 0.0).2;   // z_view = 0
-    let z1 = ortho_project(&m, 0.0, 0.0, -50.0).2;  // z_view = -50
+    let z0 = ortho_project(&m, 0.0, 0.0, 0.0).2; // z_view = 0
+    let z1 = ortho_project(&m, 0.0, 0.0, -50.0).2; // z_view = -50
     let z2 = ortho_project(&m, 0.0, 0.0, -100.0).2; // z_view = -100
     let d01 = z1 - z0;
     let d12 = z2 - z1;
@@ -283,8 +286,7 @@ fn det4(m: &[[f32; 4]; 4]) -> f32 {
             - m[r0][c1] * (m[r1][c0] * m[r2][c2] - m[r1][c2] * m[r2][c0])
             + m[r0][c2] * (m[r1][c0] * m[r2][c1] - m[r1][c1] * m[r2][c0])
     };
-    m[0][0] * minor(1, 2, 3, 1, 2, 3)
-        - m[0][1] * minor(1, 2, 3, 0, 2, 3)
+    m[0][0] * minor(1, 2, 3, 1, 2, 3) - m[0][1] * minor(1, 2, 3, 0, 2, 3)
         + m[0][2] * minor(1, 2, 3, 0, 1, 3)
         - m[0][3] * minor(1, 2, 3, 0, 1, 2)
 }

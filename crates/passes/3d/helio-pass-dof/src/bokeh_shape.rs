@@ -68,10 +68,7 @@ fn generate_bokeh_slice(blades: u32, out: &mut Vec<u8>) {
     let verts: Vec<[f32; 2]> = (0..blades)
         .map(|i| {
             let angle = rot_offset + i as f32 * angle_step;
-            [
-                half + radius * angle.cos(),
-                half + radius * angle.sin(),
-            ]
+            [half + radius * angle.cos(), half + radius * angle.sin()]
         })
         .collect();
 
@@ -123,7 +120,13 @@ fn point_in_convex_polygon(px: f32, py: f32, verts: &[[f32; 2]]) -> bool {
         let bx = px - verts[i][0];
         let by = py - verts[i][1];
         let cross = ax * by - ay * bx;
-        let s = if cross > 0.0 { 1 } else if cross < 0.0 { -1 } else { 0 };
+        let s = if cross > 0.0 {
+            1
+        } else if cross < 0.0 {
+            -1
+        } else {
+            0
+        };
         if s != 0 {
             if sign == 0 {
                 sign = s;

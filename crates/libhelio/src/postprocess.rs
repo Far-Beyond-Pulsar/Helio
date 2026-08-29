@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TonemapOperator {
-    None = 5,       // skip tonemapping entirely (default)
+    None = 5, // skip tonemapping entirely (default)
     Aces = 0,
     Filmic = 1,
     Reinhard = 2,
@@ -46,16 +46,16 @@ pub enum HdrOutputMode {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuPostProcessUniforms {
     // ── Exposure (16 bytes) ──
-    pub exposure_mode: u32,           // 0 = Manual, 1 = Auto (histogram-based)
-    pub exposure_compensation: f32,   // EV offset applied after metering
-    pub exposure_min: f32,            // min EV for auto exposure
-    pub exposure_max: f32,            // max EV for auto exposure
+    pub exposure_mode: u32,         // 0 = Manual, 1 = Auto (histogram-based)
+    pub exposure_compensation: f32, // EV offset applied after metering
+    pub exposure_min: f32,          // min EV for auto exposure
+    pub exposure_max: f32,          // max EV for auto exposure
 
     // ── Bloom (8 x 4 = 32 bytes) ──
     pub bloom_intensity: f32,
     pub bloom_threshold: f32,
-    pub bloom_knee: f32,              // soft knee around threshold
-    pub bloom_radius: f32,            // scatter size (1.0 = default)
+    pub bloom_knee: f32,   // soft knee around threshold
+    pub bloom_radius: f32, // scatter size (1.0 = default)
     pub bloom_tint: [f32; 3],
     pub bloom_enabled: u32,
 
@@ -72,14 +72,14 @@ pub struct GpuPostProcessUniforms {
     pub pad_col_off: f32,
 
     // ── White balance (16 bytes) ──
-    pub white_temp: f32,              // correlated colour temperature (K)
-    pub white_tint: f32,              // green/magenta offset
+    pub white_temp: f32, // correlated colour temperature (K)
+    pub white_tint: f32, // green/magenta offset
     pub white_balance_enabled: u32,
     pub pad_wb: f32,
 
     // ── Tonemap (16 bytes) ──
-    pub tonemap_operator: u32,        // TonemapOperator discriminant
-    pub tonemap_exposure: f32,        // scene-linear exposure multiplier
+    pub tonemap_operator: u32, // TonemapOperator discriminant
+    pub tonemap_exposure: f32, // scene-linear exposure multiplier
     pub tonemap_white_point: f32,
     pub pad_tm: f32,
 
@@ -94,14 +94,14 @@ pub struct GpuPostProcessUniforms {
     pub vignette_enabled: u32,
 
     // ── Chromatic Aberration (16 bytes) ──
-    pub ca_intensity: f32,            // 0 = disabled
-    pub ca_start_offset: f32,         // radial distance where CA begins (0 = center)
+    pub ca_intensity: f32,    // 0 = disabled
+    pub ca_start_offset: f32, // radial distance where CA begins (0 = center)
     pub ca_enabled: u32,
     pub pad_ca: f32,
 
     // ── Film Grain (16 bytes) ──
     pub grain_intensity: f32,
-    pub grain_response: f32,          // curve exponent
+    pub grain_response: f32, // curve exponent
     pub grain_size: f32,
     pub grain_enabled: u32,
 
@@ -157,10 +157,10 @@ pub struct GpuPostProcessUniforms {
     pub pad_fog_emissive: f32,          // 364
 
     // ── HDR Output (16 bytes) ──
-    pub hdr_output_mode: u32,           // 368
-    pub hdr_max_nits: f32,              // 372
-    pub hdr_ui_brightness: f32,         // 376
-    pub pad_hdr_end: f32,               // 380
+    pub hdr_output_mode: u32,   // 368
+    pub hdr_max_nits: f32,      // 372
+    pub hdr_ui_brightness: f32, // 376
+    pub pad_hdr_end: f32,       // 380
 
     // ── Advanced Color Grading (48 bytes) ──
     pub lift_color: [f32; 3],          // 384 — shadow tint
@@ -171,7 +171,7 @@ pub struct GpuPostProcessUniforms {
     pub pad_gain: f32,                 // 428
     pub shadows_max: f32,              // 432 — luminance threshold for shadow region
     pub highlights_min: f32,           // 436 — luminance threshold for highlight region
-    pub shadow_highlight_balance: f32,  // 440 — 0-1 blend between shadow and highlight
+    pub shadow_highlight_balance: f32, // 440 — 0-1 blend between shadow and highlight
     pub hue_shift: f32,                // 444 — global hue rotation (degrees)
     pub lut_generation: u32,           // 448 — incremented when LUT needs rebuilding
     pub lut_intensity: f32,            // 452 — blend 0-1 between graded and ungraded
@@ -219,7 +219,8 @@ pub struct GpuFogUniforms {
 
 impl GpuPostProcessUniforms {
     /// Byte offset of the fog block, for passes that bind only [`GpuFogUniforms`].
-    pub const FOG_BLOCK_OFFSET: u64 = std::mem::offset_of!(GpuPostProcessUniforms, fog_enabled) as u64;
+    pub const FOG_BLOCK_OFFSET: u64 =
+        std::mem::offset_of!(GpuPostProcessUniforms, fog_enabled) as u64;
     /// Byte length of the fog block.
     pub const FOG_BLOCK_SIZE: u64 = std::mem::size_of::<GpuFogUniforms>() as u64;
 }
@@ -377,8 +378,8 @@ pub struct PostProcessSettings {
     pub exposure_compensation: f32,
     pub exposure_min: f32,
     pub exposure_max: f32,
-    pub exposure_speed_up: f32,     // seconds to bright-adapt
-    pub exposure_speed_down: f32,   // seconds to dark-adapt
+    pub exposure_speed_up: f32,   // seconds to bright-adapt
+    pub exposure_speed_down: f32, // seconds to dark-adapt
 
     // Bloom
     pub bloom_intensity: f32,
@@ -539,7 +540,11 @@ impl PostProcessSettings {
 
             dof_focal_distance: self.dof_focal_distance,
             dof_focal_region: self.dof_focal_region,
-            dof_aperture_shape: if self.dof_enabled { self.dof_aperture_blades as f32 } else { -1.0 },
+            dof_aperture_shape: if self.dof_enabled {
+                self.dof_aperture_blades as f32
+            } else {
+                -1.0
+            },
             dof_aperture_rotation: self.dof_aperture_rotation,
             dof_near_transition: self.dof_near_transition,
             dof_far_transition: self.dof_far_transition,
@@ -707,8 +712,8 @@ pub struct GpuPostProcessVolume {
     pub bounds_max: [f32; 4],
     pub priority: f32,
     pub blend_radius: f32,
-    pub blend_weight: f32,         // 0-1, global volume opacity
-    pub unbound: u32,              // 0 = bounded, 1 = applies everywhere
+    pub blend_weight: f32, // 0-1, global volume opacity
+    pub unbound: u32,      // 0 = bounded, 1 = applies everywhere
     // 16 bytes, not 8. `settings` contains vec3s, so WGSL gives it 16-byte
     // alignment and places it at offset 64 — while #[repr(C)] would happily put
     // it at 56 after an 8-byte pad. That 8-byte skew made the GPU read every
@@ -735,7 +740,7 @@ pub struct PostProcessVolumeDescriptor {
     pub priority: f32,
     pub blend_radius: f32,
     pub blend_weight: f32,
-    pub unbound: bool,               // infinite volume (camera always inside)
+    pub unbound: bool, // infinite volume (camera always inside)
     pub settings: PostProcessSettings,
 }
 
@@ -756,8 +761,18 @@ impl Default for PostProcessVolumeDescriptor {
 impl PostProcessVolumeDescriptor {
     pub fn to_gpu(&self) -> GpuPostProcessVolume {
         GpuPostProcessVolume {
-            bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
-            bounds_max: [self.bounds_max[0], self.bounds_max[1], self.bounds_max[2], 0.0],
+            bounds_min: [
+                self.bounds_min[0],
+                self.bounds_min[1],
+                self.bounds_min[2],
+                0.0,
+            ],
+            bounds_max: [
+                self.bounds_max[0],
+                self.bounds_max[1],
+                self.bounds_max[2],
+                0.0,
+            ],
             priority: self.priority,
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
@@ -846,9 +861,17 @@ impl PostProcessBlender {
     }
 
     /// Linearly interpolate between two PostProcessSettings.
-    fn lerp_settings(a: &PostProcessSettings, b: &PostProcessSettings, t: f32) -> PostProcessSettings {
+    fn lerp_settings(
+        a: &PostProcessSettings,
+        b: &PostProcessSettings,
+        t: f32,
+    ) -> PostProcessSettings {
         PostProcessSettings {
-            exposure_mode: if t >= 0.5 { b.exposure_mode } else { a.exposure_mode },
+            exposure_mode: if t >= 0.5 {
+                b.exposure_mode
+            } else {
+                a.exposure_mode
+            },
             exposure_compensation: lerp(a.exposure_compensation, b.exposure_compensation, t),
             exposure_min: lerp(a.exposure_min, b.exposure_min, t),
             exposure_max: lerp(a.exposure_max, b.exposure_max, t),
@@ -860,7 +883,11 @@ impl PostProcessBlender {
             bloom_knee: lerp(a.bloom_knee, b.bloom_knee, t),
             bloom_radius: lerp(a.bloom_radius, b.bloom_radius, t),
             bloom_tint: lerp3(a.bloom_tint, b.bloom_tint, t),
-            bloom_enabled: if t >= 0.5 { b.bloom_enabled } else { a.bloom_enabled },
+            bloom_enabled: if t >= 0.5 {
+                b.bloom_enabled
+            } else {
+                a.bloom_enabled
+            },
 
             color_saturation: lerp3(a.color_saturation, b.color_saturation, t),
             color_contrast: lerp3(a.color_contrast, b.color_contrast, t),
@@ -870,9 +897,17 @@ impl PostProcessBlender {
 
             white_temp: lerp(a.white_temp, b.white_temp, t),
             white_tint: lerp(a.white_tint, b.white_tint, t),
-            white_balance_enabled: if t >= 0.5 { b.white_balance_enabled } else { a.white_balance_enabled },
+            white_balance_enabled: if t >= 0.5 {
+                b.white_balance_enabled
+            } else {
+                a.white_balance_enabled
+            },
 
-            tonemap_operator: if t >= 0.5 { b.tonemap_operator } else { a.tonemap_operator },
+            tonemap_operator: if t >= 0.5 {
+                b.tonemap_operator
+            } else {
+                a.tonemap_operator
+            },
             tonemap_exposure: lerp(a.tonemap_exposure, b.tonemap_exposure, t),
             tonemap_white_point: lerp(a.tonemap_white_point, b.tonemap_white_point, t),
 
@@ -880,7 +915,11 @@ impl PostProcessBlender {
             vignette_smoothness: lerp(a.vignette_smoothness, b.vignette_smoothness, t),
             vignette_roundness: lerp(a.vignette_roundness, b.vignette_roundness, t),
             vignette_color: lerp3(a.vignette_color, b.vignette_color, t),
-            vignette_enabled: if t >= 0.5 { b.vignette_enabled } else { a.vignette_enabled },
+            vignette_enabled: if t >= 0.5 {
+                b.vignette_enabled
+            } else {
+                a.vignette_enabled
+            },
 
             ca_intensity: lerp(a.ca_intensity, b.ca_intensity, t),
             ca_start_offset: lerp(a.ca_start_offset, b.ca_start_offset, t),
@@ -889,7 +928,11 @@ impl PostProcessBlender {
             grain_intensity: lerp(a.grain_intensity, b.grain_intensity, t),
             grain_response: lerp(a.grain_response, b.grain_response, t),
             grain_size: lerp(a.grain_size, b.grain_size, t),
-            grain_enabled: if t >= 0.5 { b.grain_enabled } else { a.grain_enabled },
+            grain_enabled: if t >= 0.5 {
+                b.grain_enabled
+            } else {
+                a.grain_enabled
+            },
 
             dof_focal_distance: lerp(a.dof_focal_distance, b.dof_focal_distance, t),
             dof_focal_region: lerp(a.dof_focal_region, b.dof_focal_region, t),
@@ -897,35 +940,63 @@ impl PostProcessBlender {
             dof_far_transition: lerp(a.dof_far_transition, b.dof_far_transition, t),
             dof_scale: lerp(a.dof_scale, b.dof_scale, t),
             dof_max_bokeh_size: lerp(a.dof_max_bokeh_size, b.dof_max_bokeh_size, t),
-            dof_aperture_blades: if t >= 0.5 { b.dof_aperture_blades } else { a.dof_aperture_blades },
+            dof_aperture_blades: if t >= 0.5 {
+                b.dof_aperture_blades
+            } else {
+                a.dof_aperture_blades
+            },
             dof_aperture_rotation: lerp(a.dof_aperture_rotation, b.dof_aperture_rotation, t),
             dof_sensor_diagonal: lerp(a.dof_sensor_diagonal, b.dof_sensor_diagonal, t),
-            dof_enabled: if t >= 0.5 { b.dof_enabled } else { a.dof_enabled },
+            dof_enabled: if t >= 0.5 {
+                b.dof_enabled
+            } else {
+                a.dof_enabled
+            },
 
             motion_blur_amount: lerp(a.motion_blur_amount, b.motion_blur_amount, t),
             motion_blur_max: lerp(a.motion_blur_max, b.motion_blur_max, t),
-            motion_blur_enabled: if t >= 0.5 { b.motion_blur_enabled } else { a.motion_blur_enabled },
+            motion_blur_enabled: if t >= 0.5 {
+                b.motion_blur_enabled
+            } else {
+                a.motion_blur_enabled
+            },
 
             blend_weight_bloom: lerp(a.blend_weight_bloom, b.blend_weight_bloom, t),
             blend_weight_dof: lerp(a.blend_weight_dof, b.blend_weight_dof, t),
-            blend_weight_motion_blur: lerp(a.blend_weight_motion_blur, b.blend_weight_motion_blur, t),
+            blend_weight_motion_blur: lerp(
+                a.blend_weight_motion_blur,
+                b.blend_weight_motion_blur,
+                t,
+            ),
             blend_weight_vignette: lerp(a.blend_weight_vignette, b.blend_weight_vignette, t),
             blend_weight_ca: lerp(a.blend_weight_ca, b.blend_weight_ca, t),
             blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
             blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
 
-            hdr_output_mode: if t >= 0.5 { b.hdr_output_mode } else { a.hdr_output_mode },
+            hdr_output_mode: if t >= 0.5 {
+                b.hdr_output_mode
+            } else {
+                a.hdr_output_mode
+            },
             hdr_max_nits: lerp(a.hdr_max_nits, b.hdr_max_nits, t),
             hdr_ui_brightness: lerp(a.hdr_ui_brightness, b.hdr_ui_brightness, t),
 
-            fog_enabled: if t >= 0.5 { b.fog_enabled } else { a.fog_enabled },
+            fog_enabled: if t >= 0.5 {
+                b.fog_enabled
+            } else {
+                a.fog_enabled
+            },
             fog_mode: if t >= 0.5 { b.fog_mode } else { a.fog_mode },
             fog_density: lerp(a.fog_density, b.fog_density, t),
             fog_height_falloff: lerp(a.fog_height_falloff, b.fog_height_falloff, t),
             fog_start_distance: lerp(a.fog_start_distance, b.fog_start_distance, t),
             fog_max_distance: lerp(a.fog_max_distance, b.fog_max_distance, t),
             fog_height: lerp(a.fog_height, b.fog_height, t),
-            fog_scattering_anisotropy: lerp(a.fog_scattering_anisotropy, b.fog_scattering_anisotropy, t),
+            fog_scattering_anisotropy: lerp(
+                a.fog_scattering_anisotropy,
+                b.fog_scattering_anisotropy,
+                t,
+            ),
             fog_color: lerp3(a.fog_color, b.fog_color, t),
             fog_emissive: lerp3(a.fog_emissive, b.fog_emissive, t),
 
@@ -934,18 +1005,36 @@ impl PostProcessBlender {
             gain_color: lerp3(a.gain_color, b.gain_color, t),
             shadows_max: lerp(a.shadows_max, b.shadows_max, t),
             highlights_min: lerp(a.highlights_min, b.highlights_min, t),
-            shadow_highlight_balance: lerp(a.shadow_highlight_balance, b.shadow_highlight_balance, t),
+            shadow_highlight_balance: lerp(
+                a.shadow_highlight_balance,
+                b.shadow_highlight_balance,
+                t,
+            ),
             hue_shift: lerp(a.hue_shift, b.hue_shift, t),
-            lut_generation: if t >= 0.5 { b.lut_generation } else { a.lut_generation },
+            lut_generation: if t >= 0.5 {
+                b.lut_generation
+            } else {
+                a.lut_generation
+            },
             lut_intensity: lerp(a.lut_intensity, b.lut_intensity, t),
-            lut_platform: if t >= 0.5 { b.lut_platform } else { a.lut_platform },
+            lut_platform: if t >= 0.5 {
+                b.lut_platform
+            } else {
+                a.lut_platform
+            },
         }
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
 fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+    ]
 }
 
 fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
@@ -958,7 +1047,11 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         },
         hdr_max_nits: gpu.hdr_max_nits,
         hdr_ui_brightness: gpu.hdr_ui_brightness,
-        exposure_mode: if gpu.exposure_mode == 0 { ExposureMode::Manual } else { ExposureMode::Auto },
+        exposure_mode: if gpu.exposure_mode == 0 {
+            ExposureMode::Manual
+        } else {
+            ExposureMode::Auto
+        },
         exposure_compensation: gpu.exposure_compensation,
         exposure_min: gpu.exposure_min,
         exposure_max: gpu.exposure_max,

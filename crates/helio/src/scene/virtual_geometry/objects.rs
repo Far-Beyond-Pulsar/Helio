@@ -87,7 +87,7 @@ impl super::super::Scene {
             mesh_id: mesh_id.slot(),
             material_id: desc.material_id,
             flags: desc.flags,
-            lightmap_index: 0xFFFFFFFF,  // Virtual geometry doesn't use lightmaps
+            lightmap_index: 0xFFFFFFFF, // Virtual geometry doesn't use lightmaps
         };
         let (id, _) = self.vg_objects.insert(VirtualObjectRecord {
             virtual_mesh: desc.virtual_mesh,
@@ -244,13 +244,11 @@ mod tests {
             apply_limit_buckets: false,
         }))
         .expect("no adapter found");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
         .expect("failed to create device");
         Scene::new(Arc::new(device), Arc::new(queue))
     }

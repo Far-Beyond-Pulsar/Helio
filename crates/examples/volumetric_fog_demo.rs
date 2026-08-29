@@ -177,8 +177,8 @@ impl ApplicationHandler for App {
         // edges — fine in a game demo, but here it would be mistaken for fog
         // quality. Fog accumulates at a quarter of *this*, so the base wants to
         // be honest.
-        let config = RendererConfig::new(size.width, size.height, surface_format)
-            .with_render_scale(1.0);
+        let config =
+            RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -234,7 +234,8 @@ impl ApplicationHandler for App {
             .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
             .as_mesh()
             .unwrap();
-        let _ = v3_demo_common::insert_object(&mut renderer, floor, stone, glam::Mat4::IDENTITY, 40.0);
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, floor, stone, glam::Mat4::IDENTITY, 40.0);
 
         // Roof — without it the sun lights everything and there is nothing to
         // slice the light into shafts.

@@ -93,30 +93,31 @@ impl PortalInstancePass {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("PortalInstance BGL 0"),
-            entries: &[
-                storage_entry(0, wgpu::ShaderStages::VERTEX, true),   // cameras
-                uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false), // screen size
-                storage_entry(2, wgpu::ShaderStages::VERTEX, true),   // instance_data
-                storage_entry(3, wgpu::ShaderStages::VERTEX, true),   // coordinate_spaces
-                storage_entry(4, wgpu::ShaderStages::VERTEX, true),   // coordinate_spaces_prev
-                storage_entry(5, wgpu::ShaderStages::VERTEX, true),   // portal_compacted_indices
-                storage_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_views
-                storage_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_chains
-                storage_entry(8, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_compacted_chains
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Uint,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                }, // portal_mask — written by helio-pass-portal-mask
-            ],
-        });
+        let bind_group_layout_0 =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("PortalInstance BGL 0"),
+                entries: &[
+                    storage_entry(0, wgpu::ShaderStages::VERTEX, true), // cameras
+                    uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false), // screen size
+                    storage_entry(2, wgpu::ShaderStages::VERTEX, true), // instance_data
+                    storage_entry(3, wgpu::ShaderStages::VERTEX, true), // coordinate_spaces
+                    storage_entry(4, wgpu::ShaderStages::VERTEX, true), // coordinate_spaces_prev
+                    storage_entry(5, wgpu::ShaderStages::VERTEX, true), // portal_compacted_indices
+                    storage_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_views
+                    storage_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_chains
+                    storage_entry(8, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_compacted_chains
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    }, // portal_mask — written by helio-pass-portal-mask
+                ],
+            });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -138,12 +139,36 @@ impl PortalInstancePass {
                     array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 5 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 32, shader_location: 3 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 36, shader_location: 4 },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 24,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 32,
+                            shader_location: 3,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 36,
+                            shader_location: 4,
+                        },
                     ],
                 })],
             },
@@ -152,14 +177,46 @@ impl PortalInstancePass {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rg16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rg16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
             }),
             primitive: wgpu::PrimitiveState {
@@ -229,7 +286,11 @@ fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Co
     }
 }
 
-fn storage_entry(binding: u32, visibility: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+fn storage_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    read_only: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -242,7 +303,11 @@ fn storage_entry(binding: u32, visibility: wgpu::ShaderStages, read_only: bool) 
     }
 }
 
-fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages, dynamic: bool) -> wgpu::BindGroupLayoutEntry {
+fn uniform_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    dynamic: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -296,14 +361,54 @@ impl RenderPass for PortalInstancePass {
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
-                Some(wgpu::RenderPassColorAttachment { view: gbuffer.albedo, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: gbuffer.normal, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: gbuffer.orm, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: gbuffer.emissive, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: lightmap_uv, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: sss_target, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: extra_target, resolve_target: None, depth_slice: None, ops: LOAD }),
-                Some(wgpu::RenderPassColorAttachment { view: velocity_target, resolve_target: None, depth_slice: None, ops: LOAD }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.albedo,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.normal,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.orm,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.emissive,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: lightmap_uv,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: sss_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: extra_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: velocity_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: LOAD,
+                }),
             ]));
 
         Some(wgpu::RenderPassDescriptor {
@@ -311,7 +416,10 @@ impl RenderPass for PortalInstancePass {
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -336,19 +444,28 @@ impl RenderPass for PortalInstancePass {
         if ctx.frame_num < 3 || ctx.frame_num.is_multiple_of(120) {
             log::info!(
                 "[PortalInstance] frame={} draw_count={} render_pass_open={}",
-                ctx.frame_num, self.draw_count, ctx.active_render_pass_ptr().is_some(),
+                ctx.frame_num,
+                self.draw_count,
+                ctx.active_render_pass_ptr().is_some(),
             );
         }
         if self.draw_count == 0 {
             return Ok(());
         }
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
-            log::warn!("[PortalInstance] frame={} no active render pass — G-buffer chain not fused/opened", ctx.frame_num);
+            log::warn!(
+                "[PortalInstance] frame={} no active render pass — G-buffer chain not fused/opened",
+                ctx.frame_num
+            );
             return Ok(());
         };
         let main_scene = ctx.resources.main_scene.read("PortalInstance");
         if ctx.frame_num < 3 {
-            log::info!("[PortalInstance] frame={} main_scene_available={}", ctx.frame_num, main_scene.is_some());
+            log::info!(
+                "[PortalInstance] frame={} main_scene_available={}",
+                ctx.frame_num,
+                main_scene.is_some()
+            );
         }
 
         // helio-pass-portal-mask must run before this pass every frame (see
@@ -375,16 +492,46 @@ impl RenderPass for PortalInstancePass {
                 label: Some("PortalInstance BG 0"),
                 layout: &self.bind_group_layout_0,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.screen_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: ctx.scene.instances.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: ctx.scene.coordinate_spaces.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: ctx.scene.coordinate_spaces_prev.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: self.portal_compacted_indices_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: ctx.scene.portal_views.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.portal_chains.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.portal_compacted_chains_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(portal_mask_view) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.screen_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.portal_compacted_indices_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: ctx.scene.portal_views.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.portal_compacted_chains_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(portal_mask_view),
+                    },
                 ],
             }));
             self.bind_group_0_key = Some(key);
@@ -398,10 +545,16 @@ impl RenderPass for PortalInstancePass {
             || self.bind_group_1.is_none();
         if needs_rebuild {
             let mut entries = vec![
-                wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.materials.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ctx.scene.materials.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene.material_textures.material_textures.as_entire_binding(),
+                    resource: main_scene
+                        .material_textures
+                        .material_textures
+                        .as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(

@@ -313,14 +313,21 @@ mod tests {
 
     #[test]
     fn to_gpu_falls_back_to_plus_x_for_a_degenerate_direction() {
-        for bad in [Vec3::ZERO, Vec3::splat(f32::NAN), Vec3::splat(f32::INFINITY)] {
+        for bad in [
+            Vec3::ZERO,
+            Vec3::splat(f32::NAN),
+            Vec3::splat(f32::INFINITY),
+        ] {
             let gpu = Wind {
                 direction: bad,
                 ..Default::default()
             }
             .to_gpu();
             let dir = Vec3::from_slice(&gpu.direction_speed[..3]);
-            assert!(dir.is_finite(), "degenerate direction {bad:?} produced {dir:?}");
+            assert!(
+                dir.is_finite(),
+                "degenerate direction {bad:?} produced {dir:?}"
+            );
             assert_eq!(dir, Vec3::X);
         }
     }

@@ -58,7 +58,10 @@ impl Scene {
         let slot = self
             .alloc_coordinate_space()
             .ok_or(SceneError::CoordinateSpaceCapacityExceeded)?;
-        let pair = PortalPair { a: desc.a, b: desc.b };
+        let pair = PortalPair {
+            a: desc.a,
+            b: desc.b,
+        };
         self.gpu_scene
             .coordinate_spaces
             .update_slot(slot, pair.pair_map_inverse().to_cols_array());
@@ -78,7 +81,12 @@ impl Scene {
 
     /// Update a portal's pose pair. **O(1)** — one coordinate-space matrix
     /// write, no scene object is touched.
-    pub fn update_portal_pose(&mut self, portal: PortalId, a: PortalPose, b: PortalPose) -> Result<()> {
+    pub fn update_portal_pose(
+        &mut self,
+        portal: PortalId,
+        a: PortalPose,
+        b: PortalPose,
+    ) -> Result<()> {
         let (_slot_index, record) = self
             .portals
             .get_mut_with_slot(portal)
@@ -181,14 +189,21 @@ impl Scene {
 /// picking `0..records.len()` at each of up to `MAX_CHAIN_DEPTH` steps,
 /// pruned to steps where the next portal is actually reachable through the
 /// current innermost one — see `portal_reachable_through`.
-fn generate_chains(records: &[PortalRecord], prefix: &mut Vec<u32>, chains: &mut Vec<libhelio::GpuPortalChain>) {
+fn generate_chains(
+    records: &[PortalRecord],
+    prefix: &mut Vec<u32>,
+    chains: &mut Vec<libhelio::GpuPortalChain>,
+) {
     if chains.len() >= libhelio::MAX_PORTAL_CHAINS {
         return;
     }
     if !prefix.is_empty() {
         let mut portals = [0u32; libhelio::MAX_CHAIN_DEPTH];
         portals[..prefix.len()].copy_from_slice(prefix);
-        chains.push(libhelio::GpuPortalChain { portals, depth: prefix.len() as u32 });
+        chains.push(libhelio::GpuPortalChain {
+            portals,
+            depth: prefix.len() as u32,
+        });
     }
     if prefix.len() >= libhelio::MAX_CHAIN_DEPTH {
         return;
@@ -234,9 +249,16 @@ fn generate_chains(records: &[PortalRecord], prefix: &mut Vec<u32>, chains: &mut
 /// that same spot, as in `portal_cube` — is precisely the legitimate case
 /// this needs to keep allowing.
 fn portal_reachable_through(prev: &PortalRecord, next: &PortalRecord) -> bool {
-    let local = prev.pair.b.transform.inverse().transform_point3(next.pair.a.position());
+    let local = prev
+        .pair
+        .b
+        .transform
+        .inverse()
+        .transform_point3(next.pair.a.position());
     let tolerance = prev.half_extent.x.max(prev.half_extent.y);
-    local.x.abs() <= prev.half_extent.x && local.y.abs() <= prev.half_extent.y && local.z.abs() <= tolerance
+    local.x.abs() <= prev.half_extent.x
+        && local.y.abs() <= prev.half_extent.y
+        && local.z.abs() <= tolerance
 }
 
 /// Placement helper: build a rigid [`PortalPose`] at `position` looking toward

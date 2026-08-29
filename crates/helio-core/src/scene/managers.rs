@@ -287,7 +287,7 @@ impl GpuCameraBuffer {
         [p[0], p[1], p[2]]
     }
 
-        /// Returns the camera forward direction as `[x, y, z]`.
+    /// Returns the camera forward direction as `[x, y, z]`.
     pub fn forward(&self) -> [f32; 3] {
         let f = self.data.forward_far;
         [f[0], f[1], f[2]]
@@ -363,8 +363,8 @@ pub struct CoordinateSpaceBuffer {
 
 impl CoordinateSpaceBuffer {
     pub fn new(device: &wgpu::Device) -> Self {
-        let size = (libhelio::MAX_COORDINATE_SPACES as usize * std::mem::size_of::<[f32; 16]>())
-            as u64;
+        let size =
+            (libhelio::MAX_COORDINATE_SPACES as usize * std::mem::size_of::<[f32; 16]>()) as u64;
         let make = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),

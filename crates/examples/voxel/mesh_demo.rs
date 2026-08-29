@@ -16,9 +16,9 @@ use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
-    RendererConfig, Scene, SceneActor, RenderGraph, VoxelTerrain, VoxelVolumeDescriptor, VoxelMode,
-    VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
+    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneActor, VoxelMode, VoxelTerrain,
+    VoxelVolumeDescriptor, VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -116,12 +116,24 @@ impl AppState {
         let right = orientation * Vec3::X;
 
         let mut accel = Vec3::ZERO;
-        if self.keys.contains(&KeyCode::KeyW) { accel += forward; }
-        if self.keys.contains(&KeyCode::KeyS) { accel -= forward; }
-        if self.keys.contains(&KeyCode::KeyA) { accel -= right; }
-        if self.keys.contains(&KeyCode::KeyD) { accel += right; }
-        if self.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            accel += forward;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            accel -= forward;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            accel -= right;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            accel += right;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            accel += Vec3::Y;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            accel -= Vec3::Y;
+        }
 
         self.velocity += accel * FLY_SPEED * dt;
         self.velocity /= 1.0 + DRAG * dt;
@@ -171,7 +183,10 @@ impl AppState {
         let radius_grid = 2.0 / VOXEL_SIZE;
 
         if let Some(range) = world.paint_sphere(center_grid, radius_grid, material, add) {
-            let (meta_buf, data_buf) = (mesh_pass.brick_meta_buf().clone(), mesh_pass.voxel_data_buf().clone());
+            let (meta_buf, data_buf) = (
+                mesh_pass.brick_meta_buf().clone(),
+                mesh_pass.voxel_data_buf().clone(),
+            );
             let touched = world.upload_range_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
             for (brick_idx, origin, occupied) in touched {
                 mesh_pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
@@ -182,7 +197,9 @@ impl AppState {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
         let attrs = Window::default_attributes()
             .with_title("Helio Voxel Demo")
@@ -200,14 +217,12 @@ impl ApplicationHandler for App {
         }))
         .expect("No suitable GPU adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
         .expect("Device request failed");
 
         let device = Arc::new(device);
@@ -219,7 +234,9 @@ impl ApplicationHandler for App {
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter()
+        let surface_format = caps
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
@@ -245,7 +262,8 @@ impl ApplicationHandler for App {
         // from it), but our graph has no TAA upscale step and locks pre_aa at
         // full window resolution — a scaled depth buffer here would mismatch the
         // full-res color attachment, so pin it to 1.0.
-        let config = RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
+        let config =
+            RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
         let mut scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -256,7 +274,9 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
@@ -272,14 +292,46 @@ impl ApplicationHandler for App {
             // heavy per-frame editing — not the case here.
             mode: Some(VoxelMode::Auto),
             material_palette: vec![
-                GpuVoxelMaterial { color: [0.0, 0.0, 0.0], roughness: 1.0, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // air (unused)
-                GpuVoxelMaterial { color: [0.3, 0.7, 0.25], roughness: 0.8, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // grass
-                GpuVoxelMaterial { color: [0.45, 0.3, 0.15], roughness: 0.9, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // dirt
-                GpuVoxelMaterial { color: [0.5, 0.5, 0.52], roughness: 0.85, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // stone
-                GpuVoxelMaterial { color: [0.9, 0.75, 0.2], roughness: 0.4, metalness: 0.8, emissive: 0.0, _pad: [0; 2] }, // ore
+                GpuVoxelMaterial {
+                    color: [0.0, 0.0, 0.0],
+                    roughness: 1.0,
+                    metalness: 0.0,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                }, // air (unused)
+                GpuVoxelMaterial {
+                    color: [0.3, 0.7, 0.25],
+                    roughness: 0.8,
+                    metalness: 0.0,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                }, // grass
+                GpuVoxelMaterial {
+                    color: [0.45, 0.3, 0.15],
+                    roughness: 0.9,
+                    metalness: 0.0,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                }, // dirt
+                GpuVoxelMaterial {
+                    color: [0.5, 0.5, 0.52],
+                    roughness: 0.85,
+                    metalness: 0.0,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                }, // stone
+                GpuVoxelMaterial {
+                    color: [0.9, 0.75, 0.2],
+                    roughness: 0.4,
+                    metalness: 0.8,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                }, // ore
             ],
         };
-        let vol_id = scene.insert_voxel_volume(voxel_desc).expect("Failed to create voxel volume");
+        let vol_id = scene
+            .insert_voxel_volume(voxel_desc)
+            .expect("Failed to create voxel volume");
 
         // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
         // directly (see voxel_raymarch.wgsl), the same infrastructure the default
@@ -327,9 +379,18 @@ impl ApplicationHandler for App {
         graph.lock(size.width, size.height);
 
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         // Renderer applies TAA-style subpixel camera jitter every frame
         // unconditionally; without a TaaPass to resolve it (we only have
@@ -338,8 +399,11 @@ impl ApplicationHandler for App {
         renderer.set_jitter_enabled(false);
 
         {
-            let pass = renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
-            let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
+            let pass = renderer
+                .find_pass_mut::<VoxelMeshPass>()
+                .expect("VoxelMeshPass missing from graph");
+            let (meta_buf, data_buf) =
+                (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
             let touched = world.upload_all_mesh(&queue, &meta_buf, &data_buf, VOXEL_SIZE);
             for (brick_idx, origin, occupied) in touched {
                 pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
@@ -386,11 +450,12 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(true) => state.last_frame = Instant::now(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -403,11 +468,12 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(code),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 let _ = state.keys.insert(code);
@@ -417,11 +483,24 @@ impl ApplicationHandler for App {
                     KeyCode::Digit3 => state.current_material = 3,
                     KeyCode::Digit4 => state.current_material = 4,
                     KeyCode::KeyR => {
-                        state.world_seed = state.world_seed.wrapping_add(1).wrapping_mul(2654435761).wrapping_add(1);
+                        state.world_seed = state
+                            .world_seed
+                            .wrapping_add(1)
+                            .wrapping_mul(2654435761)
+                            .wrapping_add(1);
                         state.world.generate(state.world_seed);
-                        let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
-                        let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-                        let touched = state.world.upload_all_mesh(&state.queue, &meta_buf, &data_buf, VOXEL_SIZE);
+                        let pass = state
+                            .renderer
+                            .find_pass_mut::<VoxelMeshPass>()
+                            .expect("VoxelMeshPass missing from graph");
+                        let (meta_buf, data_buf) =
+                            (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
+                        let touched = state.world.upload_all_mesh(
+                            &state.queue,
+                            &meta_buf,
+                            &data_buf,
+                            VOXEL_SIZE,
+                        );
                         for (brick_idx, origin, occupied) in touched {
                             pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
                         }
@@ -431,11 +510,12 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Released,
-                    physical_key: PhysicalKey::Code(code),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => {
                 state.keys.remove(&code);
@@ -446,7 +526,8 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } if !state.cursor_grabbed => {
-                let ok = state.window
+                let ok = state
+                    .window
                     .set_cursor_grab(CursorGrabMode::Confined)
                     .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                     .is_ok();
@@ -466,7 +547,10 @@ impl ApplicationHandler for App {
                 let yaw = state.yaw;
                 let pitch = state.pitch;
                 let queue = state.queue.clone();
-                let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+                let pass = state
+                    .renderer
+                    .find_pass_mut::<VoxelMeshPass>()
+                    .expect("VoxelMeshPass missing from graph");
                 AppState::place_edit(true, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
             }
 
@@ -480,7 +564,10 @@ impl ApplicationHandler for App {
                 let yaw = state.yaw;
                 let pitch = state.pitch;
                 let queue = state.queue.clone();
-                let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+                let pass = state
+                    .renderer
+                    .find_pass_mut::<VoxelMeshPass>()
+                    .expect("VoxelMeshPass missing from graph");
                 AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
             }
 
@@ -501,7 +588,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }

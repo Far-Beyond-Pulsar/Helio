@@ -236,7 +236,8 @@ impl MeshBvh {
             let r_first = lo;
             let r_count = count - left_count;
             let (lmin, lmax) = slice_aabb(&tri_ids[l_first..lo], &tri_mins, &tri_maxs);
-            let (rmin, rmax) = slice_aabb(&tri_ids[r_first..r_first + r_count], &tri_mins, &tri_maxs);
+            let (rmin, rmax) =
+                slice_aabb(&tri_ids[r_first..r_first + r_count], &tri_mins, &tri_maxs);
 
             let left_idx = nodes.len();
             let right_idx = left_idx + 1;
@@ -296,7 +297,13 @@ impl MeshBvh {
             sp -= 1;
             let node = self.nodes[stack[sp] as usize];
 
-            if !ray_aabb_hit(origin, inv_dir, Vec3::from(node.min), Vec3::from(node.max), t_best) {
+            if !ray_aabb_hit(
+                origin,
+                inv_dir,
+                Vec3::from(node.min),
+                Vec3::from(node.max),
+                t_best,
+            ) {
                 continue;
             }
 
@@ -645,9 +652,21 @@ fn slice_aabb(ids: &[u32], mins: &[Vec3], maxs: &[Vec3]) -> (Vec3, Vec3) {
 #[inline(always)]
 fn safe_inv_dir(dir: Vec3) -> Vec3 {
     Vec3::new(
-        if dir.x.abs() > 1e-30 { 1.0 / dir.x } else { f32::MAX },
-        if dir.y.abs() > 1e-30 { 1.0 / dir.y } else { f32::MAX },
-        if dir.z.abs() > 1e-30 { 1.0 / dir.z } else { f32::MAX },
+        if dir.x.abs() > 1e-30 {
+            1.0 / dir.x
+        } else {
+            f32::MAX
+        },
+        if dir.y.abs() > 1e-30 {
+            1.0 / dir.y
+        } else {
+            f32::MAX
+        },
+        if dir.z.abs() > 1e-30 {
+            1.0 / dir.z
+        } else {
+            f32::MAX
+        },
     )
 }
 
@@ -667,12 +686,7 @@ fn ray_aabb_hit(origin: Vec3, inv_dir: Vec3, aabb_min: Vec3, aabb_max: Vec3, t_m
 /// Returns `None` for a miss.  Entry `t` is clamped to 0 for rays starting
 /// inside the box.
 #[inline(always)]
-fn ray_aabb_t(
-    origin: Vec3,
-    inv_dir: Vec3,
-    aabb_min: Vec3,
-    aabb_max: Vec3,
-) -> Option<(f32, f32)> {
+fn ray_aabb_t(origin: Vec3, inv_dir: Vec3, aabb_min: Vec3, aabb_max: Vec3) -> Option<(f32, f32)> {
     let t_lo = (aabb_min - origin) * inv_dir;
     let t_hi = (aabb_max - origin) * inv_dir;
     let t_enter = t_lo.min(t_hi).max_element();

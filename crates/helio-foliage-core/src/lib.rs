@@ -164,10 +164,7 @@ mod tests {
         for lane in 0..64u32 {
             let seed = blade_seed(tile_coord, lane, generation);
             let params = BladeParams {
-                tile_uv: [
-                    hash_to_unit(seed),
-                    hash_to_unit(seed.rotate_left(11)),
-                ],
+                tile_uv: [hash_to_unit(seed), hash_to_unit(seed.rotate_left(11))],
                 height_offset: hash_to_unit(seed.rotate_left(19)) * 0.4,
                 yaw: hash_to_unit(seed.rotate_left(23)) * std::f32::consts::TAU,
                 height_scale: hash_to_unit(seed.rotate_left(5)),
@@ -257,6 +254,9 @@ mod tests {
             .zip(neighbour.iter())
             .filter(|(a, b)| a.packed_pos == b.packed_pos)
             .count();
-        assert!(shared <= 2, "{shared} of 128 blades are shared with the neighbouring tile");
+        assert!(
+            shared <= 2,
+            "{shared} of 128 blades are shared with the neighbouring tile"
+        );
     }
 }

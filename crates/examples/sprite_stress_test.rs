@@ -39,7 +39,10 @@ impl Rng {
         Rng(seed)
     }
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
     fn next_f32(&mut self) -> f32 {
@@ -62,7 +65,10 @@ fn spawn_sprites(count: usize) -> Vec<Sprite> {
         .map(|_| {
             let hue = rng.next_f32();
             Sprite {
-                pos: [rng.range_f32(-BOUNDS_HALF[0], BOUNDS_HALF[0]), rng.range_f32(-BOUNDS_HALF[1], BOUNDS_HALF[1])],
+                pos: [
+                    rng.range_f32(-BOUNDS_HALF[0], BOUNDS_HALF[0]),
+                    rng.range_f32(-BOUNDS_HALF[1], BOUNDS_HALF[1]),
+                ],
                 vel: [rng.range_f32(-120.0, 120.0), rng.range_f32(-120.0, 120.0)],
                 color: hsv_to_rgb(hue, 0.75, 1.0),
             }
@@ -198,7 +204,12 @@ impl ApplicationHandler for App {
         // simulation and the visible area agree no matter how the window is
         // resized.
         sprite_pass.set_camera([0.0, 0.0], Some(BOUNDS_HALF));
-        sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }));
+        sprite_pass.set_clear_color(Some(wgpu::Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.04,
+            a: 1.0,
+        }));
         let dot_layer = sprite_pass.add_atlas_layer(&device, &queue, 8, 8, &make_dot_atlas());
         let sprites = spawn_sprites(count);
 
@@ -217,7 +228,10 @@ impl ApplicationHandler for App {
             count as u32,
         );
         sprite_cull.set_view_rect([0.0, 0.0], BOUNDS_HALF);
-        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+        sprite_pass.use_gpu_culling(
+            sprite_cull.draw_order_buf.clone(),
+            sprite_cull.indirect_buf.clone(),
+        );
 
         let sprite_handles: Vec<SpriteHandle> = sprites
             .iter()
@@ -240,7 +254,11 @@ impl ApplicationHandler for App {
         let scene = GpuScene::new(device.clone(), queue.clone());
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -348,7 +366,10 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = output.texture.create_view(&Default::default());
-                if let Err(e) = state.graph.execute(&state.scene, &view, &state.dummy_depth_view) {
+                if let Err(e) = state
+                    .graph
+                    .execute(&state.scene, &view, &state.dummy_depth_view)
+                {
                     log::error!("graph execute error: {e:?}");
                 }
                 state.queue.present(output);

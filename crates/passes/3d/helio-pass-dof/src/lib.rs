@@ -94,7 +94,11 @@ impl DofPass {
         // ── Internal textures ───────────────────────────────────────────
         let coc_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF CoC"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -106,7 +110,11 @@ impl DofPass {
 
         let near_blur_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF Near Blur"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -118,7 +126,11 @@ impl DofPass {
 
         let far_blur_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF Far Blur"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -158,35 +170,42 @@ impl DofPass {
         let coc_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DOF CoC Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(COC_SHADER_SRC).into_owned().into(),
+                helio_core::shader::resolve(COC_SHADER_SRC)
+                    .into_owned()
+                    .into(),
             ),
         });
         let gather_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DOF Gather Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(GATHER_SHADER_SRC).into_owned().into(),
+                helio_core::shader::resolve(GATHER_SHADER_SRC)
+                    .into_owned()
+                    .into(),
             ),
         });
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DOF Composite Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(COMPOSITE_SHADER_SRC).into_owned().into(),
+                helio_core::shader::resolve(COMPOSITE_SHADER_SRC)
+                    .into_owned()
+                    .into(),
             ),
         });
 
         // ── Bind group layouts ──────────────────────────────────────────
         /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
         /// The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
-        let uniform_entry = |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: min_size,
-            },
-            count: None,
-        };
+        let uniform_entry =
+            |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: min_size,
+                },
+                count: None,
+            };
 
         // The engine-wide camera buffer (`GpuCameraBuffer`, label "Camera Storage")
         // is a storage buffer sized for 2 cameras (mono/stereo), matching every
@@ -461,10 +480,22 @@ impl DofPass {
             label: Some("DOF CoC BG"),
             layout: &self.coc_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.coc_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.dof_block_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.coc_view),
+                },
             ],
         });
         self.coc_bg = Some(bg);
@@ -480,34 +511,72 @@ impl DofPass {
             label: Some("DOF Gather BG"),
             layout: &self.gather_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(src_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.coc_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.bokeh_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.near_blur_view) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.far_blur_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.dof_block_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.coc_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.bokeh_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.near_blur_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.far_blur_view),
+                },
             ],
         });
         self.gather_bg = Some(bg);
     }
 
-    fn rebuild_composite_bg(
-        &mut self,
-        device: &wgpu::Device,
-        src_view: &wgpu::TextureView,
-    ) {
+    fn rebuild_composite_bg(&mut self, device: &wgpu::Device, src_view: &wgpu::TextureView) {
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DOF Composite BG"),
             layout: &self.composite_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.near_blur_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.far_blur_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.coc_view) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.dof_block_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.near_blur_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.far_blur_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.coc_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
             ],
         });
         self.composite_bg = Some(bg);
@@ -546,7 +615,11 @@ impl RenderPass for DofPass {
 
         let new_coc = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF CoC"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -555,11 +628,17 @@ impl RenderPass for DofPass {
             view_formats: &[],
         });
         self.coc_tex = new_coc;
-        self.coc_view = self.coc_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.coc_view = self
+            .coc_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let new_near = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF Near Blur"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -568,11 +647,17 @@ impl RenderPass for DofPass {
             view_formats: &[],
         });
         self.near_blur_tex = new_near;
-        self.near_blur_view = self.near_blur_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.near_blur_view = self
+            .near_blur_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let new_far = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DOF Far Blur"),
-            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: half_w,
+                height: half_h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -581,7 +666,9 @@ impl RenderPass for DofPass {
             view_formats: &[],
         });
         self.far_blur_tex = new_far;
-        self.far_blur_view = self.far_blur_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.far_blur_view = self
+            .far_blur_tex
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.coc_bg = None;
         self.gather_bg = None;
@@ -625,17 +712,17 @@ impl RenderPass for DofPass {
         let gather_key = (
             src_view as *const _ as usize,
             camera_buf as *const _ as usize,
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
         );
         if self.bg_key_gather != Some(gather_key) {
             self.rebuild_gather_bg(ctx.device, src_view, camera_buf);
             self.bg_key_gather = Some(gather_key);
         }
 
-        let composite_key = (
-            src_view as *const _ as usize,
-            0, 0, 0, 0,
-        );
+        let composite_key = (src_view as *const _ as usize, 0, 0, 0, 0);
         if self.bg_key_composite != Some(composite_key) {
             self.rebuild_composite_bg(ctx.device, src_view);
             self.bg_key_composite = Some(composite_key);
@@ -648,8 +735,10 @@ impl RenderPass for DofPass {
         {
             let ce = ctx.compute_encoder_ptr;
             unsafe { &mut *ce }.copy_buffer_to_buffer(
-                pp_buf, DOF_BLOCK_OFFSET,
-                &self.dof_block_buf, 0,
+                pp_buf,
+                DOF_BLOCK_OFFSET,
+                &self.dof_block_buf,
+                0,
                 DOF_BLOCK_SIZE,
             );
         }
@@ -693,14 +782,15 @@ impl RenderPass for DofPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("DOF Composite"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("DOF Composite"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, self.composite_bg.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);

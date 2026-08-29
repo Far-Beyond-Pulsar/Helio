@@ -21,7 +21,9 @@ use helio::{
     DebugDrawState, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, sphere_mesh};
+use v3_demo_common::{
+    box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, sphere_mesh,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -106,24 +108,22 @@ impl ApplicationHandler for App {
             .create_surface(window.clone())
             .expect("Failed to create surface");
 
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: true,
-            }))
-            .expect("Failed to find adapter");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: true,
+        }))
+        .expect("Failed to find adapter");
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }))
-            .expect("Failed to create device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Main Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
+        .expect("Failed to create device");
 
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             log::error!("wgpu uncaptured error: {:?}", e);
@@ -158,8 +158,8 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &cfg);
 
-        let config = RendererConfig::new(size.width, size.height, surface_format)
-            .with_render_scale(1.0);
+        let config =
+            RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -255,7 +255,13 @@ impl ApplicationHandler for App {
             )))
             .as_mesh()
             .unwrap();
-        let _ = insert_object(&mut renderer, floor, floor_mat, glam::Mat4::IDENTITY, SCENE_HALF_Z);
+        let _ = insert_object(
+            &mut renderer,
+            floor,
+            floor_mat,
+            glam::Mat4::IDENTITY,
+            SCENE_HALF_Z,
+        );
 
         // ── Tabletop ────────────────────────────────────────────────────
         let table = renderer
@@ -286,9 +292,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
 
-        let z_positions: [f32; 9] = [
-            -20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0,
-        ];
+        let z_positions: [f32; 9] = [-20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0];
         let colors = [&red_mat, &green_mat, &blue_mat, &yellow_mat, &white_mat];
         let shapes = [sphere_m, box_m];
 

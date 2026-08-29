@@ -9,7 +9,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
@@ -145,15 +146,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         let mat = renderer.scene_mut().insert_material(make_material(
@@ -164,16 +185,83 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0))).as_mesh().unwrap();
-        let bld_a = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 7.0, 2.5]))).as_mesh().unwrap();
-        let bld_b = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.5, 2.0]))).as_mesh().unwrap();
-        let bld_c = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 3.0, 3.0]))).as_mesh().unwrap();
-        let bld_d = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 1.5, 2.5]))).as_mesh().unwrap();
-        let bld_e = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 9.5, 3.0]))).as_mesh().unwrap();
-        let lamp_pole_a = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]))).as_mesh().unwrap();
-        let lamp_pole_b = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]))).as_mesh().unwrap();
-        let lamp_pole_c = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]))).as_mesh().unwrap();
-        let lamp_pole_d = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]))).as_mesh().unwrap();
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
+            .as_mesh()
+            .unwrap();
+        let bld_a = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 7.0, 2.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let bld_b = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [3.0, 4.5, 2.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let bld_c = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.0, 3.0, 3.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let bld_d = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [3.5, 1.5, 2.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let bld_e = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [4.0, 9.5, 3.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let lamp_pole_a = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.08, 2.5, 0.08],
+            )))
+            .as_mesh()
+            .unwrap();
+        let lamp_pole_b = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.08, 2.5, 0.08],
+            )))
+            .as_mesh()
+            .unwrap();
+        let lamp_pole_c = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.08, 2.5, 0.08],
+            )))
+            .as_mesh()
+            .unwrap();
+        let lamp_pole_d = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.08, 2.5, 0.08],
+            )))
+            .as_mesh()
+            .unwrap();
 
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
@@ -242,42 +330,78 @@ impl ApplicationHandler for App {
         );
 
         let mut _light_ids: Vec<LightId> = Vec::new();
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [-5.0, 5.1, -5.0],
-            [1.0, 0.72, 0.3],
-            6.0,
-            14.0,
-        ))).as_light().unwrap());
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [5.0, 5.1, -5.0],
-            [1.0, 0.72, 0.3],
-            6.0,
-            14.0,
-        ))).as_light().unwrap());
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [-5.0, 5.1, 5.0],
-            [1.0, 0.72, 0.3],
-            6.0,
-            14.0,
-        ))).as_light().unwrap());
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [5.0, 5.1, 5.0],
-            [1.0, 0.72, 0.3],
-            6.0,
-            14.0,
-        ))).as_light().unwrap());
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [8.0, 12.0, -5.8],
-            [1.0, 0.05, 0.8],
-            5.0,
-            12.0,
-        ))).as_light().unwrap());
-        _light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [0.0, 16.5, -14.0],
-            [0.05, 0.9, 1.0],
-            4.0,
-            10.0,
-        ))).as_light().unwrap());
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [-5.0, 5.1, -5.0],
+                    [1.0, 0.72, 0.3],
+                    6.0,
+                    14.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [5.0, 5.1, -5.0],
+                    [1.0, 0.72, 0.3],
+                    6.0,
+                    14.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [-5.0, 5.1, 5.0],
+                    [1.0, 0.72, 0.3],
+                    6.0,
+                    14.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [5.0, 5.1, 5.0],
+                    [1.0, 0.72, 0.3],
+                    6.0,
+                    14.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [8.0, 12.0, -5.8],
+                    [1.0, 0.05, 0.8],
+                    5.0,
+                    12.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
+        _light_ids.push(
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [0.0, 16.5, -14.0],
+                    [0.05, 0.9, 1.0],
+                    4.0,
+                    10.0,
+                )))
+                .as_light()
+                .unwrap(),
+        );
         renderer.set_ambient([0.1, 0.15, 0.3], 0.06);
         renderer.set_clear_color([0.005, 0.005, 0.025, 1.0]);
 
@@ -457,6 +581,3 @@ impl AppState {
         self.queue.present(output);
     }
 }
-
-
-

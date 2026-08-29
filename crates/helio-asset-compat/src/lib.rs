@@ -6,13 +6,13 @@
 
 mod animation_system;
 mod camera_converter;
+mod ies;
 mod light_converter;
+mod lut;
 mod material_converter;
 mod mesh_converter;
 mod scene_converter;
 mod texture_loader;
-mod lut;
-mod ies;
 
 use helio::MeshId;
 use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, TextureId};
@@ -20,7 +20,9 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 pub use camera_converter::{extract_camera_data, CameraData};
+pub use ies::{IesError, IesProfile};
 pub use light_converter::convert_light;
+pub use lut::{CubeLut, LutError};
 pub use material_converter::{
     convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
 };
@@ -28,8 +30,6 @@ pub use mesh_converter::{convert_primitive, convert_vertex};
 pub use scene_converter::{
     convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
 };
-pub use lut::{CubeLut, LutError};
-pub use ies::{IesProfile, IesError};
 
 use std::path::Path;
 
@@ -300,10 +300,7 @@ impl UploadedScene {
     ///
     /// Falls back to `material_ids[0]` when the mesh has no material index, and
     /// returns `None` when `material_ids` is empty.
-    pub fn mesh_material(
-        &self,
-        converted: &scene_converter::ConvertedMesh,
-    ) -> Option<MaterialId> {
+    pub fn mesh_material(&self, converted: &scene_converter::ConvertedMesh) -> Option<MaterialId> {
         let idx = converted.material_index?;
         self.material_ids
             .get(idx)
@@ -336,16 +333,19 @@ pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<U
         .meshes
         .iter()
         .filter_map(|mesh| {
-            let actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                vertices: mesh.vertices.clone(),
-                indices: mesh.indices.clone(),
-            }));
+            let actor_id =
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                        vertices: mesh.vertices.clone(),
+                        indices: mesh.indices.clone(),
+                    }));
             match actor_id {
                 helio::SceneActorId::Mesh(id) => Some(id),
                 _ => None,
             }
         })
-        .collect::<Vec<_>>() ;
+        .collect::<Vec<_>>();
     Ok(UploadedScene {
         mesh_ids,
         material_ids,
@@ -394,10 +394,9 @@ pub fn upload_sectioned_scene(
     renderer: &mut Renderer,
     scene: &ConvertedScene,
 ) -> Result<(MultiMeshId, Vec<MaterialId>)> {
-    let sm = scene
-        .sectioned_mesh
-        .as_ref()
-        .expect("upload_sectioned_scene called on a scene without sectioned_mesh; use merge_meshes=true");
+    let sm = scene.sectioned_mesh.as_ref().expect(
+        "upload_sectioned_scene called on a scene without sectioned_mesh; use merge_meshes=true",
+    );
 
     // Upload textures and materials (same as upload_scene_materials).
     let texture_ids: Result<Vec<TextureId>> = scene
@@ -519,7 +518,10 @@ mod configurator_tests {
             let schema = options_schema_for_extension(extension)
                 .unwrap_or_else(|| panic!("missing schema for .{extension}"));
             assert!(
-                schema.fields.iter().any(|field| field.key == keys::FLIP_UV_V),
+                schema
+                    .fields
+                    .iter()
+                    .any(|field| field.key == keys::FLIP_UV_V),
                 ".{extension} schema omitted the shared UV option"
             );
         }

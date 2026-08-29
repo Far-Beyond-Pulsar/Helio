@@ -280,8 +280,8 @@ impl RenderPass for IndirectDispatchPass {
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel. One
         // workgroup per draw-call group — its 64 lanes cooperatively compact
         // that group's surviving instances (see indirect_dispatch.wgsl).
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("IndirectDispatch"),
                 timestamp_writes: None,
             });
@@ -333,4 +333,3 @@ fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
         normalize(sub(r3, r2)), // far:     z ≤  w  → -z + w ≥ 0
     ]
 }
-

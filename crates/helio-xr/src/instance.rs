@@ -66,8 +66,7 @@ impl XrInstance {
         // with a struct literal.
         let mut extensions = openxr::ExtensionSet::default();
         extensions.khr_vulkan_enable2 = supported.khr_vulkan_enable2;
-        extensions.khr_vulkan_enable =
-            !supported.khr_vulkan_enable2 && supported.khr_vulkan_enable;
+        extensions.khr_vulkan_enable = !supported.khr_vulkan_enable2 && supported.khr_vulkan_enable;
         extensions.ext_debug_utils = supported.ext_debug_utils;
 
         // ── API version negotiation ──────────────────────────────────────────
@@ -96,21 +95,18 @@ impl XrInstance {
             api_version,
         };
 
-        let instance = match entry.create_instance(
-            &app_info(openxr::CURRENT_API_VERSION),
-            &extensions,
-            &[],
-        ) {
-            Ok(instance) => instance,
-            Err(newest_error) => {
-                log::info!(
-                    "OpenXR runtime rejected API {} ({newest_error}); retrying at {}",
-                    openxr::CURRENT_API_VERSION,
-                    OPENXR_1_0,
-                );
-                entry.create_instance(&app_info(OPENXR_1_0), &extensions, &[])?
-            }
-        };
+        let instance =
+            match entry.create_instance(&app_info(openxr::CURRENT_API_VERSION), &extensions, &[]) {
+                Ok(instance) => instance,
+                Err(newest_error) => {
+                    log::info!(
+                        "OpenXR runtime rejected API {} ({newest_error}); retrying at {}",
+                        openxr::CURRENT_API_VERSION,
+                        OPENXR_1_0,
+                    );
+                    entry.create_instance(&app_info(OPENXR_1_0), &extensions, &[])?
+                }
+            };
 
         let system = instance
             .system(openxr::FormFactor::HEAD_MOUNTED_DISPLAY)
@@ -212,8 +208,7 @@ fn load_entry() -> Result<openxr::Entry> {
 
     // Common SteamVR `openxr_loader.dll` locations. Recent SteamVR ships it in
     // `bin\win64`; older versions used `openxr\win64`.
-    const STEAMVR_LOADER_BIN: &str =
-        "steamapps\\common\\SteamVR\\bin\\win64\\openxr_loader.dll";
+    const STEAMVR_LOADER_BIN: &str = "steamapps\\common\\SteamVR\\bin\\win64\\openxr_loader.dll";
     const STEAMVR_LOADER_OPENXR: &str =
         "steamapps\\common\\SteamVR\\openxr\\win64\\openxr_loader.dll";
     let mut candidates = Vec::new();

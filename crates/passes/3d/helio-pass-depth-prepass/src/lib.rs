@@ -151,7 +151,8 @@ impl RenderPass for DepthPrepassPass {
         depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([]));
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DepthPrepass"),
             color_attachments,

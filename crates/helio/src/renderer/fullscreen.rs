@@ -50,9 +50,7 @@ fn exclusive_fullscreen_win(
             let swap_chain = surface
                 .as_hal::<wgpu::hal::api::Dx12>()
                 .and_then(|s| s.swap_chain())
-                .ok_or_else(|| windows::core::Error::from(
-                    windows::Win32::Foundation::E_FAIL,
-                ))?;
+                .ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
             swap_chain.SetFullscreenState(true, None)
         })();
         return match result {
@@ -85,7 +83,9 @@ fn exit_exclusive_fullscreen_win(surface: &wgpu::Surface<'_>) {
             .and_then(|s| s.swap_chain())
         {
             if let Err(e) = swap_chain.SetFullscreenState(false, None) {
-                log::warn!("helio: exit_exclusive_fullscreen: SetFullscreenState(FALSE) failed: {e}");
+                log::warn!(
+                    "helio: exit_exclusive_fullscreen: SetFullscreenState(FALSE) failed: {e}"
+                );
             }
         }
     }

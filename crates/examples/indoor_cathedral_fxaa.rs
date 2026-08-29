@@ -20,9 +20,9 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState,
-    HelioAction, HelioCommandBridge, LightId, MeshId, Movability, PerfOverlayMode, Renderer,
-    RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
+    Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, Movability,
+    PerfOverlayMode, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
@@ -220,8 +220,8 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
-                .with_shadow_quality(helio::ShadowQuality::Ultra)
-                .with_render_scale(1.0);
+            .with_shadow_quality(helio::ShadowQuality::Ultra)
+            .with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -232,15 +232,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_editor_mode(true);
 
@@ -814,7 +834,9 @@ impl ApplicationHandler for App {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
 
                 if let Ok(mut renderer) = state.renderer.lock() {
-                    if let Some(pass) = renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                    if let Some(pass) =
+                        renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+                    {
                         pass.set_enabled(state.debug_overlay_enabled);
                     }
                 }
@@ -832,7 +854,9 @@ impl ApplicationHandler for App {
             } => {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
                 if let Ok(mut renderer) = state.renderer.lock() {
-                    if let Some(pass) = renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                    if let Some(pass) =
+                        renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+                    {
                         pass.set_enabled(state.debug_overlay_enabled);
                     }
                 }

@@ -142,8 +142,8 @@ pub fn f32_to_f16_bits(value: f32) -> u16 {
 
     let truncated = ((exponent as u16) << 10) | ((mantissa >> 13) as u16);
     let round_bit = 0x0000_1000u32;
-    let round_up = (mantissa & round_bit) != 0
-        && ((mantissa & (round_bit - 1)) != 0 || (truncated & 1) != 0);
+    let round_up =
+        (mantissa & round_bit) != 0 && ((mantissa & (round_bit - 1)) != 0 || (truncated & 1) != 0);
     // A carry out of the mantissa increments the exponent field for free, and a carry
     // out of the exponent lands exactly on the infinity encoding. Both are correct.
     sign | (truncated + u16::from(round_up))
@@ -194,7 +194,10 @@ mod tests {
     fn unorm16_round_trips_every_code() {
         for code in 0..=u16::MAX {
             let decoded = unpack_unorm16(code);
-            assert!((0.0..=1.0).contains(&decoded), "code {code} left the unit range");
+            assert!(
+                (0.0..=1.0).contains(&decoded),
+                "code {code} left the unit range"
+            );
             assert_eq!(
                 pack_unorm16(decoded),
                 code,
@@ -229,7 +232,11 @@ mod tests {
     fn yaw_round_trips_every_code() {
         for code in 0..=u16::MAX {
             let radians = unpack_yaw(code);
-            assert_eq!(pack_yaw(radians), code, "yaw code {code} did not round trip");
+            assert_eq!(
+                pack_yaw(radians),
+                code,
+                "yaw code {code} did not round trip"
+            );
         }
     }
 
@@ -257,7 +264,10 @@ mod tests {
             let error = (unpack_yaw(pack_yaw(angle)) - angle).abs();
             worst = worst.max(error.min((std::f32::consts::TAU - error).abs()));
         }
-        assert!(worst <= STEP * 0.5 + 1.0e-6, "worst yaw error {worst} exceeds half a step");
+        assert!(
+            worst <= STEP * 0.5 + 1.0e-6,
+            "worst yaw error {worst} exceeds half a step"
+        );
     }
 
     #[test]
@@ -270,7 +280,10 @@ mod tests {
                 continue; // inf/NaN handled separately
             }
             let decoded = f16_bits_to_f32(code);
-            assert!(decoded.is_finite(), "code {code:#06x} decoded to non-finite");
+            assert!(
+                decoded.is_finite(),
+                "code {code:#06x} decoded to non-finite"
+            );
             assert_eq!(
                 f32_to_f16_bits(decoded),
                 code,
@@ -322,8 +335,16 @@ mod tests {
     #[test]
     fn f16x2_packs_low_half_first() {
         let packed = pack_f16x2(1.0, 2.0);
-        assert_eq!(packed & 0xffff, 0x3c00, "low half must hold the first argument");
-        assert_eq!(packed >> 16, 0x4000, "high half must hold the second argument");
+        assert_eq!(
+            packed & 0xffff,
+            0x3c00,
+            "low half must hold the first argument"
+        );
+        assert_eq!(
+            packed >> 16,
+            0x4000,
+            "high half must hold the second argument"
+        );
         assert_eq!(unpack_f16x2(packed), [1.0, 2.0]);
         assert_eq!(unpack_f16x2(pack_f16x2(0.0, 0.0)), [0.0, 0.0]);
         assert_eq!(unpack_f16x2(pack_f16x2(-3.5, 65504.0)), [-3.5, 65504.0]);

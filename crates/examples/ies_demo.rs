@@ -16,8 +16,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    Camera, DebugDrawState, Renderer, RendererConfig, Scene, TonemapOperator,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, Renderer, RendererConfig, Scene, TonemapOperator,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{make_material, plane_mesh};
@@ -76,14 +76,14 @@ impl App {
             let mut light = helio::GpuLight::default();
             light.light_type = helio::LightType::Spot as u32;
             light.color_intensity = match i {
-                0 => [1.0, 0.3, 0.2, 8.0],   // red-tinted narrow
-                1 => [0.2, 1.0, 0.3, 8.0],   // green-tinted medium
-                _ => [0.3, 0.4, 1.0, 8.0],   // blue-tinted wide
+                0 => [1.0, 0.3, 0.2, 8.0], // red-tinted narrow
+                1 => [0.2, 1.0, 0.3, 8.0], // green-tinted medium
+                _ => [0.3, 0.4, 1.0, 8.0], // blue-tinted wide
             };
             light.direction_outer = match i {
-                0 => [0.0, -1.0, 0.0, 0.85],  // narrow (outer cos=0.85 ≈ 32°)
-                1 => [0.0, -1.0, 0.0, 0.75],  // medium (outer cos=0.75 ≈ 41°)
-                _ => [0.0, -1.0, 0.0, 0.50],  // wide (outer cos=0.50 ≈ 60°)
+                0 => [0.0, -1.0, 0.0, 0.85], // narrow (outer cos=0.85 ≈ 32°)
+                1 => [0.0, -1.0, 0.0, 0.75], // medium (outer cos=0.75 ≈ 41°)
+                _ => [0.0, -1.0, 0.0, 0.50], // wide (outer cos=0.50 ≈ 60°)
             };
             light.position_range = match i {
                 0 => [-1.5, 3.0, -1.0, 8.0],
@@ -91,7 +91,7 @@ impl App {
                 _ => [0.0, 3.0, 2.0, 8.0],
             };
             light.inner_angle = match i {
-                0 => 0.98,  // very tight hotspot
+                0 => 0.98, // very tight hotspot
                 1 => 0.92,
                 _ => 0.80,
             };
@@ -106,17 +106,19 @@ impl App {
             if state.gobo_enabled {
                 light.light_function_index = 1;
             }
-            let _ = state.renderer.scene_mut().update_light(
-                state.light_ids[i],
-                light,
-            );
+            let _ = state
+                .renderer
+                .scene_mut()
+                .update_light(state.light_ids[i], light);
         }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
         let window = Arc::new(
             event_loop
@@ -158,20 +160,27 @@ impl ApplicationHandler for App {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
+        println!(
+            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
+            info.backend, info.name, info.driver
+        );
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
-            .formats.iter().find(|f| f.is_srgb()).copied()
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
             .unwrap_or(surface_caps.formats[0]);
 
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width, height: size.height,
+            width: size.width,
+            height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -191,25 +200,58 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_editor_mode(true);
 
         // Dark floor
         let floor_mat = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.15, 0.16, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.15, 0.15, 0.16, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
-        let ground = renderer.scene_mut().insert_actor(
-            helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0))).as_mesh().unwrap();
-        let _ = v3_demo_common::insert_object(&mut renderer, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)))
+            .as_mesh()
+            .unwrap();
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            ground,
+            floor_mat,
+            glam::Mat4::IDENTITY,
+            6.0,
+        );
 
         // Spot lights
         let light_ids: [helio::LightId; 3] = std::array::from_fn(|i| {
@@ -235,7 +277,11 @@ impl ApplicationHandler for App {
                 1 => 0.92,
                 _ => 0.80,
             };
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(light)).as_light().unwrap()
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(light))
+                .as_light()
+                .unwrap()
         });
 
         // Upload a 2-layer IES texture array: layer 0 = spotlight gradient, layer 1 = checkerboard gobo
@@ -261,8 +307,13 @@ impl ApplicationHandler for App {
         }
         let ies_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Demo IES Textures"),
-            size: wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 2 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
@@ -270,17 +321,43 @@ impl ApplicationHandler for App {
         });
         // Write layer 0
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &ies_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
             &ies_pixels[..(IES_W * IES_H) as usize],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
-            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(IES_W),
+                rows_per_image: Some(IES_H),
+            },
+            wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 1,
+            },
         );
         // Write layer 1
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &ies_tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &ies_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 1 },
+                aspect: wgpu::TextureAspect::All,
+            },
             &ies_pixels[(IES_W * IES_H) as usize..],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_W), rows_per_image: Some(IES_H) },
-            wgpu::Extent3d { width: IES_W, height: IES_H, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(IES_W),
+                rows_per_image: Some(IES_H),
+            },
+            wgpu::Extent3d {
+                width: IES_W,
+                height: IES_H,
+                depth_or_array_layers: 1,
+            },
         );
         let ies_view = ies_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -289,11 +366,19 @@ impl ApplicationHandler for App {
         renderer.set_ies_texture_view(ies_view);
 
         self.state = Some(AppState {
-            window, surface, device, queue, surface_format, renderer,
+            window,
+            surface,
+            device,
+            queue,
+            surface_format,
+            renderer,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 2.0, 5.0),
-            cam_yaw: 0.0, cam_pitch: -0.2,
-            keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
+            cam_yaw: 0.0,
+            cam_pitch: -0.2,
+            keys: HashSet::new(),
+            cursor_grabbed: false,
+            mouse_delta: (0.0, 0.0),
             ies_enabled: [false, false, false],
             gobo_enabled: false,
             light_ids,
@@ -301,50 +386,99 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let state = match self.state.as_mut() { Some(s) => s, None => return };
+        let state = match self.state.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(KeyCode::Escape), state: ElementState::Released, .. }, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        state: ElementState::Released,
+                        ..
+                    },
+                ..
+            } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                     state.window.set_cursor_visible(true);
-                } else { event_loop.exit(); }
+                } else {
+                    event_loop.exit();
+                }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: key_state, .. }, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
+                ..
+            } => {
                 if key_state == ElementState::Pressed {
                     state.keys.insert(code);
                     let changed = match code {
-                        KeyCode::Digit1 => { state.ies_enabled[0] = !state.ies_enabled[0]; true }
-                        KeyCode::Digit2 => { state.ies_enabled[1] = !state.ies_enabled[1]; true }
-                        KeyCode::Digit3 => { state.ies_enabled[2] = !state.ies_enabled[2]; true }
-                        KeyCode::KeyG => { state.gobo_enabled = !state.gobo_enabled; true }
+                        KeyCode::Digit1 => {
+                            state.ies_enabled[0] = !state.ies_enabled[0];
+                            true
+                        }
+                        KeyCode::Digit2 => {
+                            state.ies_enabled[1] = !state.ies_enabled[1];
+                            true
+                        }
+                        KeyCode::Digit3 => {
+                            state.ies_enabled[2] = !state.ies_enabled[2];
+                            true
+                        }
+                        KeyCode::KeyG => {
+                            state.gobo_enabled = !state.gobo_enabled;
+                            true
+                        }
                         _ => false,
                     };
                     if changed {
                         App::update_lights(state);
                         let status = format!(
                             "IES: {},{},{}  Gobo: {}",
-                            if state.ies_enabled[0] {"ON"} else {"OFF"},
-                            if state.ies_enabled[1] {"ON"} else {"OFF"},
-                            if state.ies_enabled[2] {"ON"} else {"OFF"},
-                            if state.gobo_enabled {"ON"} else {"OFF"},
+                            if state.ies_enabled[0] { "ON" } else { "OFF" },
+                            if state.ies_enabled[1] { "ON" } else { "OFF" },
+                            if state.ies_enabled[2] { "ON" } else { "OFF" },
+                            if state.gobo_enabled { "ON" } else { "OFF" },
                         );
-                        state.window.set_title(&format!("Helio — IES Light Profiles  |  {}", status));
+                        state
+                            .window
+                            .set_title(&format!("Helio — IES Light Profiles  |  {}", status));
                     }
-                } else { state.keys.remove(&code); }
+                } else {
+                    state.keys.remove(&code);
+                }
             }
-            WindowEvent::CursorMoved { device_id: _, position } => {
+            WindowEvent::CursorMoved {
+                device_id: _,
+                position,
+            } => {
                 if state.cursor_grabbed {
                     let center = state.window.inner_size();
                     let dx = position.x as f32 - center.width as f32 / 2.0;
                     let dy = position.y as f32 - center.height as f32 / 2.0;
                     state.mouse_delta = (dx, dy);
-                    let _ = state.window.set_cursor_position(winit::dpi::PhysicalPosition::new(center.width as f64 / 2.0, center.height as f64 / 2.0));
+                    let _ = state
+                        .window
+                        .set_cursor_position(winit::dpi::PhysicalPosition::new(
+                            center.width as f64 / 2.0,
+                            center.height as f64 / 2.0,
+                        ));
                 }
             }
-            WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Pressed, .. } => {
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state: ElementState::Pressed,
+                ..
+            } => {
                 state.cursor_grabbed = true;
                 let _ = state.window.set_cursor_grab(CursorGrabMode::Confined);
                 state.window.set_cursor_visible(false);
@@ -353,7 +487,9 @@ impl ApplicationHandler for App {
                 if size.width > 0 && size.height > 0 {
                     let config = wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: state.surface_format, width: size.width, height: size.height,
+                        format: state.surface_format,
+                        width: size.width,
+                        height: size.height,
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
                         view_formats: vec![],
@@ -373,27 +509,49 @@ impl ApplicationHandler for App {
                 let (sp, cp) = state.cam_pitch.sin_cos();
                 let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
                 let right = glam::Vec3::new(cy, 0.0, sy);
-                if state.keys.contains(&KeyCode::KeyW) { state.cam_pos += forward * speed * dt; }
-                if state.keys.contains(&KeyCode::KeyS) { state.cam_pos -= forward * speed * dt; }
-                if state.keys.contains(&KeyCode::KeyA) { state.cam_pos -= right * speed * dt; }
-                if state.keys.contains(&KeyCode::KeyD) { state.cam_pos += right * speed * dt; }
-                if state.keys.contains(&KeyCode::Space) { state.cam_pos.y += speed * dt; }
-                if state.keys.contains(&KeyCode::ShiftLeft) { state.cam_pos.y -= speed * dt; }
+                if state.keys.contains(&KeyCode::KeyW) {
+                    state.cam_pos += forward * speed * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyS) {
+                    state.cam_pos -= forward * speed * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyA) {
+                    state.cam_pos -= right * speed * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyD) {
+                    state.cam_pos += right * speed * dt;
+                }
+                if state.keys.contains(&KeyCode::Space) {
+                    state.cam_pos.y += speed * dt;
+                }
+                if state.keys.contains(&KeyCode::ShiftLeft) {
+                    state.cam_pos.y -= speed * dt;
+                }
                 state.cam_yaw -= state.mouse_delta.0 * 0.005;
-                state.cam_pitch = (state.cam_pitch - state.mouse_delta.1 * 0.005).clamp(-1.55, 1.55);
+                state.cam_pitch =
+                    (state.cam_pitch - state.mouse_delta.1 * 0.005).clamp(-1.55, 1.55);
                 state.mouse_delta = (0.0, 0.0);
-                let aspect = state.window.inner_size().width as f32 / state.window.inner_size().height.max(1) as f32;
+                let aspect = state.window.inner_size().width as f32
+                    / state.window.inner_size().height.max(1) as f32;
 
                 let camera = Camera::perspective_look_at(
-                    state.cam_pos, state.cam_pos + forward, glam::Vec3::Y,
-                    std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
+                    state.cam_pos,
+                    state.cam_pos + forward,
+                    glam::Vec3::Y,
+                    std::f32::consts::FRAC_PI_4,
+                    aspect,
+                    0.1,
+                    200.0,
                 );
 
                 let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
                     _ => return,
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {:?}", e);
                 }

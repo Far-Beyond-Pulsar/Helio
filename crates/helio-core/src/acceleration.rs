@@ -137,10 +137,12 @@ impl BlasManager {
         );
 
         queue.submit(std::iter::once(encoder.finish()));
-        device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        }).ok();
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
 
         Some(blas)
     }

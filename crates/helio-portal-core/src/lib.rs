@@ -259,8 +259,16 @@ mod tests {
         let eye = Vec3::new(3.0, 1.0, -2.0);
         let dir = Vec3::new(1.0, 0.0, 1.0).normalize();
         let pose = PortalPose::from_look_at(eye, eye + dir, Vec3::Y);
-        assert!((pose.position() - eye).length() < 1e-4, "got {:?}", pose.position());
-        assert!((pose.forward() - dir).length() < 1e-4, "got {:?}", pose.forward());
+        assert!(
+            (pose.position() - eye).length() < 1e-4,
+            "got {:?}",
+            pose.position()
+        );
+        assert!(
+            (pose.forward() - dir).length() < 1e-4,
+            "got {:?}",
+            pose.forward()
+        );
     }
 }
 
@@ -293,15 +301,26 @@ mod corridor_regression {
     #[test]
     fn far_surface_maps_exactly_onto_near_surface() {
         let (pose_near, pose_far) = corridor_portal_poses();
-        let pair = PortalPair { a: pose_near, b: pose_far };
-        let mapped = pair.pair_map_inverse().transform_point3(pose_far.position());
-        assert!((mapped - pose_near.position()).length() < 1e-4, "got {mapped:?}");
+        let pair = PortalPair {
+            a: pose_near,
+            b: pose_far,
+        };
+        let mapped = pair
+            .pair_map_inverse()
+            .transform_point3(pose_far.position());
+        assert!(
+            (mapped - pose_near.position()).length() < 1e-4,
+            "got {mapped:?}"
+        );
     }
 
     #[test]
     fn content_just_past_far_surface_lands_inside_near_portals_clip_window() {
         let (pose_near, pose_far) = corridor_portal_poses();
-        let pair = PortalPair { a: pose_near, b: pose_far };
+        let pair = PortalPair {
+            a: pose_near,
+            b: pose_far,
+        };
         let half_extent = (2.0f32, 1.5f32);
 
         // A point slightly beyond pose_far, in its forward direction — the
@@ -312,7 +331,10 @@ mod corridor_regression {
 
         assert!(local.x.abs() <= half_extent.0, "local={local:?}");
         assert!(local.y.abs() <= half_extent.1, "local={local:?}");
-        assert!(local.z <= 0.0, "local={local:?} — clip test discards local.z > 0");
+        assert!(
+            local.z <= 0.0,
+            "local={local:?} — clip test discards local.z > 0"
+        );
     }
 }
 
@@ -355,8 +377,13 @@ mod infinite_tunnel_regression {
     fn pair_map_inverse_is_a_pure_vertical_lift() {
         let (a, b) = portal_poses();
         let pair = PortalPair { a, b };
-        let mapped = pair.pair_map_inverse().transform_point3(Vec3::new(1.0, 2.0, 3.0));
-        assert!((mapped - Vec3::new(1.0, 502.0, 3.0)).length() < 1e-3, "got {mapped:?}");
+        let mapped = pair
+            .pair_map_inverse()
+            .transform_point3(Vec3::new(1.0, 2.0, 3.0));
+        assert!(
+            (mapped - Vec3::new(1.0, 502.0, 3.0)).length() < 1e-3,
+            "got {mapped:?}"
+        );
     }
 
     #[test]

@@ -115,9 +115,9 @@ impl TsrQuality {
     pub fn render_scale(self) -> f32 {
         match self {
             Self::Performance => 0.50,
-            Self::Balanced    => 0.67,
-            Self::Quality     => 0.75,
-            Self::Native      => 1.00,
+            Self::Balanced => 0.67,
+            Self::Quality => 0.75,
+            Self::Native => 1.00,
         }
     }
 
@@ -127,7 +127,7 @@ impl TsrQuality {
     pub fn tap_radius(self) -> u32 {
         match self {
             Self::Performance | Self::Balanced => 1,
-            Self::Quality     | Self::Native   => 2,
+            Self::Quality | Self::Native => 2,
         }
     }
 }
@@ -138,11 +138,11 @@ impl TsrQuality {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TsrUniform {
     jitter_offset: [f32; 2], // sub-pixel jitter in [-0.5, 0.5)
-    reactivity:    f32,      // extra blend toward current (0 = full history)
-    reset:         u32,      // 1 on first frame / after reset_history()
-    time_delta:    f32,      // seconds since last frame
-    tap_radius:    u32,      // 1 = 3×3, 2 = 5×5
-    _pad:          [f32; 2],
+    reactivity: f32,         // extra blend toward current (0 = full history)
+    reset: u32,              // 1 on first frame / after reset_history()
+    time_delta: f32,         // seconds since last frame
+    tap_radius: u32,         // 1 = 3×3, 2 = 5×5
+    _pad: [f32; 2],
 }
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
@@ -154,34 +154,34 @@ struct TsrUniform {
 /// writes the upsampled, temporally accumulated image to `ctx.target`.
 pub struct TsrPass {
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
-    pipeline:       wgpu::RenderPipeline,
-    bgl:            wgpu::BindGroupLayout,
-    bind_group:     Option<wgpu::BindGroup>,
+    pipeline: wgpu::RenderPipeline,
+    bgl: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(usize, usize)>,
-    uniform_buf:    wgpu::Buffer,
+    uniform_buf: wgpu::Buffer,
 
     // ── Blit pipeline (output_texture → ctx.target) ───────────────────────────
-    blit_pipeline:   wgpu::RenderPipeline,
-    blit_bgl:        wgpu::BindGroupLayout,
+    blit_pipeline: wgpu::RenderPipeline,
+    blit_bgl: wgpu::BindGroupLayout,
     blit_bind_group: wgpu::BindGroup,
 
     // ── Temporal history (ping-pong) ──────────────────────────────────────────
     /// Previous frame's TSR output at display resolution.
     pub history_texture: wgpu::Texture,
-    pub history_view:    wgpu::TextureView,
+    pub history_view: wgpu::TextureView,
     /// Current frame's TSR output (rendered to, then copied → history).
-    pub output_texture:  wgpu::Texture,
-    pub output_view:     wgpu::TextureView,
+    pub output_texture: wgpu::Texture,
+    pub output_view: wgpu::TextureView,
 
     // ── Samplers ──────────────────────────────────────────────────────────────
     linear_sampler: wgpu::Sampler,
-    point_sampler:  wgpu::Sampler,
+    point_sampler: wgpu::Sampler,
 
     // ── Dimensions ────────────────────────────────────────────────────────────
-    internal_width:  u32,
+    internal_width: u32,
     internal_height: u32,
-    output_width:    u32,
-    output_height:   u32,
+    output_width: u32,
+    output_height: u32,
 
     // ── Reactivity state ──────────────────────────────────────────────────────
     /// `true` until the first frame (or after `reset_history()`).
@@ -200,13 +200,13 @@ impl TsrPass {
     /// - `format`     — swapchain / surface format for the final blit.
     /// - `quality`    — neighbourhood tap count and accumulation parameters.
     pub fn new(
-        device:          &wgpu::Device,
-        internal_width:  u32,
+        device: &wgpu::Device,
+        internal_width: u32,
         internal_height: u32,
-        output_width:    u32,
-        output_height:   u32,
-        format:          wgpu::TextureFormat,
-        quality:         TsrQuality,
+        output_width: u32,
+        output_height: u32,
+        format: wgpu::TextureFormat,
+        quality: TsrQuality,
     ) -> Self {
         let tsr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("TSR Shader"),
@@ -241,7 +241,7 @@ impl TsrPass {
             ..Default::default()
         });
 
-        let output_width  = output_width.max(1);
+        let output_width = output_width.max(1);
         let output_height = output_height.max(1);
 
         let (history_texture, history_view, output_texture, output_view) =
@@ -256,8 +256,8 @@ impl TsrPass {
                 tex_entry(2, wgpu::TextureSampleType::Depth),                      // depth_tex
                 sampler_entry(3, wgpu::SamplerBindingType::Filtering),             // linear_sampler
                 sampler_entry(4, wgpu::SamplerBindingType::NonFiltering),          // point_sampler
-                camera_storage_entry(5),                                            // camera
-                uniform_entry(6),                                                   // tsr
+                camera_storage_entry(5),                                           // camera
+                uniform_entry(6),                                                  // tsr
             ],
         });
 
@@ -298,7 +298,10 @@ impl TsrPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -330,7 +333,10 @@ impl TsrPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -395,11 +401,20 @@ impl TsrPass {
         device: &wgpu::Device,
         width: u32,
         height: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        wgpu::Texture,
+        wgpu::TextureView,
+    ) {
         let make = |label: &'static str, extra: wgpu::TextureUsages| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -411,9 +426,9 @@ impl TsrPass {
             })
         };
         let history = make("TSR History", wgpu::TextureUsages::COPY_DST);
-        let hv      = history.create_view(&Default::default());
-        let output  = make("TSR Output",  wgpu::TextureUsages::COPY_SRC);
-        let ov      = output.create_view(&Default::default());
+        let hv = history.create_view(&Default::default());
+        let output = make("TSR Output", wgpu::TextureUsages::COPY_SRC);
+        let ov = output.create_view(&Default::default());
         (history, hv, output, ov)
     }
 }
@@ -424,7 +439,11 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         count: None,
     }
 }
@@ -478,8 +497,14 @@ fn make_blit_bg(
         label: Some("TSR Blit BG"),
         layout: bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
         ],
     })
 }
@@ -487,14 +512,18 @@ fn make_blit_bg(
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for TsrPass {
-    fn name(&self) -> &'static str { "TSR" }
+    fn name(&self) -> &'static str {
+        "TSR"
+    }
 
-    fn requires_camera_jitter(&self) -> bool { true }
+    fn requires_camera_jitter(&self) -> bool {
+        true
+    }
 
     fn render_pass_descriptor<'a>(
         &'a self,
-        _target:    &'a wgpu::TextureView,
-        _depth:     &'a wgpu::TextureView,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
@@ -505,20 +534,25 @@ impl RenderPass for TsrPass {
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.output_width  = width.max(1);
+        self.output_width = width.max(1);
         self.output_height = height.max(1);
 
         let (ht, hv, ot, ov) = Self::create_textures(device, self.output_width, self.output_height);
         self.history_texture = ht;
-        self.history_view    = hv;
-        self.output_texture  = ot;
-        self.output_view     = ov;
+        self.history_view = hv;
+        self.output_texture = ot;
+        self.output_view = ov;
 
         // Rebuild blit bind group (references output_view).
-        self.blit_bind_group = make_blit_bg(device, &self.blit_bgl, &self.output_view, &self.linear_sampler);
+        self.blit_bind_group = make_blit_bg(
+            device,
+            &self.blit_bgl,
+            &self.output_view,
+            &self.linear_sampler,
+        );
 
         // Invalidate main bind group (references history_view via binding 1).
-        self.bind_group     = None;
+        self.bind_group = None;
         self.bind_group_key = None;
 
         // History is stale after resize — prime the next frame.
@@ -527,18 +561,24 @@ impl RenderPass for TsrPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter = r1_r2_jitter(ctx.frame_num);
-        let reset  = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
+        let reset = if self.first_frame {
+            self.first_frame = false;
+            1u32
+        } else {
+            0u32
+        };
 
         let u = TsrUniform {
             jitter_offset: jitter,
-            reactivity:    self.reactivity,
+            reactivity: self.reactivity,
             reset,
-            time_delta:    ctx.delta_time.max(0.0),
-            tap_radius:    self.quality.tap_radius(),
-            _pad:          [0.0; 2],
+            time_delta: ctx.delta_time.max(0.0),
+            tap_radius: self.quality.tap_radius(),
+            _pad: [0.0; 2],
         };
 
-        ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        ctx.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         Ok(())
     }
 
@@ -550,19 +590,43 @@ impl RenderPass for TsrPass {
             )
         })?;
 
-        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
+        let key = (
+            pre_aa_view as *const _ as usize,
+            ctx.depth as *const _ as usize,
+        );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TSR BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: self.uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.history_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.point_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -579,14 +643,15 @@ impl RenderPass for TsrPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TSR Resolve"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TSR Resolve"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -596,7 +661,11 @@ impl RenderPass for TsrPass {
         unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.output_width,
+                height: self.output_height,
+                depth_or_array_layers: 1,
+            },
         );
 
         // ── 4. Blit output_view → ctx.target ──────────────────────────────────
@@ -610,14 +679,15 @@ impl RenderPass for TsrPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TSR Blit"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TSR Blit"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);

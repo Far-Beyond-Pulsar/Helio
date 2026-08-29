@@ -1,9 +1,9 @@
-use wgpu::util::DeviceExt;
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
-    make_static_box_mesh, make_top_grid, make_caustics_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
-    CASCADE_COUNT, SIM_SIZE, MAX_SIM_VOLUMES,
+    make_caustics_grid, make_static_box_mesh, make_top_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
+    CASCADE_COUNT, MAX_SIM_VOLUMES, SIM_SIZE,
 };
+use wgpu::util::DeviceExt;
 
 impl WaterSimPass {
     #[allow(clippy::too_many_arguments)]
@@ -266,11 +266,19 @@ impl WaterSimPass {
         let mut update_bufs_vec: Vec<wgpu::Buffer> = Vec::with_capacity(CASCADE_COUNT as usize);
         let mut normal_bufs_vec: Vec<wgpu::Buffer> = Vec::with_capacity(CASCADE_COUNT as usize);
         for i in 0..CASCADE_COUNT as usize {
-            update_bufs_vec.push(make_ubuf(&update_bufs_labels[i], std::mem::size_of::<DeltaUniform>()));
-            normal_bufs_vec.push(make_ubuf(&normal_bufs_labels[i], std::mem::size_of::<DeltaUniform>()));
+            update_bufs_vec.push(make_ubuf(
+                &update_bufs_labels[i],
+                std::mem::size_of::<DeltaUniform>(),
+            ));
+            normal_bufs_vec.push(make_ubuf(
+                &normal_bufs_labels[i],
+                std::mem::size_of::<DeltaUniform>(),
+            ));
         }
-        let hitbox_count_buf =
-            make_ubuf("WaterSim Hitbox Count", std::mem::size_of::<HitboxCountUniform>());
+        let hitbox_count_buf = make_ubuf(
+            "WaterSim Hitbox Count",
+            std::mem::size_of::<HitboxCountUniform>(),
+        );
 
         let caustics_render_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -304,7 +312,6 @@ impl WaterSimPass {
                     },
                 ],
             });
-
 
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Render BGL"),
@@ -419,7 +426,6 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
-
             ],
         });
 
@@ -737,44 +743,44 @@ impl WaterSimPass {
             cache: None,
         });
 
-        let surface_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Water Surface Pipeline"),
-                layout: Some(&render_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &surface_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(vbl.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &surface_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+        let surface_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Surface Pipeline"),
+            layout: Some(&render_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &surface_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(vbl.clone())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &surface_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
-        let (static_box_vbuf, static_box_ibuf, static_box_index_count) = make_static_box_mesh(device);
+        let (static_box_vbuf, static_box_ibuf, static_box_index_count) =
+            make_static_box_mesh(device);
         let (top_vbuf, top_ibuf, top_index_count) = make_top_grid(device);
         let (caustics_vbuf, caustics_ibuf, caustics_index_count) = make_caustics_grid(device);
 
@@ -799,12 +805,16 @@ impl WaterSimPass {
             output_sampler,
             depth_sampler,
             drop_buf,
-            update_bufs: update_bufs_vec.try_into().unwrap_or_else(|_: Vec<wgpu::Buffer>| {
-                panic!("CASCADE_COUNT doesn't match expected size")
-            }),
-            normal_bufs: normal_bufs_vec.try_into().unwrap_or_else(|_: Vec<wgpu::Buffer>| {
-                panic!("CASCADE_COUNT doesn't match expected size")
-            }),
+            update_bufs: update_bufs_vec
+                .try_into()
+                .unwrap_or_else(|_: Vec<wgpu::Buffer>| {
+                    panic!("CASCADE_COUNT doesn't match expected size")
+                }),
+            normal_bufs: normal_bufs_vec
+                .try_into()
+                .unwrap_or_else(|_: Vec<wgpu::Buffer>| {
+                    panic!("CASCADE_COUNT doesn't match expected size")
+                }),
             hitbox_count_buf,
             pending_drops: std::collections::VecDeque::new(),
             drop_staged: false,

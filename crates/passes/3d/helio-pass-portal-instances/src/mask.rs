@@ -213,7 +213,11 @@ impl RenderPass for PortalMaskPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("portal_mask", wgpu::TextureFormat::R32Uint, ResourceSize::MatchSurface);
+        builder.write_color_raw(
+            "portal_mask",
+            wgpu::TextureFormat::R32Uint,
+            ResourceSize::MatchSurface,
+        );
         builder.with_extra_usage(wgpu::TextureUsages::TEXTURE_BINDING);
     }
 
@@ -246,21 +250,34 @@ impl RenderPass for PortalMaskPass {
             return Ok(());
         }
         let Some(mask_view) = ctx.resource_pool.get_view("portal_mask") else {
-            log::warn!("[PortalMask] frame={} portal_mask resource not allocated", ctx.frame_num);
+            log::warn!(
+                "[PortalMask] frame={} portal_mask resource not allocated",
+                ctx.frame_num
+            );
             return Ok(());
         };
 
         // ── Sub-pass 1: stamp ────────────────────────────────────────────
-        let stamp_key = (ctx.scene.camera as *const _ as usize, ctx.scene.portal_views as *const _ as usize);
+        let stamp_key = (
+            ctx.scene.camera as *const _ as usize,
+            ctx.scene.portal_views as *const _ as usize,
+        );
         if self.stamp_bind_group_key != Some(stamp_key) {
-            self.stamp_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PortalMask Stamp BG"),
-                layout: &self.stamp_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: ctx.scene.portal_views.as_entire_binding() },
-                ],
-            }));
+            self.stamp_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("PortalMask Stamp BG"),
+                    layout: &self.stamp_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: ctx.scene.portal_views.as_entire_binding(),
+                        },
+                    ],
+                }));
             self.stamp_bind_group_key = Some(stamp_key);
         }
 
@@ -270,7 +287,12 @@ impl RenderPass for PortalMaskPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })];
@@ -279,7 +301,10 @@ impl RenderPass for PortalMaskPass {
                 color_attachments: &color_attachments,
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -295,11 +320,15 @@ impl RenderPass for PortalMaskPass {
         // ── Sub-pass 2: reset ────────────────────────────────────────────
         let reset_key = mask_view as *const _ as usize;
         if self.reset_bind_group_key != Some(reset_key) {
-            self.reset_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PortalMask Reset BG"),
-                layout: &self.reset_bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(mask_view) }],
-            }));
+            self.reset_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("PortalMask Reset BG"),
+                    layout: &self.reset_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(mask_view),
+                    }],
+                }));
             self.reset_bind_group_key = Some(reset_key);
         }
 
@@ -309,7 +338,10 @@ impl RenderPass for PortalMaskPass {
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,

@@ -73,7 +73,11 @@ struct AppState {
 }
 
 const RING_COUNT: usize = 12;
-const STACK_TINTS: [[f32; 4]; 3] = [[1.0, 0.2, 0.2, 0.6], [0.2, 1.0, 0.2, 0.6], [0.2, 0.4, 1.0, 0.6]];
+const STACK_TINTS: [[f32; 4]; 3] = [
+    [1.0, 0.2, 0.2, 0.6],
+    [0.2, 1.0, 0.2, 0.6],
+    [0.2, 0.4, 1.0, 0.6],
+];
 const DECOY_COUNT: usize = 200;
 
 /// A 32×32 RGBA8 filled disc, straight alpha, on a transparent background.
@@ -83,7 +87,13 @@ fn make_disc_atlas() -> Vec<u8> {
 
 /// A 32×32 RGBA8 ring (annulus), straight alpha, on a transparent background.
 fn make_ring_atlas() -> Vec<u8> {
-    make_shape_atlas(|dist| if (0.55..=0.9).contains(&dist) { 1.0 } else { 0.0 })
+    make_shape_atlas(|dist| {
+        if (0.55..=0.9).contains(&dist) {
+            1.0
+        } else {
+            0.0
+        }
+    })
 }
 
 fn make_shape_atlas(alpha_at: impl Fn(f32) -> f32) -> Vec<u8> {
@@ -189,8 +199,14 @@ impl ApplicationHandler for App {
         );
         // Default camera (center [0,0], half-extent derived from the render
         // target size) — so the cull pass's view rect must track the window.
-        sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5, size.height as f32 * 0.5]);
-        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+        sprite_cull.set_view_rect(
+            [0.0, 0.0],
+            [size.width as f32 * 0.5, size.height as f32 * 0.5],
+        );
+        sprite_pass.use_gpu_culling(
+            sprite_cull.draw_order_buf.clone(),
+            sprite_cull.indirect_buf.clone(),
+        );
 
         // Ring + stack get stable handles because `RedrawRequested` animates
         // them via `update_sprite` every frame. The 200 decoys are inserted
@@ -200,7 +216,9 @@ impl ApplicationHandler for App {
         let ring_handles: Vec<SpriteHandle> = (0..RING_COUNT)
             .map(|i| {
                 let layer = if i % 2 == 0 { disc_layer } else { ring_layer };
-                sprite_pass.insert_sprite(SpriteInstance::new([0.0, 0.0], [48.0, 48.0]).with_atlas_layer(layer))
+                sprite_pass.insert_sprite(
+                    SpriteInstance::new([0.0, 0.0], [48.0, 48.0]).with_atlas_layer(layer),
+                )
             })
             .collect();
         let stack_handles: Vec<SpriteHandle> = STACK_TINTS
@@ -219,7 +237,8 @@ impl ApplicationHandler for App {
         for i in 0..DECOY_COUNT {
             let t = i as f32 / DECOY_COUNT as f32;
             let pos = [5000.0 + t * 100.0, 5000.0 + t * 100.0];
-            sprite_pass.insert_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
+            sprite_pass
+                .insert_sprite(SpriteInstance::new(pos, [48.0, 48.0]).with_atlas_layer(disc_layer));
         }
 
         graph.add_pass(Box::new(sprite_cull));
@@ -229,7 +248,11 @@ impl ApplicationHandler for App {
         let scene = GpuScene::new(device.clone(), queue.clone());
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -328,7 +351,12 @@ impl ApplicationHandler for App {
                 // byte range still gets marked dirty and re-uploaded — dirty
                 // tracking is a "don't upload if nothing calls update", not
                 // a value-equality diff).
-                for (i, (&handle, tint)) in state.stack_handles.iter().zip(STACK_TINTS.iter()).enumerate() {
+                for (i, (&handle, tint)) in state
+                    .stack_handles
+                    .iter()
+                    .zip(STACK_TINTS.iter())
+                    .enumerate()
+                {
                     let offset = i as f32 * 20.0 - 20.0;
                     sprite.update_sprite(
                         handle,
@@ -355,7 +383,10 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = output.texture.create_view(&Default::default());
-                if let Err(e) = state.graph.execute(&state.scene, &view, &state.dummy_depth_view) {
+                if let Err(e) = state
+                    .graph
+                    .execute(&state.scene, &view, &state.dummy_depth_view)
+                {
                     log::error!("graph execute error: {e:?}");
                 }
                 state.queue.present(output);

@@ -841,8 +841,14 @@ mod tests {
             64
         );
         assert_eq!(offset_of(&value.material_id as *const u32 as *const u8), 68);
-        assert_eq!(offset_of(&value.density_layer as *const u32 as *const u8), 72);
-        assert_eq!(offset_of(&value.kind_and_flags as *const u32 as *const u8), 76);
+        assert_eq!(
+            offset_of(&value.density_layer as *const u32 as *const u8),
+            72
+        );
+        assert_eq!(
+            offset_of(&value.kind_and_flags as *const u32 as *const u8),
+            76
+        );
         assert_eq!(
             offset_of(&value.mesh_or_impostor_id as *const u32 as *const u8),
             80
@@ -882,13 +888,21 @@ mod tests {
             offset_of(value.slope_range.as_ptr() as *const u8),
             offset_of(value.altitude_range.as_ptr() as *const u8),
         ] {
-            assert_ne!(offset % 8, 0, "offset {offset} is vec2<f32>-aligned in WGSL");
+            assert_ne!(
+                offset % 8,
+                0,
+                "offset {offset} is vec2<f32>-aligned in WGSL"
+            );
         }
         for offset in [
             offset_of(value.lod_distances.as_ptr() as *const u8),
             offset_of(value.wind_response.as_ptr() as *const u8),
         ] {
-            assert_ne!(offset % 16, 0, "offset {offset} is vec3/vec4-aligned in WGSL");
+            assert_ne!(
+                offset % 16,
+                0,
+                "offset {offset} is vec3/vec4-aligned in WGSL"
+            );
         }
     }
 
@@ -1062,10 +1076,16 @@ mod tests {
         tile.state = TileState::Resident.as_u32();
         assert!(tile.is_drawable());
         tile.state = TileState::Evicting.as_u32();
-        assert!(tile.is_drawable(), "evicting tiles still draw for one frame");
+        assert!(
+            tile.is_drawable(),
+            "evicting tiles still draw for one frame"
+        );
         tile.state = 99;
         assert_eq!(tile.state(), None);
-        assert!(!tile.is_drawable(), "an unknown state must not be assumed drawable");
+        assert!(
+            !tile.is_drawable(),
+            "an unknown state must not be assumed drawable"
+        );
     }
 
     #[test]
@@ -1086,7 +1106,10 @@ mod tests {
 
         // A flag argument that trespasses on the kind byte is dropped, not merged.
         let defended = pack_kind_and_flags(FoliageKind::Card, 0xff | FOLIAGE_FLAG_TWO_SIDED);
-        assert_eq!(FoliageKind::from_u32(defended & FOLIAGE_KIND_MASK), Some(FoliageKind::Card));
+        assert_eq!(
+            FoliageKind::from_u32(defended & FOLIAGE_KIND_MASK),
+            Some(FoliageKind::Card)
+        );
 
         for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh] {
             assert_eq!(FoliageKind::from_u32(kind.as_u32()), Some(kind));

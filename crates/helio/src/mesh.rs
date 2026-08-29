@@ -236,8 +236,13 @@ impl MeshSubPool {
     /// `GrowableBuffer::update_range` path enforced via its caller
     /// (`MeshPool::update_dynamic_vertices`).
     fn rewrite_dynamic_vertices(&self, handle: VarLenHandle, new_vertices: &[PackedVertex]) {
-        debug_assert_eq!(handle.count as usize, new_vertices.len(), "in-place rewrite must not change element count");
-        self.vertices.write_at_offset(&self.queue, handle.offset, new_vertices);
+        debug_assert_eq!(
+            handle.count as usize,
+            new_vertices.len(),
+            "in-place rewrite must not change element count"
+        );
+        self.vertices
+            .write_at_offset(&self.queue, handle.offset, new_vertices);
     }
 
     /// Return the vertex and index ranges of `slice` to the pool's freelist.
@@ -250,8 +255,14 @@ impl MeshSubPool {
     /// is gone, not correctness. Acceptable trade-off for de-duplicating two
     /// copies of the same allocator, not something masked or silently lost.
     fn free_slice(&mut self, slice: &MeshSlice) {
-        self.vertices.free_handle(VarLenHandle { offset: slice.first_vertex, count: slice.vertex_count });
-        self.indices.free_handle(VarLenHandle { offset: slice.first_index, count: slice.index_count });
+        self.vertices.free_handle(VarLenHandle {
+            offset: slice.first_vertex,
+            count: slice.vertex_count,
+        });
+        self.indices.free_handle(VarLenHandle {
+            offset: slice.first_index,
+            count: slice.index_count,
+        });
         self.live_vertex_count -= slice.vertex_count as usize;
         self.live_index_count -= slice.index_count as usize;
     }
@@ -322,7 +333,11 @@ impl MeshPool {
     /// `insert_sectioned()` call has had a chance to write real data --
     /// callers that violate this ordering will see their earlier inserts'
     /// `MeshSlice` offsets silently stop matching the new pool's contents.
-    pub fn rebind_static_pools(&mut self, vertices: Arc<VarLenGpuPool<PackedVertex>>, indices: Arc<VarLenGpuPool<u32>>) {
+    pub fn rebind_static_pools(
+        &mut self,
+        vertices: Arc<VarLenGpuPool<PackedVertex>>,
+        indices: Arc<VarLenGpuPool<u32>>,
+    ) {
         self.static_sub.vertices = vertices;
         self.static_sub.indices = indices;
     }
@@ -360,14 +375,22 @@ impl MeshPool {
     /// the caller is done referencing this `MeshId` (e.g. the entity's
     /// object was removed from the scene) -- it drops the bookkeeping
     /// without touching the pool.
-    pub fn adopt_static_slice(&mut self, vertex_handle: VarLenHandle, index_handle: VarLenHandle) -> MeshId {
+    pub fn adopt_static_slice(
+        &mut self,
+        vertex_handle: VarLenHandle,
+        index_handle: VarLenHandle,
+    ) -> MeshId {
         let slice = MeshSlice {
             first_vertex: vertex_handle.offset,
             vertex_count: vertex_handle.count,
             first_index: index_handle.offset,
             index_count: index_handle.count,
         };
-        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0, kind: MeshKind::Static });
+        let (id, _, _) = self.meshes.insert(MeshRecord {
+            slice,
+            ref_count: 0,
+            kind: MeshKind::Static,
+        });
         self.static_sub.live_vertex_count += vertex_handle.count as usize;
         self.static_sub.live_index_count += index_handle.count as usize;
         id
@@ -379,9 +402,17 @@ impl MeshPool {
     /// error) if `id` isn't a currently-live mesh; the caller doesn't need
     /// to track whether it already called this once.
     pub fn forget_adopted_slice(&mut self, id: MeshId) {
-        let Some((_, record)) = self.meshes.remove(id) else { return };
-        self.static_sub.live_vertex_count = self.static_sub.live_vertex_count.saturating_sub(record.slice.vertex_count as usize);
-        self.static_sub.live_index_count = self.static_sub.live_index_count.saturating_sub(record.slice.index_count as usize);
+        let Some((_, record)) = self.meshes.remove(id) else {
+            return;
+        };
+        self.static_sub.live_vertex_count = self
+            .static_sub
+            .live_vertex_count
+            .saturating_sub(record.slice.vertex_count as usize);
+        self.static_sub.live_index_count = self
+            .static_sub
+            .live_index_count
+            .saturating_sub(record.slice.index_count as usize);
     }
 
     pub fn insert(&mut self, mesh: MeshUpload) -> MeshId {
@@ -407,7 +438,11 @@ impl MeshPool {
             index_count: ihandle.count,
         };
 
-        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0, kind });
+        let (id, _, _) = self.meshes.insert(MeshRecord {
+            slice,
+            ref_count: 0,
+            kind,
+        });
         id
     }
 
@@ -445,7 +480,10 @@ impl MeshPool {
             })
             .collect();
 
-        MultiMeshRecord { section_mesh_ids, ref_count: 0 }
+        MultiMeshRecord {
+            section_mesh_ids,
+            ref_count: 0,
+        }
     }
 
     pub fn update_dynamic_vertices(
@@ -462,8 +500,12 @@ impl MeshPool {
         if new_vertices.len() != record.slice.vertex_count as usize {
             return Err("vertex count mismatch: new_vertices.len() must equal the original upload");
         }
-        let handle = VarLenHandle { offset: record.slice.first_vertex, count: record.slice.vertex_count };
-        self.dynamic_sub.rewrite_dynamic_vertices(handle, new_vertices);
+        let handle = VarLenHandle {
+            offset: record.slice.first_vertex,
+            count: record.slice.vertex_count,
+        };
+        self.dynamic_sub
+            .rewrite_dynamic_vertices(handle, new_vertices);
         Ok(())
     }
 
@@ -537,8 +579,20 @@ impl MeshPool {
             MeshKind::Dynamic => &self.dynamic_sub,
         };
 
-        let vertices = readback_var_len(device, queue, &sub.vertices, slice.first_vertex, slice.vertex_count);
-        let indices = readback_var_len(device, queue, &sub.indices, slice.first_index, slice.index_count);
+        let vertices = readback_var_len(
+            device,
+            queue,
+            &sub.vertices,
+            slice.first_vertex,
+            slice.vertex_count,
+        );
+        let indices = readback_var_len(
+            device,
+            queue,
+            &sub.indices,
+            slice.first_index,
+            slice.index_count,
+        );
 
         Some(MeshUpload { vertices, indices })
     }
@@ -574,11 +628,16 @@ fn readback_var_len<T: bytemuck::Pod + pulsar_scenedb::Pod + Send + Sync + 'stat
     });
     queue.submit([encoder.finish()]);
     let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.expect("mesh extract readback map failed"));
+    slice.map_async(wgpu::MapMode::Read, |r| {
+        r.expect("mesh extract readback map failed")
+    });
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("mesh extract readback poll failed");
-    let data = slice.get_mapped_range().expect("mesh extract readback mapped range").to_vec();
+    let data = slice
+        .get_mapped_range()
+        .expect("mesh extract readback mapped range")
+        .to_vec();
     staging.unmap();
     bytemuck::cast_slice(&data).to_vec()
 }
@@ -605,7 +664,10 @@ mod tests {
     }
 
     fn v(x: f32) -> PackedVertex {
-        PackedVertex { position: [x, 0.0, 0.0], ..Default::default() }
+        PackedVertex {
+            position: [x, 0.0, 0.0],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -613,13 +675,25 @@ mod tests {
         let (device, queue) = test_device();
         let mut pool = MeshPool::new(device.clone(), queue.clone());
 
-        let id = pool.insert(MeshUpload { vertices: vec![v(1.0), v(2.0), v(3.0)], indices: vec![0, 1, 2] });
+        let id = pool.insert(MeshUpload {
+            vertices: vec![v(1.0), v(2.0), v(3.0)],
+            indices: vec![0, 1, 2],
+        });
         let record = pool.get(id).expect("just-inserted mesh must be reachable");
         assert_eq!(record.slice.vertex_count, 3);
         assert_eq!(record.slice.index_count, 3);
 
-        let got = readback_var_len::<PackedVertex>(&device, &queue, &pool.vertex_pool(), record.slice.first_vertex, record.slice.vertex_count);
-        assert_eq!(got.iter().map(|p| p.position[0]).collect::<Vec<_>>(), vec![1.0, 2.0, 3.0]);
+        let got = readback_var_len::<PackedVertex>(
+            &device,
+            &queue,
+            &pool.vertex_pool(),
+            record.slice.first_vertex,
+            record.slice.vertex_count,
+        );
+        assert_eq!(
+            got.iter().map(|p| p.position[0]).collect::<Vec<_>>(),
+            vec![1.0, 2.0, 3.0]
+        );
     }
 
     #[test]
@@ -627,12 +701,22 @@ mod tests {
         let (device, queue) = test_device();
         let mut pool = MeshPool::new(device.clone(), queue.clone());
 
-        let a = pool.insert(MeshUpload { vertices: vec![v(1.0), v(2.0)], indices: vec![0, 1] });
+        let a = pool.insert(MeshUpload {
+            vertices: vec![v(1.0), v(2.0)],
+            indices: vec![0, 1],
+        });
         let a_offset = pool.get(a).unwrap().slice.first_vertex;
         pool.remove(a);
 
-        let b = pool.insert(MeshUpload { vertices: vec![v(9.0), v(9.0)], indices: vec![0, 1] });
-        assert_eq!(pool.get(b).unwrap().slice.first_vertex, a_offset, "B must reuse A's freed slot, not append past it");
+        let b = pool.insert(MeshUpload {
+            vertices: vec![v(9.0), v(9.0)],
+            indices: vec![0, 1],
+        });
+        assert_eq!(
+            pool.get(b).unwrap().slice.first_vertex,
+            a_offset,
+            "B must reuse A's freed slot, not append past it"
+        );
     }
 
     #[test]
@@ -645,23 +729,49 @@ mod tests {
         // Insert a second dynamic mesh right after, so a relocation (if one
         // happened) would be observable as a changed offset, not silently
         // masked by both meshes coincidentally landing at 0 again.
-        let a = pool.insert_dynamic(MeshUpload { vertices: vec![v(1.0), v(2.0)], indices: vec![0, 1] });
-        let _b = pool.insert_dynamic(MeshUpload { vertices: vec![v(5.0)], indices: vec![0] });
+        let a = pool.insert_dynamic(MeshUpload {
+            vertices: vec![v(1.0), v(2.0)],
+            indices: vec![0, 1],
+        });
+        let _b = pool.insert_dynamic(MeshUpload {
+            vertices: vec![v(5.0)],
+            indices: vec![0],
+        });
         let a_offset = pool.get(a).unwrap().slice.first_vertex;
 
-        pool.update_dynamic_vertices(a, &[v(100.0), v(200.0)]).expect("same-length update must succeed");
-        assert_eq!(pool.get(a).unwrap().slice.first_vertex, a_offset, "in-place update must not move the allocation");
+        pool.update_dynamic_vertices(a, &[v(100.0), v(200.0)])
+            .expect("same-length update must succeed");
+        assert_eq!(
+            pool.get(a).unwrap().slice.first_vertex,
+            a_offset,
+            "in-place update must not move the allocation"
+        );
 
-        let got = readback_var_len::<PackedVertex>(&device, &queue, &pool.dynamic_buffers_pool_for_test(), a_offset, 2);
-        assert_eq!(got.iter().map(|p| p.position[0]).collect::<Vec<_>>(), vec![100.0, 200.0]);
+        let got = readback_var_len::<PackedVertex>(
+            &device,
+            &queue,
+            &pool.dynamic_buffers_pool_for_test(),
+            a_offset,
+            2,
+        );
+        assert_eq!(
+            got.iter().map(|p| p.position[0]).collect::<Vec<_>>(),
+            vec![100.0, 200.0]
+        );
     }
 
     #[test]
     fn update_dynamic_vertices_rejects_a_length_mismatch() {
         let (device, queue) = test_device();
         let mut pool = MeshPool::new(device, queue);
-        let a = pool.insert_dynamic(MeshUpload { vertices: vec![v(1.0), v(2.0)], indices: vec![0, 1] });
-        assert!(pool.update_dynamic_vertices(a, &[v(1.0)]).is_err(), "fewer vertices than the original upload must be rejected");
+        let a = pool.insert_dynamic(MeshUpload {
+            vertices: vec![v(1.0), v(2.0)],
+            indices: vec![0, 1],
+        });
+        assert!(
+            pool.update_dynamic_vertices(a, &[v(1.0)]).is_err(),
+            "fewer vertices than the original upload must be rejected"
+        );
     }
 
     #[test]
@@ -678,9 +788,15 @@ mod tests {
 
         let s0 = pool.get(record.section_mesh_ids[0]).unwrap().slice;
         let s1 = pool.get(record.section_mesh_ids[1]).unwrap().slice;
-        assert_eq!(s0.first_vertex, s1.first_vertex, "both sections must share the same vertex range");
+        assert_eq!(
+            s0.first_vertex, s1.first_vertex,
+            "both sections must share the same vertex range"
+        );
         assert_eq!(s0.vertex_count, s1.vertex_count);
-        assert_ne!(s0.first_index, s1.first_index, "each section must have its own index range");
+        assert_ne!(
+            s0.first_index, s1.first_index,
+            "each section must have its own index range"
+        );
     }
 
     #[test]
@@ -692,8 +808,14 @@ mod tests {
         // pool -- exactly what happens for real via `write_var_len_field_at_row`,
         // just called directly here since this test doesn't need a whole
         // SceneGpuStore to prove MeshPool's own half of the contract.
-        let vhandle = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(5.0), v(6.0)]).unwrap();
-        let ihandle = pool.index_pool().write_var_row(&queue, VarLenHandle::default(), &[0, 1]).unwrap();
+        let vhandle = pool
+            .vertex_pool()
+            .write_var_row(&queue, VarLenHandle::default(), &[v(5.0), v(6.0)])
+            .unwrap();
+        let ihandle = pool
+            .index_pool()
+            .write_var_row(&queue, VarLenHandle::default(), &[0, 1])
+            .unwrap();
 
         let id = pool.adopt_static_slice(vhandle, ihandle);
         let record = pool.get(id).expect("adopted mesh must be reachable");
@@ -702,8 +824,17 @@ mod tests {
         assert_eq!(record.slice.first_index, ihandle.offset);
         assert_eq!(record.slice.index_count, ihandle.count);
 
-        let got = readback_var_len::<PackedVertex>(&device, &queue, &pool.vertex_pool(), record.slice.first_vertex, record.slice.vertex_count);
-        assert_eq!(got.iter().map(|p| p.position[0]).collect::<Vec<_>>(), vec![5.0, 6.0]);
+        let got = readback_var_len::<PackedVertex>(
+            &device,
+            &queue,
+            &pool.vertex_pool(),
+            record.slice.first_vertex,
+            record.slice.vertex_count,
+        );
+        assert_eq!(
+            got.iter().map(|p| p.position[0]).collect::<Vec<_>>(),
+            vec![5.0, 6.0]
+        );
     }
 
     #[test]
@@ -711,18 +842,33 @@ mod tests {
         let (device, queue) = test_device();
         let mut pool = MeshPool::new(device.clone(), queue.clone());
 
-        let vhandle = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(1.0)]).unwrap();
-        let ihandle = pool.index_pool().write_var_row(&queue, VarLenHandle::default(), &[0]).unwrap();
+        let vhandle = pool
+            .vertex_pool()
+            .write_var_row(&queue, VarLenHandle::default(), &[v(1.0)])
+            .unwrap();
+        let ihandle = pool
+            .index_pool()
+            .write_var_row(&queue, VarLenHandle::default(), &[0])
+            .unwrap();
         let id = pool.adopt_static_slice(vhandle, ihandle);
 
         pool.forget_adopted_slice(id);
-        assert!(pool.get(id).is_none(), "the MeshId must no longer be reachable");
+        assert!(
+            pool.get(id).is_none(),
+            "the MeshId must no longer be reachable"
+        );
 
         // The pool range itself must NOT have been freed -- a fresh
         // write_var_row for unrelated data must NOT reuse offset 0, which
         // is still "live" as far as the pool's own freelist is concerned
         // (only the owning field's own next write, or despawn, frees it).
-        let other = pool.vertex_pool().write_var_row(&queue, VarLenHandle::default(), &[v(99.0)]).unwrap();
-        assert_ne!(other.offset, vhandle.offset, "forget_adopted_slice must not have freed vhandle's range");
+        let other = pool
+            .vertex_pool()
+            .write_var_row(&queue, VarLenHandle::default(), &[v(99.0)])
+            .unwrap();
+        assert_ne!(
+            other.offset, vhandle.offset,
+            "forget_adopted_slice must not have freed vhandle's range"
+        );
     }
 }

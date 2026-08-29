@@ -11,9 +11,7 @@ use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{
-    CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer,
-};
+use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer};
 
 impl Renderer {
     pub(crate) fn create_depth_resources(
@@ -107,7 +105,6 @@ impl Renderer {
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
     ) -> Self {
-
         scene.set_shadow_face_capacity(config.shadow_face_capacity);
         scene.set_render_size(width, height);
 
@@ -279,8 +276,12 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             tsr_quality: config.tsr_quality,
-            template_registry: std::sync::Arc::new(std::sync::RwLock::new(RadiantTemplateRegistry::new())),
-            transparent_template_registry: std::sync::Arc::new(std::sync::RwLock::new(RadiantTemplateRegistry::new())),
+            template_registry: std::sync::Arc::new(std::sync::RwLock::new(
+                RadiantTemplateRegistry::new(),
+            )),
+            transparent_template_registry: std::sync::Arc::new(std::sync::RwLock::new(
+                RadiantTemplateRegistry::new(),
+            )),
             render_mode: config.render_mode,
             enable_xr: config.enable_xr,
             #[cfg(not(target_arch = "wasm32"))]

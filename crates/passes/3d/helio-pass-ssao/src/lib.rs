@@ -6,7 +6,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::graph::ResourceSize;
-use helio_core::{GpuCameraUniforms, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{
+    GpuCameraUniforms, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -68,11 +70,8 @@ impl SsaoPass {
         gbuf_emissive: &wgpu::TextureView,
         gbuf_depth: &wgpu::TextureView,
     ) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "SSAO Shader",
-            include_str!("../shaders/ssao.wgsl"),
-        );
+        let shader =
+            helio_core::shader::module(device, "SSAO Shader", include_str!("../shaders/ssao.wgsl"));
 
         // ── Buffers ────────────────────────────────────────────────────────────
 
@@ -105,7 +104,12 @@ impl SsaoPass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        helio_core::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
+        helio_core::upload::write_buffer(
+            queue,
+            &sample_kernel_buf,
+            0,
+            bytemuck::cast_slice(&kernel),
+        );
 
         // ── Noise texture (4×4 Rgba8Unorm, random rotation vectors) ───────────
         let noise_data = generate_noise();
@@ -384,7 +388,11 @@ impl RenderPass for SsaoPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("ssao", wgpu::TextureFormat::R8Unorm, ResourceSize::MatchSurface);
+        builder.write_color_raw(
+            "ssao",
+            wgpu::TextureFormat::R8Unorm,
+            ResourceSize::MatchSurface,
+        );
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -410,8 +418,8 @@ impl RenderPass for SsaoPass {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let ssao_view = resources.ssao.read("SSAO")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: ssao_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -419,8 +427,7 @@ impl RenderPass for SsaoPass {
                     load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("SSAO"),
             color_attachments,
@@ -554,8 +561,14 @@ mod test_utils {
             let b = noise[base + 2];
             let a = noise[base + 3];
 
-            assert_ne!(r, 0, "R channel should be pseudo-random and non-zero in deterministic stream");
-            assert_ne!(g, 0, "G channel should be pseudo-random and non-zero in deterministic stream");
+            assert_ne!(
+                r, 0,
+                "R channel should be pseudo-random and non-zero in deterministic stream"
+            );
+            assert_ne!(
+                g, 0,
+                "G channel should be pseudo-random and non-zero in deterministic stream"
+            );
             assert_eq!(b, 128, "B channel must be fixed at 128");
             assert_eq!(a, 255, "A channel must be fixed at 255");
         }
@@ -565,7 +578,10 @@ mod test_utils {
     fn generate_noise_is_deterministic() {
         let first = generate_noise();
         let second = generate_noise();
-        assert_eq!(first, second, "generate_noise() should be deterministic across calls");
+        assert_eq!(
+            first, second,
+            "generate_noise() should be deterministic across calls"
+        );
     }
 
     #[test]
@@ -578,10 +594,16 @@ mod test_utils {
             let x = sample[0];
             let y = sample[1];
             let z = sample[2];
-            assert!(z >= -1e-6f32, "kernel sample z should be non-negative (hemisphere), got {z}");
+            assert!(
+                z >= -1e-6f32,
+                "kernel sample z should be non-negative (hemisphere), got {z}"
+            );
 
             let length = (x * x + y * y + z * z).sqrt();
-            assert!(length <= 1.01f32, "kernel sample length must be <= 1.0, got {length}");
+            assert!(
+                length <= 1.01f32,
+                "kernel sample length must be <= 1.0, got {length}"
+            );
             if length > 0.001f32 {
                 has_nonzero = true;
             }
@@ -597,5 +619,3 @@ mod test_utils {
         assert_eq!(a, b, "generate_kernel() must be deterministic");
     }
 }
-
-

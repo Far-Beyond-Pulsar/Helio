@@ -36,8 +36,8 @@ use helio::{
     DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId,
     Renderer, RendererConfig, Scene, SceneActor, SublevelDescriptor,
 };
-use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
 use helio_default_graphs::build_default_graph;
+use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
 use v3_demo_common::{box_mesh, make_material, point_light};
 
 use winit::{
@@ -206,15 +206,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         // ── Shared geometry & materials for every segment ─────────────────────
@@ -249,14 +269,59 @@ impl ApplicationHandler for App {
 
         // Meshes are inserted once and shared by every copy's instances (the
         // copies batch into the same draw calls by mesh+material).
-        let slab_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]))).as_mesh().unwrap();
-        let side_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]))).as_mesh().unwrap();
-        let strip_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 0.02, HALF_LENGTH]))).as_mesh().unwrap();
-        let post_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 0.8, 0.08]))).as_mesh().unwrap();
-        let frame_box_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.12, 0.12, 0.12]))).as_mesh().unwrap();
+        let slab_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [HALF_WIDTH, 0.02, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let side_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.02, HALF_HEIGHT, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let strip_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.06, 0.02, HALF_LENGTH],
+            )))
+            .as_mesh()
+            .unwrap();
+        let post_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.08, 0.8, 0.08],
+            )))
+            .as_mesh()
+            .unwrap();
+        let frame_box_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.12, 0.12, 0.12],
+            )))
+            .as_mesh()
+            .unwrap();
 
         // Central corridor segment (world space, no sublevel).
-        insert_segment(&mut renderer, slab_mesh, side_mesh, strip_mesh, post_mesh, wall_mat, strip_mat, post_mat, GroupMask::NONE);
+        insert_segment(
+            &mut renderer,
+            slab_mesh,
+            side_mesh,
+            strip_mesh,
+            post_mesh,
+            wall_mat,
+            strip_mat,
+            post_mat,
+            GroupMask::NONE,
+        );
 
         // ── Copy segments as buried sublevels, ±16 m apart, out to ±160 m ──
         // Each copy re-inserts the same objects (shared meshes/materials) with
@@ -275,44 +340,91 @@ impl ApplicationHandler for App {
             for copy in 1..=COPIES {
                 let idx = (if sign > 0.0 { COPIES } else { 0 }) + (copy - 1);
                 let group = GroupId::new(COPY_GROUP_BASE + idx as u8);
-                insert_segment(&mut renderer, slab_mesh, side_mesh, strip_mesh, post_mesh, wall_mat, strip_mat, post_mat, GroupMask::from(group));
+                insert_segment(
+                    &mut renderer,
+                    slab_mesh,
+                    side_mesh,
+                    strip_mesh,
+                    post_mesh,
+                    wall_mat,
+                    strip_mat,
+                    post_mat,
+                    GroupMask::from(group),
+                );
                 let z = sign * copy as f32 * COPY_STRIDE;
                 renderer
                     .scene_mut()
                     .add_sublevel(SublevelDescriptor {
                         group,
-                        placement: glam::Mat4::from_translation(glam::Vec3::new(0.0, -HIDE_OFFSET, z)),
+                        placement: glam::Mat4::from_translation(glam::Vec3::new(
+                            0.0,
+                            -HIDE_OFFSET,
+                            z,
+                        )),
                     })
                     .expect("add_sublevel");
                 coord_slots += 1;
             }
         }
         // 2 portals + 20 sublevels = 22 ≤ MAX_COORDINATE_SPACES (32).
-        assert!(coord_slots <= 32, "coordinate-space budget exceeded: {coord_slots}");
+        assert!(
+            coord_slots <= 32,
+            "coordinate-space budget exceeded: {coord_slots}"
+        );
 
         // ── Portal frames: emissive collars around each opening ───────────────
         // Four thin boxes outline the opening at each end so the portal reads
         // as a framed doorway rather than a bare change in the corridor.
         let frame_t = 0.12; // frame half-thickness
         let mut insert_frame = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32| {
-            let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh: frame_box_mesh,
-                material: frame_mat,
-                transform: glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
-                    * glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                bounds: [cx, cy, cz, (hx * hx + hy * hy + hz * hz).sqrt()],
-                flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh: frame_box_mesh,
+                    material: frame_mat,
+                    transform: glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
+                        * glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
+                    bounds: [cx, cy, cz, (hx * hx + hy * hy + hz * hz).sqrt()],
+                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
+                    groups: helio::GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
         };
         for &z in &[PORTAL_Z, -PORTAL_Z] {
             // Top / bottom rails (full opening width), left / right posts.
-            insert_frame(0.0, HALF_HEIGHT + frame_t, z, HALF_WIDTH + frame_t, frame_t, frame_t);
-            insert_frame(0.0, -(HALF_HEIGHT + frame_t), z, HALF_WIDTH + frame_t, frame_t, frame_t);
-            insert_frame(-(HALF_WIDTH + frame_t), 0.0, z, frame_t, HALF_HEIGHT + frame_t, frame_t);
-            insert_frame(HALF_WIDTH + frame_t, 0.0, z, frame_t, HALF_HEIGHT + frame_t, frame_t);
+            insert_frame(
+                0.0,
+                HALF_HEIGHT + frame_t,
+                z,
+                HALF_WIDTH + frame_t,
+                frame_t,
+                frame_t,
+            );
+            insert_frame(
+                0.0,
+                -(HALF_HEIGHT + frame_t),
+                z,
+                HALF_WIDTH + frame_t,
+                frame_t,
+                frame_t,
+            );
+            insert_frame(
+                -(HALF_WIDTH + frame_t),
+                0.0,
+                z,
+                frame_t,
+                HALF_HEIGHT + frame_t,
+                frame_t,
+            );
+            insert_frame(
+                HALF_WIDTH + frame_t,
+                0.0,
+                z,
+                frame_t,
+                HALF_HEIGHT + frame_t,
+                frame_t,
+            );
         }
 
         // ── Lights down the tunnel so the near copies are lit; the far ones
@@ -577,8 +689,14 @@ impl AppState {
         let mut teleported = false;
         for portal in [self.portal_near, self.portal_far] {
             if let Some(pair) = scene.portal_pair(portal) {
-                if helio::crossing_detected(prev_pos, self.cam_pos, &pair.a, glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT)) {
-                    self.cam_pos = glam::Vec3::new(-self.cam_pos.x, self.cam_pos.y, -self.cam_pos.z);
+                if helio::crossing_detected(
+                    prev_pos,
+                    self.cam_pos,
+                    &pair.a,
+                    glam::Vec2::new(HALF_WIDTH, HALF_HEIGHT),
+                ) {
+                    self.cam_pos =
+                        glam::Vec3::new(-self.cam_pos.x, self.cam_pos.y, -self.cam_pos.z);
                     forward = glam::Vec3::new(-forward.x, forward.y, -forward.z);
                     self.cam_yaw = forward.x.atan2(-forward.z);
                     self.cam_pitch = forward.y.clamp(-1.0, 1.0).asin();
@@ -628,7 +746,11 @@ impl AppState {
                 // the capture — one extra render call, only on capture frames.
                 let offscreen = self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Screenshot Offscreen"),
-                    size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -640,7 +762,13 @@ impl AppState {
                 if let Err(e) = self.renderer.render(&camera, &offscreen_view) {
                     log::error!("Screenshot render: {:?}", e);
                 }
-                capture_screenshot(&self.device, &self.queue, &offscreen, self.surface_format, &path);
+                capture_screenshot(
+                    &self.device,
+                    &self.queue,
+                    &offscreen,
+                    self.surface_format,
+                    &path,
+                );
                 self.queue.present(output);
                 std::process::exit(0);
             }
@@ -693,13 +821,19 @@ fn capture_screenshot(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit(Some(encoder.finish()));
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |r| r.expect("map screenshot buffer"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = slice.get_mapped_range().expect("get_mapped_range");
 
     let is_bgra = matches!(
@@ -754,32 +888,65 @@ fn insert_segment(
     } else {
         0
     };
-    let mut insert = |mesh: helio::MeshId, material: helio::MaterialId, transform: glam::Mat4, radius: f32| {
-        let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-            mesh,
-            material,
-            transform,
-            bounds: [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius],
-            flags,
-            groups,
-            movability: None,
-            user_tag: 0,
-        }));
-    };
+    let mut insert =
+        |mesh: helio::MeshId, material: helio::MaterialId, transform: glam::Mat4, radius: f32| {
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh,
+                    material,
+                    transform,
+                    bounds: [
+                        transform.w_axis.x,
+                        transform.w_axis.y,
+                        transform.w_axis.z,
+                        radius,
+                    ],
+                    flags,
+                    groups,
+                    movability: None,
+                    user_tag: 0,
+                }));
+        };
     // Floor + ceiling share the slab mesh; left + right walls share the side mesh.
     insert(slab_mesh, wall_mat, glam::Mat4::IDENTITY, HALF_LENGTH);
-    insert(slab_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)), HALF_LENGTH);
-    insert(side_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)), HALF_LENGTH);
-    insert(side_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)), HALF_LENGTH);
+    insert(
+        slab_mesh,
+        wall_mat,
+        glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)),
+        HALF_LENGTH,
+    );
+    insert(
+        side_mesh,
+        wall_mat,
+        glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)),
+        HALF_LENGTH,
+    );
+    insert(
+        side_mesh,
+        wall_mat,
+        glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)),
+        HALF_LENGTH,
+    );
     // Emissive ceiling strip + trim posts — the periodic detail that makes the
     // repetition of the tunnel obvious at a glance.
-    insert(strip_mesh, strip_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT - 0.02, 0.0)), HALF_LENGTH);
+    insert(
+        strip_mesh,
+        strip_mat,
+        glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT - 0.02, 0.0)),
+        HALF_LENGTH,
+    );
     for &(x, z) in &[
         (-HALF_WIDTH + 0.4, -HALF_LENGTH * 0.5),
         (HALF_WIDTH - 0.4, -HALF_LENGTH * 0.5),
         (-HALF_WIDTH + 0.4, HALF_LENGTH * 0.5),
         (HALF_WIDTH - 0.4, HALF_LENGTH * 0.5),
     ] {
-        insert(post_mesh, post_mat, glam::Mat4::from_translation(glam::Vec3::new(x, 0.4, z)), 0.6);
+        insert(
+            post_mesh,
+            post_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(x, 0.4, z)),
+            0.6,
+        );
     }
 }

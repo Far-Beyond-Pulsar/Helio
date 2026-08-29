@@ -182,9 +182,13 @@ impl XrInput {
                 continue;
             }
 
-            if let Err(error) = instance.suggest_interaction_profile_bindings(profile_path, &bindings)
+            if let Err(error) =
+                instance.suggest_interaction_profile_bindings(profile_path, &bindings)
             {
-                log::debug!("[XR] runtime rejected bindings for {}: {error}", profile.path);
+                log::debug!(
+                    "[XR] runtime rejected bindings for {}: {error}",
+                    profile.path
+                );
             }
         }
         Ok(())

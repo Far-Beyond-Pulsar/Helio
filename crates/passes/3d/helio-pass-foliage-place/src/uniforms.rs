@@ -186,18 +186,45 @@ mod tests {
         let offset_of = |field: *const u8| field as usize - base;
 
         assert_eq!(offset_of(&value.tile_size as *const f32 as *const u8), 0);
-        assert_eq!(offset_of(&value.candidate_grid as *const u32 as *const u8), 4);
+        assert_eq!(
+            offset_of(&value.candidate_grid as *const u32 as *const u8),
+            4
+        );
         assert_eq!(offset_of(&value.cluster_edge as *const u32 as *const u8), 8);
-        assert_eq!(offset_of(&value.slab_capacity as *const u32 as *const u8), 12);
-        assert_eq!(offset_of(&value.queued_tile_count as *const u32 as *const u8), 16);
-        assert_eq!(offset_of(&value.density_multiplier as *const f32 as *const u8), 20);
+        assert_eq!(
+            offset_of(&value.slab_capacity as *const u32 as *const u8),
+            12
+        );
+        assert_eq!(
+            offset_of(&value.queued_tile_count as *const u32 as *const u8),
+            16
+        );
+        assert_eq!(
+            offset_of(&value.density_multiplier as *const f32 as *const u8),
+            20
+        );
         assert_eq!(offset_of(&value.max_density as *const f32 as *const u8), 24);
         assert_eq!(offset_of(&value.type_count as *const u32 as *const u8), 28);
-        assert_eq!(offset_of(&value.max_foliage_height as *const f32 as *const u8), 32);
-        assert_eq!(offset_of(&value.terrain_valid as *const u32 as *const u8), 36);
-        assert_eq!(offset_of(&value.terrain_origin_x as *const f32 as *const u8), 40);
-        assert_eq!(offset_of(&value.terrain_origin_z as *const f32 as *const u8), 44);
-        assert_eq!(offset_of(&value.terrain_extent as *const f32 as *const u8), 48);
+        assert_eq!(
+            offset_of(&value.max_foliage_height as *const f32 as *const u8),
+            32
+        );
+        assert_eq!(
+            offset_of(&value.terrain_valid as *const u32 as *const u8),
+            36
+        );
+        assert_eq!(
+            offset_of(&value.terrain_origin_x as *const f32 as *const u8),
+            40
+        );
+        assert_eq!(
+            offset_of(&value.terrain_origin_z as *const f32 as *const u8),
+            44
+        );
+        assert_eq!(
+            offset_of(&value.terrain_extent as *const f32 as *const u8),
+            48
+        );
         assert_eq!(offset_of(&value.layer_count as *const u32 as *const u8), 52);
         assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 56);
     }
@@ -210,19 +237,46 @@ mod tests {
 
         assert_eq!(offset_of(&value.tile_count as *const u32 as *const u8), 0);
         assert_eq!(offset_of(&value.screen_width as *const u32 as *const u8), 4);
-        assert_eq!(offset_of(&value.screen_height as *const u32 as *const u8), 8);
-        assert_eq!(offset_of(&value.hiz_mip_count as *const u32 as *const u8), 12);
+        assert_eq!(
+            offset_of(&value.screen_height as *const u32 as *const u8),
+            8
+        );
+        assert_eq!(
+            offset_of(&value.hiz_mip_count as *const u32 as *const u8),
+            12
+        );
         assert_eq!(offset_of(&value.hiz_valid as *const u32 as *const u8), 16);
-        assert_eq!(offset_of(&value.cluster_size as *const u32 as *const u8), 20);
-        assert_eq!(offset_of(&value.clusters_per_tile as *const u32 as *const u8), 24);
-        assert_eq!(offset_of(&value.per_lod_capacity as *const u32 as *const u8), 28);
+        assert_eq!(
+            offset_of(&value.cluster_size as *const u32 as *const u8),
+            20
+        );
+        assert_eq!(
+            offset_of(&value.clusters_per_tile as *const u32 as *const u8),
+            24
+        );
+        assert_eq!(
+            offset_of(&value.per_lod_capacity as *const u32 as *const u8),
+            28
+        );
         assert_eq!(offset_of(&value.tile_size as *const f32 as *const u8), 32);
-        assert_eq!(offset_of(&value.lod_quality_scale as *const f32 as *const u8), 36);
+        assert_eq!(
+            offset_of(&value.lod_quality_scale as *const f32 as *const u8),
+            36
+        );
         assert_eq!(offset_of(&value.type_count as *const u32 as *const u8), 40);
-        assert_eq!(offset_of(&value.cluster_dispatch_width as *const u32 as *const u8), 44);
-        assert_eq!(offset_of(&value.max_foliage_height as *const f32 as *const u8), 48);
+        assert_eq!(
+            offset_of(&value.cluster_dispatch_width as *const u32 as *const u8),
+            44
+        );
+        assert_eq!(
+            offset_of(&value.max_foliage_height as *const f32 as *const u8),
+            48
+        );
         assert_eq!(offset_of(&value.wpo_extent as *const f32 as *const u8), 52);
-        assert_eq!(offset_of(&value.lod_fade_band as *const f32 as *const u8), 56);
+        assert_eq!(
+            offset_of(&value.lod_fade_band as *const f32 as *const u8),
+            56
+        );
         assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 60);
     }
 

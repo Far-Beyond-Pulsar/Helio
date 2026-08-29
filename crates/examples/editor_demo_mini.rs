@@ -27,12 +27,12 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, EditorState,
-    GizmoMode, Renderer, RendererConfig, Scene, SceneActor, ScenePicker, VirtualMeshUpload,
-    VirtualObjectDescriptor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, EditorState, GizmoMode, Renderer, RendererConfig, Scene, SceneActor,
+    ScenePicker, VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
+use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use helio_pass_virtual_geometry::{VirtualGeometryDebugStats, VirtualGeometryPass};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
@@ -169,8 +169,7 @@ impl ApplicationHandler for App {
         );
 
         // ── Renderer (FXAA pipeline: full-res, no TAA jitter/upscaling) ───
-        let config = RendererConfig::new(sz.width, sz.height, format)
-                .with_render_scale(1.0);
+        let config = RendererConfig::new(sz.width, sz.height, format).with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -181,15 +180,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_editor_mode(true);
         // Night sky — deep navy
@@ -539,8 +558,9 @@ impl ApplicationHandler for App {
                 }))
                 .as_virtual_mesh()
                 .unwrap();
-            let _ = renderer.scene_mut().insert_actor(SceneActor::virtual_object(
-                VirtualObjectDescriptor {
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::virtual_object(VirtualObjectDescriptor {
                     virtual_mesh,
                     material_id: mat_steel.slot(),
                     transform: glam::Mat4::from_translation(position),
@@ -548,8 +568,7 @@ impl ApplicationHandler for App {
                     flags: 0,
                     groups: helio::GroupMask::NONE,
                     movability: Some(helio::Movability::Static),
-                },
-            ));
+                }));
         }
 
         // ── Shipping containers — 10 total, using Virtual Geometry ─────
@@ -573,17 +592,22 @@ impl ApplicationHandler for App {
                 Ok(scene) => {
                     // Upload textures and materials from the FBX.
                     let fallback_mat = renderer.scene_mut().insert_material(make_material(
-                        [0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0,
+                        [0.5, 0.5, 0.5, 1.0],
+                        0.8,
+                        0.0,
+                        [0.0; 3],
+                        0.0,
                     ));
-                    let mat_ids = upload_scene_materials(&mut renderer, &scene)
-                        .unwrap_or_default();
+                    let mat_ids = upload_scene_materials(&mut renderer, &scene).unwrap_or_default();
 
                     if let Some(sm) = &scene.sectioned_mesh {
                         // One VG mesh per section — each section has its own
                         // material but shares the vertex buffer.
                         let mut vg_entries: Vec<(helio::VirtualMeshId, u32)> = Vec::new();
                         for sec in &sm.sections {
-                            if sec.indices.is_empty() { continue; }
+                            if sec.indices.is_empty() {
+                                continue;
+                            }
 
                             let vm_id = renderer
                                 .scene_mut()
@@ -594,7 +618,8 @@ impl ApplicationHandler for App {
                                 .as_virtual_mesh()
                                 .unwrap();
 
-                            let mat_slot = sec.material_index
+                            let mat_slot = sec
+                                .material_index
                                 .and_then(|idx| mat_ids.get(idx))
                                 .copied()
                                 .unwrap_or(fallback_mat)
@@ -617,17 +642,29 @@ impl ApplicationHandler for App {
                         eprintln!(
                             "[shipyard] VG container: {} sections {} verts  \
                              size={:.2?} center={:.2?} r={radius:.2}",
-                            vg_entries.len(), sm.vertices.len(),
-                            local_size, local_center
+                            vg_entries.len(),
+                            sm.vertices.len(),
+                            local_size,
+                            local_center
                         );
 
                         let step_x = local_size.x + 0.04;
                         let step_z = local_size.z + 0.06;
                         let step_y = local_size.y;
 
-                        struct Bay { ox: f32, oz: f32, cols: u32, rows: u32, layers: u32 }
+                        struct Bay {
+                            ox: f32,
+                            oz: f32,
+                            cols: u32,
+                            rows: u32,
+                            layers: u32,
+                        }
                         let bays: &[Bay] = &[Bay {
-                            ox: -95.0, oz: -26.0, cols: 5, rows: 1, layers: 2,
+                            ox: -95.0,
+                            oz: -26.0,
+                            cols: 5,
+                            rows: 1,
+                            layers: 2,
                         }];
                         const MAX_CONTAINERS: u32 = 10;
 
@@ -636,7 +673,9 @@ impl ApplicationHandler for App {
                             for layer in 0..bay.layers {
                                 for row in 0..bay.rows {
                                     for col in 0..bay.cols {
-                                        if count >= MAX_CONTAINERS { break 'bays; }
+                                        if count >= MAX_CONTAINERS {
+                                            break 'bays;
+                                        }
                                         let wx = bay.ox + col as f32 * step_x;
                                         let wy = layer as f32 * step_y + local_size.y * 0.5;
                                         let wz = bay.oz + row as f32 * step_z;
@@ -647,7 +686,8 @@ impl ApplicationHandler for App {
                                         };
                                         let placement = glam::Mat4::from_translation(
                                             glam::Vec3::new(wx, wy, wz),
-                                        ) * rot * glam::Mat4::from_translation(-local_center);
+                                        ) * rot
+                                            * glam::Mat4::from_translation(-local_center);
 
                                         for &(vm_id, mat_slot) in &vg_entries {
                                             let _ = renderer.scene_mut().insert_actor(
@@ -659,9 +699,7 @@ impl ApplicationHandler for App {
                                                         bounds: [wx, wy, wz, radius],
                                                         flags: 0,
                                                         groups: helio::GroupMask::NONE,
-                                                        movability: Some(
-                                                            helio::Movability::Static,
-                                                        ),
+                                                        movability: Some(helio::Movability::Static),
                                                     },
                                                 ),
                                             );
@@ -671,7 +709,10 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        eprintln!("[shipyard] {count} VG containers inserted ({} VG meshes per instance)", vg_entries.len());
+                        eprintln!(
+                            "[shipyard] {count} VG containers inserted ({} VG meshes per instance)",
+                            vg_entries.len()
+                        );
                     } else {
                         eprintln!("[shipyard] No sectioned mesh in FBX");
                     }
@@ -781,12 +822,9 @@ impl ApplicationHandler for App {
             )));
 
         // Switch to FXAA pipeline: full-res rendering, no TAA jitter/upscaling
-        let fxaa_config = RendererConfig::new(sz.width, sz.height, format)
-            .with_render_scale(1.0);
+        let fxaa_config = RendererConfig::new(sz.width, sz.height, format).with_render_scale(1.0);
         let debug_overlay = helio_pass_debug_overlay::DebugOverlayState::new();
-        let lod_debug_stats = Arc::new(std::sync::Mutex::new(
-            VirtualGeometryDebugStats::default(),
-        ));
+        let lod_debug_stats = Arc::new(std::sync::Mutex::new(VirtualGeometryDebugStats::default()));
         let fxaa_graph = build_fxaa_graph(
             &device,
             &queue,
@@ -846,13 +884,9 @@ impl ApplicationHandler for App {
                 state.cursor_pos = (position.x as f32, position.y as f32);
                 if !state.right_mouse_held {
                     let (ray_o, ray_d) = state.build_ray();
-                    state
-                        .editor
-                        .update_hover(ray_o, ray_d, &state.renderer);
+                    state.editor.update_hover(ray_o, ray_d, &state.renderer);
                     if state.left_mouse_held && state.editor.is_dragging() {
-                        state
-                            .editor
-                            .update_drag(ray_o, ray_d, &mut state.renderer);
+                        state.editor.update_drag(ray_o, ray_d, &mut state.renderer);
                     } else if state.editor.is_dragging() {
                         state.editor.end_drag();
                     }
@@ -919,14 +953,18 @@ impl ApplicationHandler for App {
                             if views.is_empty() {
                                 eprintln!("[debug] No debug views available");
                             } else {
-                                state.debug_view_index = (state.debug_view_index + 1) % (views.len() + 1);
+                                state.debug_view_index =
+                                    (state.debug_view_index + 1) % (views.len() + 1);
                                 if state.debug_view_index == 0 {
                                     state.apply_debug_mode(0);
                                     eprintln!("[debug] Debug view: OFF");
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
                                     state.apply_debug_mode(view.debug_mode);
-                                    eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
+                                    eprintln!(
+                                        "[debug] Debug view: {} — {}",
+                                        view.name, view.description
+                                    );
                                 }
                             }
                         }
@@ -946,14 +984,22 @@ impl ApplicationHandler for App {
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
                                     state.apply_debug_mode(view.debug_mode);
-                                    eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
+                                    eprintln!(
+                                        "[debug] Debug view: {} — {}",
+                                        view.name, view.description
+                                    );
                                 }
                             }
                         }
                         KeyCode::F2 | KeyCode::F5 => {
                             state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                            if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
-                                pass.set_enabled(state.debug_overlay_enabled || state.active_debug_mode == 21);
+                            if let Some(pass) = state
+                                .renderer
+                                .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>(
+                            ) {
+                                pass.set_enabled(
+                                    state.debug_overlay_enabled || state.active_debug_mode == 21,
+                                );
                             }
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
@@ -1093,40 +1139,51 @@ impl AppState {
             let mut overlay = self.debug_overlay.lock().unwrap();
             let shared_stats = Arc::clone(&self.lod_debug_stats);
             overlay.populate = show_lod_legend.then(move || {
-                Box::new(move |overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
-                    let stats = *shared_stats.lock().unwrap();
-                    overlay.write_text(0, 2, "VG LOD HEATMAP");
-                    if let Some((first, last)) = stats.selected_lod_range() {
-                        overlay.write_text(
-                            0,
-                            3,
-                            &format!(
-                                "GPU objects: {}  selected: LOD{}..LOD{}  asset max: LOD{}",
-                                stats.visible_objects(), first, last, stats.max_available_lod,
-                            ),
-                        );
-                        overlay.write_text(
-                            0,
-                            4,
-                            &format!(
-                                "Meshlets: {} visible  {} rejected",
-                                stats.visible_meshlets, stats.rejected_meshlets,
-                            ),
-                        );
-                    } else {
-                        overlay.write_text(0, 3, "GPU LOD sample pending / no VG objects visible");
-                    }
-                    for (lod, color) in LOD_COLORS.iter().enumerate() {
-                        let x = 8.0 + lod as f32 * 68.0;
-                        overlay.add_bar(x, 128.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
-                        overlay.write_small(
-                            (x / 8.0) as u32 + 3,
-                            11,
-                            &format!("L{lod}:{}", stats.lod_object_counts[lod]),
-                        );
-                    }
-                    overlay.write_text(0, 6, "LOD0 = full detail; asset max can be below LOD7");
-                }) as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
+                Box::new(
+                    move |overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
+                        let stats = *shared_stats.lock().unwrap();
+                        overlay.write_text(0, 2, "VG LOD HEATMAP");
+                        if let Some((first, last)) = stats.selected_lod_range() {
+                            overlay.write_text(
+                                0,
+                                3,
+                                &format!(
+                                    "GPU objects: {}  selected: LOD{}..LOD{}  asset max: LOD{}",
+                                    stats.visible_objects(),
+                                    first,
+                                    last,
+                                    stats.max_available_lod,
+                                ),
+                            );
+                            overlay.write_text(
+                                0,
+                                4,
+                                &format!(
+                                    "Meshlets: {} visible  {} rejected",
+                                    stats.visible_meshlets, stats.rejected_meshlets,
+                                ),
+                            );
+                        } else {
+                            overlay.write_text(
+                                0,
+                                3,
+                                "GPU LOD sample pending / no VG objects visible",
+                            );
+                        }
+                        for (lod, color) in LOD_COLORS.iter().enumerate() {
+                            let x = 8.0 + lod as f32 * 68.0;
+                            overlay
+                                .add_bar(x, 128.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
+                            overlay.write_small(
+                                (x / 8.0) as u32 + 3,
+                                11,
+                                &format!("L{lod}:{}", stats.lod_object_counts[lod]),
+                            );
+                        }
+                        overlay.write_text(0, 6, "LOD0 = full detail; asset max can be below LOD7");
+                    },
+                )
+                    as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
             });
         }
 
@@ -1285,7 +1342,8 @@ impl AppState {
         }
 
         self.renderer.debug_clear();
-        self.renderer.set_gizmo_camera(&camera, self.renderer.output_height() as f32);
+        self.renderer
+            .set_gizmo_camera(&camera, self.renderer.output_height() as f32);
         self.editor.draw_gizmos(&mut self.renderer);
 
         if !self.right_mouse_held {

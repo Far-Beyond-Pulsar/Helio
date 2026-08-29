@@ -74,13 +74,13 @@
 
 use crate::acceleration::{BlasManager, TlasManager};
 use crate::component::ComponentRegistry;
-use crate::scene::managers::{
-    CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer,
-    GpuCompactedIndices2Buffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
-    GpuInstanceBuffer, GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
-    GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
-};
 use crate::scene::managers::GrowableBuffer;
+use crate::scene::managers::{
+    CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
+    GpuCompactedIndicesBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer,
+    GpuShadowMatrixBuffer, GpuVisibilityBuffer, GpuVoxelEditRing, GpuVoxelVolumeBuffer,
+};
 use crate::scene::SceneResources;
 use std::sync::Arc;
 

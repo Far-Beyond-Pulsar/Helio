@@ -150,8 +150,8 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::{
-        GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
-        VG_CULL_MESHLETS_PER_WORK_ITEM, VG_LOD_LEVELS,
+        GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM,
+        VG_LOD_LEVELS,
     };
 
     #[test]
@@ -165,4 +165,3 @@ mod tests {
         assert_eq!(VG_CULL_MESHLETS_PER_WORK_ITEM, 64);
     }
 }
-

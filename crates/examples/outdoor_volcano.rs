@@ -17,7 +17,8 @@
 
 mod v3_demo_common;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, MeshId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, LightId, MeshId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{
@@ -201,15 +202,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         let rock_mat = renderer.scene_mut().insert_material(make_material(
@@ -227,7 +248,11 @@ impl ApplicationHandler for App {
             3.0,
         ));
 
-        let _island_ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 55.0))).as_mesh().unwrap();
+        let _island_ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 55.0)))
+            .as_mesh()
+            .unwrap();
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _island_ground,
@@ -236,13 +261,62 @@ impl ApplicationHandler for App {
             55.0,
         );
 
-        let _cone_l1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [22.0, 5.0, 20.0]))).as_mesh().unwrap();
-        let _cone_l2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [15.5, 6.5, 14.0]))).as_mesh().unwrap();
-        let _cone_l3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [10.0, 6.5, 9.5]))).as_mesh().unwrap();
-        let _cone_l4 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 6.0, 5.5]))).as_mesh().unwrap();
-        let _cone_l5 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.8, 4.5, 2.8]))).as_mesh().unwrap();
-        let _crater_rim = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.2, 0.4, 3.2]))).as_mesh().unwrap();
-        let _lava_lake = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.2, 0.05, 2.2]))).as_mesh().unwrap();
+        let _cone_l1 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [22.0, 5.0, 20.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cone_l2 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [15.5, 6.5, 14.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cone_l3 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [10.0, 6.5, 9.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cone_l4 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [5.5, 6.0, 5.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cone_l5 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.8, 4.5, 2.8],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _crater_rim = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [3.2, 0.4, 3.2],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _lava_lake = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.2, 0.05, 2.2],
+            )))
+            .as_mesh()
+            .unwrap();
         for (&m, t) in [
             _cone_l1,
             _cone_l2,
@@ -263,13 +337,7 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
-                m,
-                rock_mat,
-                *t,
-                22.0,
-            );
+            let _ = v3_demo_common::insert_object(&mut renderer, m, rock_mat, *t, 22.0);
         }
         let _ = v3_demo_common::insert_object(
             &mut renderer,
@@ -280,16 +348,72 @@ impl ApplicationHandler for App {
         );
 
         let _flow_left: Vec<MeshId> = vec![
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 5.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 6.0]))).as_mesh().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.12, 2.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.2, 0.12, 3.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.4, 0.12, 5.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.5, 0.1, 6.0],
+                )))
+                .as_mesh()
+                .unwrap(),
         ];
         let _flow_right: Vec<MeshId> = vec![
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 4.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 5.5]))).as_mesh().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.12, 2.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.2, 0.12, 3.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.4, 0.12, 4.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [1.5, 0.1, 5.5],
+                )))
+                .as_mesh()
+                .unwrap(),
         ];
         for (&m, t) in _flow_left.iter().chain(_flow_right.iter()).zip(
             [
@@ -304,19 +428,34 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
-                m,
-                lava_mat,
-                *t,
-                6.0,
-            );
+            let _ = v3_demo_common::insert_object(&mut renderer, m, lava_mat, *t, 6.0);
         }
 
         let _lava_pools: Vec<MeshId> = vec![
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.06, 3.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.06, 2.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.06, 2.0]))).as_mesh().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [4.0, 0.06, 3.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [3.5, 0.06, 2.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [2.5, 0.06, 2.0],
+                )))
+                .as_mesh()
+                .unwrap(),
         ];
         for (&m, t) in _lava_pools.iter().zip(
             [
@@ -326,18 +465,18 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
-                m,
-                lava_mat,
-                *t,
-                4.0,
-            );
+            let _ = v3_demo_common::insert_object(&mut renderer, m, lava_mat, *t, 4.0);
         }
 
         let _boulders: Vec<MeshId> = BOULDERS
             .iter()
-            .map(|&(_x, _yh, _z, hs)| renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], hs))).as_mesh().unwrap())
+            .map(|&(_x, _yh, _z, hs)| {
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], hs)))
+                    .as_mesh()
+                    .unwrap()
+            })
             .collect();
         for (&m, &(x, yh, z, _)) in _boulders.iter().zip(BOULDERS.iter()) {
             let _ = v3_demo_common::insert_object(
@@ -350,11 +489,46 @@ impl ApplicationHandler for App {
         }
 
         let _scorch_patches: Vec<MeshId> = vec![
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.02, 3.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 3.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 4.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 2.5]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 2.5]))).as_mesh().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [4.5, 0.02, 3.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [3.5, 0.02, 3.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [3.0, 0.02, 4.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [3.0, 0.02, 2.5],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [3.5, 0.02, 2.5],
+                )))
+                .as_mesh()
+                .unwrap(),
         ];
         for (&m, t) in _scorch_patches.iter().zip(
             [
@@ -366,25 +540,34 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
-                m,
-                rock_mat,
-                *t,
-                4.0,
-            );
+            let _ = v3_demo_common::insert_object(&mut renderer, m, rock_mat, *t, 4.0);
         }
 
         let ocean_dir = glam::Vec3::new(-0.3, -0.6, 0.2).normalize();
-        let _ocean_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-            [ocean_dir.x, ocean_dir.y, ocean_dir.z],
-            [0.3, 0.5, 1.0],
-            0.04,
-        ))).as_light().unwrap();
+        let _ocean_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(directional_light(
+                [ocean_dir.x, ocean_dir.y, ocean_dir.z],
+                [0.3, 0.5, 1.0],
+                0.04,
+            )))
+            .as_light()
+            .unwrap();
         let mut lava_light_ids = Vec::new();
         for &(x, y, z, r, g, b, intensity, range) in LAVA_LIGHTS {
             let p = [x, y, z];
-            lava_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p, [r, g, b], intensity, range))).as_light().unwrap());
+            lava_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        p,
+                        [r, g, b],
+                        intensity,
+                        range,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         renderer.set_ambient([0.5, 0.1, 0.02], 0.04);
         renderer.set_clear_color([0.06, 0.01, 0.01, 1.0]);
@@ -584,7 +767,10 @@ impl AppState {
             let phase = i as f32 * 1.37;
             let fi = f(phase, 8.0 + i as f32 * 1.1, 0.06 + (i % 3) as f32 * 0.03);
             let p = [x, y, z];
-            let _ = self.renderer.scene_mut().update_light(id, point_light(p, [r, g, b], intensity * fi, range));
+            let _ = self
+                .renderer
+                .scene_mut()
+                .update_light(id, point_light(p, [r, g, b], intensity * fi, range));
         }
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
@@ -592,6 +778,3 @@ impl AppState {
         self.queue.present(output);
     }
 }
-
-
-

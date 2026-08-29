@@ -585,17 +585,13 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let cascade_out_view =
-            cascade_out.create_view(&wgpu::TextureViewDescriptor::default());
+        let cascade_out_view = cascade_out.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let history = ctx
-            .resource_pool
-            .get_texture("rc_history")
-            .ok_or_else(|| {
-                helio_core::Error::InvalidPassConfig(
-                    "RadianceCascades: missing rc_history texture".into(),
-                )
-            })?;
+        let history = ctx.resource_pool.get_texture("rc_history").ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "RadianceCascades: missing rc_history texture".into(),
+            )
+        })?;
         let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
 
         let lights_buf = ctx.scene.lights;

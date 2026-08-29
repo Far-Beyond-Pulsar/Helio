@@ -83,17 +83,17 @@ mod water;
 
 pub use actor::{
     DecalActor, PostProcessVolumeActor, ReflectionCaptureActor, ReflectionCaptureDescriptor,
-    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
-    WaterVolumeDescriptor, WaterVolumeActor,
+    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxActor, WaterHitboxDescriptor,
+    WaterVolumeActor, WaterVolumeDescriptor,
 };
 pub use camera::Camera;
 pub use core::Scene;
-pub use foliage::{
-    FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFoliageInteractor,
-};
 pub use errors::*;
+pub use foliage::{FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFoliageInteractor};
 pub use portals::{portal_pose_facing, PortalDescriptor};
 pub use sublevels::SublevelDescriptor;
-pub use types::{LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput, VoxelVolumeDescriptor};
+pub use types::{
+    LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput,
+    VoxelVolumeDescriptor,
+};
 pub use voxel::VoxelMode;
-

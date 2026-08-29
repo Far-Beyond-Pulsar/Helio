@@ -133,9 +133,9 @@ impl SsrPass {
             // so `enable wgpu_ray_query;` can appear at line 1 as WGSL requires.
             let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("SSR RT Trace Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    std::borrow::Cow::Owned(include_str!("../shaders/ssr_trace_rt.wgsl").to_string()),
-                ),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
+                    include_str!("../shaders/ssr_trace_rt.wgsl").to_string(),
+                )),
             });
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

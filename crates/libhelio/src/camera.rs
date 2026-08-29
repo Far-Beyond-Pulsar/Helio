@@ -63,4 +63,3 @@ impl GpuCameraUniforms {
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(&data));
     }
 }
-

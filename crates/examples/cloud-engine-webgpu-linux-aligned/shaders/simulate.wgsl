@@ -312,7 +312,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // still clears to an empty volume.
   if (params.flow_controls.w > 0.5) {
     let reset_density = select(0.0, formation_target, automatic > 0.5);
-    textureStore(next_volume, coordinate, vec4<f32>(reset_density, fine_noise, formation_target, 1.0));
+    let reset_thickness = clamp(reset_density * 1.8, 0.0, 1.0);
+    textureStore(next_volume, coordinate, vec4<f32>(reset_density, fine_noise, formation_target, reset_thickness));
     return;
   }
 
@@ -354,5 +355,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   density = clamp(density, 0.0, 1.0);
-  textureStore(next_volume, coordinate, vec4<f32>(density, fine_noise, formation_target, 1.0));
+  // Thickness baked per voxel: 1.0 = dense core, 0.0 = wispy edge. No extra fetches in raymarch - w channel is free.
+  let thickness = clamp(density * 1.6 - edge_weight * 0.25, 0.0, 1.0);
+  textureStore(next_volume, coordinate, vec4<f32>(density, fine_noise, formation_target, thickness));
 }

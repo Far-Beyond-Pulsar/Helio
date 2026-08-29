@@ -16,7 +16,7 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 mod clip_stack;
 mod globals;
-use clip_stack::{ClipStack, HLFS_LEVELS, HLFS_RES, HLFS_NEAR_FIELD, HLFS_CASCADE_SCALE};
+use clip_stack::{ClipStack, HLFS_CASCADE_SCALE, HLFS_LEVELS, HLFS_NEAR_FIELD, HLFS_RES};
 use globals::HlfsGlobals;
 
 const CLIP_STACK_LEVELS: usize = HLFS_LEVELS as usize;
@@ -914,7 +914,11 @@ impl HlfsPass {
         // Fallback 1x1 RG16Float texture for lightmap UVs (when gbuffer_lightmap_uv is not available).
         let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("HLFS Fallback Lightmap UV"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -930,8 +934,16 @@ impl HlfsPass {
                 aspect: wgpu::TextureAspect::All,
             },
             &[0u8; 4], // (0.0, 0.0) UV coords
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
 
@@ -1072,10 +1084,30 @@ impl RenderPass for HlfsPass {
         // Write new HLFS globals with clip-stack state
         let hlfs = HlfsGlobals {
             clip_origins: [
-                [self.clip_stack.levels[0].origin[0], self.clip_stack.levels[0].origin[1], self.clip_stack.levels[0].origin[2], 0],
-                [self.clip_stack.levels[1].origin[0], self.clip_stack.levels[1].origin[1], self.clip_stack.levels[1].origin[2], 0],
-                [self.clip_stack.levels[2].origin[0], self.clip_stack.levels[2].origin[1], self.clip_stack.levels[2].origin[2], 0],
-                [self.clip_stack.levels[3].origin[0], self.clip_stack.levels[3].origin[1], self.clip_stack.levels[3].origin[2], 0],
+                [
+                    self.clip_stack.levels[0].origin[0],
+                    self.clip_stack.levels[0].origin[1],
+                    self.clip_stack.levels[0].origin[2],
+                    0,
+                ],
+                [
+                    self.clip_stack.levels[1].origin[0],
+                    self.clip_stack.levels[1].origin[1],
+                    self.clip_stack.levels[1].origin[2],
+                    0,
+                ],
+                [
+                    self.clip_stack.levels[2].origin[0],
+                    self.clip_stack.levels[2].origin[1],
+                    self.clip_stack.levels[2].origin[2],
+                    0,
+                ],
+                [
+                    self.clip_stack.levels[3].origin[0],
+                    self.clip_stack.levels[3].origin[1],
+                    self.clip_stack.levels[3].origin[2],
+                    0,
+                ],
             ],
             voxel_sizes: [
                 self.clip_stack.levels[0].voxel_size,
@@ -1118,7 +1150,11 @@ impl RenderPass for HlfsPass {
                 "HLFS requires shadow_atlas (shadow pass must run first)".to_string(),
             )
         })?;
-        let shadow_sampler = ctx.resources.shadow_sampler.get().unwrap_or(&self.fallback_shadow_sampler);
+        let shadow_sampler = ctx
+            .resources
+            .shadow_sampler
+            .get()
+            .unwrap_or(&self.fallback_shadow_sampler);
 
         let shade0_key = (
             pre_aa as *const _ as usize,
@@ -1216,23 +1252,33 @@ impl RenderPass for HlfsPass {
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.clip_stack.read[0],
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[1]),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.clip_stack.read[1],
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[2]),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.clip_stack.read[2],
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[3]),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.clip_stack.read[3],
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 4,
-                                    resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.clip_stack_sampler,
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 5,
@@ -1286,7 +1332,11 @@ impl RenderPass for HlfsPass {
             )
         })?;
 
-        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
+        let lightmap_uv_view = ctx
+            .resources
+            .gbuffer_lightmap_uv
+            .get()
+            .unwrap_or(&self.fallback_lightmap_uv_view);
 
         let shade1_key = (
             gbuffer.albedo as *const _ as usize,
@@ -1513,9 +1563,8 @@ impl RenderPass for HlfsPass {
         };
 
         // Decide between RT and software shadow path
-        let use_rt_path = self.use_rt
-            && self.rt_pipeline.is_some()
-            && self.bind_group_shade0_rt.is_some();
+        let use_rt_path =
+            self.use_rt && self.rt_pipeline.is_some() && self.bind_group_shade0_rt.is_some();
 
         if use_rt_path {
             let mut pass = ctx.begin_render_pass(&render_pass_desc);

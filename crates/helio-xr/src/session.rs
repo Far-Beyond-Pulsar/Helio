@@ -84,7 +84,12 @@ impl XrSession {
         let view_config_views = instance.enumerate_view_configuration_views(system, view_config)?;
         let (width, height) = view_config_views
             .first()
-            .map(|v| (v.recommended_image_rect_width.max(1), v.recommended_image_rect_height.max(1)))
+            .map(|v| {
+                (
+                    v.recommended_image_rect_width.max(1),
+                    v.recommended_image_rect_height.max(1),
+                )
+            })
             .unwrap_or((1, 1));
 
         let blend_modes = instance.enumerate_environment_blend_modes(system, view_config)?;
@@ -220,7 +225,8 @@ impl XrSession {
         world_from_stage: &glam::Mat4,
     ) -> Result<LocatedViews> {
         let (view_state_flags, views) =
-            self.session.locate_views(self.view_config, display_time, &self.stage)?;
+            self.session
+                .locate_views(self.view_config, display_time, &self.stage)?;
         let view_poses = views
             .iter()
             .map(|view| ViewPose::from_xr(view, world_from_stage))
@@ -344,10 +350,12 @@ pub fn vulkan_session_create_info(
         XrError::GraphicsUnavailable("wgpu device is not backed by the Vulkan backend".to_string())
     })?;
 
-    let instance =
-        hal_device.shared_instance().raw_instance().handle().as_raw() as *const std::ffi::c_void;
-    let physical_device =
-        hal_device.raw_physical_device().as_raw() as *const std::ffi::c_void;
+    let instance = hal_device
+        .shared_instance()
+        .raw_instance()
+        .handle()
+        .as_raw() as *const std::ffi::c_void;
+    let physical_device = hal_device.raw_physical_device().as_raw() as *const std::ffi::c_void;
     let device = hal_device.raw_device().handle().as_raw() as *const std::ffi::c_void;
 
     Ok(openxr::vulkan::SessionCreateInfo {

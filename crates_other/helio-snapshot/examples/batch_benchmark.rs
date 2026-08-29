@@ -10,8 +10,7 @@ fn main() {
         .filter_level(log::LevelFilter::Warn)
         .init();
 
-    let model_path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test.fbx");
+    let model_path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test.fbx");
 
     println!("Model: {}", model_path.display());
     println!("Initialising GPU and renderer...");
@@ -37,8 +36,8 @@ fn main() {
         let elapsed = t.elapsed();
         times.push(elapsed);
 
-        let avg_ms = times.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>()
-            / times.len() as f64;
+        let avg_ms =
+            times.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / times.len() as f64;
 
         println!(
             "{:<6}  {:>9.1}ms  {:>11.1}ms",

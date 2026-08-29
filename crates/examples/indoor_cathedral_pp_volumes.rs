@@ -15,8 +15,9 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState, HelioAction,
-    HelioCommandBridge, LightId, MeshId, Movability, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
+    Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer,
+    RendererConfig, Scene,
 };
 use helio_default_graphs::{build_default_graph, build_fxaa_hlfs_graph};
 use helio_pass_perf_overlay::PerfOverlayMode;
@@ -157,15 +158,14 @@ impl ApplicationHandler for App {
             apply_limit_buckets: false,
         }))
         .expect("adapter");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }))
-            .expect("device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
+        .expect("device");
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
@@ -268,40 +268,62 @@ impl ApplicationHandler for App {
             .unwrap();
         let _wall_back = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
             .as_mesh()
             .unwrap();
         let _wall_front = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
             .as_mesh()
             .unwrap();
         let _aisle_ceil_l = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
             .as_mesh()
             .unwrap();
         let _nave_ceiling = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 0.18, 28.0],
+            )))
             .as_mesh()
             .unwrap();
         let _aisle_ceil_r = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
             .as_mesh()
             .unwrap();
         let _wall_left_outer = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
             .as_mesh()
             .unwrap();
         let _wall_right_outer = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0])))
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
             .as_mesh()
             .unwrap();
-        let _ = v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _nave_ceiling,
@@ -640,70 +662,76 @@ impl ApplicationHandler for App {
         // ── Post-process volumes ──────────────────────────────────────────────────
 
         // Volume 1: Warm altar glow — golden vignette + saturation shift
-        renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-6.0, 0.0, -28.0],
-                bounds_max: [6.0, 14.0, -20.0],
-                priority: 10.0,
-                blend_radius: 3.0,
-                blend_weight: 1.0,
-                unbound: false,
-                settings: PostProcessSettings {
-                    vignette_intensity: 0.65,
-                    vignette_smoothness: 2.0,
-                    vignette_roundness: 1.2,
-                    vignette_color: [1.0, 0.7, 0.2],
-                    vignette_enabled: true,
-                    color_saturation: [1.3, 1.1, 0.8],
-                    color_contrast: [1.1, 1.1, 1.1],
-                    color_gamma: [1.0, 1.0, 1.0],
-                    color_gain: [1.0, 1.0, 1.0],
-                    color_offset: [0.05, 0.02, 0.0],
-                    ..PostProcessSettings::default()
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::post_process_volume(
+                PostProcessVolumeDescriptor {
+                    bounds_min: [-6.0, 0.0, -28.0],
+                    bounds_max: [6.0, 14.0, -20.0],
+                    priority: 10.0,
+                    blend_radius: 3.0,
+                    blend_weight: 1.0,
+                    unbound: false,
+                    settings: PostProcessSettings {
+                        vignette_intensity: 0.65,
+                        vignette_smoothness: 2.0,
+                        vignette_roundness: 1.2,
+                        vignette_color: [1.0, 0.7, 0.2],
+                        vignette_enabled: true,
+                        color_saturation: [1.3, 1.1, 0.8],
+                        color_contrast: [1.1, 1.1, 1.1],
+                        color_gamma: [1.0, 1.0, 1.0],
+                        color_gain: [1.0, 1.0, 1.0],
+                        color_offset: [0.05, 0.02, 0.0],
+                        ..PostProcessSettings::default()
+                    },
                 },
-            },
-        ));
+            ));
 
         // Volume 2: Cool cyan entrance zone
-        renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-6.0, 0.0, 15.0],
-                bounds_max: [6.0, 14.0, 28.0],
-                priority: 10.0,
-                blend_radius: 4.0,
-                blend_weight: 0.8,
-                unbound: false,
-                settings: PostProcessSettings {
-                    color_saturation: [0.7, 0.9, 1.2],
-                    color_contrast: [0.95, 0.95, 0.95],
-                    color_gain: [0.9, 0.95, 1.1],
-                    color_offset: [-0.02, 0.0, 0.03],
-                    bloom_intensity: 0.3,
-                    bloom_enabled: true,
-                    ..PostProcessSettings::default()
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::post_process_volume(
+                PostProcessVolumeDescriptor {
+                    bounds_min: [-6.0, 0.0, 15.0],
+                    bounds_max: [6.0, 14.0, 28.0],
+                    priority: 10.0,
+                    blend_radius: 4.0,
+                    blend_weight: 0.8,
+                    unbound: false,
+                    settings: PostProcessSettings {
+                        color_saturation: [0.7, 0.9, 1.2],
+                        color_contrast: [0.95, 0.95, 0.95],
+                        color_gain: [0.9, 0.95, 1.1],
+                        color_offset: [-0.02, 0.0, 0.03],
+                        bloom_intensity: 0.3,
+                        bloom_enabled: true,
+                        ..PostProcessSettings::default()
+                    },
                 },
-            },
-        ));
+            ));
 
         // Volume 3: Chandelier bloom zone (covers all three chandeliers)
-        renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-2.0, 12.0, -20.0],
-                bounds_max: [2.0, 20.0, 20.0],
-                priority: 5.0,
-                blend_radius: 1.5,
-                blend_weight: 1.0,
-                unbound: false,
-                settings: PostProcessSettings {
-                    bloom_intensity: 2.5,
-                    bloom_threshold: 1.5,
-                    bloom_knee: 0.5,
-                    bloom_enabled: true,
-                    bloom_tint: [1.0, 0.85, 0.6],
-                    ..PostProcessSettings::default()
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::post_process_volume(
+                PostProcessVolumeDescriptor {
+                    bounds_min: [-2.0, 12.0, -20.0],
+                    bounds_max: [2.0, 20.0, 20.0],
+                    priority: 5.0,
+                    blend_radius: 1.5,
+                    blend_weight: 1.0,
+                    unbound: false,
+                    settings: PostProcessSettings {
+                        bloom_intensity: 2.5,
+                        bloom_threshold: 1.5,
+                        bloom_knee: 0.5,
+                        bloom_enabled: true,
+                        bloom_tint: [1.0, 0.85, 0.6],
+                        ..PostProcessSettings::default()
+                    },
                 },
-            },
-        ));
+            ));
 
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
@@ -733,12 +761,10 @@ impl ApplicationHandler for App {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
                     match line {
-                        Ok(cmd) if !cmd.trim().is_empty() => {
-                            match bridge.run(&cmd) {
-                                Ok(()) => println!("OK: {}", cmd),
-                                Err(e) => println!("ERR: {} -> {}", cmd, e),
-                            }
-                        }
+                        Ok(cmd) if !cmd.trim().is_empty() => match bridge.run(&cmd) {
+                            Ok(()) => println!("OK: {}", cmd),
+                            Err(e) => println!("ERR: {} -> {}", cmd, e),
+                        },
                         _ => {}
                     }
                 }

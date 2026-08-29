@@ -23,7 +23,7 @@ impl Scene {
     pub fn clear(&mut self) {
         // Collect all handles before mutating — iterators are invalidated by removal.
         let object_ids: Vec<_> = self.objects.iter_with_handles().map(|(id, _)| id).collect();
-        let light_ids:  Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
+        let light_ids: Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
 
         // Objects first: the cascade frees meshes, materials, and textures.
         for id in object_ids {
@@ -45,7 +45,10 @@ impl Scene {
     /// Insert a custom trait-based scene actor.
     ///
     /// This can be e.g. `SceneActor::Sky`, `MeshActor`, `LightActor`, or other custom actors.
-    pub fn insert_actor<A: SceneActorTrait + 'static>(&mut self, mut actor: A) -> crate::scene::actor::SceneActorId {
+    pub fn insert_actor<A: SceneActorTrait + 'static>(
+        &mut self,
+        mut actor: A,
+    ) -> crate::scene::actor::SceneActorId {
         actor.on_attach(self);
         let id = actor.inserted_id();
         self.custom_actors.push(Box::new(actor));
@@ -142,7 +145,11 @@ impl Scene {
     /// own. `Renderer::auto_bake` (this method's one call site) already has
     /// both.
     #[cfg(feature = "bake")]
-    pub fn build_static_bake_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> helio_bake::SceneGeometry {
+    pub fn build_static_bake_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> helio_bake::SceneGeometry {
         use helio_bake::{LightSource, LightSourceKind, SceneGeometry};
         use libhelio::{LightType, Movability};
 
@@ -162,7 +169,10 @@ impl Scene {
             }
 
             // Extract mesh data from the pool
-            let Some(mesh_upload) = self.mesh_pool.extract_mesh_data(device, queue, object_record.mesh) else {
+            let Some(mesh_upload) =
+                self.mesh_pool
+                    .extract_mesh_data(device, queue, object_record.mesh)
+            else {
                 continue;
             };
 
@@ -314,13 +324,11 @@ mod tests {
         }))
         .expect("No adapter found");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                ..Default::default()
-            },
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            ..Default::default()
+        }))
         .expect("Failed to create device");
 
         (std::sync::Arc::new(device), std::sync::Arc::new(queue))
@@ -333,7 +341,10 @@ mod tests {
 
         let sky_ctx = scene.sky_context();
         assert!(!sky_ctx.has_sky, "Default scene should have no sky");
-        assert!(sky_ctx.clouds.is_none(), "Default scene should have no clouds");
+        assert!(
+            sky_ctx.clouds.is_none(),
+            "Default scene should have no clouds"
+        );
     }
 
     #[test]
@@ -349,15 +360,21 @@ mod tests {
                     coverage: 0.6,
                     density: 0.8,
                     ..Default::default()
-                })
+                }),
         ));
 
         let sky_ctx = scene.sky_context();
         assert!(sky_ctx.has_sky, "Sky actor should be detected");
-        assert!(sky_ctx.clouds.is_some(), "Cloud settings should be detected");
+        assert!(
+            sky_ctx.clouds.is_some(),
+            "Cloud settings should be detected"
+        );
 
         if let Some(clouds) = sky_ctx.clouds {
-            assert!((clouds.coverage - 0.6).abs() < 0.01, "Coverage should match");
+            assert!(
+                (clouds.coverage - 0.6).abs() < 0.01,
+                "Coverage should match"
+            );
             assert!((clouds.density - 0.8).abs() < 0.01, "Density should match");
         }
     }
@@ -369,16 +386,19 @@ mod tests {
 
         // Insert first sky actor
         scene.insert_actor(SceneActor::Sky(
-            SkyActor::new().with_sky_color([1.0, 0.0, 0.0])
+            SkyActor::new().with_sky_color([1.0, 0.0, 0.0]),
         ));
 
         // Insert second sky actor (should be ignored)
         scene.insert_actor(SceneActor::Sky(
-            SkyActor::new().with_sky_color([0.0, 1.0, 0.0])
+            SkyActor::new().with_sky_color([0.0, 1.0, 0.0]),
         ));
 
         let sky_ctx = scene.sky_context();
         // First actor wins
-        assert!((sky_ctx.sky_color[0] - 1.0).abs() < 0.01, "Should use first actor's color");
+        assert!(
+            (sky_ctx.sky_color[0] - 1.0).abs() < 0.01,
+            "Should use first actor's color"
+        );
     }
 }

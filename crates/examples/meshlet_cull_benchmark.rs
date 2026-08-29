@@ -13,13 +13,14 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use libhelio::{
-    GpuCameraUniforms, GpuInstanceData, GpuMeshletEntry, GpuVgDraw, GpuVgObject,
-    GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM,
+    GpuCameraUniforms, GpuInstanceData, GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
+    VG_CULL_MESHLETS_PER_WORK_ITEM,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 
-const CULL_SHADER: &str = include_str!("../passes/3d/helio-pass-virtual-geometry/shaders/vg_cull.wgsl");
+const CULL_SHADER: &str =
+    include_str!("../passes/3d/helio-pass-virtual-geometry/shaders/vg_cull.wgsl");
 const DRAW_BENCH_SHADER: &str = r#"
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -234,10 +235,26 @@ async fn run() {
     });
 
     let cases = [
-        Case { name: "single_huge", object_count: 1, meshlets_per_object: TOTAL_MESHLETS },
-        Case { name: "few_huge", object_count: 16, meshlets_per_object: TOTAL_MESHLETS / 16 },
-        Case { name: "balanced", object_count: 4096, meshlets_per_object: TOTAL_MESHLETS / 4096 },
-        Case { name: "many_small", object_count: 65_536, meshlets_per_object: TOTAL_MESHLETS / 65_536 },
+        Case {
+            name: "single_huge",
+            object_count: 1,
+            meshlets_per_object: TOTAL_MESHLETS,
+        },
+        Case {
+            name: "few_huge",
+            object_count: 16,
+            meshlets_per_object: TOTAL_MESHLETS / 16,
+        },
+        Case {
+            name: "balanced",
+            object_count: 4096,
+            meshlets_per_object: TOTAL_MESHLETS / 4096,
+        },
+        Case {
+            name: "many_small",
+            object_count: 65_536,
+            meshlets_per_object: TOTAL_MESHLETS / 65_536,
+        },
     ];
 
     for &case in &cases {
@@ -313,29 +330,25 @@ async fn run() {
     // capacity, so this is not a complete scene-memory comparison.
     println!("memory_probe,case,meshlet_descriptors_bytes,object_metadata_bytes,instance_and_cull_bytes,work_span_bytes,publication_bytes,vg_total_bytes,conventional_object_draw_bytes");
     for &case in &cases {
-        let meshlet_descriptors = u64::from(case.meshlets_per_object)
-            * std::mem::size_of::<GpuMeshletEntry>() as u64;
-        let object_metadata = u64::from(case.object_count)
-            * std::mem::size_of::<GpuVgObject>() as u64;
+        let meshlet_descriptors =
+            u64::from(case.meshlets_per_object) * std::mem::size_of::<GpuMeshletEntry>() as u64;
+        let object_metadata =
+            u64::from(case.object_count) * std::mem::size_of::<GpuVgObject>() as u64;
         let instance_and_cull = u64::from(case.object_count)
-            * (std::mem::size_of::<GpuInstanceData>()
-                + std::mem::size_of::<InstanceCullData>()) as u64;
+            * (std::mem::size_of::<GpuInstanceData>() + std::mem::size_of::<InstanceCullData>())
+                as u64;
         let work_spans = u64::from(case.object_count)
             * u64::from(
                 case.meshlets_per_object
                     .div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM),
             )
             * std::mem::size_of::<GpuVgWorkItem>() as u64;
-        let publication = u64::from(TOTAL_MESHLETS)
-            * (20 + std::mem::size_of::<GpuVgDraw>() as u64)
-            + 44;
-        let vg_total = meshlet_descriptors
-            + object_metadata
-            + instance_and_cull
-            + work_spans
-            + publication;
-        let conventional = u64::from(case.object_count)
-            * (std::mem::size_of::<GpuInstanceData>() as u64 + 20);
+        let publication =
+            u64::from(TOTAL_MESHLETS) * (20 + std::mem::size_of::<GpuVgDraw>() as u64) + 44;
+        let vg_total =
+            meshlet_descriptors + object_metadata + instance_and_cull + work_spans + publication;
+        let conventional =
+            u64::from(case.object_count) * (std::mem::size_of::<GpuInstanceData>() as u64 + 20);
         println!(
             "memory_probe,{},{meshlet_descriptors},{object_metadata},{instance_and_cull},{work_spans},{publication},{vg_total},{conventional}",
             case.name,
@@ -376,7 +389,10 @@ async fn run() {
             TOTAL_MESHLETS - (TOTAL_MESHLETS - 17) / 2,
         ],
     );
-    eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[2]);
+    eprintln!(
+        "overflow_probe,attempted={},rejected={}",
+        counters[0], counters[2]
+    );
 
     let render_probe = create_case_buffers(
         &device,
@@ -446,16 +462,18 @@ async fn run() {
 }
 
 fn case_fits_limits(case: Case, limits: &wgpu::Limits) -> bool {
-    let meshlet_bytes = u64::from(case.meshlets_per_object)
-        * std::mem::size_of::<GpuMeshletEntry>() as u64;
+    let meshlet_bytes =
+        u64::from(case.meshlets_per_object) * std::mem::size_of::<GpuMeshletEntry>() as u64;
     let object_bytes = u64::from(case.object_count) * std::mem::size_of::<GpuVgObject>() as u64;
     let instance_bytes =
         u64::from(case.object_count) * std::mem::size_of::<GpuInstanceData>() as u64;
     let indirect_bytes = u64::from(TOTAL_MESHLETS) * 20;
-    let metadata_bytes =
-        u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64;
+    let metadata_bytes = u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64;
     let work_item_count = u64::from(case.object_count)
-        * u64::from(case.meshlets_per_object.div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM));
+        * u64::from(
+            case.meshlets_per_object
+                .div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM),
+        );
     let work_item_bytes = work_item_count * std::mem::size_of::<GpuVgWorkItem>() as u64;
     let largest = meshlet_bytes
         .max(object_bytes)
@@ -486,38 +504,43 @@ fn create_case_buffers(
         [0.0; 2],
         Mat4::IDENTITY,
     );
-    let instances = vec![GpuInstanceData {
-        model: identity,
-        normal_mat: [
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-        ],
-        bounds: [0.0, 0.0, -10.0, 1.0],
-        prev_model: identity,
-        mesh_id: 0,
-        material_id: 0,
-        flags: 0,
-        lightmap_index: u32::MAX,
-    }; case.object_count as usize];
-    let instance_cull = vec![InstanceCullData {
-        max_scale: 1.0,
-        min_scale: 1.0,
-        cone_cull_enabled: 3, // CULL_FLAG_CONE_CULL | CULL_FLAG_OPAQUE
-        valid_transform: 1,
-    }; case.object_count as usize];
-    let meshlets = vec![GpuMeshletEntry {
-        center: [0.0, 0.0, -10.0],
-        radius: 0.25,
-        cone_apex: [0.0, 0.0, -10.0],
-        cone_cutoff: 2.0,
-        cone_axis: [0.0, 0.0, 1.0],
-        lod_error: 0.0,
-        first_index: 0,
-        index_count: 3,
-        vertex_offset: 0,
-        instance_index: 0,
-    }; case.meshlets_per_object as usize];
+    let instances = vec![
+        GpuInstanceData {
+            model: identity,
+            normal_mat: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,],
+            bounds: [0.0, 0.0, -10.0, 1.0],
+            prev_model: identity,
+            mesh_id: 0,
+            material_id: 0,
+            flags: 0,
+            lightmap_index: u32::MAX,
+        };
+        case.object_count as usize
+    ];
+    let instance_cull = vec![
+        InstanceCullData {
+            max_scale: 1.0,
+            min_scale: 1.0,
+            cone_cull_enabled: 3, // CULL_FLAG_CONE_CULL | CULL_FLAG_OPAQUE
+            valid_transform: 1,
+        };
+        case.object_count as usize
+    ];
+    let meshlets = vec![
+        GpuMeshletEntry {
+            center: [0.0, 0.0, -10.0],
+            radius: 0.25,
+            cone_apex: [0.0, 0.0, -10.0],
+            cone_cutoff: 2.0,
+            cone_axis: [0.0, 0.0, 1.0],
+            lod_error: 0.0,
+            first_index: 0,
+            index_count: 3,
+            vertex_offset: 0,
+            instance_index: 0,
+        };
+        case.meshlets_per_object as usize
+    ];
     let objects: Vec<_> = (0..case.object_count)
         .map(|instance_index| {
             let mut lod_meshlet_counts = [0; 8];
@@ -577,12 +600,42 @@ fn create_case_buffers(
         bytemuck::cast_slice(&camera_data),
         wgpu::BufferUsages::STORAGE,
     );
-    let cull_buffer = init_buffer(device, "Benchmark Cull Uniforms", bytemuck::bytes_of(&cull_uniforms), wgpu::BufferUsages::UNIFORM);
-    let meshlet_buffer = init_buffer(device, "Benchmark Meshlets", bytemuck::cast_slice(&meshlets), wgpu::BufferUsages::STORAGE);
-    let object_buffer = init_buffer(device, "Benchmark Objects", bytemuck::cast_slice(&objects), wgpu::BufferUsages::STORAGE);
-    let instance_buffer = init_buffer(device, "Benchmark Instances", bytemuck::cast_slice(&instances), wgpu::BufferUsages::STORAGE);
-    let instance_cull_buffer = init_buffer(device, "Benchmark Instance Cull", bytemuck::cast_slice(&instance_cull), wgpu::BufferUsages::STORAGE);
-    let work_item_buffer = init_buffer(device, "Benchmark Work Items", bytemuck::cast_slice(&work_items), wgpu::BufferUsages::STORAGE);
+    let cull_buffer = init_buffer(
+        device,
+        "Benchmark Cull Uniforms",
+        bytemuck::bytes_of(&cull_uniforms),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let meshlet_buffer = init_buffer(
+        device,
+        "Benchmark Meshlets",
+        bytemuck::cast_slice(&meshlets),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let object_buffer = init_buffer(
+        device,
+        "Benchmark Objects",
+        bytemuck::cast_slice(&objects),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let instance_buffer = init_buffer(
+        device,
+        "Benchmark Instances",
+        bytemuck::cast_slice(&instances),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let instance_cull_buffer = init_buffer(
+        device,
+        "Benchmark Instance Cull",
+        bytemuck::cast_slice(&instance_cull),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let work_item_buffer = init_buffer(
+        device,
+        "Benchmark Work Items",
+        bytemuck::cast_slice(&work_items),
+        wgpu::BufferUsages::STORAGE,
+    );
     let indirect_buffer = output_buffer(
         device,
         "Benchmark Indirect",
@@ -612,7 +665,11 @@ fn create_case_buffers(
 
     let hiz = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Benchmark Far HiZ"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -628,8 +685,16 @@ fn create_case_buffers(
             aspect: wgpu::TextureAspect::All,
         },
         &[255, 255, 255, 255],
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
     );
     let hiz_view = hiz.create_view(&wgpu::TextureViewDescriptor::default());
     let hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -644,30 +709,84 @@ fn create_case_buffers(
         label: Some("VG Object Select Benchmark Bind Group"),
         layout: select_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: cull_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: object_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: instance_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: draw_count.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: instance_cull_buffer.as_entire_binding(),
+            },
         ],
     });
     let cull_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("VG Cull Benchmark Bind Group"),
         layout: cull_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: meshlet_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: indirect_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: metadata_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hiz_view) },
-            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&hiz_sampler) },
-            wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 11, resource: work_item_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: cull_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: meshlet_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: object_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: instance_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: indirect_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: metadata_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: draw_count.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&hiz_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::Sampler(&hiz_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: instance_cull_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: work_item_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -724,11 +843,7 @@ fn dispatch_and_time(
         });
         pass.set_pipeline(cull_pipeline);
         pass.set_bind_group(0, &buffers.cull_bind_group, &[]);
-        pass.dispatch_workgroups(
-            buffers.work_dispatch_width,
-            buffers.work_dispatch_height,
-            1,
-        );
+        pass.dispatch_workgroups(buffers.work_dispatch_width, buffers.work_dispatch_height, 1);
     }
     encoder.write_timestamp(query_set, 1);
     encoder.resolve_query_set(query_set, 0..2, query_resolve, 0);
@@ -807,19 +922,23 @@ fn draw_and_time(
     queue.submit([encoder.finish()]);
 
     let ticks = read_mapped::<u64>(device, query_readback, 2);
-    ticks[1].saturating_sub(ticks[0]) as f64
-        * f64::from(queue.get_timestamp_period())
-        / 1_000_000.0
+    ticks[1].saturating_sub(ticks[0]) as f64 * f64::from(queue.get_timestamp_period()) / 1_000_000.0
 }
 
-fn read_mapped<T: Pod + Copy>(device: &wgpu::Device, buffer: &wgpu::Buffer, count: usize) -> Vec<T> {
+fn read_mapped<T: Pod + Copy>(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    count: usize,
+) -> Vec<T> {
     let slice = buffer.slice(..);
     let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().expect("map callback dropped").expect("readback mapping failed");
+    rx.recv()
+        .expect("map callback dropped")
+        .expect("readback mapping failed");
     let data = slice
         .get_mapped_range()
         .expect("readback range unavailable");

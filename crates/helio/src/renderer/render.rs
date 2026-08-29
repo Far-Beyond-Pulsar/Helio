@@ -1,7 +1,7 @@
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
@@ -9,9 +9,7 @@ use helio_core::Result as HelioResult;
 use crate::groups::GroupId;
 use crate::scene::Camera;
 
-use super::renderer_impl::{
-    CullStatsReadbackState, DebugCameraUniform, Renderer,
-};
+use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
 fn r1_r2_jitter(frame: u64) -> [f32; 2] {
@@ -140,12 +138,17 @@ impl Renderer {
                 bake_duration.as_secs_f32(),
                 obj_count,
                 light_count,
-                if obj_count > 0 { bake_duration.as_millis() as f32 / obj_count as f32 } else { 0.0 }
+                if obj_count > 0 {
+                    bake_duration.as_millis() as f32 / obj_count as f32
+                } else {
+                    0.0
+                }
             );
 
             self.baked_data = Some(baked.clone());
 
-            self.scene.update_lightmap_indices(baked.lightmap_atlas_regions());
+            self.scene
+                .update_lightmap_indices(baked.lightmap_atlas_regions());
         }
 
         #[cfg(feature = "bake")]
@@ -157,7 +160,10 @@ impl Renderer {
         }
 
         let now = Instant::now();
-        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
+        let dt = now
+            .duration_since(self.last_render_time)
+            .as_secs_f32()
+            .min(0.1);
         self.last_render_time = now;
         self.delta_time = dt;
         self.frame_times[self.frame_times_cursor] = dt;
@@ -182,9 +188,9 @@ impl Renderer {
         let col = jittered_m.to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {
             view_proj: [
-                [col[0],  col[1],  col[2],  col[3]],
-                [col[4],  col[5],  col[6],  col[7]],
-                [col[8],  col[9],  col[10], col[11]],
+                [col[0], col[1], col[2], col[3]],
+                [col[4], col[5], col[6], col[7]],
+                [col[8], col[9], col[10], col[11]],
                 [col[12], col[13], col[14], col[15]],
             ],
         };
@@ -256,7 +262,8 @@ impl Renderer {
             || corona_gen != self.billboard_cached_corona_gen
         {
             self.billboard_scratch.clear();
-            self.billboard_scratch.extend_from_slice(&self.billboard_instances);
+            self.billboard_scratch
+                .extend_from_slice(&self.billboard_instances);
             if !editor_hidden {
                 for light in self.scene.gpu_scene().lights.as_slice() {
                     if light.light_type == libhelio::LightType::Point as u32
@@ -264,20 +271,22 @@ impl Renderer {
                     {
                         let [x, y, z, _] = light.position_range;
                         let [r, g, b, _] = light.color_intensity;
-                        self.billboard_scratch.push(super::renderer_impl::BillboardInstance {
-                            world_pos: [x, y, z, 0.0],
-                            scale_flags: [0.25, 0.25, 0.0, 0.0],
-                            color: [r, g, b, 1.0],
-                        });
+                        self.billboard_scratch
+                            .push(super::renderer_impl::BillboardInstance {
+                                world_pos: [x, y, z, 0.0],
+                                scale_flags: [0.25, 0.25, 0.0, 0.0],
+                                color: [r, g, b, 1.0],
+                            });
                     }
                 }
                 for emitter in &self.corona_emitters {
                     let [x, y, z, _] = emitter.transform[3];
-                    self.billboard_scratch.push(super::renderer_impl::BillboardInstance {
-                        world_pos: [x, y, z, 0.0],
-                        scale_flags: [0.25, 0.25, 0.0, 0.0],
-                        color: [0.2, 0.8, 1.0, 1.0],
-                    });
+                    self.billboard_scratch
+                        .push(super::renderer_impl::BillboardInstance {
+                            world_pos: [x, y, z, 0.0],
+                            scale_flags: [0.25, 0.25, 0.0, 0.0],
+                            color: [0.2, 0.8, 1.0, 1.0],
+                        });
                 }
             }
             self.billboard_generation = self.billboard_generation.wrapping_add(1);
@@ -350,7 +359,8 @@ impl Renderer {
             // will blend toward active volumes if any are present.
             // The camera's postprocess_settings.hdr_output_mode controls HDR output.
             let pp = camera.postprocess_settings.to_gpu();
-            self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
+            self.queue
+                .write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
 
             // Gate bloom: conservative when volumes exist since a volume may enable it.
             let bloom_visible = if pp_count > 0 {
@@ -358,7 +368,10 @@ impl Renderer {
             } else {
                 pp.bloom_intensity > 0.001 && pp.bloom_enabled != 0
             };
-            if let Some(pp_pass) = self.graph.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
+            if let Some(pp_pass) = self
+                .graph
+                .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
+            {
                 pp_pass.set_bloom_active(bloom_visible);
             }
         }
@@ -372,7 +385,8 @@ impl Renderer {
         // (overwhelming) majority that don't override it.
         self.graph.set_editor_mode(self.editor_mode);
 
-        let mut texture_views = ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
+        let mut texture_views =
+            ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
         let mut samplers = ArrayVec::<&wgpu::Sampler, { crate::material::MAX_TEXTURES }>::new();
         for slot in 0..self.scene.material_binding_config().max_textures {
             texture_views.push(self.scene.texture_view_for_slot(slot));
@@ -391,8 +405,7 @@ impl Renderer {
                 let lines = self.scene.editor_volume_debug_lines();
                 if lines != state.editor_volume_lines {
                     state.editor_volume_lines = lines;
-                    state.editor_volume_generation =
-                        state.editor_volume_generation.wrapping_add(1);
+                    state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
                 }
             } else if !state.editor_volume_lines.is_empty() {
                 state.editor_volume_lines = Vec::new();
@@ -400,8 +413,16 @@ impl Renderer {
             }
         }
         let rc_radius = self.gi_config.rc_radius;
-        let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
-        let rc_max = [camera.position.x + rc_radius, camera.position.y + rc_radius, camera.position.z + rc_radius];
+        let rc_min = [
+            camera.position.x - rc_radius,
+            camera.position.y - rc_radius,
+            camera.position.z - rc_radius,
+        ];
+        let rc_max = [
+            camera.position.x + rc_radius,
+            camera.position.y + rc_radius,
+            camera.position.z + rc_radius,
+        ];
 
         #[cfg(feature = "bake")]
         let baked_ao = self.baked_data.as_deref().and_then(|d| d.ao_view_ref());
@@ -412,23 +433,38 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_ao_sampler = None;
         #[cfg(feature = "bake")]
-        let baked_lightmap = self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref());
+        let baked_lightmap = self
+            .baked_data
+            .as_deref()
+            .and_then(|d| d.lightmap_view_ref());
         #[cfg(not(feature = "bake"))]
         let baked_lightmap = None;
         #[cfg(feature = "bake")]
-        let baked_lightmap_sampler = self.baked_data.as_deref().and_then(|d| d.lightmap_sampler_ref());
+        let baked_lightmap_sampler = self
+            .baked_data
+            .as_deref()
+            .and_then(|d| d.lightmap_sampler_ref());
         #[cfg(not(feature = "bake"))]
         let baked_lightmap_sampler = None;
         #[cfg(feature = "bake")]
-        let baked_reflection = self.baked_data.as_deref().and_then(|d| d.reflection_view_ref());
+        let baked_reflection = self
+            .baked_data
+            .as_deref()
+            .and_then(|d| d.reflection_view_ref());
         #[cfg(not(feature = "bake"))]
         let baked_reflection = None;
         #[cfg(feature = "bake")]
-        let baked_reflection_sampler = self.baked_data.as_deref().and_then(|d| d.reflection_sampler_ref());
+        let baked_reflection_sampler = self
+            .baked_data
+            .as_deref()
+            .and_then(|d| d.reflection_sampler_ref());
         #[cfg(not(feature = "bake"))]
         let baked_reflection_sampler = None;
         #[cfg(feature = "bake")]
-        let baked_irradiance_sh = self.baked_data.as_deref().and_then(|d| d.irradiance_sh_buf_ref());
+        let baked_irradiance_sh = self
+            .baked_data
+            .as_deref()
+            .and_then(|d| d.irradiance_sh_buf_ref());
         #[cfg(not(feature = "bake"))]
         let baked_irradiance_sh = None;
         #[cfg(feature = "bake")]
@@ -495,16 +531,24 @@ impl Renderer {
             );
         }
         if water_volume_count > 0 {
-            frame_resources.water_volumes.write(&self.water_volumes_buffer, "Renderer");
+            frame_resources
+                .water_volumes
+                .write(&self.water_volumes_buffer, "Renderer");
         }
         frame_resources.water_volume_count = water_volume_count;
         if water_hitbox_count > 0 {
-            frame_resources.water_hitboxes.write(&self.water_hitboxes_buffer, "Renderer");
+            frame_resources
+                .water_hitboxes
+                .write(&self.water_hitboxes_buffer, "Renderer");
         }
         frame_resources.water_hitbox_count = water_hitbox_count;
-        frame_resources.pp_volumes.write(&self.pp_volumes_buffer, "Renderer");
+        frame_resources
+            .pp_volumes
+            .write(&self.pp_volumes_buffer, "Renderer");
         frame_resources.pp_volume_count = pp_count;
-        frame_resources.postprocess_uniforms.write(&self.postprocess_buffer, "Renderer");
+        frame_resources
+            .postprocess_uniforms
+            .write(&self.postprocess_buffer, "Renderer");
         if let Some(ref lut) = self.color_grading_lut_view {
             frame_resources.color_grading_lut.write(lut, "Renderer");
         }
@@ -524,7 +568,9 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
-        frame_resources.depth_texture.write(depth_texture, "Renderer");
+        frame_resources
+            .depth_texture
+            .write(depth_texture, "Renderer");
         #[cfg(not(target_arch = "wasm32"))]
         let depth_sampler_view: &wgpu::TextureView = if multiview {
             self.xr_depth_view_layer0
@@ -536,11 +582,21 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
-        frame_resources.depth_sampler_view.write(depth_sampler_view, "Renderer");
-        if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
+        frame_resources
+            .depth_sampler_view
+            .write(depth_sampler_view, "Renderer");
+        if let Some(v) = self
+            .full_res_depth_view
+            .as_ref()
+            .map(|v| v as &wgpu::TextureView)
+        {
             frame_resources.full_res_depth.write(v, "Renderer");
         }
-        if let Some(t) = self.full_res_depth_texture.as_ref().map(|t| t as &wgpu::Texture) {
+        if let Some(t) = self
+            .full_res_depth_texture
+            .as_ref()
+            .map(|t| t as &wgpu::Texture)
+        {
             frame_resources.full_res_depth_texture.write(t, "Renderer");
         }
         if let Some(vg_data) = self.scene.vg_frame_data() {
@@ -565,22 +621,32 @@ impl Renderer {
             frame_resources.baked_ao.write(ao, "Renderer");
         }
         if let Some(ao_sampler) = baked_ao_sampler {
-            frame_resources.baked_ao_sampler.write(ao_sampler, "Renderer");
+            frame_resources
+                .baked_ao_sampler
+                .write(ao_sampler, "Renderer");
         }
         if let Some(lightmap) = baked_lightmap {
             frame_resources.baked_lightmap.write(lightmap, "Renderer");
         }
         if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            frame_resources.baked_lightmap_sampler.write(lightmap_sampler, "Renderer");
+            frame_resources
+                .baked_lightmap_sampler
+                .write(lightmap_sampler, "Renderer");
         }
         if let Some(reflection) = baked_reflection {
-            frame_resources.baked_reflection.write(reflection, "Renderer");
+            frame_resources
+                .baked_reflection
+                .write(reflection, "Renderer");
         }
         if let Some(reflection_sampler) = baked_reflection_sampler {
-            frame_resources.baked_reflection_sampler.write(reflection_sampler, "Renderer");
+            frame_resources
+                .baked_reflection_sampler
+                .write(reflection_sampler, "Renderer");
         }
         if let Some(irradiance_sh) = baked_irradiance_sh {
-            frame_resources.baked_irradiance_sh.write(irradiance_sh, "Renderer");
+            frame_resources
+                .baked_irradiance_sh
+                .write(irradiance_sh, "Renderer");
         }
         if let Some(pvs) = baked_pvs {
             frame_resources.baked_pvs.write(pvs, "Renderer");
@@ -596,11 +662,11 @@ impl Renderer {
             b: self.clear_color[2] as f64,
             a: self.clear_color[3] as f64,
         };
-        let mut clear_encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Renderer Target Clear"),
-            });
+        let mut clear_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Renderer Target Clear"),
+                });
         {
             let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Renderer Target Clear Pass"),
@@ -636,17 +702,18 @@ impl Renderer {
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
         if self.owns_device
-            && matches!(
-                self.cull_stats_readback_state,
-                CullStatsReadbackState::Idle
-            )
+            && matches!(self.cull_stats_readback_state, CullStatsReadbackState::Idle)
         {
-            let mut read_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("CullStats Readback"),
-            });
+            let mut read_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("CullStats Readback"),
+                    });
             read_encoder.copy_buffer_to_buffer(
-                &self.cull_stats_buffer, 0,
-                &self.cull_stats_staging, 0,
+                &self.cull_stats_buffer,
+                0,
+                &self.cull_stats_staging,
+                0,
                 32,
             );
             self.queue.submit(std::iter::once(read_encoder.finish()));
@@ -708,7 +775,10 @@ impl Renderer {
         self.poll_cull_stats_readback();
 
         let now = Instant::now();
-        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
+        let dt = now
+            .duration_since(self.last_render_time)
+            .as_secs_f32()
+            .min(0.1);
         self.last_render_time = now;
         self.delta_time = dt;
         self.frame_times[self.frame_times_cursor] = dt;
@@ -754,7 +824,10 @@ impl Renderer {
             }
             let frame_state = session.wait_frame().map_err(xr_error)?;
             session.begin_frame().map_err(xr_error)?;
-            (frame_state.predicted_display_time, frame_state.should_render)
+            (
+                frame_state.predicted_display_time,
+                frame_state.should_render,
+            )
         };
 
         // ── 2. Not rendering this frame (runtime in SYNCHRONIZED or similar):
@@ -763,10 +836,14 @@ impl Renderer {
         if !should_render {
             {
                 let session = self.xr.as_mut().ok_or_else(|| {
-                    invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
+                    invalid_xr(
+                        "render_xr() called with no XR session (call Renderer::set_xr_session)",
+                    )
                 })?;
                 let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
-                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                    invalid_xr(
+                        "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                    )
                 })?;
                 session
                     .end_frame(display_time, swapchain, &[])
@@ -806,15 +883,16 @@ impl Renderer {
         // ──    multiview, so every existing pass/sampler works unchanged.
         let image_index = {
             let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
-                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                invalid_xr(
+                    "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                )
             })?;
             swapchain.acquire_image().map_err(xr_error)?
         };
 
         let mut representative = self.default_xr_camera(near_far.0, near_far.1);
         for (eye, pose) in located.view_poses.iter().enumerate() {
-            let eye_uniform =
-                helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0];
+            let eye_uniform = helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0];
 
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer
@@ -852,9 +930,9 @@ impl Renderer {
             let col = eye_uniform.view_proj;
             let debug_camera_uniform = DebugCameraUniform {
                 view_proj: [
-                    [col[0],  col[1],  col[2],  col[3]],
-                    [col[4],  col[5],  col[6],  col[7]],
-                    [col[8],  col[9],  col[10], col[11]],
+                    [col[0], col[1], col[2], col[3]],
+                    [col[4], col[5], col[6], col[7]],
+                    [col[8], col[9], col[10], col[11]],
                     [col[12], col[13], col[14], col[15]],
                 ],
             };
@@ -866,9 +944,14 @@ impl Renderer {
 
             let layer_view = {
                 let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
-                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                    invalid_xr(
+                        "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                    )
                 })?;
-                swapchain.layer_view(image_index, eye as u32).map_err(xr_error)?.clone()
+                swapchain
+                    .layer_view(image_index, eye as u32)
+                    .map_err(xr_error)?
+                    .clone()
             };
             self.submit_frame(&representative, &layer_view, false)?;
         }
@@ -885,7 +968,9 @@ impl Renderer {
         // ──    to anchor the projection layer.
         {
             let swapchain = self.xr_swapchain.as_mut().ok_or_else(|| {
-                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                invalid_xr(
+                    "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                )
             })?;
             swapchain.present().map_err(xr_error)?;
         }
@@ -894,7 +979,9 @@ impl Renderer {
                 invalid_xr("render_xr() called with no XR session (call Renderer::set_xr_session)")
             })?;
             let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
-                invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                invalid_xr(
+                    "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                )
             })?;
             session
                 .end_frame(display_time, swapchain, &located.views)
@@ -963,22 +1050,22 @@ impl Renderer {
             ));
         }
         if self.xr_mirror_pipeline.is_none() {
-            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("XR Mirror Shader"),
-                source: wgpu::ShaderSource::Wgsl(XR_MIRROR_WGSL.into()),
-            });
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("XR Mirror Shader"),
+                    source: wgpu::ShaderSource::Wgsl(XR_MIRROR_WGSL.into()),
+                });
             self.xr_mirror_pipeline = Some(self.device.create_render_pipeline(
                 &wgpu::RenderPipelineDescriptor {
                     label: Some("XR Mirror Pipeline"),
-                    layout: Some(
-                        &self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    layout: Some(&self.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
                             label: Some("XR Mirror PL"),
-                            bind_group_layouts: &[
-                                Some(self.xr_mirror_bgl.as_ref().unwrap()),
-                            ],
+                            bind_group_layouts: &[Some(self.xr_mirror_bgl.as_ref().unwrap())],
                             immediate_size: 0,
-                        }),
-                    ),
+                        },
+                    )),
                     vertex: wgpu::VertexState {
                         module: &module,
                         entry_point: Some("vs_main"),
@@ -1007,7 +1094,9 @@ impl Renderer {
         if self.xr_mirror_bind_group.as_ref().map(|(k, _)| *k) != Some(image_index) {
             let array_view = {
                 let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
-                    invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+                    invalid_xr(
+                        "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
+                    )
                 })?;
                 swapchain.view(image_index).map_err(xr_error)?.clone()
             };

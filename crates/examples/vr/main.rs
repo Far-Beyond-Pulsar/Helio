@@ -86,10 +86,13 @@ fn xr_features() -> wgpu::Features {
 fn try_init_xr() -> Option<XrBundle> {
     let result = (|| -> helio_xr::Result<XrBundle> {
         let instance = helio_xr::XrInstance::create("helio_vr_demo")?;
-        let wgpu_instance =
-            helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
-        let (adapter, device, queue) =
-            helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
+        let wgpu_instance = helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
+        let (adapter, device, queue) = helio_xr::create_wgpu_device(
+            &instance.instance,
+            instance.system,
+            &wgpu_instance,
+            xr_features(),
+        )?;
         // Actions must be declared and their bindings suggested BEFORE the session is
         // created; the runtime resolves them at session creation and will not accept new
         // suggestions afterwards.
@@ -265,8 +268,8 @@ impl AppState {
         let Some(time) = self.renderer.xr_last_display_time() else {
             return;
         };
-        let world_from_stage = Mat4::from_translation(self.player_position)
-            * Mat4::from_rotation_y(self.player_yaw);
+        let world_from_stage =
+            Mat4::from_translation(self.player_position) * Mat4::from_rotation_y(self.player_yaw);
         let Some((input, session)) = &mut self.xr_input else {
             return;
         };
@@ -332,7 +335,8 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_owned: Option<XrBundle> = xr_bundle;
 
-        let (device, queue, surface, surface_format, alpha_mode, config, xr_owned) = match xr_owned {
+        let (device, queue, surface, surface_format, alpha_mode, config, xr_owned) = match xr_owned
+        {
             Some(bundle) => {
                 let config = RendererConfig::new(
                     bundle.session.width,
@@ -361,21 +365,20 @@ impl ApplicationHandler for App {
                     .unwrap_or(caps.formats[0]);
                 let mirror_alpha = caps.alpha_modes[0];
                 let mirror_size = window.inner_size();
-                mirror_surface
-                    .configure(
-                        &bundle.device,
-                        &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: mirror_format,
-                            color_space: wgpu::SurfaceColorSpace::Auto,
-                            width: mirror_size.width.max(1),
-                            height: mirror_size.height.max(1),
-                            present_mode: wgpu::PresentMode::Fifo,
-                            alpha_mode: mirror_alpha,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 2,
-                        },
-                    );
+                mirror_surface.configure(
+                    &bundle.device,
+                    &wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: mirror_format,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
+                        width: mirror_size.width.max(1),
+                        height: mirror_size.height.max(1),
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: mirror_alpha,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 2,
+                    },
+                );
                 (
                     bundle.device.clone(),
                     bundle.queue.clone(),
@@ -396,15 +399,14 @@ impl ApplicationHandler for App {
                 let surface = instance
                     .create_surface(window.clone())
                     .expect("Failed to create surface");
-                let adapter = pollster::block_on(instance.request_adapter(
-                    &wgpu::RequestAdapterOptions {
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                         power_preference: wgpu::PowerPreference::HighPerformance,
                         compatible_surface: Some(&surface),
                         force_fallback_adapter: false,
                         apply_limit_buckets: false,
-                    },
-                ))
-                .expect("Failed to find adapter");
+                    }))
+                    .expect("Failed to find adapter");
                 let (device, queue) =
                     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                         label: Some("Main Device"),
@@ -537,7 +539,10 @@ impl ApplicationHandler for App {
             last_frame: Instant::now(),
             fps: FpsCounter::new(),
         };
-        state.configure_surface(state.window.inner_size().width, state.window.inner_size().height);
+        state.configure_surface(
+            state.window.inner_size().width,
+            state.window.inner_size().height,
+        );
         self.state = Some(state);
     }
 

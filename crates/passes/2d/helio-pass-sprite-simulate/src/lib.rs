@@ -76,7 +76,9 @@ impl SpriteSimulatePass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sprite Simulate Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite_simulate.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/sprite_simulate.wgsl").into(),
+            ),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -156,14 +158,33 @@ impl SpriteSimulatePass {
             label: Some("Sprite Simulate BG"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: alive_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: instances_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: velocity_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: alive_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: instances_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: velocity_buf.as_entire_binding(),
+                },
             ],
         });
 
-        Self { pipeline, bind_group, uniform_buf, slot_count, bounds_min, bounds_max }
+        Self {
+            pipeline,
+            bind_group,
+            uniform_buf,
+            slot_count,
+            bounds_min,
+            bounds_max,
+        }
     }
 }
 

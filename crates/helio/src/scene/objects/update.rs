@@ -89,7 +89,12 @@ impl super::super::Scene {
         // Keep the world-space bounding sphere center in sync with the new translation.
         // The bounds radius is preserved — only the center tracks the transform.
         let translation = transform.w_axis;
-        record.instance.bounds = [translation.x, translation.y, translation.z, record.instance.bounds[3]];
+        record.instance.bounds = [
+            translation.x,
+            translation.y,
+            translation.z,
+            record.instance.bounds[3],
+        ];
         record.aabb = sphere_to_aabb(record.instance.bounds);
 
         // Increment generation counter for movable objects (for shadow cache invalidation)
@@ -237,10 +242,7 @@ impl super::super::Scene {
     /// - CPU cost: O(N + M) where N = object count, M = region count
     /// - GPU cost: O(N) writes to instance buffer (only for static objects)
     #[cfg(feature = "bake")]
-    pub fn update_lightmap_indices(
-        &mut self,
-        regions: &[helio_bake::CachedAtlasRegion],
-    ) {
+    pub fn update_lightmap_indices(&mut self, regions: &[helio_bake::CachedAtlasRegion]) {
         use std::collections::HashMap;
 
         // Build mesh_slot -> region_index lookup map
@@ -339,21 +341,24 @@ impl super::super::Scene {
     /// [`crate::Scene::insert_object`] to create an identical copy.
     ///
     /// Returns `Err` if the handle is invalid.
-    pub fn get_object_descriptor(&self, id: ObjectId) -> Result<crate::scene::types::ObjectDescriptor> {
-        use crate::scene::types::ObjectDescriptor;
+    pub fn get_object_descriptor(
+        &self,
+        id: ObjectId,
+    ) -> Result<crate::scene::types::ObjectDescriptor> {
         use crate::groups::GroupMask;
+        use crate::scene::types::ObjectDescriptor;
         let Some((_, record)) = self.objects.get_with_index(id) else {
             return Err(invalid("object"));
         };
         Ok(ObjectDescriptor {
-            mesh:        record.mesh,
-            material:    record.material,
-            transform:   Mat4::from_cols_array(&record.instance.model),
-            bounds:      record.instance.bounds,
-            flags:       record.instance.flags,
-            groups:      GroupMask(record.groups.0),
-            movability:  Some(record.movability),
-            user_tag:    record.user_tag,
+            mesh: record.mesh,
+            material: record.material,
+            transform: Mat4::from_cols_array(&record.instance.model),
+            bounds: record.instance.bounds,
+            flags: record.instance.flags,
+            groups: GroupMask(record.groups.0),
+            movability: Some(record.movability),
+            user_tag: record.user_tag,
         })
     }
 
@@ -363,12 +368,13 @@ impl super::super::Scene {
     /// are added or removed.  O(N) over live objects — call on scene change, not
     /// per frame.
     pub fn iter_pickable_objects(&self) -> impl Iterator<Item = PickableObject> + '_ {
-        self.objects.iter_with_handles().map(|(id, rec)| PickableObject {
-            id,
-            mesh_id: rec.mesh,
-            transform: Mat4::from_cols_array(&rec.instance.model),
-            user_tag: rec.user_tag,
-        })
+        self.objects
+            .iter_with_handles()
+            .map(|(id, rec)| PickableObject {
+                id,
+                mesh_id: rec.mesh,
+                transform: Mat4::from_cols_array(&rec.instance.model),
+                user_tag: rec.user_tag,
+            })
     }
 }
-

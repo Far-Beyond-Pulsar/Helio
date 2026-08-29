@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use libhelio::{
-    GpuMeshletEntry, GpuVgObject, GpuVgWorkItem, VgFrameData,
-    VG_CULL_MESHLETS_PER_WORK_ITEM, VG_LOD_LEVELS,
+    GpuMeshletEntry, GpuVgObject, GpuVgWorkItem, VgFrameData, VG_CULL_MESHLETS_PER_WORK_ITEM,
+    VG_LOD_LEVELS,
 };
 
 use crate::vg::VirtualMeshId;
@@ -42,11 +42,7 @@ fn append_unique_meshlets(
     bases
 }
 
-fn append_work_items(
-    object_index: u32,
-    max_meshlet_count: u32,
-    output: &mut Vec<GpuVgWorkItem>,
-) {
+fn append_work_items(object_index: u32, max_meshlet_count: u32, output: &mut Vec<GpuVgWorkItem>) {
     for local_meshlet_base in
         (0..max_meshlet_count).step_by(VG_CULL_MESHLETS_PER_WORK_ITEM as usize)
     {
@@ -80,7 +76,9 @@ impl super::super::Scene {
             instance_version: self.vg_instance_version,
             instance_dirty_start: self
                 .vg_published_instance_dirty_range
-                .map_or(0, |(start, _)| u32::try_from(start).expect("VG dirty start exceeds u32")),
+                .map_or(0, |(start, _)| {
+                    u32::try_from(start).expect("VG dirty start exceeds u32")
+                }),
             instance_dirty_count: self
                 .vg_published_instance_dirty_range
                 .map_or(0, |(start, end)| {
@@ -219,16 +217,19 @@ mod tests {
         ]);
         let mut output = Vec::new();
 
-        let bases = append_unique_meshlets(
-            [first, first, second, first, second],
-            &records,
-            &mut output,
-        );
+        let bases =
+            append_unique_meshlets([first, first, second, first, second], &records, &mut output);
 
         assert_eq!(output.len(), 3);
         assert_eq!(bases[&first], 0);
         assert_eq!(bases[&second], 2);
-        assert_eq!(output.iter().map(|entry| entry.first_index).collect::<Vec<_>>(), [11, 12, 20]);
+        assert_eq!(
+            output
+                .iter()
+                .map(|entry| entry.first_index)
+                .collect::<Vec<_>>(),
+            [11, 12, 20]
+        );
     }
 
     #[test]

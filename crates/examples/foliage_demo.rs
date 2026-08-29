@@ -88,10 +88,13 @@ fn xr_features() -> wgpu::Features {
 fn try_init_xr() -> Option<XrBundle> {
     let result = (|| -> helio_xr::Result<XrBundle> {
         let instance = helio_xr::XrInstance::create("helio_foliage_demo")?;
-        let wgpu_instance =
-            helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
-        let (adapter, device, queue) =
-            helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
+        let wgpu_instance = helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
+        let (adapter, device, queue) = helio_xr::create_wgpu_device(
+            &instance.instance,
+            instance.system,
+            &wgpu_instance,
+            xr_features(),
+        )?;
         // Actions must be declared and their bindings suggested BEFORE the session is
         // created; the runtime resolves them at session creation and will not accept new
         // suggestions afterwards.
@@ -279,7 +282,10 @@ impl ApplicationHandler for App {
         let foliage_enabled = std::env::var("HELIO_FOLIAGE")
             .map(|value| value != "0")
             .unwrap_or(true);
-        eprintln!("[foliage_demo] foliage passes: {}", if foliage_enabled { "ON" } else { "OFF" });
+        eprintln!(
+            "[foliage_demo] foliage passes: {}",
+            if foliage_enabled { "ON" } else { "OFF" }
+        );
 
         // Density is an allocation ceiling, so it is stated up front and the arena is
         // sized to hold it — 256 blades/m² over a 128 m ring is ~256 MiB of blade arena.
@@ -296,101 +302,112 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_owned: Option<XrBundle> = None;
 
-        let (device, queue, surface, surface_format, alpha_mode, mut config, xr_owned) = match xr_owned
-        {
-            Some(bundle) => {
-                let config = RendererConfig::new(
-                    bundle.session.width,
-                    bundle.session.height,
-                    bundle.swapchain.format,
-                )
-                // The graph's internal resolution must match the XR eye buffer exactly
-                // (it becomes the swapchain target); no scaling. The graph is built in
-                // single-layer (non-multiview) mode — render_xr renders each eye
-                // separately (dual-pass stereo) so every existing pass and shader,
-                // including the whole foliage path, works unchanged.
-                .with_render_scale(1.0);
-                // PC mirror surface: the OpenXR-created device presents both eye
-                // buffers side-by-side into this window.
-                let mirror_surface = bundle
-                    .wgpu_instance
-                    .create_surface(window.clone())
-                    .expect("Failed to create mirror surface");
-                let caps = mirror_surface.get_capabilities(&bundle.adapter);
-                let mirror_format = caps
-                    .formats
-                    .iter()
-                    .find(|f| f.is_srgb())
-                    .copied()
-                    .unwrap_or(caps.formats[0]);
-                let mirror_alpha = caps.alpha_modes[0];
-                let mirror_size = window.inner_size();
-                mirror_surface.configure(
-                    &bundle.device,
-                    &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: mirror_format,
-                        color_space: wgpu::SurfaceColorSpace::Auto,
-                        width: mirror_size.width.max(1),
-                        height: mirror_size.height.max(1),
-                        present_mode: wgpu::PresentMode::Fifo,
-                        alpha_mode: mirror_alpha,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
-                    },
-                );
-                (
-                    bundle.device.clone(),
-                    bundle.queue.clone(),
-                    Some(mirror_surface),
-                    mirror_format,
-                    mirror_alpha,
-                    config,
-                    Some(bundle),
-                )
-            }
-            None => {
-                log::warn!("[XR] no headset — running desktop mirror");
-                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                    backends: wgpu::Backends::all(),
-                    flags: wgpu::InstanceFlags::empty(),
-                    ..wgpu::InstanceDescriptor::new_without_display_handle()
-                });
-                let surface = instance.create_surface(window.clone()).expect("surface");
-                let adapter =
-                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        compatible_surface: Some(&surface),
-                        force_fallback_adapter: false,
-                        apply_limit_buckets: false,
-                    }))
+        let (device, queue, surface, surface_format, alpha_mode, mut config, xr_owned) =
+            match xr_owned {
+                Some(bundle) => {
+                    let config = RendererConfig::new(
+                        bundle.session.width,
+                        bundle.session.height,
+                        bundle.swapchain.format,
+                    )
+                    // The graph's internal resolution must match the XR eye buffer exactly
+                    // (it becomes the swapchain target); no scaling. The graph is built in
+                    // single-layer (non-multiview) mode — render_xr renders each eye
+                    // separately (dual-pass stereo) so every existing pass and shader,
+                    // including the whole foliage path, works unchanged.
+                    .with_render_scale(1.0);
+                    // PC mirror surface: the OpenXR-created device presents both eye
+                    // buffers side-by-side into this window.
+                    let mirror_surface = bundle
+                        .wgpu_instance
+                        .create_surface(window.clone())
+                        .expect("Failed to create mirror surface");
+                    let caps = mirror_surface.get_capabilities(&bundle.adapter);
+                    let mirror_format = caps
+                        .formats
+                        .iter()
+                        .find(|f| f.is_srgb())
+                        .copied()
+                        .unwrap_or(caps.formats[0]);
+                    let mirror_alpha = caps.alpha_modes[0];
+                    let mirror_size = window.inner_size();
+                    mirror_surface.configure(
+                        &bundle.device,
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format: mirror_format,
+                            color_space: wgpu::SurfaceColorSpace::Auto,
+                            width: mirror_size.width.max(1),
+                            height: mirror_size.height.max(1),
+                            present_mode: wgpu::PresentMode::Fifo,
+                            alpha_mode: mirror_alpha,
+                            view_formats: vec![],
+                            desired_maximum_frame_latency: 2,
+                        },
+                    );
+                    (
+                        bundle.device.clone(),
+                        bundle.queue.clone(),
+                        Some(mirror_surface),
+                        mirror_format,
+                        mirror_alpha,
+                        config,
+                        Some(bundle),
+                    )
+                }
+                None => {
+                    log::warn!("[XR] no headset — running desktop mirror");
+                    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                        backends: wgpu::Backends::all(),
+                        flags: wgpu::InstanceFlags::empty(),
+                        ..wgpu::InstanceDescriptor::new_without_display_handle()
+                    });
+                    let surface = instance.create_surface(window.clone()).expect("surface");
+                    let adapter = pollster::block_on(instance.request_adapter(
+                        &wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::HighPerformance,
+                            compatible_surface: Some(&surface),
+                            force_fallback_adapter: false,
+                            apply_limit_buckets: false,
+                        },
+                    ))
                     .expect("adapter");
 
-                let (device, queue) =
-                    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                        label: Some("Device"),
-                        required_features: required_wgpu_features(adapter.features()),
-                        required_limits: required_wgpu_limits(adapter.limits()),
-                        experimental_features: required_experimental_features(adapter.features()),
-                        ..Default::default()
-                    }))
-                    .expect("device");
-                let device = Arc::new(device);
-                let queue = Arc::new(queue);
+                    let (device, queue) =
+                        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                            label: Some("Device"),
+                            required_features: required_wgpu_features(adapter.features()),
+                            required_limits: required_wgpu_limits(adapter.limits()),
+                            experimental_features: required_experimental_features(
+                                adapter.features(),
+                            ),
+                            ..Default::default()
+                        }))
+                        .expect("device");
+                    let device = Arc::new(device);
+                    let queue = Arc::new(queue);
 
-                let caps = surface.get_capabilities(&adapter);
-                let format = caps
-                    .formats
-                    .iter()
-                    .find(|f| f.is_srgb())
-                    .copied()
-                    .unwrap_or(caps.formats[0]);
-                let alpha_mode = caps.alpha_modes[0];
-                let size = window.inner_size();
-                let config = RendererConfig::new(size.width, size.height, format);
-                (device, queue, Some(surface), format, alpha_mode, config, None)
-            }
-        };
+                    let caps = surface.get_capabilities(&adapter);
+                    let format = caps
+                        .formats
+                        .iter()
+                        .find(|f| f.is_srgb())
+                        .copied()
+                        .unwrap_or(caps.formats[0]);
+                    let alpha_mode = caps.alpha_modes[0];
+                    let size = window.inner_size();
+                    let config = RendererConfig::new(size.width, size.height, format);
+                    (
+                        device,
+                        queue,
+                        Some(surface),
+                        format,
+                        alpha_mode,
+                        config,
+                        None,
+                    )
+                }
+            };
         config.enable_foliage = foliage_enabled;
         config.foliage_blades_per_m2 = Some(blades_per_m2);
 
@@ -505,18 +522,19 @@ impl ApplicationHandler for App {
         // slightly wrong deletes the entire ground the moment a corner leaves the frustum.
         // One object always being submitted costs a single draw; the alternative is a
         // whole-screen artefact.
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::object(helio::ObjectDescriptor {
-                mesh: ground_mesh,
-                material: ground_mat,
-                transform: glam::Mat4::IDENTITY,
-                bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
-                flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        let _ =
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::object(helio::ObjectDescriptor {
+                    mesh: ground_mesh,
+                    material: ground_mat,
+                    transform: glam::Mat4::IDENTITY,
+                    bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
+                    flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
+                    groups: helio::GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
 
         // A visible marker for the roaming interactor, so the grass displacement has
         // something obviously attached to it.
@@ -636,7 +654,10 @@ impl ApplicationHandler for App {
             player_position: glam::Vec3::ZERO,
             player_yaw: 0.0,
         };
-        state.configure_surface(state.window.inner_size().width, state.window.inner_size().height);
+        state.configure_surface(
+            state.window.inner_size().width,
+            state.window.inner_size().height,
+        );
         self.state = Some(state);
     }
 
@@ -820,10 +841,8 @@ impl AppState {
         self.interactor_prev_pos = marker_pos;
 
         let _ = scene.update_foliage_interactor(self.interactor_id, marker_pos, velocity);
-        let _ = scene.update_object_transform(
-            self.marker_object,
-            glam::Mat4::from_translation(marker_pos),
-        );
+        let _ = scene
+            .update_object_transform(self.marker_object, glam::Mat4::from_translation(marker_pos));
 
         scene.flush();
     }

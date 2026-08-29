@@ -200,8 +200,12 @@ fn edge_detection_higher_threshold_misses_soft_edge() {
     let neighbour = 0.5f32;
     let low_threshold = 0.04f32;
     let high_threshold = 0.1f32;
-    assert!(is_luma_edge(center, neighbour, low_threshold),
-        "Should detect edge at low threshold");
-    assert!(!is_luma_edge(center, neighbour, high_threshold),
-        "Should miss edge at high threshold");
+    assert!(
+        is_luma_edge(center, neighbour, low_threshold),
+        "Should detect edge at low threshold"
+    );
+    assert!(
+        !is_luma_edge(center, neighbour, high_threshold),
+        "Should miss edge at high threshold"
+    );
 }

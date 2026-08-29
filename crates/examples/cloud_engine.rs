@@ -14,9 +14,7 @@ use std::{
 use glam::Vec3;
 use microfont::{stamp_text, FHEIGHT};
 mod v3_demo_common;
-use helio::{
-    Camera, DebugDrawState, Renderer, RendererConfig, Scene,
-};
+use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene};
 use helio_controls::{FlyCamera, FlyCameraConfig, WinitFlyInput};
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{cube_mesh, directional_light, insert_object_with_movability, make_material};
@@ -53,7 +51,8 @@ const BOUNDS_SIM_MAX: Vec3 = Vec3::new(
 );
 
 const BOUNDS_RENDER_Y_MID: f32 = (BOUNDS_SIM_MIN_Y + BOUNDS_SIM_MAX_Y) * 0.5;
-const BOUNDS_RENDER_Y_HALF: f32 = ((BOUNDS_SIM_MAX_Y - BOUNDS_SIM_MIN_Y) * 0.5) * BOUNDS_Y_HEIGHT_SCALE;
+const BOUNDS_RENDER_Y_HALF: f32 =
+    ((BOUNDS_SIM_MAX_Y - BOUNDS_SIM_MIN_Y) * 0.5) * BOUNDS_Y_HEIGHT_SCALE;
 const BOUNDS_RENDER_MIN: Vec3 = Vec3::new(
     BOUNDS_SIM_MIN_X * BOUNDS_XZ_EXPAND_FACTOR,
     BOUNDS_RENDER_Y_MID - BOUNDS_RENDER_Y_HALF,
@@ -258,29 +257,46 @@ impl ArtPreset {
     }
 
     fn moon_look_direction(camera_forward: Vec3) -> ArtDirection {
-        let horizontal_forward = Vec3::new(camera_forward.x, 0.0, camera_forward.z)
-            .normalize_or_zero();
-        let raw_weights = MOON_LOOK_DIRECTIONS.map(|direction| {
-            (horizontal_forward.dot(direction) * MOON_LOOK_BLEND_SHARPNESS).exp()
-        });
+        let horizontal_forward =
+            Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize_or_zero();
+        let raw_weights = MOON_LOOK_DIRECTIONS
+            .map(|direction| (horizontal_forward.dot(direction) * MOON_LOOK_BLEND_SHARPNESS).exp());
         let total_weight = raw_weights.iter().sum::<f32>().max(f32::EPSILON);
         let weights = raw_weights.map(|weight| weight / total_weight);
         let porcelain = Self::Porcelain.direction();
         let ember = Self::Ember.direction();
         let violet = Self::Violet.direction();
         ArtDirection {
-            cloud: porcelain.cloud * weights[0] + ember.cloud * weights[1] + violet.cloud * weights[2],
-            shadow: porcelain.shadow * weights[0] + ember.shadow * weights[1] + violet.shadow * weights[2],
+            cloud: porcelain.cloud * weights[0]
+                + ember.cloud * weights[1]
+                + violet.cloud * weights[2],
+            shadow: porcelain.shadow * weights[0]
+                + ember.shadow * weights[1]
+                + violet.shadow * weights[2],
             sky: porcelain.sky * weights[0] + ember.sky * weights[1] + violet.sky * weights[2],
             moon: porcelain.moon * weights[0] + ember.moon * weights[1] + violet.moon * weights[2],
             curl: porcelain.curl * weights[0] + ember.curl * weights[1] + violet.curl * weights[2],
-            ribbon: porcelain.ribbon * weights[0] + ember.ribbon * weights[1] + violet.ribbon * weights[2],
-            sculpt: porcelain.sculpt * weights[0] + ember.sculpt * weights[1] + violet.sculpt * weights[2],
-            bands: porcelain.bands * weights[0] + ember.bands * weights[1] + violet.bands * weights[2],
-            outline: porcelain.outline * weights[0] + ember.outline * weights[1] + violet.outline * weights[2],
-            moon_size: porcelain.moon_size * weights[0] + ember.moon_size * weights[1] + violet.moon_size * weights[2],
-            moon_glow: porcelain.moon_glow * weights[0] + ember.moon_glow * weights[1] + violet.moon_glow * weights[2],
-            grain: porcelain.grain * weights[0] + ember.grain * weights[1] + violet.grain * weights[2],
+            ribbon: porcelain.ribbon * weights[0]
+                + ember.ribbon * weights[1]
+                + violet.ribbon * weights[2],
+            sculpt: porcelain.sculpt * weights[0]
+                + ember.sculpt * weights[1]
+                + violet.sculpt * weights[2],
+            bands: porcelain.bands * weights[0]
+                + ember.bands * weights[1]
+                + violet.bands * weights[2],
+            outline: porcelain.outline * weights[0]
+                + ember.outline * weights[1]
+                + violet.outline * weights[2],
+            moon_size: porcelain.moon_size * weights[0]
+                + ember.moon_size * weights[1]
+                + violet.moon_size * weights[2],
+            moon_glow: porcelain.moon_glow * weights[0]
+                + ember.moon_glow * weights[1]
+                + violet.moon_glow * weights[2],
+            grain: porcelain.grain * weights[0]
+                + ember.grain * weights[1]
+                + violet.grain * weights[2],
         }
     }
 }
@@ -322,11 +338,7 @@ struct PerfOverlay {
 }
 
 impl PerfOverlay {
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cloud Engine Perf overlay texture"),
             size: wgpu::Extent3d {
@@ -469,7 +481,11 @@ impl PerfOverlay {
         [left_ndc, top_ndc, right_ndc, bottom_ndc]
     }
 
-    fn is_click_within(position: winit::dpi::PhysicalPosition<f64>, width: u32, height: u32) -> bool {
+    fn is_click_within(
+        position: winit::dpi::PhysicalPosition<f64>,
+        width: u32,
+        height: u32,
+    ) -> bool {
         let overlay_w = PERF_OVERLAY_TEXTURE_WIDTH as f64 * PERF_OVERLAY_SCALE as f64;
         let overlay_h = PERF_OVERLAY_TEXTURE_HEIGHT as f64 * PERF_OVERLAY_SCALE as f64;
         let left = f64::from(width).max(1.0) - PERF_OVERLAY_MARGIN as f64 - overlay_w;
@@ -481,7 +497,10 @@ impl PerfOverlay {
 
     fn update_text(&mut self, queue: &wgpu::Queue, fps: u32, mode_index: u32) {
         let mode = PerfCycleMode::from_index(mode_index);
-        let text = format!("FPS {:>3}  steps {:>2}  tier {}", fps, mode.steps, mode.detail_tier);
+        let text = format!(
+            "FPS {:>3}  steps {:>2}  tier {}",
+            fps, mode.steps, mode.detail_tier
+        );
         self.pixels.fill(0);
         stamp_text(
             &mut self.pixels,
@@ -707,7 +726,7 @@ impl AutoBezierBrush {
         self.control = (midpoint
             + perpendicular * self.range(-0.22, 0.22)
             + Vec3::Y * self.range(-0.18, 0.18))
-            .clamp(Vec3::splat(0.08), Vec3::splat(0.92));
+        .clamp(Vec3::splat(0.08), Vec3::splat(0.92));
         self.duration = self.range(0.42, 1.10);
         self.size = self.range(0.038, 0.078);
         self.elapsed = 0.0;
@@ -966,8 +985,8 @@ impl App {
         // Render regular Helio content first. The cloud pass below samples this
         // target, so meshes and future voxel content retain Helio's normal
         // material, lighting, culling, and instancing path.
-        let mut scene_config = RendererConfig::new(config.width, config.height, format)
-            .with_render_scale(1.0);
+        let mut scene_config =
+            RendererConfig::new(config.width, config.height, format).with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         // The background is composed in the cloud shader. In particular, do
         // not attach Helio's SkyActor here: its analytic sun disc would show
@@ -1189,30 +1208,78 @@ impl App {
         });
 
         let outline_vertex_data: Vec<f32> = [
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MIN.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MAX.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MIN.z,
-            BOUNDS_RENDER_MIN.x, BOUNDS_RENDER_MAX.y, BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MIN.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MAX.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MIN.z,
+            BOUNDS_RENDER_MIN.x,
+            BOUNDS_RENDER_MAX.y,
+            BOUNDS_RENDER_MAX.z,
         ]
         .to_vec();
 
@@ -1452,12 +1519,10 @@ impl State {
 
     fn write_uniforms(&self, delta: f32, clear: bool) {
         let perf_mode = PerfCycleMode::from_index(self.perf_mode_index);
-        let art_mode = self
-            .art_preset
-            .lock()
-            .expect("art preset lock");
+        let art_mode = self.art_preset.lock().expect("art preset lock");
         let art = art_mode.to_art_direction(self.camera_basis().0);
-        let wind_cycle = (self.time * WIND_SPEED_RADIANS_PER_SECOND / std::f32::consts::TAU).rem_euclid(1.0);
+        let wind_cycle =
+            (self.time * WIND_SPEED_RADIANS_PER_SECOND / std::f32::consts::TAU).rem_euclid(1.0);
         let wind_angle = WIND_INITIAL_ANGLE_RADIANS + wind_cycle * std::f32::consts::TAU;
         let wind = Vec3::new(
             wind_angle.sin() * WIND_STRENGTH,
@@ -1668,7 +1733,10 @@ impl State {
             0.1,
             1_000.0,
         );
-        if let Err(error) = self.scene_renderer.render(&scene_camera, &self.scene_color_view) {
+        if let Err(error) = self
+            .scene_renderer
+            .render(&scene_camera, &self.scene_color_view)
+        {
             log::error!("Cloud Engine scene render failed: {error:?}");
         }
         let output = match self.surface.get_current_texture() {
@@ -1746,15 +1814,14 @@ impl State {
             pass.draw(0..self.outline_vertex_count, 0..1);
         }
 
-        self.perf_overlay
-            .draw(
-                dt,
-                self.perf_mode_index,
-                &mut encoder,
-                &self.queue,
-                &view,
-                winit::dpi::PhysicalSize::new(self.config.width, self.config.height),
-            );
+        self.perf_overlay.draw(
+            dt,
+            self.perf_mode_index,
+            &mut encoder,
+            &self.queue,
+            &view,
+            winit::dpi::PhysicalSize::new(self.config.width, self.config.height),
+        );
 
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(output);
@@ -1791,15 +1858,21 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.input.cursor_grabbed() {
-                    if state
-                        .pointer_position
-                        .is_some_and(|position| PerfOverlay::is_click_within(position, state.config.width, state.config.height))
-                    {
-                        state.perf_mode_index = (state.perf_mode_index + 1) % PERF_MODES.len() as u32;
+                    if state.pointer_position.is_some_and(|position| {
+                        PerfOverlay::is_click_within(
+                            position,
+                            state.config.width,
+                            state.config.height,
+                        )
+                    }) {
+                        state.perf_mode_index =
+                            (state.perf_mode_index + 1) % PERF_MODES.len() as u32;
                         state.brush_active = false;
-                        state
-                            .perf_overlay
-                            .update_text(&state.queue, state.perf_overlay.last_fps, state.perf_mode_index);
+                        state.perf_overlay.update_text(
+                            &state.queue,
+                            state.perf_overlay.last_fps,
+                            state.perf_mode_index,
+                        );
                     } else {
                         state.brush_sign = 1.0;
                         state.brush_active = state

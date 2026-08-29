@@ -12,7 +12,9 @@ pub struct RadiantGraphRegistry {
 
 impl RadiantGraphRegistry {
     pub fn new() -> Self {
-        Self { snippets: HashMap::new() }
+        Self {
+            snippets: HashMap::new(),
+        }
     }
 
     /// Register a compiled graph snippet. `graph_hash` should be a content-hash

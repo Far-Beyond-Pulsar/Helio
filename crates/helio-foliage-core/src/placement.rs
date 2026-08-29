@@ -219,7 +219,11 @@ pub fn scale_in_factor(distance_from_ring_edge: f32, band: f32) -> f32 {
     }
 
     if !band.is_finite() || band <= 0.0 {
-        return if distance_from_ring_edge > 0.0 { 1.0 } else { 0.0 };
+        return if distance_from_ring_edge > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
     }
 
     let t = (distance_from_ring_edge / band).clamp(0.0, 1.0);
@@ -342,8 +346,14 @@ mod tests {
             (12.0..=20.0).contains(&mean),
             "mean avalanche {mean} is far from the ideal 16 bits"
         );
-        assert!(worst_low >= 2, "some input bit flip barely moved the output");
-        assert!(worst_high <= 31, "some input bit flip inverted nearly every output bit");
+        assert!(
+            worst_low >= 2,
+            "some input bit flip barely moved the output"
+        );
+        assert!(
+            worst_high <= 31,
+            "some input bit flip inverted nearly every output bit"
+        );
     }
 
     #[test]
@@ -464,7 +474,11 @@ mod tests {
         );
         // A poisoned scale falls back to 1.0 instead of collapsing the ladder.
         for bad in [f32::NAN, f32::INFINITY, 0.0, -1.0] {
-            assert_eq!(select_blade_lod(12.0, ladder, bad), 1, "scale {bad} was not defended");
+            assert_eq!(
+                select_blade_lod(12.0, ladder, bad),
+                1,
+                "scale {bad} was not defended"
+            );
         }
     }
 
@@ -482,7 +496,10 @@ mod tests {
         let mut previous = 0u32;
         for step in 0..2000u32 {
             let level = select_blade_lod(step as f32 * 0.1, scrambled, 1.0);
-            assert!(level >= previous, "a scrambled ladder still must be monotonic");
+            assert!(
+                level >= previous,
+                "a scrambled ladder still must be monotonic"
+            );
             previous = level;
         }
 
@@ -514,14 +531,20 @@ mod tests {
         for i in 0..=STEPS {
             let distance = START - 2.0 + (i as f32 / STEPS as f32) * 8.0;
             let alpha = lod_fade_alpha(distance, START, END);
-            assert!((0.0..=1.0).contains(&alpha), "alpha {alpha} left the unit range");
+            assert!(
+                (0.0..=1.0).contains(&alpha),
+                "alpha {alpha} left the unit range"
+            );
             assert!(alpha <= previous + 1.0e-6, "fade must be non-increasing");
             worst_step = worst_step.max((alpha - previous).abs());
             previous = alpha;
         }
         // The band is 4 m wide sampled at 2 mm; the largest single step of a C¹ ramp is
         // ~1.5 × the mean, well under this bound. A step discontinuity would be ~0.5.
-        assert!(worst_step < 0.01, "fade jumped by {worst_step} between adjacent samples");
+        assert!(
+            worst_step < 0.01,
+            "fade jumped by {worst_step} between adjacent samples"
+        );
     }
 
     #[test]
@@ -562,7 +585,10 @@ mod tests {
     fn scale_in_factor_grows_from_nothing_at_the_ring_edge() {
         assert_eq!(scale_in_factor(0.0, DEFAULT_SCALE_IN_BAND), 0.0);
         assert_eq!(scale_in_factor(-1.0, DEFAULT_SCALE_IN_BAND), 0.0);
-        assert_eq!(scale_in_factor(DEFAULT_SCALE_IN_BAND, DEFAULT_SCALE_IN_BAND), 1.0);
+        assert_eq!(
+            scale_in_factor(DEFAULT_SCALE_IN_BAND, DEFAULT_SCALE_IN_BAND),
+            1.0
+        );
         assert_eq!(scale_in_factor(50.0, DEFAULT_SCALE_IN_BAND), 1.0);
         assert!(
             (scale_in_factor(DEFAULT_SCALE_IN_BAND * 0.5, DEFAULT_SCALE_IN_BAND) - 0.5).abs()
@@ -584,7 +610,10 @@ mod tests {
             worst_step = worst_step.max((s - previous).abs());
             previous = s;
         }
-        assert!(worst_step < 0.01, "scale-in jumped by {worst_step} between adjacent samples");
+        assert!(
+            worst_step < 0.01,
+            "scale-in jumped by {worst_step} between adjacent samples"
+        );
         assert_eq!(previous, 1.0);
     }
 

@@ -179,29 +179,61 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         // ── Materials ───────────────────────────────────────────────────────
         let wall_mat = renderer.scene_mut().insert_material(make_material(
-            [0.75, 0.75, 0.78, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.75, 0.75, 0.78, 1.0],
+            0.75,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let frame_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.9, 1.0, 1.0], 0.4, 0.0, [0.2, 0.85, 1.0], 2.5,
+            [0.3, 0.9, 1.0, 1.0],
+            0.4,
+            0.0,
+            [0.2, 0.85, 1.0],
+            2.5,
         ));
 
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
-        let unit_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))).as_mesh().unwrap();
+        let unit_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])))
+            .as_mesh()
+            .unwrap();
 
         // ── The room: one wall per axis direction, each with a centered
         // doorway. `up_hint` just needs to not be parallel to `normal` — Y
@@ -223,7 +255,15 @@ impl ApplicationHandler for App {
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
 
-            insert_wall_face(&mut renderer, unit_mesh, wall_mat, frame_mat, normal, right, up);
+            insert_wall_face(
+                &mut renderer,
+                unit_mesh,
+                wall_mat,
+                frame_mat,
+                normal,
+                right,
+                up,
+            );
 
             // Pair this doorway with the pose at the *opposite* wall, facing
             // the *same* direction as this one (not that wall's own outward
@@ -235,7 +275,11 @@ impl ApplicationHandler for App {
             let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
             let portal = renderer
                 .scene_mut()
-                .add_portal(PortalDescriptor { a, b, half_extent: Vec2::new(DOOR_HALF_W, DOOR_HALF_H) })
+                .add_portal(PortalDescriptor {
+                    a,
+                    b,
+                    half_extent: Vec2::new(DOOR_HALF_W, DOOR_HALF_H),
+                })
                 .expect("add_portal");
             portal_ids.push(portal);
         }
@@ -244,16 +288,32 @@ impl ApplicationHandler for App {
         // doorway direction so the receding reflections don't go flat black.
         let mut light_ids = Vec::new();
         light_ids.push(
-            renderer.scene_mut().insert_actor(SceneActor::light(point_light([0.0, HALF_SIZE * 0.85, 0.0], [1.0, 0.98, 0.92], 4.0, HALF_SIZE * 1.8)))
-                .as_light().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(SceneActor::light(point_light(
+                    [0.0, HALF_SIZE * 0.85, 0.0],
+                    [1.0, 0.98, 0.92],
+                    4.0,
+                    HALF_SIZE * 1.8,
+                )))
+                .as_light()
+                .unwrap(),
         );
         // Just 2 more (not one per face — 7 overlapping light-range gizmos
         // in editor mode turned into unreadable clutter) at opposite
         // corners, enough to break up the single center light's flatness.
         for &pos in &[Vec3::new(3.5, 3.0, 3.5), Vec3::new(-3.5, -3.0, -3.5)] {
             light_ids.push(
-                renderer.scene_mut().insert_actor(SceneActor::light(point_light([pos.x, pos.y, pos.z], [0.85, 0.92, 1.0], 2.0, HALF_SIZE)))
-                    .as_light().unwrap(),
+                renderer
+                    .scene_mut()
+                    .insert_actor(SceneActor::light(point_light(
+                        [pos.x, pos.y, pos.z],
+                        [0.85, 0.92, 1.0],
+                        2.0,
+                        HALF_SIZE,
+                    )))
+                    .as_light()
+                    .unwrap(),
             );
         }
 
@@ -290,9 +350,21 @@ impl ApplicationHandler for App {
             // picture-frame effect) — solid wall content only comes into
             // view off that centerline, same as it would with two real
             // rooms and a real window between them.
-            cam_pos: if std::env::var("CUBE_CLOSEUP").is_ok() { Vec3::new(1.5, 1.0, 3.5) } else { Vec3::new(4.0, 3.0, 4.0) },
-            cam_yaw: if std::env::var("CUBE_CLOSEUP").is_ok() { -2.60 } else { -0.785 },
-            cam_pitch: if std::env::var("CUBE_CLOSEUP").is_ok() { -0.33 } else { -0.488 },
+            cam_pos: if std::env::var("CUBE_CLOSEUP").is_ok() {
+                Vec3::new(1.5, 1.0, 3.5)
+            } else {
+                Vec3::new(4.0, 3.0, 4.0)
+            },
+            cam_yaw: if std::env::var("CUBE_CLOSEUP").is_ok() {
+                -2.60
+            } else {
+                -0.785
+            },
+            cam_pitch: if std::env::var("CUBE_CLOSEUP").is_ok() {
+                -0.33
+            } else {
+                -0.488
+            },
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
@@ -307,7 +379,12 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -319,7 +396,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Tab), repeat: false, .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Tab),
+                        repeat: false,
+                        ..
+                    },
                 ..
             } => {
                 let enabled = !state.renderer.is_editor_mode();
@@ -327,15 +410,30 @@ impl ApplicationHandler for App {
                 log::info!("[portal_cube] editor mode: {}", enabled);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
                 ..
             } => match ks {
-                ElementState::Pressed => { state.keys.insert(key); }
-                ElementState::Released => { state.keys.remove(&key); }
+                ElementState::Pressed => {
+                    state.keys.insert(key);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
             },
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if ok {
@@ -403,19 +501,36 @@ impl AppState {
         let forward = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos += Vec3::Y * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= Vec3::Y * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += Vec3::Y * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= Vec3::Y * SPEED * dt;
+        }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
 
         let camera = Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + forward, Vec3::Y,
-            std::f32::consts::FRAC_PI_4, aspect, 0.1, FAR_PLANE,
+            self.cam_pos,
+            self.cam_pos + forward,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            FAR_PLANE,
         );
 
         let output = match self.surface.get_current_texture() {
@@ -437,7 +552,11 @@ impl AppState {
             if self.frame_count == CAPTURE_AT_FRAME {
                 let offscreen = self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Screenshot Offscreen"),
-                    size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -449,7 +568,13 @@ impl AppState {
                 if let Err(e) = self.renderer.render(&camera, &offscreen_view) {
                     log::error!("Screenshot render: {:?}", e);
                 }
-                capture_screenshot(&self.device, &self.queue, &offscreen, self.surface_format, &path);
+                capture_screenshot(
+                    &self.device,
+                    &self.queue,
+                    &offscreen,
+                    self.surface_format,
+                    &path,
+                );
                 self.queue.present(output);
                 std::process::exit(0);
             }
@@ -474,7 +599,13 @@ fn insert_wall_face(
     up: Vec3,
 ) {
     let face_center = normal * HALF_SIZE;
-    let mut insert_box = |material: helio::MaterialId, center_right: f32, center_up: f32, center_normal: f32, half_right: f32, half_up: f32, half_normal: f32| {
+    let mut insert_box = |material: helio::MaterialId,
+                          center_right: f32,
+                          center_up: f32,
+                          center_normal: f32,
+                          half_right: f32,
+                          half_up: f32,
+                          half_normal: f32| {
         let center = face_center + right * center_right + up * center_up + normal * center_normal;
         let transform = Mat4::from_cols(
             (right * half_right).extend(0.0),
@@ -482,7 +613,8 @@ fn insert_wall_face(
             (normal * half_normal).extend(0.0),
             center.extend(1.0),
         );
-        let radius = (half_right * half_right + half_up * half_up + half_normal * half_normal).sqrt();
+        let radius =
+            (half_right * half_right + half_up * half_up + half_normal * half_normal).sqrt();
         // Deliberately *not* INSTANCE_FLAG_ALWAYS_VISIBLE — unlike
         // infinite_tunnel's single central corridor segment (world-space,
         // no portal chain ever needs to reconsider it), every wall panel
@@ -492,37 +624,103 @@ fn insert_wall_face(
         // view regardless of where it actually maps to — wildly
         // overselecting and blowing straight through the cull pass's
         // per-group capacity.
-        let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-            mesh: unit_mesh,
-            material,
-            transform,
-            bounds: [center.x, center.y, center.z, radius],
-            flags: 0,
-            groups: GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::object(ObjectDescriptor {
+                mesh: unit_mesh,
+                material,
+                transform,
+                bounds: [center.x, center.y, center.z, radius],
+                flags: 0,
+                groups: GroupMask::NONE,
+                movability: None,
+                user_tag: 0,
+            }));
     };
 
     // Top / bottom panels span the full width; left / right panels fill the
     // remaining height beside the doorway.
     let vert_half = (HALF_SIZE - DOOR_HALF_H) / 2.0;
     let vert_center = DOOR_HALF_H + vert_half;
-    insert_box(wall_mat, 0.0, vert_center, 0.0, HALF_SIZE, vert_half, WALL_T);
-    insert_box(wall_mat, 0.0, -vert_center, 0.0, HALF_SIZE, vert_half, WALL_T);
+    insert_box(
+        wall_mat,
+        0.0,
+        vert_center,
+        0.0,
+        HALF_SIZE,
+        vert_half,
+        WALL_T,
+    );
+    insert_box(
+        wall_mat,
+        0.0,
+        -vert_center,
+        0.0,
+        HALF_SIZE,
+        vert_half,
+        WALL_T,
+    );
     let horiz_half = (HALF_SIZE - DOOR_HALF_W) / 2.0;
     let horiz_center = DOOR_HALF_W + horiz_half;
-    insert_box(wall_mat, horiz_center, 0.0, 0.0, horiz_half, DOOR_HALF_H, WALL_T);
-    insert_box(wall_mat, -horiz_center, 0.0, 0.0, horiz_half, DOOR_HALF_H, WALL_T);
+    insert_box(
+        wall_mat,
+        horiz_center,
+        0.0,
+        0.0,
+        horiz_half,
+        DOOR_HALF_H,
+        WALL_T,
+    );
+    insert_box(
+        wall_mat,
+        -horiz_center,
+        0.0,
+        0.0,
+        horiz_half,
+        DOOR_HALF_H,
+        WALL_T,
+    );
 
     // Emissive frame collar right at the doorway's edge, thin boxes just
     // outside the opening — same purely-decorative role as
     // infinite_tunnel's own portal frames.
     let ft = 0.08;
-    insert_box(frame_mat, 0.0, DOOR_HALF_H + ft, ft, DOOR_HALF_W + ft, ft, ft);
-    insert_box(frame_mat, 0.0, -(DOOR_HALF_H + ft), ft, DOOR_HALF_W + ft, ft, ft);
-    insert_box(frame_mat, DOOR_HALF_W + ft, 0.0, ft, ft, DOOR_HALF_H + ft, ft);
-    insert_box(frame_mat, -(DOOR_HALF_W + ft), 0.0, ft, ft, DOOR_HALF_H + ft, ft);
+    insert_box(
+        frame_mat,
+        0.0,
+        DOOR_HALF_H + ft,
+        ft,
+        DOOR_HALF_W + ft,
+        ft,
+        ft,
+    );
+    insert_box(
+        frame_mat,
+        0.0,
+        -(DOOR_HALF_H + ft),
+        ft,
+        DOOR_HALF_W + ft,
+        ft,
+        ft,
+    );
+    insert_box(
+        frame_mat,
+        DOOR_HALF_W + ft,
+        0.0,
+        ft,
+        ft,
+        DOOR_HALF_H + ft,
+        ft,
+    );
+    insert_box(
+        frame_mat,
+        -(DOOR_HALF_W + ft),
+        0.0,
+        ft,
+        ft,
+        DOOR_HALF_H + ft,
+        ft,
+    );
 }
 
 /// Copies `texture` (must have been created/configured with `COPY_SRC`) back
@@ -568,13 +766,19 @@ fn capture_screenshot(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit(Some(encoder.finish()));
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |r| r.expect("map screenshot buffer"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = slice.get_mapped_range().expect("get_mapped_range");
 
     let is_bgra = matches!(

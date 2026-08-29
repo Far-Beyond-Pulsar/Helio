@@ -123,8 +123,8 @@ pub fn reference_candidate(
     let slope_cos = 1.0f32;
 
     let type_limit = (uniforms.type_count.min(types.len() as u32)).max(1);
-    let type_id = ((hash_to_unit(seed.rotate_left(5)) * type_limit as f32) as u32)
-        .min(type_limit - 1);
+    let type_id =
+        ((hash_to_unit(seed.rotate_left(5)) * type_limit as f32) as u32).min(type_limit - 1);
     let foliage = types
         .get(type_id as usize)
         .copied()
@@ -143,9 +143,8 @@ pub fn reference_candidate(
         && height >= foliage.altitude_range[0]
         && height <= foliage.altitude_range[1]
     {
-        weight = (foliage.density * uniforms.density_multiplier
-            / uniforms.max_density.max(1.0e-6))
-        .clamp(0.0, 1.0);
+        weight = (foliage.density * uniforms.density_multiplier / uniforms.max_density.max(1.0e-6))
+            .clamp(0.0, 1.0);
     }
 
     ReferenceCandidate {
@@ -184,8 +183,7 @@ pub fn place_tile_reference(
     };
 
     for index in 0..candidates {
-        let candidate =
-            reference_candidate(uniforms, types, layers, tile_coord, generation, index);
+        let candidate = reference_candidate(uniforms, types, layers, tile_coord, generation, index);
         if !candidate.accepted {
             continue;
         }
@@ -220,10 +218,7 @@ mod tests {
     use helio_foliage_core::{unpack_blade, FOLIAGE_TILE_SIZE_METERS};
 
     fn uniforms(grid: u32, slab: u32, types: &[GpuFoliageType]) -> PlaceUniforms {
-        let max_density = types
-            .iter()
-            .map(|t| t.density)
-            .fold(0.0f32, f32::max);
+        let max_density = types.iter().map(|t| t.density).fold(0.0f32, f32::max);
         PlaceUniforms {
             tile_size: FOLIAGE_TILE_SIZE_METERS,
             candidate_grid: grid,
@@ -255,7 +250,10 @@ mod tests {
         let uni = uniforms(24, 1024, &types);
         let first = place_tile_reference(&uni, &types, &[], [12, -7], 3);
         let second = place_tile_reference(&uni, &types, &[], [12, -7], 3);
-        assert!(!first.blades.is_empty(), "the reference placed nothing to compare");
+        assert!(
+            !first.blades.is_empty(),
+            "the reference placed nothing to compare"
+        );
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(&first.blades),
             bytemuck::cast_slice::<_, u8>(&second.blades),
@@ -341,7 +339,10 @@ mod tests {
             buckets[bz * 4 + bx] += 1;
         }
         for (index, count) in buckets.iter().enumerate() {
-            assert!(*count > 0, "quadrant {index} of the tile got no blades at all");
+            assert!(
+                *count > 0,
+                "quadrant {index} of the tile got no blades at all"
+            );
         }
     }
 
@@ -409,7 +410,10 @@ mod tests {
         let mut uni = uniforms(32, 4096, &types);
         uni.layer_count = layers.len() as u32;
         let placement = place_tile_reference(&uni, &types, &layers, [-1, -1], 0);
-        assert!(placement.blades.is_empty(), "grass must not grow outside a layer");
+        assert!(
+            placement.blades.is_empty(),
+            "grass must not grow outside a layer"
+        );
     }
 
     #[test]
@@ -423,7 +427,10 @@ mod tests {
         let mut uni = uniforms(24, 1024, &types);
         uni.layer_count = layers.len() as u32;
         let placement = place_tile_reference(&uni, &types, &layers, [0, 0], 0);
-        assert!(!placement.blades.is_empty(), "grass inside a layer must be placed");
+        assert!(
+            !placement.blades.is_empty(),
+            "grass inside a layer must be placed"
+        );
     }
 
     #[test]
@@ -439,6 +446,9 @@ mod tests {
         let mut uni = uniforms(24, 1024, &types);
         uni.layer_count = layers.len() as u32;
         let placement = place_tile_reference(&uni, &types, &layers, [5, -3], 0);
-        assert!(!placement.blades.is_empty(), "an infinite layer must not cull");
+        assert!(
+            !placement.blades.is_empty(),
+            "an infinite layer must not cull"
+        );
     }
 }

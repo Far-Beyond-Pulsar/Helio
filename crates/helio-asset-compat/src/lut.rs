@@ -36,9 +36,8 @@ pub struct CubeLut {
 impl CubeLut {
     /// Parse a `.cube` file from a byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, LutError> {
-        let s = std::str::from_utf8(bytes).map_err(|e| {
-            LutError::Parse(format!("File is not valid UTF-8: {}", e))
-        })?;
+        let s = std::str::from_utf8(bytes)
+            .map_err(|e| LutError::Parse(format!("File is not valid UTF-8: {}", e)))?;
 
         let mut size: Option<u32> = None;
         let mut domain_min = [0.0f32; 3];

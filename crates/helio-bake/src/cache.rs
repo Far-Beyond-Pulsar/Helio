@@ -110,7 +110,8 @@ impl BakeCache {
         let path = self.path(suffix);
         let mut file = fs::File::create(&path).map_err(BakeError::Io)?;
         file.write_all(CACHE_MAGIC).map_err(BakeError::Io)?;
-        file.write_all(&CACHE_VERSION.to_le_bytes()).map_err(BakeError::Io)?;
+        file.write_all(&CACHE_VERSION.to_le_bytes())
+            .map_err(BakeError::Io)?;
         file.write_all(&payload).map_err(BakeError::Io)?;
         log::info!("[helio-bake] Wrote cache: {}", path.display());
         Ok(())
@@ -147,7 +148,11 @@ impl BakeCache {
         let mut payload = Vec::new();
         file.read_to_end(&mut payload).map_err(BakeError::Io)?;
         let value: T = bincode::deserialize(&payload).map_err(|e| {
-            log::warn!("Bake cache {} failed to deserialize: {}. Will re-bake.", path.display(), e);
+            log::warn!(
+                "Bake cache {} failed to deserialize: {}. Will re-bake.",
+                path.display(),
+                e
+            );
             BakeError::Deserialize(e)
         })?;
         log::info!("[helio-bake] Loaded from cache: {}", path.display());

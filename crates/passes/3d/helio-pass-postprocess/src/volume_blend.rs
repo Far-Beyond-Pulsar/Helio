@@ -159,10 +159,22 @@ impl RenderPass for PostProcessVolumeBlendPass {
                 label: Some("PostProcess Volume Blend BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: postprocess_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 15, resource: pp_volumes_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: postprocess_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: pp_volumes_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 16,
+                        resource: self.blend_output_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);

@@ -40,9 +40,7 @@ use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, L
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 use helio_voxel_core::GpuVoxelMaterial;
-use libhelio::{
-    CoronaEmitterDescriptor, PostProcessSettings, PostProcessVolumeDescriptor,
-};
+use libhelio::{CoronaEmitterDescriptor, PostProcessSettings, PostProcessVolumeDescriptor};
 
 use crate::v3_demo_common::{
     box_mesh, cube_mesh, insert_object, make_material, point_light, sphere_mesh, spot_light,
@@ -109,7 +107,13 @@ fn insert_box_mesh(renderer: &mut Renderer, half: Vec3) -> helio::MeshId {
 
 /// Insert an object at a world-space position, ignoring errors.
 fn place(renderer: &mut Renderer, mesh: MeshId, material: MaterialId, pos: Vec3, radius: f32) {
-    let _ = insert_object(renderer, mesh, material, Mat4::from_translation(pos), radius);
+    let _ = insert_object(
+        renderer,
+        mesh,
+        material,
+        Mat4::from_translation(pos),
+        radius,
+    );
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -155,7 +159,13 @@ struct Meshes {
 /// Bay 0 — the PBR material space: a rotating metal cube, a bobbing orb, an
 /// emissive strip paired with a real light. Everything else is built from the
 /// same `make_material` parameters, just spread across roughness/metallic.
-fn bay_materials(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+fn bay_materials(
+    renderer: &mut Renderer,
+    z: f32,
+    meshes: &Meshes,
+    mats: &Mats,
+    anim: &mut Animated,
+) {
     let plinth_left = Vec3::new(-1.4, 0.45, z);
     place(renderer, meshes.plinth, mats.dark_trim, plinth_left, 0.6);
     let spin_centre = plinth_left + Vec3::new(0.0, 0.75, 0.0);
@@ -173,7 +183,13 @@ fn bay_materials(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, 
     let plinth_right = Vec3::new(1.4, 0.45, z);
     place(renderer, meshes.plinth, mats.dark_trim, plinth_right, 0.6);
     let orb_rest = plinth_right + Vec3::new(0.0, 0.85, 0.0);
-    if let Ok(id) = insert_object(renderer, meshes.sphere, mats.gold, Mat4::from_translation(orb_rest), 0.3) {
+    if let Ok(id) = insert_object(
+        renderer,
+        meshes.sphere,
+        mats.gold,
+        Mat4::from_translation(orb_rest),
+        0.3,
+    ) {
         anim.bobbers.push((id, orb_rest));
     }
 
@@ -189,17 +205,34 @@ fn bay_materials(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, 
 
     // Material shelf: one sphere per material, spanning the roughness/metallic
     // space from mirror to chalk, so the whole range reads at a glance.
-    let shelf = [mats.mirror, mats.gold, mats.copper, mats.chalk, mats.glossy_red];
+    let shelf = [
+        mats.mirror,
+        mats.gold,
+        mats.copper,
+        mats.chalk,
+        mats.glossy_red,
+    ];
     for (i, material) in shelf.into_iter().enumerate() {
         let x = -1.9 + i as f32 * 0.6;
-        place(renderer, meshes.sphere, material, Vec3::new(x, 0.3, z + 3.2), 0.3);
+        place(
+            renderer,
+            meshes.sphere,
+            material,
+            Vec3::new(x, 0.3, z + 3.2),
+            0.3,
+        );
     }
     let position = Vec3::new(0.0, HALL_HEIGHT - 0.5, z);
     let colour = [0.25, 0.85, 1.0];
     let intensity = 7.5;
     let light = renderer
         .scene_mut()
-        .insert_actor(helio::SceneActor::light(point_light(position.into(), colour, intensity, BAY_LENGTH)))
+        .insert_actor(helio::SceneActor::light(point_light(
+            position.into(),
+            colour,
+            intensity,
+            BAY_LENGTH,
+        )))
         .as_light()
         .unwrap();
     anim.pulse_lights.push((light, position, colour, intensity));
@@ -211,15 +244,17 @@ fn bay_materials(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, 
 fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) {
     for side in [-1.0_f32, 1.0] {
         let x = side * 1.2;
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
-            [x, HALL_HEIGHT - 0.05, z],
-            [0.0, -1.0, 0.0],
-            [0.9, 0.95, 1.0],
-            5.0,
-            6.5,
-            1.22,
-            1.48,
-        )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(spot_light(
+                [x, HALL_HEIGHT - 0.05, z],
+                [0.0, -1.0, 0.0],
+                [0.9, 0.95, 1.0],
+                5.0,
+                6.5,
+                1.22,
+                1.48,
+            )));
         place(
             renderer,
             meshes.panel,
@@ -228,12 +263,14 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
             0.7,
         );
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            [side * (HALL_HALF_WIDTH - 0.15), 1.6, z],
-            [1.0, 0.65, 0.3],
-            2.2,
-            4.5,
-        )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [side * (HALL_HALF_WIDTH - 0.15), 1.6, z],
+                [1.0, 0.65, 0.3],
+                2.2,
+                4.5,
+            )));
         let sconce = insert_box_mesh(renderer, Vec3::new(0.06, 0.12, 0.25));
         place(
             renderer,
@@ -248,47 +285,59 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
 /// Bay 2 — a bright flare light (ghost lens flare) plus a fog volume lit by a
 /// god-ray overhead light, so the corridor fills with visible volumetric shafts.
 fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) {
-    renderer.scene_mut().insert_actor(helio::SceneActor::light(GpuLight {
-        position_range: [0.0, 1.6, z, 9.0],
-        direction_outer: [0.0, -1.0, 0.0, 0.0],
-        color_intensity: [1.0, 0.85, 0.5, 12.0],
-        shadow_index: u32::MAX,
-        light_type: LightType::Point as u32,
-        inner_angle: 0.0,
-        _pad: 0,
-        flare_enabled: 1,
-        flare_type: 1,
-        flare_intensity: 0.3,
-        flare_scale: 1.0,
-        flare_tint_r: 1.0,
-        flare_tint_g: 0.7,
-        flare_tint_b: 0.35,
-        ..Default::default()
-    }));
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::light(GpuLight {
+            position_range: [0.0, 1.6, z, 9.0],
+            direction_outer: [0.0, -1.0, 0.0, 0.0],
+            color_intensity: [1.0, 0.85, 0.5, 12.0],
+            shadow_index: u32::MAX,
+            light_type: LightType::Point as u32,
+            inner_angle: 0.0,
+            _pad: 0,
+            flare_enabled: 1,
+            flare_type: 1,
+            flare_intensity: 0.3,
+            flare_scale: 1.0,
+            flare_tint_r: 1.0,
+            flare_tint_g: 0.7,
+            flare_tint_b: 0.35,
+            ..Default::default()
+        }));
 
     let mut shaft = point_light([0.0, HALL_HEIGHT - 0.15, z], [0.7, 0.8, 1.0], 7.0, 9.0);
     shaft.god_rays_enabled = 1;
-    renderer.scene_mut().insert_actor(helio::SceneActor::light(shaft));
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::light(shaft));
 
-    renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-        PostProcessVolumeDescriptor {
-            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-            priority: 10.0,
-            blend_radius: 1.5,
-            blend_weight: 1.0,
-            unbound: false,
-            settings: PostProcessSettings {
-                fog_enabled: true,
-                fog_density: 0.08,
-                fog_color: [0.7, 0.76, 0.92],
-                fog_scattering_anisotropy: 0.6,
-                ..PostProcessSettings::default()
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::post_process_volume(
+            PostProcessVolumeDescriptor {
+                bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
+                bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
+                priority: 10.0,
+                blend_radius: 1.5,
+                blend_weight: 1.0,
+                unbound: false,
+                settings: PostProcessSettings {
+                    fog_enabled: true,
+                    fog_density: 0.08,
+                    fog_color: [0.7, 0.76, 0.92],
+                    fog_scattering_anisotropy: 0.6,
+                    ..PostProcessSettings::default()
+                },
             },
-        },
-    ));
+        ));
 
-    place(renderer, meshes.cube, mats.emissive_warm, Vec3::new(0.0, 1.6, z), 0.4);
+    place(
+        renderer,
+        meshes.cube,
+        mats.emissive_warm,
+        Vec3::new(0.0, 1.6, z),
+        0.4,
+    );
 }
 
 /// Bay 3 — water simulation: a raised pool with a sphere that bobs in and out
@@ -297,50 +346,66 @@ fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim
     let pool_centre = Vec3::new(-1.5, 0.45, z);
     let pool_half = Vec3::new(0.95, 0.45, 3.4);
     let pool_mesh = insert_box_mesh(renderer, pool_half);
-    place(renderer, pool_mesh, mats.dark_trim, pool_centre, pool_half.length());
+    place(
+        renderer,
+        pool_mesh,
+        mats.dark_trim,
+        pool_centre,
+        pool_half.length(),
+    );
 
     // The water surface sits exactly on the pedestal top (y = 0.9).
-    renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(
-        helio::WaterVolumeDescriptor {
-            bounds_min: [pool_centre.x - pool_half.x + 0.05, 0.9, pool_centre.z - pool_half.z + 0.05],
-            bounds_max: [pool_centre.x + pool_half.x - 0.05, 1.8, pool_centre.z + pool_half.z - 0.05],
-            surface_height: 0.0,
-            wave_amplitude: 0.15,
-            wave_frequency: 0.5,
-            wave_speed: 6.0,
-            wave_direction: [0.6, 0.3],
-            wave_steepness: 0.5,
-            water_color: [0.03, 0.25, 0.4],
-            extinction: [0.2, 0.08, 0.05],
-            foam_threshold: 0.5,
-            foam_amount: 0.6,
-            reflection_strength: 0.9,
-            refraction_strength: 1.0,
-            fresnel_power: 5.0,
-            caustics_enabled: true,
-            caustics_intensity: 1.5,
-            caustics_scale: 6.0,
-            caustics_speed: 0.0,
-            fog_density: 0.0,
-            god_rays_intensity: 0.3,
-            ssr_enabled: true,
-            ssr_steps: 32,
-            ssr_step_size: 0.05,
-            ssr_thickness: 0.02,
-            ior: 1.333,
-            fresnel_min: 0.1,
-            density: 0.03,
-            shadow_rim: 1.0,
-            shadow_hitbox: 0.0,
-            shadow_ao: 1.0,
-            sun_direction: [0.0, 1.0, 0.0],
-            wave_spring: 1.2,
-            wave_damping: 0.98,
-            wind_direction: [0.6, 0.4],
-            wind_strength: 1.5,
-            wave_scale: 0.4,
-        },
-    ));
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::water_volume(
+            helio::WaterVolumeDescriptor {
+                bounds_min: [
+                    pool_centre.x - pool_half.x + 0.05,
+                    0.9,
+                    pool_centre.z - pool_half.z + 0.05,
+                ],
+                bounds_max: [
+                    pool_centre.x + pool_half.x - 0.05,
+                    1.8,
+                    pool_centre.z + pool_half.z - 0.05,
+                ],
+                surface_height: 0.0,
+                wave_amplitude: 0.15,
+                wave_frequency: 0.5,
+                wave_speed: 6.0,
+                wave_direction: [0.6, 0.3],
+                wave_steepness: 0.5,
+                water_color: [0.03, 0.25, 0.4],
+                extinction: [0.2, 0.08, 0.05],
+                foam_threshold: 0.5,
+                foam_amount: 0.6,
+                reflection_strength: 0.9,
+                refraction_strength: 1.0,
+                fresnel_power: 5.0,
+                caustics_enabled: true,
+                caustics_intensity: 1.5,
+                caustics_scale: 6.0,
+                caustics_speed: 0.0,
+                fog_density: 0.0,
+                god_rays_intensity: 0.3,
+                ssr_enabled: true,
+                ssr_steps: 32,
+                ssr_step_size: 0.05,
+                ssr_thickness: 0.02,
+                ior: 1.333,
+                fresnel_min: 0.1,
+                density: 0.03,
+                shadow_rim: 1.0,
+                shadow_hitbox: 0.0,
+                shadow_ao: 1.0,
+                sun_direction: [0.0, 1.0, 0.0],
+                wave_spring: 1.2,
+                wave_damping: 0.98,
+                wind_direction: [0.6, 0.4],
+                wind_strength: 1.5,
+                wave_scale: 0.4,
+            },
+        ));
     if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
         sim.set_wind([0.6, 0.4], 1.5);
         sim.set_wave_scale(0.4);
@@ -361,7 +426,13 @@ fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim
 /// Bay 4 — GPU particles: a corona ember fountain, with the emitter re-uploaded
 /// every frame so the source drifts on a slow orbit.
 fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
-    place(renderer, meshes.plinth, mats.emissive_warm, Vec3::new(0.0, 0.05, z), 0.8);
+    place(
+        renderer,
+        meshes.plinth,
+        mats.emissive_warm,
+        Vec3::new(0.0, 0.05, z),
+        0.8,
+    );
 
     let emitter = CoronaEmitterDescriptor {
         max_particles: 65_536,
@@ -388,12 +459,14 @@ fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, ani
         speed: 0.7,
     });
 
-    renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-        [0.0, 2.4, z],
-        [1.0, 0.5, 0.2],
-        3.0,
-        5.0,
-    )));
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::light(point_light(
+            [0.0, 2.4, z],
+            [1.0, 0.5, 0.2],
+            3.0,
+            5.0,
+        )));
 }
 
 /// Bay 5 — instancing: a crate stack and tile floor of identical objects that
@@ -487,9 +560,13 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
     }
     let local_centre = (bb_min + bb_max) * 0.5;
 
-    let fallback = renderer
-        .scene_mut()
-        .insert_material(make_material([0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
+    let fallback = renderer.scene_mut().insert_material(make_material(
+        [0.5, 0.5, 0.5, 1.0],
+        0.8,
+        0.0,
+        [0.0; 3],
+        0.0,
+    ));
     let material = section
         .material_index
         .and_then(|i| mat_ids.get(i))
@@ -510,11 +587,26 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
 
 /// Bay 6 — emissive/HDR colour targets plus a grid of hue-cycling lights, a
 /// condensed take on the HDR/colour-grading and light-benchmark demos.
-fn bay_emissive_colour(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+fn bay_emissive_colour(
+    renderer: &mut Renderer,
+    z: f32,
+    meshes: &Meshes,
+    mats: &Mats,
+    anim: &mut Animated,
+) {
     let targets = [
-        (make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0), -1.4),
-        (make_material([0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0), 0.0),
-        (make_material([0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0), 1.4),
+        (
+            make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0),
+            -1.4,
+        ),
+        (
+            make_material([0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0),
+            0.0,
+        ),
+        (
+            make_material([0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0),
+            1.4,
+        ),
     ];
     for (gpu, x) in targets {
         let mat = renderer.scene_mut().insert_material(gpu);
@@ -522,36 +614,77 @@ fn bay_emissive_colour(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &
     }
 
     for i in 0..6 {
-        let pos = Vec3::new(-1.7 + (i % 3) as f32 * 1.7, 2.2, z + ((i / 3) as f32 - 0.5) * 5.0);
+        let pos = Vec3::new(
+            -1.7 + (i % 3) as f32 * 1.7,
+            2.2,
+            z + ((i / 3) as f32 - 0.5) * 5.0,
+        );
         let colour = hsv_to_rgb(i as f32 / 6.0, 0.8, 1.0);
         let base = 3.0;
         let light = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(pos.into(), colour, base, 6.0)))
+            .insert_actor(helio::SceneActor::light(point_light(
+                pos.into(),
+                colour,
+                base,
+                6.0,
+            )))
             .as_light()
             .unwrap();
         anim.colour_lights.push((light, pos, colour, base));
     }
-    place(renderer, meshes.plinth, mats.emissive_white, Vec3::new(0.0, 0.05, z), 0.8);
+    place(
+        renderer,
+        meshes.plinth,
+        mats.emissive_white,
+        Vec3::new(0.0, 0.05, z),
+        0.8,
+    );
 }
 
 /// Bay 7 — a voxel sculpture rendered as real triangles through `VoxelMeshPass`.
 fn bay_voxel(renderer: &mut Renderer, z: f32) {
     const VOXEL_SIZE: f32 = 0.22;
 
-    let _ = renderer.scene_mut().insert_voxel_volume(VoxelVolumeDescriptor {
-        voxel_size: VOXEL_SIZE,
-        root_extent: VOXEL_TERRAIN_GRID_DIM as f32 * VOXEL_SIZE,
-        local_to_world: Mat4::from_translation(Vec3::new(0.0, 0.0, z)),
-        movability: Some(helio::Movability::Stationary),
-        mode: Some(VoxelMode::Auto),
-        material_palette: vec![
-            GpuVoxelMaterial { color: [0.0, 0.0, 0.0], roughness: 1.0, metalness: 0.0, emissive: 0.0, _pad: [0; 2] },
-            GpuVoxelMaterial { color: [0.85, 0.7, 0.25], roughness: 0.5, metalness: 0.6, emissive: 0.0, _pad: [0; 2] },
-            GpuVoxelMaterial { color: [0.25, 0.55, 0.85], roughness: 0.7, metalness: 0.2, emissive: 0.0, _pad: [0; 2] },
-            GpuVoxelMaterial { color: [0.85, 0.3, 0.3], roughness: 0.6, metalness: 0.1, emissive: 0.2, _pad: [0; 2] },
-        ],
-    });
+    let _ = renderer
+        .scene_mut()
+        .insert_voxel_volume(VoxelVolumeDescriptor {
+            voxel_size: VOXEL_SIZE,
+            root_extent: VOXEL_TERRAIN_GRID_DIM as f32 * VOXEL_SIZE,
+            local_to_world: Mat4::from_translation(Vec3::new(0.0, 0.0, z)),
+            movability: Some(helio::Movability::Stationary),
+            mode: Some(VoxelMode::Auto),
+            material_palette: vec![
+                GpuVoxelMaterial {
+                    color: [0.0, 0.0, 0.0],
+                    roughness: 1.0,
+                    metalness: 0.0,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                },
+                GpuVoxelMaterial {
+                    color: [0.85, 0.7, 0.25],
+                    roughness: 0.5,
+                    metalness: 0.6,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                },
+                GpuVoxelMaterial {
+                    color: [0.25, 0.55, 0.85],
+                    roughness: 0.7,
+                    metalness: 0.2,
+                    emissive: 0.0,
+                    _pad: [0; 2],
+                },
+                GpuVoxelMaterial {
+                    color: [0.85, 0.3, 0.3],
+                    roughness: 0.6,
+                    metalness: 0.1,
+                    emissive: 0.2,
+                    _pad: [0; 2],
+                },
+            ],
+        });
 
     // Sculpt an abstract piece around the volume's local origin. Grid coordinates:
     // local = (grid - GRID_DIM/2) * voxel_size, so the origin sits at grid centre and
@@ -578,42 +711,50 @@ fn bay_voxel(renderer: &mut Renderer, z: f32) {
 /// Bay 8 — post-process colour grading: a warm vignette + saturation + bloom
 /// volume over the whole bay, anchored on a blindingly bright emissive sun.
 fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
-    renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-        PostProcessVolumeDescriptor {
-            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-            priority: 10.0,
-            blend_radius: 2.0,
-            blend_weight: 1.0,
-            unbound: false,
-            settings: PostProcessSettings {
-                vignette_intensity: 0.5,
-                vignette_smoothness: 2.0,
-                vignette_roundness: 1.2,
-                vignette_color: [1.0, 0.6, 0.2],
-                vignette_enabled: true,
-                color_saturation: [1.2, 1.05, 0.85],
-                color_contrast: [1.05, 1.05, 1.05],
-                bloom_intensity: 0.7,
-                bloom_threshold: 1.2,
-                bloom_knee: 0.5,
-                bloom_enabled: true,
-                bloom_tint: [1.0, 0.9, 0.7],
-                ..PostProcessSettings::default()
-            },
-        },
-    ));
-
-    let sun_mat = renderer
+    renderer
         .scene_mut()
-        .insert_material(make_material([1.0, 0.9, 0.7, 1.0], 0.2, 0.0, [50.0, 45.0, 35.0], 50.0));
+        .insert_actor(helio::SceneActor::post_process_volume(
+            PostProcessVolumeDescriptor {
+                bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
+                bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
+                priority: 10.0,
+                blend_radius: 2.0,
+                blend_weight: 1.0,
+                unbound: false,
+                settings: PostProcessSettings {
+                    vignette_intensity: 0.5,
+                    vignette_smoothness: 2.0,
+                    vignette_roundness: 1.2,
+                    vignette_color: [1.0, 0.6, 0.2],
+                    vignette_enabled: true,
+                    color_saturation: [1.2, 1.05, 0.85],
+                    color_contrast: [1.05, 1.05, 1.05],
+                    bloom_intensity: 0.7,
+                    bloom_threshold: 1.2,
+                    bloom_knee: 0.5,
+                    bloom_enabled: true,
+                    bloom_tint: [1.0, 0.9, 0.7],
+                    ..PostProcessSettings::default()
+                },
+            },
+        ));
+
+    let sun_mat = renderer.scene_mut().insert_material(make_material(
+        [1.0, 0.9, 0.7, 1.0],
+        0.2,
+        0.0,
+        [50.0, 45.0, 35.0],
+        50.0,
+    ));
     place(renderer, meshes.cube, sun_mat, Vec3::new(0.0, 1.4, z), 0.6);
-    renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-        [0.0, 1.4, z],
-        [1.0, 0.9, 0.7],
-        12.0,
-        8.0,
-    )));
+    renderer
+        .scene_mut()
+        .insert_actor(helio::SceneActor::light(point_light(
+            [0.0, 1.4, z],
+            [1.0, 0.9, 0.7],
+            12.0,
+            8.0,
+        )));
 }
 
 // ── Build ─────────────────────────────────────────────────────────────────────
@@ -663,8 +804,20 @@ pub fn build(renderer: &mut Renderer) -> Animated {
 
     for bay in 0..BAY_COUNT {
         let z = bay_centre_z(bay);
-        place(renderer, floor_mesh, concrete, Vec3::new(0.0, -0.1, z), floor_half.length());
-        place(renderer, floor_mesh, dark_trim, Vec3::new(0.0, HALL_HEIGHT + 0.1, z), floor_half.length());
+        place(
+            renderer,
+            floor_mesh,
+            concrete,
+            Vec3::new(0.0, -0.1, z),
+            floor_half.length(),
+        );
+        place(
+            renderer,
+            floor_mesh,
+            dark_trim,
+            Vec3::new(0.0, HALL_HEIGHT + 0.1, z),
+            floor_half.length(),
+        );
         for side in [-1.0_f32, 1.0] {
             place(
                 renderer,
@@ -684,7 +837,11 @@ pub fn build(renderer: &mut Renderer) -> Animated {
         renderer,
         end_mesh,
         mirror,
-        Vec3::new(0.0, HALL_HEIGHT * 0.5, bay_centre_z(BAY_COUNT - 1) - BAY_LENGTH * 0.5),
+        Vec3::new(
+            0.0,
+            HALL_HEIGHT * 0.5,
+            bay_centre_z(BAY_COUNT - 1) - BAY_LENGTH * 0.5,
+        ),
         end_half.length(),
     );
 
@@ -707,13 +864,23 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // ── Controller cubes ─────────────────────────────────────────────────────
     // Small bright cubes `main.rs` reparents to the OpenXR grip poses each frame.
     let hand_mesh = insert_box_mesh(renderer, Vec3::new(0.05, 0.05, 0.05));
-    let hand_mat = renderer
-        .scene_mut()
-        .insert_material(make_material([0.05, 0.05, 0.06, 1.0], 0.4, 0.0, [0.2, 1.0, 0.9], 8.0));
+    let hand_mat = renderer.scene_mut().insert_material(make_material(
+        [0.05, 0.05, 0.06, 1.0],
+        0.4,
+        0.0,
+        [0.2, 1.0, 0.9],
+        8.0,
+    ));
     let mut hand_cubes = [ObjectId::from_raw(0, 0); 2];
     for (i, side) in [1.0_f32, -1.0].into_iter().enumerate() {
         let start = Vec3::new(side * 0.2, 1.4, -0.4);
-        if let Ok(id) = insert_object(renderer, hand_mesh, hand_mat, Mat4::from_translation(start), 0.15) {
+        if let Ok(id) = insert_object(
+            renderer,
+            hand_mesh,
+            hand_mat,
+            Mat4::from_translation(start),
+            0.15,
+        ) {
             hand_cubes[i] = id;
         }
     }

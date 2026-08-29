@@ -12,10 +12,7 @@ use crate::vg::{
 use super::super::errors::{invalid, Result, SceneError};
 use super::super::types::VirtualMeshRecord;
 
-fn referenced_bounds(
-    vertices: &[crate::mesh::PackedVertex],
-    indices: &[u32],
-) -> Option<[f32; 4]> {
+fn referenced_bounds(vertices: &[crate::mesh::PackedVertex], indices: &[u32]) -> Option<[f32; 4]> {
     let mut min = glam::Vec3::splat(f32::INFINITY);
     let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
 
@@ -174,13 +171,7 @@ mod tests {
     use crate::mesh::PackedVertex;
 
     fn vertex(position: [f32; 3]) -> PackedVertex {
-        PackedVertex::from_components(
-            position,
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            1.0,
-        )
+        PackedVertex::from_components(position, [0.0, 1.0, 0.0], [0.0, 0.0], [1.0, 0.0, 0.0], 1.0)
     }
 
     #[test]

@@ -103,15 +103,14 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }))
-            .expect("Failed to create device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Main Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
+        .expect("Failed to create device");
 
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -205,9 +204,13 @@ impl ApplicationHandler for App {
         let materials: Vec<_> = palette
             .iter()
             .map(|&color| {
-                renderer
-                    .scene_mut()
-                    .insert_material(make_material(color, 0.5, 0.1, [0.0, 0.0, 0.0], 0.0))
+                renderer.scene_mut().insert_material(make_material(
+                    color,
+                    0.5,
+                    0.1,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ))
             })
             .collect();
 

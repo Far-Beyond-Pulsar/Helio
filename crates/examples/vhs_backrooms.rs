@@ -704,10 +704,13 @@ fn xr_features() -> wgpu::Features {
 fn try_init_xr() -> Option<XrBundle> {
     let result = (|| -> helio_xr::Result<XrBundle> {
         let instance = helio_xr::XrInstance::create("helio_vhs_backrooms_demo")?;
-        let wgpu_instance =
-            helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
-        let (adapter, device, queue) =
-            helio_xr::create_wgpu_device(&instance.instance, instance.system, &wgpu_instance, xr_features())?;
+        let wgpu_instance = helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
+        let (adapter, device, queue) = helio_xr::create_wgpu_device(
+            &instance.instance,
+            instance.system,
+            &wgpu_instance,
+            xr_features(),
+        )?;
         // Actions must be declared and their bindings suggested BEFORE the session is
         // created; the runtime resolves them at session creation and will not accept new
         // suggestions afterwards.
@@ -1282,7 +1285,15 @@ impl ApplicationHandler for App {
                 let config = RendererConfig::new(size.width, size.height, format)
                     .with_shadow_quality(helio::ShadowQuality::Ultra)
                     .with_render_scale(1.0);
-                (device, queue, Some(surface), format, alpha_mode, config, None)
+                (
+                    device,
+                    queue,
+                    Some(surface),
+                    format,
+                    alpha_mode,
+                    config,
+                    None,
+                )
             }
         };
 
@@ -1431,7 +1442,10 @@ impl ApplicationHandler for App {
             player_position: glam::Vec3::ZERO,
             player_yaw: 0.0,
         };
-        state.configure_surface(state.window.inner_size().width, state.window.inner_size().height);
+        state.configure_surface(
+            state.window.inner_size().width,
+            state.window.inner_size().height,
+        );
         self.state = Some(state);
     }
 
@@ -1538,9 +1552,7 @@ impl ApplicationHandler for App {
                         let mirror = match &state.surface {
                             Some(surface) => match surface.get_current_texture() {
                                 wgpu::CurrentSurfaceTexture::Success(texture)
-                                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                                    Some(texture)
-                                }
+                                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
                                 _ => None,
                             },
                             None => None,

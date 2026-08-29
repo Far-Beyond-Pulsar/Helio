@@ -32,8 +32,8 @@ use helio::{
     ScenePicker, VirtualMeshUpload, VirtualObjectDescriptor,
 };
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
-use helio_pass_tsr::TsrQuality;
 use helio_default_graphs::build_default_graph;
+use helio_pass_tsr::TsrQuality;
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
 };

@@ -498,7 +498,10 @@ fn build_mip_uniforms(
         });
         queue.write_buffer(&ub, 0, bytemuck::bytes_of(&u));
         uniforms.push(ub);
-        dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
+        dispatch_groups.push((
+            dst_w.div_ceil(WORKGROUP_SIZE),
+            dst_h.div_ceil(WORKGROUP_SIZE),
+        ));
     }
 
     (uniforms, dispatch_groups)
@@ -514,7 +517,13 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["hiz", "hiz_min", "hiz_sampler", "static_hiz", "static_hiz_sampler"]
+        &[
+            "hiz",
+            "hiz_min",
+            "hiz_sampler",
+            "static_hiz",
+            "static_hiz_sampler",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -577,7 +586,9 @@ impl RenderPass for HiZBuildPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── Lazy init: build mip views and bind groups from graph-owned texture ──
         if self.mip_views.is_empty() {
-            let hiz_texture = ctx.resource_pool.get_texture("hiz")
+            let hiz_texture = ctx
+                .resource_pool
+                .get_texture("hiz")
                 .expect("HiZ texture 'hiz' must be declared as a graph resource");
             let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 
@@ -625,7 +636,9 @@ impl RenderPass for HiZBuildPass {
 
         // ── Lazy init: min pyramid views + bind groups ───────────────────────
         if self.min_mip_views.is_empty() {
-            let tex = ctx.resource_pool.get_texture("hiz_min")
+            let tex = ctx
+                .resource_pool
+                .get_texture("hiz_min")
                 .expect("HiZ texture 'hiz_min' must be declared as a graph resource");
             let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 

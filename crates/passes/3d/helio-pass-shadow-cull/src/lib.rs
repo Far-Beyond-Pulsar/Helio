@@ -46,17 +46,17 @@ const WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
-    instance_count:    u32,
+    instance_count: u32,
     max_draws_per_face: u32,
-    _pad0:             u32,
-    _pad1:             u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowCullPass {
     pipeline: wgpu::ComputePipeline,
-    bgl:      wgpu::BindGroupLayout,
+    bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
 
     /// Per-face compacted indirect draw commands.
@@ -70,7 +70,7 @@ pub struct ShadowCullPass {
     face_dirty_buf: Arc<wgpu::Buffer>,
 
     /// Lazy bind group, rebuilt when scene buffer pointers change.
-    bind_group:     Option<wgpu::BindGroup>,
+    bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(usize, usize, usize, usize, usize)>,
 }
 
@@ -79,23 +79,18 @@ impl ShadowCullPass {
     ///
     /// `face_dirty_buf` is shared with `ShadowDirtyPass` (and `ShadowPass`) —
     /// this pass only *reads* it to skip clean faces.
-    pub fn new(
-        device: &wgpu::Device,
-        face_dirty_buf: Arc<wgpu::Buffer>,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, face_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ShadowCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shadow_cull.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_cull.wgsl").into()),
         });
 
         // ── Uniform buffer ────────────────────────────────────────────────────
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("ShadowCull/Uniforms"),
-            size:               std::mem::size_of::<CullUniforms>() as u64,
-            usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("ShadowCull/Uniforms"),
+            size: std::mem::size_of::<CullUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -112,7 +107,9 @@ impl ShadowCullPass {
         let face_counts_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowCull/FaceCounts"),
             size: (MAX_FACES as u64) * 4u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -213,18 +210,18 @@ impl ShadowCullPass {
 
         // ── Pipeline ──────────────────────────────────────────────────────────
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:              Some("ShadowCull PL"),
+            label: Some("ShadowCull PL"),
             bind_group_layouts: &[Some(&bgl)],
-            immediate_size:     0,
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label:               Some("ShadowCull Pipeline"),
-            layout:              Some(&pl),
-            module:              &shader,
-            entry_point:         Some("main"),
+            label: Some("ShadowCull Pipeline"),
+            layout: Some(&pl),
+            module: &shader,
+            entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache:               None,
+            cache: None,
         });
 
         Self {
@@ -234,7 +231,7 @@ impl ShadowCullPass {
             face_indirect_buf,
             face_counts_buf,
             face_dirty_buf,
-            bind_group:     None,
+            bind_group: None,
             bind_group_key: None,
         }
     }
@@ -256,18 +253,19 @@ impl RenderPass for ShadowCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = CullUniforms {
-            instance_count:    ctx.scene.shadow_movable_draw_count,
+            instance_count: ctx.scene.shadow_movable_draw_count,
             max_draws_per_face: MAX_DRAWS_PER_FACE,
-            _pad0:             0,
-            _pad1:             0,
+            _pad0: 0,
+            _pad1: 0,
         };
-        ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        ctx.queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let movable_count = ctx.scene.shadow_movable_draw_count;
-        let face_count    = ctx.scene.shadow_count;
+        let face_count = ctx.scene.shadow_count;
 
         if face_count == 0 || movable_count == 0 {
             return Ok(());
@@ -281,11 +279,11 @@ impl RenderPass for ShadowCullPass {
         );
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
-        let sm_ptr  = ctx.scene.shadow_matrices       as *const _ as usize;
-        let inst_ptr = ctx.scene.instances             as *const _ as usize;
-        let src_ptr  = ctx.scene.shadow_movable_indirect as *const _ as usize;
-        let fd_ptr   = &*self.face_dirty_buf           as *const _ as usize;
-        let cs_ptr   = ctx.scene.coordinate_spaces      as *const _ as usize;
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances as *const _ as usize;
+        let src_ptr = ctx.scene.shadow_movable_indirect as *const _ as usize;
+        let fd_ptr = &*self.face_dirty_buf as *const _ as usize;
+        let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
 
         if self.bind_group_key != Some(key) {
@@ -333,10 +331,11 @@ impl RenderPass for ShadowCullPass {
         let bg = self.bind_group.as_ref().unwrap();
 
         let wg = movable_count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label:            Some("ShadowCull"),
-            timestamp_writes: None,
-        });
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ShadowCull"),
+                timestamp_writes: None,
+            });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(wg, 1, 1);

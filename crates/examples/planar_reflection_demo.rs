@@ -16,8 +16,9 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, ObjectDescriptor,
-    Renderer, RendererConfig, Scene, SceneActor, SkyActor, VolumetricClouds,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, ObjectDescriptor, Renderer, RendererConfig, Scene, SceneActor, SkyActor,
+    VolumetricClouds,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{
@@ -139,9 +140,9 @@ impl ApplicationHandler for App {
 
         // ── Materials ──────────────────────────────────────────────────────
         let floor_mat = scene.insert_material(make_material(
-            [0.97, 0.97, 0.97, 1.0],  // silver-tinted mirror
-            0.001,                      // near-zero roughness = mirror-sharp
-            1.0,                        // metallic mirror
+            [0.97, 0.97, 0.97, 1.0], // silver-tinted mirror
+            0.001,                   // near-zero roughness = mirror-sharp
+            1.0,                     // metallic mirror
             [0.0; 3],
             0.0,
         ));

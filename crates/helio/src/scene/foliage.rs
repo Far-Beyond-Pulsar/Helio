@@ -167,8 +167,7 @@ impl FoliageTypeDescriptor {
             // Angles in, cosines out. `cos` is decreasing over [0, π], so the band
             // inverts: the *max* angle produces the *min* accepted cosine.
             slope_range: {
-                let angles =
-                    finite_pair(self.slope_range, [0.0, std::f32::consts::FRAC_PI_4]);
+                let angles = finite_pair(self.slope_range, [0.0, std::f32::consts::FRAC_PI_4]);
                 let low = angles[0].clamp(0.0, std::f32::consts::PI);
                 let high = angles[1].clamp(0.0, std::f32::consts::PI);
                 [high.cos(), low.cos()]
@@ -298,9 +297,7 @@ impl Scene {
 
     /// Register a foliage type. Advances the publication generation.
     pub fn add_foliage_type(&mut self, descriptor: FoliageTypeDescriptor) -> FoliageTypeId {
-        let (id, _) = self
-            .foliage_types
-            .insert(FoliageTypeRecord { descriptor });
+        let (id, _) = self.foliage_types.insert(FoliageTypeRecord { descriptor });
         self.foliage_types_dirty = true;
         id
     }

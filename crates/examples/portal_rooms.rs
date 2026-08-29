@@ -207,15 +207,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
 
         // Two shared unit meshes (half-extent/radius 1) — every side room's
@@ -223,17 +243,33 @@ impl ApplicationHandler for App {
         // one of these two, scaled/positioned per instance via its own
         // transform (see `insert_room_shell`/`furnish_room` below). The hub
         // itself has no geometry — see the module doc.
-        let unit_mesh = renderer.scene_mut().insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))).as_mesh().unwrap();
-        let unit_sphere = renderer.scene_mut().insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0))).as_mesh().unwrap();
+        let unit_mesh = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])))
+            .as_mesh()
+            .unwrap();
+        let unit_sphere = renderer
+            .scene_mut()
+            .insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
+            .as_mesh()
+            .unwrap();
 
         // Shared furniture materials, reused across every room so the six
         // spaces read as built from the same "kit" — only each room's own
         // wall/accent colors (below) tell them apart.
         let wood_mat = renderer.scene_mut().insert_material(make_material(
-            [0.32, 0.2, 0.11, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.32, 0.2, 0.11, 1.0],
+            0.75,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let metal_mat = renderer.scene_mut().insert_material(make_material(
-            [0.5, 0.51, 0.54, 1.0], 0.4, 0.6, [0.0, 0.0, 0.0], 0.0,
+            [0.5, 0.51, 0.54, 1.0],
+            0.4,
+            0.6,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
 
         // ── The hub: one full-face portal per axis direction, no wall, no
@@ -247,12 +283,60 @@ impl ApplicationHandler for App {
             accent: [f32; 3],
         }
         let faces: [(Vec3, Vec3, RoomTheme); 6] = [
-            (Vec3::X, Vec3::Y, RoomTheme { name: "Ember", wall_color: [0.55, 0.12, 0.08, 1.0], accent: [1.0, 0.35, 0.1] }),
-            (Vec3::NEG_X, Vec3::Y, RoomTheme { name: "Verdant", wall_color: [0.08, 0.4, 0.14, 1.0], accent: [0.25, 1.0, 0.35] }),
-            (Vec3::Y, Vec3::Z, RoomTheme { name: "Solar", wall_color: [0.55, 0.45, 0.05, 1.0], accent: [1.0, 0.85, 0.15] }),
-            (Vec3::NEG_Y, Vec3::Z, RoomTheme { name: "Abyssal", wall_color: [0.05, 0.1, 0.4, 1.0], accent: [0.2, 0.4, 1.0] }),
-            (Vec3::Z, Vec3::Y, RoomTheme { name: "Orchid", wall_color: [0.42, 0.08, 0.48, 1.0], accent: [0.9, 0.25, 1.0] }),
-            (Vec3::NEG_Z, Vec3::Y, RoomTheme { name: "Glacier", wall_color: [0.08, 0.4, 0.45, 1.0], accent: [0.2, 0.95, 1.0] }),
+            (
+                Vec3::X,
+                Vec3::Y,
+                RoomTheme {
+                    name: "Ember",
+                    wall_color: [0.55, 0.12, 0.08, 1.0],
+                    accent: [1.0, 0.35, 0.1],
+                },
+            ),
+            (
+                Vec3::NEG_X,
+                Vec3::Y,
+                RoomTheme {
+                    name: "Verdant",
+                    wall_color: [0.08, 0.4, 0.14, 1.0],
+                    accent: [0.25, 1.0, 0.35],
+                },
+            ),
+            (
+                Vec3::Y,
+                Vec3::Z,
+                RoomTheme {
+                    name: "Solar",
+                    wall_color: [0.55, 0.45, 0.05, 1.0],
+                    accent: [1.0, 0.85, 0.15],
+                },
+            ),
+            (
+                Vec3::NEG_Y,
+                Vec3::Z,
+                RoomTheme {
+                    name: "Abyssal",
+                    wall_color: [0.05, 0.1, 0.4, 1.0],
+                    accent: [0.2, 0.4, 1.0],
+                },
+            ),
+            (
+                Vec3::Z,
+                Vec3::Y,
+                RoomTheme {
+                    name: "Orchid",
+                    wall_color: [0.42, 0.08, 0.48, 1.0],
+                    accent: [0.9, 0.25, 1.0],
+                },
+            ),
+            (
+                Vec3::NEG_Z,
+                Vec3::Y,
+                RoomTheme {
+                    name: "Glacier",
+                    wall_color: [0.08, 0.4, 0.45, 1.0],
+                    accent: [0.2, 0.95, 1.0],
+                },
+            ),
         ];
 
         // Every real room shares one fixed orientation, regardless of which
@@ -280,28 +364,71 @@ impl ApplicationHandler for App {
             // *portal* (`a`, below) needs to know which cube face it's on.
             let room_center = Vec3::new(ROOM_LINE_START_X + i as f32 * ROOM_LINE_SPACING, 0.0, 0.0);
             let room_wall_mat = renderer.scene_mut().insert_material(make_material(
-                theme.wall_color, 0.85, 0.0, [0.0, 0.0, 0.0], 0.0,
+                theme.wall_color,
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
             ));
             let room_accent_mat = renderer.scene_mut().insert_material(make_material(
-                [theme.accent[0], theme.accent[1], theme.accent[2], 1.0], 0.3, 0.0, theme.accent, 3.0,
+                [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
+                0.3,
+                0.0,
+                theme.accent,
+                3.0,
             ));
             // Leave the entrance wall (`-ROOM_FORWARD`) open — that's the
             // room's real entrance, the same real surface the portal's far
             // pose sits at, so there's real geometry (floor, ceiling, far
             // wall, side walls) waiting right where the doorway leads.
-            insert_room_shell(&mut renderer, unit_mesh, room_wall_mat, room_center, ROOM_HALF_SIZE, WALL_T, -ROOM_FORWARD);
+            insert_room_shell(
+                &mut renderer,
+                unit_mesh,
+                room_wall_mat,
+                room_center,
+                ROOM_HALF_SIZE,
+                WALL_T,
+                -ROOM_FORWARD,
+            );
             // Hand-furnish this room so each destination reads as an actual
             // place, not just a colored box — see `furnish_room` for the
             // per-theme layouts — plus a matching light so the room isn't
             // lit solely by the hub's distant, unrelated lights.
-            let frame = RoomFrame { center: room_center, right: ROOM_RIGHT, up: ROOM_UP, normal: -ROOM_FORWARD, half_size: ROOM_HALF_SIZE };
-            furnish_room(&mut renderer, unit_mesh, unit_sphere, wood_mat, metal_mat, room_wall_mat, room_accent_mat, theme.name, &frame);
-            light_ids.push(
-                renderer.scene_mut()
-                    .insert_actor(SceneActor::light(point_light(room_center.into(), theme.accent, 3.5, ROOM_HALF_SIZE * 1.8)))
-                    .as_light().unwrap(),
+            let frame = RoomFrame {
+                center: room_center,
+                right: ROOM_RIGHT,
+                up: ROOM_UP,
+                normal: -ROOM_FORWARD,
+                half_size: ROOM_HALF_SIZE,
+            };
+            furnish_room(
+                &mut renderer,
+                unit_mesh,
+                unit_sphere,
+                wood_mat,
+                metal_mat,
+                room_wall_mat,
+                room_accent_mat,
+                theme.name,
+                &frame,
             );
-            log::info!("[portal_rooms] {} room centered at {:?}", theme.name, room_center);
+            light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(SceneActor::light(point_light(
+                        room_center.into(),
+                        theme.accent,
+                        3.5,
+                        ROOM_HALF_SIZE * 1.8,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
+            log::info!(
+                "[portal_rooms] {} room centered at {:?}",
+                theme.name,
+                room_center
+            );
 
             // Pair the hub's whole face (`a`, forced to face *into* the
             // cube from outside, same as before) with this room's real
@@ -325,15 +452,27 @@ impl ApplicationHandler for App {
             let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
             let portal = renderer
                 .scene_mut()
-                .add_portal(PortalDescriptor { a, b, half_extent: Vec2::new(HUB_HALF_SIZE, HUB_HALF_SIZE) })
+                .add_portal(PortalDescriptor {
+                    a,
+                    b,
+                    half_extent: Vec2::new(HUB_HALF_SIZE, HUB_HALF_SIZE),
+                })
                 .expect("add_portal");
             portal_ids.push(portal);
         }
 
         // ── A light near the hub's center so its own walls read clearly.
         light_ids.push(
-            renderer.scene_mut().insert_actor(SceneActor::light(point_light([0.0, HUB_HALF_SIZE * 0.85, 0.0], [1.0, 0.98, 0.92], 4.0, HUB_HALF_SIZE * 1.8)))
-                .as_light().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(SceneActor::light(point_light(
+                    [0.0, HUB_HALF_SIZE * 0.85, 0.0],
+                    [1.0, 0.98, 0.92],
+                    4.0,
+                    HUB_HALF_SIZE * 1.8,
+                )))
+                .as_light()
+                .unwrap(),
         );
 
         // Deferred lighting shades every pixel — including portal
@@ -372,9 +511,21 @@ impl ApplicationHandler for App {
             // convincing yourself nothing spatially impossible is going on:
             // fly out here and it's just six boxes in a row, like any real
             // building.
-            cam_pos: if std::env::var("ROOMS_ROW_VIEW").is_ok() { Vec3::new(110.0, 15.0, -50.0) } else { Vec3::new(16.0, 12.0, 16.0) },
-            cam_yaw: if std::env::var("ROOMS_ROW_VIEW").is_ok() { std::f32::consts::PI } else { -0.785 },
-            cam_pitch: if std::env::var("ROOMS_ROW_VIEW").is_ok() { -0.25 } else { -0.488 },
+            cam_pos: if std::env::var("ROOMS_ROW_VIEW").is_ok() {
+                Vec3::new(110.0, 15.0, -50.0)
+            } else {
+                Vec3::new(16.0, 12.0, 16.0)
+            },
+            cam_yaw: if std::env::var("ROOMS_ROW_VIEW").is_ok() {
+                std::f32::consts::PI
+            } else {
+                -0.785
+            },
+            cam_pitch: if std::env::var("ROOMS_ROW_VIEW").is_ok() {
+                -0.25
+            } else {
+                -0.488
+            },
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
@@ -389,7 +540,12 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -401,7 +557,13 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Tab), repeat: false, .. },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Tab),
+                        repeat: false,
+                        ..
+                    },
                 ..
             } => {
                 let enabled = !state.renderer.is_editor_mode();
@@ -409,15 +571,30 @@ impl ApplicationHandler for App {
                 log::info!("[portal_rooms] editor mode: {}", enabled);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
                 ..
             } => match ks {
-                ElementState::Pressed => { state.keys.insert(key); }
-                ElementState::Released => { state.keys.remove(&key); }
+                ElementState::Pressed => {
+                    state.keys.insert(key);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
             },
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if ok {
@@ -485,19 +662,36 @@ impl AppState {
         let forward = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos += Vec3::Y * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= Vec3::Y * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += Vec3::Y * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= Vec3::Y * SPEED * dt;
+        }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
 
         let camera = Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + forward, Vec3::Y,
-            std::f32::consts::FRAC_PI_4, aspect, 0.1, FAR_PLANE,
+            self.cam_pos,
+            self.cam_pos + forward,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            FAR_PLANE,
         );
 
         let output = match self.surface.get_current_texture() {
@@ -519,7 +713,11 @@ impl AppState {
             if self.frame_count == CAPTURE_AT_FRAME {
                 let offscreen = self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Screenshot Offscreen"),
-                    size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -531,7 +729,13 @@ impl AppState {
                 if let Err(e) = self.renderer.render(&camera, &offscreen_view) {
                     log::error!("Screenshot render: {:?}", e);
                 }
-                capture_screenshot(&self.device, &self.queue, &offscreen, self.surface_format, &path);
+                capture_screenshot(
+                    &self.device,
+                    &self.queue,
+                    &offscreen,
+                    self.surface_format,
+                    &path,
+                );
                 self.queue.present(output);
                 std::process::exit(0);
             }
@@ -558,19 +762,21 @@ fn insert_box_panel(
         center.extend(1.0),
     );
     let radius = half_extent.length();
-    let _ = renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
-        mesh: unit_mesh,
-        material,
-        transform,
-        bounds: [center.x, center.y, center.z, radius],
-        // Not ALWAYS_VISIBLE for the same reason as `insert_wall_face`: this
-        // content is only ever seen mapped through the portal that pairs
-        // with this room, and the cull pass needs to actually test it.
-        flags: 0,
-        groups: GroupMask::NONE,
-        movability: None,
-        user_tag: 0,
-    }));
+    let _ = renderer
+        .scene_mut()
+        .insert_actor(SceneActor::object(ObjectDescriptor {
+            mesh: unit_mesh,
+            material,
+            transform,
+            bounds: [center.x, center.y, center.z, radius],
+            // Not ALWAYS_VISIBLE for the same reason as `insert_wall_face`: this
+            // content is only ever seen mapped through the portal that pairs
+            // with this room, and the cull pass needs to actually test it.
+            flags: 0,
+            groups: GroupMask::NONE,
+            movability: None,
+            user_tag: 0,
+        }));
 }
 
 /// Inserts a side room's shell: a `half_size`-cube built from 6 axis-aligned
@@ -603,7 +809,13 @@ fn insert_room_shell(
         if dir.dot(open_normal) > 0.5 {
             continue;
         }
-        insert_box_panel(renderer, unit_mesh, wall_mat, center + dir * half_size, half_extent);
+        insert_box_panel(
+            renderer,
+            unit_mesh,
+            wall_mat,
+            center + dir * half_size,
+            half_extent,
+        );
     }
 }
 
@@ -660,7 +872,13 @@ fn place(
     hu: f32,
     hn: f32,
 ) {
-    insert_box_panel(renderer, mesh, material, frame.point(rx, height, depth), frame.extent(hr, hu, hn));
+    insert_box_panel(
+        renderer,
+        mesh,
+        material,
+        frame.point(rx, height, depth),
+        frame.extent(hr, hu, hn),
+    );
 }
 
 /// Hand-furnishes one side room so it reads as an actual place instead of a
@@ -684,8 +902,12 @@ fn furnish_room(
     name: &str,
     frame: &RoomFrame,
 ) {
-    let b = |r: &mut Renderer, mat, rx, h, d, hr, hu, hn| place(r, unit_mesh, mat, frame, rx, h, d, hr, hu, hn);
-    let s = |r: &mut Renderer, mat, rx, h, d, radius: f32| place(r, unit_sphere, mat, frame, rx, h, d, radius, radius, radius);
+    let b = |r: &mut Renderer, mat, rx, h, d, hr, hu, hn| {
+        place(r, unit_mesh, mat, frame, rx, h, d, hr, hu, hn)
+    };
+    let s = |r: &mut Renderer, mat, rx, h, d, radius: f32| {
+        place(r, unit_sphere, mat, frame, rx, h, d, radius, radius, radius)
+    };
 
     match name {
         "Ember" => {
@@ -800,13 +1022,19 @@ fn capture_screenshot(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit(Some(encoder.finish()));
 
     let slice = buffer.slice(..);
     slice.map_async(wgpu::MapMode::Read, |r| r.expect("map screenshot buffer"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
     let data = slice.get_mapped_range().expect("get_mapped_range");
 
     let is_bgra = matches!(

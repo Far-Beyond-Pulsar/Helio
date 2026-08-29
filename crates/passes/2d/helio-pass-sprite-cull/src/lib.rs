@@ -194,7 +194,11 @@ impl SpriteCullPass {
 
         let keys_a = create_u32_buffer(device, "Sprite Sort Keys A", max_visible);
         let keys_b = create_u32_buffer(device, "Sprite Sort Keys B", max_visible);
-        let indices_a = Arc::new(create_u32_buffer(device, "Sprite Sort Indices A", max_visible));
+        let indices_a = Arc::new(create_u32_buffer(
+            device,
+            "Sprite Sort Indices A",
+            max_visible,
+        ));
         let indices_b = create_u32_buffer(device, "Sprite Sort Indices B", max_visible);
 
         let indirect_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -215,12 +219,30 @@ impl SpriteCullPass {
             label: Some("Sprite Cull BG"),
             layout: &cull_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: cull_uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: instances_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: alive_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: indices_a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: keys_a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cull_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instances_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: alive_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: indices_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: keys_a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: indirect_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -231,7 +253,9 @@ impl SpriteCullPass {
             // allocation for backend safety margin, mirroring the old
             // CountUniform buffer this replaces.
             size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let dispatch_args_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -244,11 +268,19 @@ impl SpriteCullPass {
         });
         // y/z workgroup counts are always 1 — only `cs_prepare` ever updates
         // [0] again, once per frame.
-        queue.write_buffer(&dispatch_args_buf, 0, bytemuck::cast_slice(&[max_blocks, 1u32, 1u32]));
+        queue.write_buffer(
+            &dispatch_args_buf,
+            0,
+            bytemuck::cast_slice(&[max_blocks, 1u32, 1u32]),
+        );
 
         let prepare_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Sort Prepare BGL"),
-            entries: &[storage_entry(0, true), storage_entry(1, false), storage_entry(2, false)],
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                storage_entry(2, false),
+            ],
         });
         let prepare_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sprite Sort Prepare PL"),
@@ -274,15 +306,29 @@ impl SpriteCullPass {
             label: Some("Sprite Sort Prepare BG"),
             layout: &prepare_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: indirect_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: dispatch_args_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: indirect_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: frame_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dispatch_args_buf.as_entire_binding(),
+                },
             ],
         });
 
         let hist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Sort Histogram BGL"),
-            entries: &[uniform_entry(0), uniform_entry(1), storage_entry(2, true), storage_entry(3, false)],
+            entries: &[
+                uniform_entry(0),
+                uniform_entry(1),
+                storage_entry(2, true),
+                storage_entry(3, false),
+            ],
         });
         let scan_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Sort Scan BGL"),
@@ -347,7 +393,8 @@ impl SpriteCullPass {
         // worst case (`max_blocks`); actual per-frame usage is bounded by
         // `frame_uniform_buf.num_blocks` at dispatch time, not by reallocating
         // this buffer.
-        let block_hist_buf = create_u32_buffer(device, "Sprite Sort Block Histogram", max_blocks * 2);
+        let block_hist_buf =
+            create_u32_buffer(device, "Sprite Sort Block Histogram", max_blocks * 2);
 
         // `bit` is compile-time-fixed given the pass index, so its uniform
         // buffer is written once here and never touched again. `count`/
@@ -361,7 +408,12 @@ impl SpriteCullPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let u = SortUniforms { bit: i as u32, _pad0: 0, _pad1: 0, _pad2: 0 };
+            let u = SortUniforms {
+                bit: i as u32,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            };
             queue.write_buffer(&buf, 0, bytemuck::bytes_of(&u));
             buf
         });
@@ -375,10 +427,22 @@ impl SpriteCullPass {
                 label: Some("Sprite Sort Histogram BG"),
                 layout: &hist_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: pass_uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: src_keys.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: block_hist_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: pass_uniforms[i].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: frame_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: src_keys.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: block_hist_buf.as_entire_binding(),
+                    },
                 ],
             })
         });
@@ -386,8 +450,14 @@ impl SpriteCullPass {
             label: Some("Sprite Sort Scan BG"),
             layout: &scan_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: frame_uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: block_hist_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: block_hist_buf.as_entire_binding(),
+                },
             ],
         });
         let scatter_bind_groups: [wgpu::BindGroup; SORT_BITS] = std::array::from_fn(|i| {
@@ -400,13 +470,34 @@ impl SpriteCullPass {
                 label: Some("Sprite Sort Scatter BG"),
                 layout: &scatter_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: pass_uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: frame_uniform_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: src_keys.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: src_indices.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: dst_keys.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: dst_indices.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: block_hist_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: pass_uniforms[i].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: frame_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: src_keys.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: src_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: dst_keys.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: dst_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: block_hist_buf.as_entire_binding(),
+                    },
                 ],
             })
         });
@@ -457,7 +548,9 @@ fn create_u32_buffer(device: &wgpu::Device, label: &str, count: u32) -> wgpu::Bu
         // COPY_SRC costs nothing at runtime and is what lets
         // `draw_order_buf` (== `indices_a`) be read back at all, including
         // by `tests/gpu_sort_validation.rs`.
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }

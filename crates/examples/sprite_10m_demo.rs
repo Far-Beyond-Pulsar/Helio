@@ -71,7 +71,10 @@ const SPRITE_SIZE: [f32; 2] = [8.0, 8.0];
 struct Rng(u64);
 impl Rng {
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
     fn next_f32(&mut self) -> f32 {
@@ -242,7 +245,12 @@ impl ApplicationHandler for App {
         // change which sprites the (separately configured) cull pass and
         // this camera agree are visible.
         sprite_pass.set_camera([0.0, 0.0], Some(CAMERA_HALF));
-        sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }));
+        sprite_pass.set_clear_color(Some(wgpu::Color {
+            r: 0.02,
+            g: 0.02,
+            b: 0.04,
+            a: 1.0,
+        }));
         let dot_layer = sprite_pass.add_atlas_layer(&device, &queue, 8, 8, &make_dot_atlas());
 
         // Pre-size the pool's GPU buffers *before* wiring GPU culling/
@@ -272,7 +280,10 @@ impl ApplicationHandler for App {
         let mut rng = Rng(0x10DA_5EED_C0FF_EE10);
         let mut velocities: Vec<[f32; 2]> = Vec::with_capacity(count);
         for _ in 0..count {
-            let pos = [rng.range(-WORLD_HALF[0], WORLD_HALF[0]), rng.range(-WORLD_HALF[1], WORLD_HALF[1])];
+            let pos = [
+                rng.range(-WORLD_HALF[0], WORLD_HALF[0]),
+                rng.range(-WORLD_HALF[1], WORLD_HALF[1]),
+            ];
             let vel = [rng.range(-120.0, 120.0), rng.range(-120.0, 120.0)];
             let hue = rng.next_f32();
             velocities.push(vel);
@@ -293,7 +304,10 @@ impl ApplicationHandler for App {
             WORLD_HALF,
         );
 
-        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+        sprite_pass.use_gpu_culling(
+            sprite_cull.draw_order_buf.clone(),
+            sprite_cull.indirect_buf.clone(),
+        );
 
         // Order matters: simulate writes positions the cull pass reads, and
         // cull writes the draw order/indirect args the batch pass reads.
@@ -305,7 +319,11 @@ impl ApplicationHandler for App {
         let scene = GpuScene::new(device.clone(), queue.clone());
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -371,7 +389,12 @@ impl ApplicationHandler for App {
                 state.zoom = (state.zoom * (1.0 - notches * ZOOM_STEP)).clamp(MIN_ZOOM, max_zoom);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(code), .. },
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(code),
+                        ..
+                    },
                 ..
             } => match ks {
                 ElementState::Pressed => {
@@ -394,10 +417,14 @@ impl ApplicationHandler for App {
 
                 let half = state.camera_half();
                 let mut pan = [0.0f32, 0.0];
-                let left = state.keys.contains(&KeyCode::KeyA) || state.keys.contains(&KeyCode::ArrowLeft);
-                let right = state.keys.contains(&KeyCode::KeyD) || state.keys.contains(&KeyCode::ArrowRight);
-                let up = state.keys.contains(&KeyCode::KeyW) || state.keys.contains(&KeyCode::ArrowUp);
-                let down = state.keys.contains(&KeyCode::KeyS) || state.keys.contains(&KeyCode::ArrowDown);
+                let left =
+                    state.keys.contains(&KeyCode::KeyA) || state.keys.contains(&KeyCode::ArrowLeft);
+                let right = state.keys.contains(&KeyCode::KeyD)
+                    || state.keys.contains(&KeyCode::ArrowRight);
+                let up =
+                    state.keys.contains(&KeyCode::KeyW) || state.keys.contains(&KeyCode::ArrowUp);
+                let down =
+                    state.keys.contains(&KeyCode::KeyS) || state.keys.contains(&KeyCode::ArrowDown);
                 if left {
                     pan[0] -= 1.0;
                 }
@@ -410,10 +437,12 @@ impl ApplicationHandler for App {
                 if down {
                     pan[1] -= 1.0;
                 }
-                state.camera_center[0] =
-                    (state.camera_center[0] + pan[0] * half[0] * PAN_SPEED * dt).clamp(-WORLD_HALF[0], WORLD_HALF[0]);
-                state.camera_center[1] =
-                    (state.camera_center[1] + pan[1] * half[1] * PAN_SPEED * dt).clamp(-WORLD_HALF[1], WORLD_HALF[1]);
+                state.camera_center[0] = (state.camera_center[0]
+                    + pan[0] * half[0] * PAN_SPEED * dt)
+                    .clamp(-WORLD_HALF[0], WORLD_HALF[0]);
+                state.camera_center[1] = (state.camera_center[1]
+                    + pan[1] * half[1] * PAN_SPEED * dt)
+                    .clamp(-WORLD_HALF[1], WORLD_HALF[1]);
 
                 let camera_center = state.camera_center;
                 let camera_half = state.camera_half();
@@ -448,7 +477,10 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = output.texture.create_view(&Default::default());
-                if let Err(e) = state.graph.execute(&state.scene, &view, &state.dummy_depth_view) {
+                if let Err(e) = state
+                    .graph
+                    .execute(&state.scene, &view, &state.dummy_depth_view)
+                {
                     log::error!("graph execute error: {e:?}");
                 }
                 state.queue.present(output);

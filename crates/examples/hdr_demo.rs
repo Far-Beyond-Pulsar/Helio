@@ -13,8 +13,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    Camera, DebugDrawState, HdrOutputMode, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, HdrOutputMode, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{cube_mesh, directional_light, make_material, plane_mesh, point_light};
@@ -188,22 +188,46 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         let white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.92, 1.0], 0.6, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.9, 0.9, 0.92, 1.0],
+            0.6,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let emissive_red = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0,
+            [1.0, 0.1, 0.1, 1.0],
+            0.3,
+            0.0,
+            [10.0, 0.5, 0.5],
+            10.0,
         ));
         let emissive_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0,
+            [0.1, 1.0, 0.1, 1.0],
+            0.3,
+            0.0,
+            [0.5, 10.0, 0.5],
+            10.0,
         ));
         let emissive_blue = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0,
+            [0.1, 0.1, 1.0, 1.0],
+            0.3,
+            0.0,
+            [0.5, 0.5, 10.0],
+            10.0,
         ));
         let emissive_sun = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.9, 0.7, 1.0], 0.2, 0.0, [50.0, 45.0, 35.0], 50.0,
+            [1.0, 0.9, 0.7, 1.0],
+            0.2,
+            0.0,
+            [50.0, 45.0, 35.0],
+            50.0,
         ));
         let metal = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.93, 0.88, 1.0], 0.1, 1.0, [0.0, 0.0, 0.0], 0.0,
+            [0.95, 0.93, 0.88, 1.0],
+            0.1,
+            1.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
 
         let ground = renderer
@@ -211,9 +235,8 @@ impl ApplicationHandler for App {
             .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 8.0)))
             .as_mesh()
             .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer, ground, white, glam::Mat4::IDENTITY, 8.0,
-        );
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, ground, white, glam::Mat4::IDENTITY, 8.0);
 
         let red_cube = renderer
             .scene_mut()
@@ -221,7 +244,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, red_cube, emissive_red, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            red_cube,
+            emissive_red,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let green_cube = renderer
@@ -230,7 +257,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, green_cube, emissive_green, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            green_cube,
+            emissive_green,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let blue_cube = renderer
@@ -239,7 +270,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, blue_cube, emissive_blue, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            blue_cube,
+            emissive_blue,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let metal_cube = renderer
@@ -248,7 +283,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, metal_cube, metal, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            metal_cube,
+            metal,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let sun_sphere = renderer
@@ -257,7 +296,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, sun_sphere, emissive_sun, glam::Mat4::IDENTITY, 0.4,
+            &mut renderer,
+            sun_sphere,
+            emissive_sun,
+            glam::Mat4::IDENTITY,
+            0.4,
         );
 
         renderer
@@ -342,9 +385,7 @@ impl ApplicationHandler for App {
                             _ => "Passthrough",
                         };
                         log::info!("[HDR Demo] Switched to {}", name);
-                        state
-                            .window
-                            .set_title(&format!("Helio — HDR: {}", name));
+                        state.window.set_title(&format!("Helio — HDR: {}", name));
                     }
                 } else {
                     state.keys.remove(&code);
@@ -359,10 +400,12 @@ impl ApplicationHandler for App {
                     let dx = position.x as f32 - center.width as f32 / 2.0;
                     let dy = position.y as f32 - center.height as f32 / 2.0;
                     state.mouse_delta = (dx, dy);
-                    let _ = state.window.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                        center.width as f64 / 2.0,
-                        center.height as f64 / 2.0,
-                    ));
+                    let _ = state
+                        .window
+                        .set_cursor_position(winit::dpi::PhysicalPosition::new(
+                            center.width as f64 / 2.0,
+                            center.height as f64 / 2.0,
+                        ));
                 }
             }
             WindowEvent::MouseInput {
@@ -388,9 +431,7 @@ impl ApplicationHandler for App {
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     state.surface.configure(&state.device, &config);
-                    state
-                        .renderer
-                        .set_render_size(size.width, size.height);
+                    state.renderer.set_render_size(size.width, size.height);
                 }
             }
             WindowEvent::RedrawRequested => {

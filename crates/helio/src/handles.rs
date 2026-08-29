@@ -61,4 +61,3 @@ define_handle!(FoliageLayerId);
 define_handle!(FoliageInteractorId);
 define_handle!(SublevelId);
 define_handle!(PortalId);
-

@@ -90,18 +90,12 @@ impl VirtualGeometryPass {
                 )
                 .replace(
                     "binding_array<sampler, 256>",
-                    &format!(
-                        "binding_array<sampler, {}>",
-                        material_binding.max_textures
-                    ),
+                    &format!("binding_array<sampler, {}>", material_binding.max_textures),
                 );
             if material_binding.uses_binding_arrays() {
                 s
             } else {
-                libhelio::shader::apply_webgpu_material_bindings(
-                    &s,
-                    material_binding.max_textures,
-                )
+                libhelio::shader::apply_webgpu_material_bindings(&s, material_binding.max_textures)
             }
         };
         let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -472,12 +466,8 @@ impl VirtualGeometryPass {
         };
 
         let opaque_draw_pipeline = make_draw_pipeline("VG Opaque Draw Pipeline", &[]);
-        let alpha_draw_pipeline = make_draw_pipeline(
-            "VG Alpha Draw Pipeline",
-            &[("has_alpha_test", 1.0)],
-        );
-
-
+        let alpha_draw_pipeline =
+            make_draw_pipeline("VG Alpha Draw Pipeline", &[("has_alpha_test", 1.0)]);
 
         let debug_draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("VG Debug Pipeline"),
@@ -773,7 +763,8 @@ impl RenderPass for VirtualGeometryPass {
                 self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
             }
-            let instance_capacity = self.instance_buf.size() / std::mem::size_of::<GpuInstanceData>() as u64;
+            let instance_capacity =
+                self.instance_buf.size() / std::mem::size_of::<GpuInstanceData>() as u64;
             if (vg.object_count as u64) > instance_capacity {
                 self.instance_buf = Self::make_instance_buf(ctx.device, vg.object_count as u64 * 2);
                 self.instance_cull_buf =
@@ -807,13 +798,14 @@ impl RenderPass for VirtualGeometryPass {
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let materials = ctx.scene.materials.as_slice();
             self.instance_cull_scratch.clear();
-            self.instance_cull_scratch.extend(instances.iter().map(|inst| {
-                let mat_flags = materials
-                    .get(inst.material_id as usize)
-                    .map(|m| m.flags)
-                    .unwrap_or(0);
-                InstanceCullData::from_instance(inst, mat_flags)
-            }));
+            self.instance_cull_scratch
+                .extend(instances.iter().map(|inst| {
+                    let mat_flags = materials
+                        .get(inst.material_id as usize)
+                        .map(|m| m.flags)
+                        .unwrap_or(0);
+                    InstanceCullData::from_instance(inst, mat_flags)
+                }));
             ctx.write_buffer(
                 &self.instance_cull_buf,
                 0,
@@ -847,17 +839,14 @@ impl RenderPass for VirtualGeometryPass {
 
             let materials = ctx.scene.materials.as_slice();
             self.instance_cull_scratch.clear();
-            self.instance_cull_scratch.extend(
-                instances[start..end]
-                    .iter()
-                    .map(|inst| {
-                        let mat_flags = materials
-                            .get(inst.material_id as usize)
-                            .map(|m| m.flags)
-                            .unwrap_or(0);
-                        InstanceCullData::from_instance(inst, mat_flags)
-                    }),
-            );
+            self.instance_cull_scratch
+                .extend(instances[start..end].iter().map(|inst| {
+                    let mat_flags = materials
+                        .get(inst.material_id as usize)
+                        .map(|m| m.flags)
+                        .unwrap_or(0);
+                    InstanceCullData::from_instance(inst, mat_flags)
+                }));
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
             ctx.write_buffer(
                 &self.instance_cull_buf,
@@ -1283,7 +1272,11 @@ impl RenderPass for VirtualGeometryPass {
 
             let opaque_capacity = max_draw_count / 2;
 
-            let draw_region = |rpass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, first_slot: u32, count: u32, counter_byte: u64| {
+            let draw_region = |rpass: &mut wgpu::RenderPass<'_>,
+                               pipeline: &wgpu::RenderPipeline,
+                               first_slot: u32,
+                               count: u32,
+                               counter_byte: u64| {
                 rpass.set_pipeline(pipeline);
                 if self.use_count_indirect {
                     rpass.multi_draw_indexed_indirect_count(
@@ -1315,11 +1308,23 @@ impl RenderPass for VirtualGeometryPass {
                         &self.lod_debug_pipeline
                     };
                     draw_region(rpass, pipeline, 0, opaque_capacity, 0);
-                    draw_region(rpass, pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
+                    draw_region(
+                        rpass,
+                        pipeline,
+                        opaque_capacity,
+                        max_draw_count - opaque_capacity,
+                        4,
+                    );
                 }
                 _ => {
                     draw_region(rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
-                    draw_region(rpass, &self.alpha_draw_pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
+                    draw_region(
+                        rpass,
+                        &self.alpha_draw_pipeline,
+                        opaque_capacity,
+                        max_draw_count - opaque_capacity,
+                        4,
+                    );
                 }
             }
         }
@@ -1331,7 +1336,12 @@ impl RenderPass for VirtualGeometryPass {
         &["gbuffer", "main_scene", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra"]
+        &[
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

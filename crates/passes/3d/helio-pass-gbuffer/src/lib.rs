@@ -632,7 +632,13 @@ impl RenderPass for GBufferPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity"]
+        &[
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
+            "gbuffer_velocity",
+        ]
     }
 }
 
@@ -777,48 +783,48 @@ impl GBufferPass {
                     module,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rg16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rg16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,

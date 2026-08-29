@@ -273,10 +273,13 @@ impl super::super::Scene {
 
         // Cascade: free any textures whose ref count just hit zero.
         for tex_id in tex_ids {
-            if self.textures.get(tex_id).map_or(false, |r| r.ref_count == 0) {
+            if self
+                .textures
+                .get(tex_id)
+                .map_or(false, |r| r.ref_count == 0)
+            {
                 self.textures.remove(tex_id);
-                self.texture_binding_version =
-                    self.texture_binding_version.wrapping_add(1);
+                self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
             }
         }
 
@@ -364,4 +367,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

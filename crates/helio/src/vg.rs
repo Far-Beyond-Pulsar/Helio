@@ -80,7 +80,8 @@ fn optimize_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVerte
 
     // Step 4: Vertex fetch optimization (reorder verts for locality).
     let remap = meshopt::optimize_vertex_fetch_remap(&overdraw_indices, welded_verts.len());
-    let fetch_indices = meshopt::remap_index_buffer(Some(&overdraw_indices), welded_verts.len(), &remap);
+    let fetch_indices =
+        meshopt::remap_index_buffer(Some(&overdraw_indices), welded_verts.len(), &remap);
     let fetch_verts = meshopt::remap_vertex_buffer(&welded_verts, welded_verts.len(), &remap);
 
     (fetch_verts, fetch_indices)
@@ -340,13 +341,8 @@ pub fn meshletize_with_indices(
     )
     .expect("valid vertex layout");
 
-    let meshlets = meshopt::clusterize::build_meshlets(
-        indices,
-        &vertex_adapter,
-        max_verts,
-        max_tris,
-        0.5,
-    );
+    let meshlets =
+        meshopt::clusterize::build_meshlets(indices, &vertex_adapter, max_verts, max_tris, 0.5);
 
     let mut entries = Vec::with_capacity(meshlets.len());
     let mut flat_indices: Vec<u32> = Vec::new();
@@ -362,10 +358,8 @@ pub fn meshletize_with_indices(
             flat_indices.push(vertex_slot);
         }
 
-        let bounds = meshopt::clusterize::compute_cluster_bounds_decoder(
-            &meshlet_global_indices,
-            vertices,
-        );
+        let bounds =
+            meshopt::clusterize::compute_cluster_bounds_decoder(&meshlet_global_indices, vertices);
 
         entries.push(GpuMeshletEntry {
             center: bounds.center,
@@ -419,11 +413,7 @@ mod tests {
         // by irrelevant geometry the caller never asked this mesh to include.
         let mut vertices = Vec::new();
         for i in 0..500u32 {
-            vertices.push(vertex(
-                [i as f32, 0.0, 0.0],
-                [0.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ));
+            vertices.push(vertex([i as f32, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0]));
         }
         // The one triangle this "section" actually uses, at the far end of
         // the shared pool.
@@ -440,10 +430,8 @@ mod tests {
         );
         assert_eq!(remapped.len(), 3);
         // Positions must still be correct after compaction.
-        let positions: std::collections::HashSet<_> = welded
-            .iter()
-            .map(|v| v.position[0].to_bits())
-            .collect();
+        let positions: std::collections::HashSet<_> =
+            welded.iter().map(|v| v.position[0].to_bits()).collect();
         assert!(positions.contains(&497.0f32.to_bits()));
         assert!(positions.contains(&498.0f32.to_bits()));
         assert!(positions.contains(&499.0f32.to_bits()));

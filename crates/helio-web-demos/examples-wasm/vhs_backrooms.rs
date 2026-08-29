@@ -72,7 +72,13 @@ fn add_box(renderer: &mut Renderer, center: [f32; 3], half: [f32; 3], material: 
         .scene_mut()
         .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], half)));
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
-    let _ = insert_object(renderer, mesh, material, Mat4::from_translation(Vec3::from(center)), radius);
+    let _ = insert_object(
+        renderer,
+        mesh,
+        material,
+        Mat4::from_translation(Vec3::from(center)),
+        radius,
+    );
 }
 
 impl Demo {
@@ -86,20 +92,55 @@ impl Demo {
             let scene = renderer.scene_mut();
             (
                 // Classic mono-yellow damp wallpaper.
-                scene.insert_material(make_material([0.78, 0.70, 0.34, 1.0], 0.92, 0.0, [0.0; 3], 0.0)),
+                scene.insert_material(make_material(
+                    [0.78, 0.70, 0.34, 1.0],
+                    0.92,
+                    0.0,
+                    [0.0; 3],
+                    0.0,
+                )),
                 // Moist patterned carpet.
-                scene.insert_material(make_material([0.42, 0.37, 0.22, 1.0], 0.96, 0.0, [0.0; 3], 0.0)),
+                scene.insert_material(make_material(
+                    [0.42, 0.37, 0.22, 1.0],
+                    0.96,
+                    0.0,
+                    [0.0; 3],
+                    0.0,
+                )),
                 // Off-white drop-ceiling tiles.
-                scene.insert_material(make_material([0.80, 0.78, 0.70, 1.0], 0.88, 0.0, [0.0; 3], 0.0)),
-                scene.insert_material(make_material([0.74, 0.66, 0.32, 1.0], 0.9, 0.0, [0.0; 3], 0.0)),
+                scene.insert_material(make_material(
+                    [0.80, 0.78, 0.70, 1.0],
+                    0.88,
+                    0.0,
+                    [0.0; 3],
+                    0.0,
+                )),
+                scene.insert_material(make_material(
+                    [0.74, 0.66, 0.32, 1.0],
+                    0.9,
+                    0.0,
+                    [0.0; 3],
+                    0.0,
+                )),
                 // Emissive fluorescent panel.
-                scene.insert_material(make_material([0.9, 0.9, 0.85, 1.0], 0.6, 0.0, [1.0, 0.96, 0.85], 6.0)),
+                scene.insert_material(make_material(
+                    [0.9, 0.9, 0.85, 1.0],
+                    0.6,
+                    0.0,
+                    [1.0, 0.96, 0.85],
+                    6.0,
+                )),
             )
         };
 
         // Floor + ceiling slabs spanning the whole plan.
         add_box(renderer, [0.0, -WALL_T, 0.0], [HALF, WALL_T, HALF], floor);
-        add_box(renderer, [0.0, WALL_H + WALL_T, 0.0], [HALF, WALL_T, HALF], ceiling);
+        add_box(
+            renderer,
+            [0.0, WALL_H + WALL_T, 0.0],
+            [HALF, WALL_T, HALF],
+            ceiling,
+        );
 
         // Perimeter walls.
         for &(cx, cz, hx, hz) in &[
@@ -108,7 +149,12 @@ impl Demo {
             (-HALF, 0.0, WALL_T, HALF),
             (HALF, 0.0, WALL_T, HALF),
         ] {
-            add_box(renderer, [cx, WALL_H * 0.5, cz], [hx, WALL_H * 0.5, hz], wall);
+            add_box(
+                renderer,
+                [cx, WALL_H * 0.5, cz],
+                [hx, WALL_H * 0.5, hz],
+                wall,
+            );
         }
 
         let mut rng = Rng(self.seed | 1);
@@ -152,13 +198,20 @@ impl Demo {
 
                 // Ceiling fluorescent fixture + light. A few cells stay dark.
                 if !rng.chance(0.16) {
-                    add_box(renderer, [cx, WALL_H - 0.05, cz], [1.2, 0.05, 0.35], fixture);
-                    renderer.scene_mut().insert_actor(SceneActor::light(point_light(
-                        [cx, WALL_H - 0.3, cz],
-                        [1.0, 0.96, 0.85],
-                        6.0,
-                        CELL * 1.6,
-                    )));
+                    add_box(
+                        renderer,
+                        [cx, WALL_H - 0.05, cz],
+                        [1.2, 0.05, 0.35],
+                        fixture,
+                    );
+                    renderer
+                        .scene_mut()
+                        .insert_actor(SceneActor::light(point_light(
+                            [cx, WALL_H - 0.3, cz],
+                            [1.0, 0.96, 0.85],
+                            6.0,
+                            CELL * 1.6,
+                        )));
                 }
             }
         }
@@ -167,15 +220,17 @@ impl Demo {
         // snippet, so the built-in chain stays at its no-op defaults.
         renderer
             .scene_mut()
-            .insert_actor(SceneActor::post_process_volume(PostProcessVolumeDescriptor {
-                bounds_min: [-1000.0, -1000.0, -1000.0],
-                bounds_max: [1000.0, 1000.0, 1000.0],
-                blend_radius: 0.0,
-                unbound: true,
-                priority: 100.0,
-                blend_weight: 1.0,
-                settings: PostProcessSettings::default(),
-            }));
+            .insert_actor(SceneActor::post_process_volume(
+                PostProcessVolumeDescriptor {
+                    bounds_min: [-1000.0, -1000.0, -1000.0],
+                    bounds_max: [1000.0, 1000.0, 1000.0],
+                    blend_radius: 0.0,
+                    unbound: true,
+                    priority: 100.0,
+                    blend_weight: 1.0,
+                    settings: PostProcessSettings::default(),
+                },
+            ));
     }
 }
 
@@ -254,12 +309,24 @@ impl HelioWasmApp for Demo {
 
         // ── Move ──────────────────────────────────────────────────────────
         let mut accel = Vec3::ZERO;
-        if input.keys.contains(&KeyCode::KeyW) { accel += forward; }
-        if input.keys.contains(&KeyCode::KeyS) { accel -= forward; }
-        if input.keys.contains(&KeyCode::KeyA) { accel -= right; }
-        if input.keys.contains(&KeyCode::KeyD) { accel += right; }
-        if input.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
-        if input.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
+        if input.keys.contains(&KeyCode::KeyW) {
+            accel += forward;
+        }
+        if input.keys.contains(&KeyCode::KeyS) {
+            accel -= forward;
+        }
+        if input.keys.contains(&KeyCode::KeyA) {
+            accel -= right;
+        }
+        if input.keys.contains(&KeyCode::KeyD) {
+            accel += right;
+        }
+        if input.keys.contains(&KeyCode::Space) {
+            accel += Vec3::Y;
+        }
+        if input.keys.contains(&KeyCode::ShiftLeft) {
+            accel -= Vec3::Y;
+        }
         if accel.length_squared() > 0.0 {
             accel = accel.normalize();
         }
@@ -283,7 +350,7 @@ impl HelioWasmApp for Demo {
 
         // ── VHS post-process params (mirrors the native demo) ─────────────
         let vhs_params: [[f32; 4]; 2] = [
-            [0.0, 0.12, 8.0, 0.2], // _, tape jitter, jitter freq, flicker intensity
+            [0.0, 0.12, 8.0, 0.2],    // _, tape jitter, jitter freq, flicker intensity
             [0.4, elapsed, 0.0, 0.0], // noise amount, animation time, _, _
         ];
         if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {

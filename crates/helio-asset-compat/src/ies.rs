@@ -60,7 +60,9 @@ impl IesProfile {
         // Skip TILT keyword block
         if line_idx < lines.len() && lines[line_idx].trim().to_uppercase() == "TILT=NONE" {
             line_idx += 1;
-        } else if line_idx < lines.len() && lines[line_idx].trim().to_uppercase().starts_with("TILT=") {
+        } else if line_idx < lines.len()
+            && lines[line_idx].trim().to_uppercase().starts_with("TILT=")
+        {
             line_idx += 1;
             // TILT=INCLUDE or TILT=FILENAME — skip until next keyword or data
             while line_idx < lines.len() && !lines[line_idx].contains('=') {
@@ -165,7 +167,14 @@ impl IesProfile {
         }
 
         // Generate 256×256 texture
-        let tex = Self::generate_texture(&v_angles, &h_angles, &candela, n_h_angles, n_v_angles, candela_mult);
+        let tex = Self::generate_texture(
+            &v_angles,
+            &h_angles,
+            &candela,
+            n_h_angles,
+            n_v_angles,
+            candela_mult,
+        );
 
         Ok(IesProfile {
             texture_data: tex,
@@ -198,11 +207,9 @@ impl IesProfile {
                 let v_angle = (py as f32 / h as f32) * 180.0;
 
                 // Bilinear interpolate in the candela grid
-                let intensity = Self::interpolate_ies(
-                    h_angle, v_angle,
-                    h_angles, v_angles,
-                    candela, n_h, n_v,
-                ) * candela_mult;
+                let intensity =
+                    Self::interpolate_ies(h_angle, v_angle, h_angles, v_angles, candela, n_h, n_v)
+                        * candela_mult;
 
                 // Normalize to [0, 1] and quantize to u8
                 let normalized = (intensity / max_cdl).clamp(0.0, 1.0);

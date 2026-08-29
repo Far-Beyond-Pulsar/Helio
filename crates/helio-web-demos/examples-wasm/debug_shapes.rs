@@ -68,12 +68,24 @@ impl HelioWasmApp for Demo {
         let right = Vec3::new(self.cam_yaw.cos(), 0.0, self.cam_yaw.sin());
         let up = Vec3::Y;
         let mut vel = Vec3::ZERO;
-        if input.keys.contains(&KeyCode::KeyW) { vel += fwd_h; }
-        if input.keys.contains(&KeyCode::KeyS) { vel -= fwd_h; }
-        if input.keys.contains(&KeyCode::KeyD) { vel += right; }
-        if input.keys.contains(&KeyCode::KeyA) { vel -= right; }
-        if input.keys.contains(&KeyCode::Space) { vel += up; }
-        if input.keys.contains(&KeyCode::ShiftLeft) { vel -= up; }
+        if input.keys.contains(&KeyCode::KeyW) {
+            vel += fwd_h;
+        }
+        if input.keys.contains(&KeyCode::KeyS) {
+            vel -= fwd_h;
+        }
+        if input.keys.contains(&KeyCode::KeyD) {
+            vel += right;
+        }
+        if input.keys.contains(&KeyCode::KeyA) {
+            vel -= right;
+        }
+        if input.keys.contains(&KeyCode::Space) {
+            vel += up;
+        }
+        if input.keys.contains(&KeyCode::ShiftLeft) {
+            vel -= up;
+        }
         if vel.length_squared() > 0.0 {
             self.cam_pos += vel.normalize() * MOVE_SPEED * dt;
         }
@@ -92,15 +104,37 @@ impl HelioWasmApp for Demo {
 
         // Torus
         let torus_center = Vec3::new((t * 0.4).sin() * 3.0, 1.5, (t * 0.4).cos() * 3.0);
-        renderer.debug_torus(torus_center.to_array(), [0.0, 1.0, 0.0], 1.2, 0.35, [1.0, 0.6, 0.7, 1.0], 24, 16);
+        renderer.debug_torus(
+            torus_center.to_array(),
+            [0.0, 1.0, 0.0],
+            1.2,
+            0.35,
+            [1.0, 0.6, 0.7, 1.0],
+            24,
+            16,
+        );
 
         // Cylinder
         let cyl_base = Vec3::new(-3.5, 0.0, (t * 0.7).sin() * 3.0);
-        renderer.debug_cylinder(cyl_base.to_array(), [0.0, 1.0, 0.0], 2.0, 0.45, [0.4, 0.4, 1.0, 1.0], 28);
+        renderer.debug_cylinder(
+            cyl_base.to_array(),
+            [0.0, 1.0, 0.0],
+            2.0,
+            0.45,
+            [0.4, 0.4, 1.0, 1.0],
+            28,
+        );
 
         // Cone
         let cone_apex = Vec3::new(3.5, 1.5, (t * 0.7).cos() * 3.0);
-        renderer.debug_cone(cone_apex.to_array(), [0.0, -1.0, 0.0], 2.0, 0.8, [0.8, 0.5, 0.2, 1.0], 32);
+        renderer.debug_cone(
+            cone_apex.to_array(),
+            [0.0, -1.0, 0.0],
+            2.0,
+            0.8,
+            [0.8, 0.5, 0.2, 1.0],
+            32,
+        );
 
         // Frustum
         let frustum_origin = Vec3::new(0.0, 0.5, 0.0);
@@ -135,14 +169,30 @@ impl HelioWasmApp for Demo {
         let fwd = Vec3::new(sy * cp, sp, -cy * cp);
         let debug_origin = self.cam_pos + fwd * 0.2;
         let debug_target = self.cam_pos + fwd * 6.0;
-        renderer.debug_line(debug_origin.to_array(), debug_target.to_array(), [1.0, 1.0, 0.0, 1.0]);
+        renderer.debug_line(
+            debug_origin.to_array(),
+            debug_target.to_array(),
+            [1.0, 1.0, 0.0, 1.0],
+        );
 
         // Near-camera cross marker
         let world_cam_mark = self.cam_pos + fwd * 2.0;
         let cross = 0.5;
-        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(cross, 0.0, 0.0)).to_array(), [1.0, 0.5, 0.0, 1.0]);
-        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(0.0, cross, 0.0)).to_array(), [1.0, 0.5, 0.0, 1.0]);
-        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(0.0, 0.0, cross)).to_array(), [1.0, 0.5, 0.0, 1.0]);
+        renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + Vec3::new(cross, 0.0, 0.0)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
+        renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + Vec3::new(0.0, cross, 0.0)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
+        renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + Vec3::new(0.0, 0.0, cross)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
 
         Camera::perspective_look_at(
             self.cam_pos,

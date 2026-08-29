@@ -61,8 +61,8 @@ fn synthetic_heightfield(wavelength_texels: f32, amplitude: f32) -> Vec<u16> {
         for x in 0..n {
             // Two crossing wave trains, so the field focuses in 2D rather than
             // being a pure 1D ridge.
-            height[y * n + x] =
-                amplitude * ((x as f32 * k).sin() + 0.7 * ((y as f32 * 0.8 + x as f32 * 0.3) * k).sin());
+            height[y * n + x] = amplitude
+                * ((x as f32 * k).sin() + 0.7 * ((y as f32 * 0.8 + x as f32 * 0.3) * k).sin());
         }
     }
 

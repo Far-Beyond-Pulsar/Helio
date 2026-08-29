@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -394,7 +396,9 @@ fn build_demo(
 
 /// Headless mode is used by CI and any non-interactive run.
 fn headless_requested() -> bool {
-    std::env::args().skip(1).any(|a| a == "--headless" || a == "--ci")
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--headless" || a == "--ci")
         || std::env::var_os("CI").is_some()
         || !std::io::stdout().is_terminal()
 }
@@ -476,7 +480,8 @@ fn run_headless(manifest_dir: &Path, out_base: &Path, cc: Option<&str>) -> i32 {
 fn run_tui(manifest_dir: PathBuf, out_base: PathBuf, cc: Option<String>) {
     enable_raw_mode().unwrap();
     std::io::stdout().execute(EnterAlternateScreen).unwrap();
-    let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())).unwrap();
+    let mut terminal =
+        Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())).unwrap();
     terminal.clear().unwrap();
 
     let mut app = App::new();
@@ -491,7 +496,13 @@ fn run_tui(manifest_dir: PathBuf, out_base: PathBuf, cc: Option<String>) {
     let jobs: Vec<(&'static Demo, PathBuf, Arc<Mutex<Vec<String>>>)> = DEMOS
         .iter()
         .enumerate()
-        .map(|(i, demo)| (demo, out_base.join(demo.name), Arc::clone(&app.builds[i].log)))
+        .map(|(i, demo)| {
+            (
+                demo,
+                out_base.join(demo.name),
+                Arc::clone(&app.builds[i].log),
+            )
+        })
         .collect();
     {
         let manifest_dir = manifest_dir.clone();
@@ -560,10 +571,14 @@ fn run_tui(manifest_dir: PathBuf, out_base: PathBuf, cc: Option<String>) {
         }
 
         if !all_done_val {
-            let done = app.builds.iter().filter(|b| {
-                let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
-                last.starts_with("OK") || last == "FAILED"
-            }).count();
+            let done = app
+                .builds
+                .iter()
+                .filter(|b| {
+                    let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
+                    last.starts_with("OK") || last == "FAILED"
+                })
+                .count();
             if done == app.total {
                 all_done.store(true, Ordering::Relaxed);
             }
@@ -592,16 +607,38 @@ fn ui(f: &mut Frame, app: &App, all_done: bool) {
 
 fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
     let total = app.total;
-    let done = app.builds.iter().filter(|b| {
-        let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
-        last.starts_with("OK") || last == "FAILED"
-    }).count();
-    let ok = app.builds.iter().filter(|b| {
-        b.log.lock().unwrap().last().cloned().unwrap_or_default().starts_with("OK")
-    }).count();
+    let done = app
+        .builds
+        .iter()
+        .filter(|b| {
+            let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
+            last.starts_with("OK") || last == "FAILED"
+        })
+        .count();
+    let ok = app
+        .builds
+        .iter()
+        .filter(|b| {
+            b.log
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
+                .starts_with("OK")
+        })
+        .count();
     let fail = done.saturating_sub(ok);
-    let pct = if total > 0 { done as f64 / total as f64 } else { 0.0 };
-    let frame = app.builds.iter().map(|b| b.log.lock().unwrap().len() as u64).sum::<u64>();
+    let pct = if total > 0 {
+        done as f64 / total as f64
+    } else {
+        0.0
+    };
+    let frame = app
+        .builds
+        .iter()
+        .map(|b| b.log.lock().unwrap().len() as u64)
+        .sum::<u64>();
 
     let bar_width = f.area().width.saturating_sub(4) as usize;
     let filled = (pct * bar_width as f64).round() as usize;
@@ -635,38 +672,63 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
     f.render_widget(header, layout[0]);
 
     // Demo list
-    let items: Vec<ListItem> = app.builds.iter().enumerate().map(|(i, b)| {
-        let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
-        let status = if last.starts_with("OK") {
-            Status::Success(last.trim_start_matches("OK (")
-                .trim_end_matches(" KiB)").parse().unwrap_or(0))
-        } else if last == "FAILED" {
-            Status::Failed
-        } else if !b.log.lock().unwrap().is_empty() {
-            Status::Building
-        } else {
-            Status::Pending
-        };
-        let icon = App::status_icon(frame, &status);
-        let color = App::status_color(&status);
-        let text = App::status_text(&status);
-        let name = DEMOS[i].name;
-        let is_selected = app.list_state.selected() == Some(i);
-        let bg = if is_selected { Color::DarkGray } else { Color::Reset };
-        let fg = if is_selected { Color::White } else { Color::Reset };
-        let icon_style = Style::default().fg(color).bg(bg).add_modifier(Modifier::BOLD);
-        let name_style = Style::default().fg(fg).bg(bg);
-        let text_style = Style::default().fg(color).bg(bg);
-        ListItem::new(Line::from(vec![
-            Span::styled(format!(" {} ", icon), icon_style),
-            Span::styled(name, name_style),
-            Span::styled(text, text_style),
-        ])).style(Style::default().bg(bg))
-    }).collect();
+    let items: Vec<ListItem> = app
+        .builds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
+            let status = if last.starts_with("OK") {
+                Status::Success(
+                    last.trim_start_matches("OK (")
+                        .trim_end_matches(" KiB)")
+                        .parse()
+                        .unwrap_or(0),
+                )
+            } else if last == "FAILED" {
+                Status::Failed
+            } else if !b.log.lock().unwrap().is_empty() {
+                Status::Building
+            } else {
+                Status::Pending
+            };
+            let icon = App::status_icon(frame, &status);
+            let color = App::status_color(&status);
+            let text = App::status_text(&status);
+            let name = DEMOS[i].name;
+            let is_selected = app.list_state.selected() == Some(i);
+            let bg = if is_selected {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
+            let fg = if is_selected {
+                Color::White
+            } else {
+                Color::Reset
+            };
+            let icon_style = Style::default()
+                .fg(color)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD);
+            let name_style = Style::default().fg(fg).bg(bg);
+            let text_style = Style::default().fg(color).bg(bg);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", icon), icon_style),
+                Span::styled(name, name_style),
+                Span::styled(text, text_style),
+            ]))
+            .style(Style::default().bg(bg))
+        })
+        .collect();
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Demos "))
-        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_stateful_widget(list, layout[1], &mut app.list_state.clone());
 }
 

@@ -20,11 +20,14 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
 
     // Flat neutral for channels that don't need a visual pattern.
     match semantic {
-        TextureSemantic::MetallicRoughness | TextureSemantic::Occlusion
+        TextureSemantic::MetallicRoughness
+        | TextureSemantic::Occlusion
         | TextureSemantic::SpecularWeight => {
             return helio::TextureUpload::rgba8(
                 format!("fallback-{}", semantic.suffix()),
-                1, 1, false,
+                1,
+                1,
+                false,
                 vec![255, 255, 255, 255],
                 helio::TextureSamplerDesc::default(),
             );
@@ -34,14 +37,16 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
 
     const SIZE: u32 = 1024;
     const TILE: u32 = 256; // 8×8 grid of 128px tiles
-    const GROUT: u32 = 1;  // 1px hairline groove (each boundary pixel)
-    const CURVE: u32 = 5;  // pixels over which tile curves down into groove
+    const GROUT: u32 = 1; // 1px hairline groove (each boundary pixel)
+    const CURVE: u32 = 5; // pixels over which tile curves down into groove
 
     let is_normal = semantic == TextureSemantic::Normal;
 
     // Deterministic position-keyed hash (no sequential state).
     let hash = |x: u32, y: u32| -> u8 {
-        let mut h = x.wrapping_mul(2246822519_u32).wrapping_add(y.wrapping_mul(3266489917_u32));
+        let mut h = x
+            .wrapping_mul(2246822519_u32)
+            .wrapping_add(y.wrapping_mul(3266489917_u32));
         h ^= h >> 13;
         h = h.wrapping_mul(1274126177_u32);
         h ^= h >> 16;
@@ -51,7 +56,9 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
     // Smooth cosine curve: returns 0.0 at groove edge, 1.0 at tile centre.
     // `edge` = pixel distance from nearest tile boundary (clamped to GROUT+CURVE).
     let curve_t = |edge: u32| -> f32 {
-        if edge < GROUT { return 0.0; }
+        if edge < GROUT {
+            return 0.0;
+        }
         let d = (edge - GROUT).min(CURVE) as f32 / CURVE as f32;
         // cosine ease-in: starts steep, flattens out
         (1.0 - (d * std::f32::consts::PI).cos()) * 0.5
@@ -59,9 +66,7 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
 
     // Groove depth factor (0=groove bottom, 1=flat tile centre) used for colour darkening.
     // In the curve zone it follows the same cosine profile.
-    let depth_factor = |edge: u32| -> f32 {
-        curve_t(edge)
-    };
+    let depth_factor = |edge: u32| -> f32 { curve_t(edge) };
 
     let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for y in 0..SIZE {
@@ -131,7 +136,9 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
 
     helio::TextureUpload::rgba8(
         format!("fallback-{}", semantic.suffix()),
-        SIZE, SIZE, srgb,
+        SIZE,
+        SIZE,
+        srgb,
         data,
         helio::TextureSamplerDesc::default(),
     )
@@ -212,25 +219,22 @@ pub fn convert_scene(
                 }
                 index
             } else {
-                let upload = match load_texture_upload(
-                    scene,
-                    texture_ref.texture_index,
-                    semantic,
-                    base_dir,
-                ) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        log::warn!(
-                            "Texture {} ({:?}) not found, using fallback: {}",
-                            texture_ref.texture_index,
-                            semantic,
-                            e
-                        );
-                        used_fallback_for_mat[mat_idx] = true;
-                        fallback_texture_indices.insert(textures.len());
-                        fallback_texture(semantic)
-                    }
-                };
+                let upload =
+                    match load_texture_upload(scene, texture_ref.texture_index, semantic, base_dir)
+                    {
+                        Ok(u) => u,
+                        Err(e) => {
+                            log::warn!(
+                                "Texture {} ({:?}) not found, using fallback: {}",
+                                texture_ref.texture_index,
+                                semantic,
+                                e
+                            );
+                            used_fallback_for_mat[mat_idx] = true;
+                            fallback_texture_indices.insert(textures.len());
+                            fallback_texture(semantic)
+                        }
+                    };
                 let index = textures.len();
                 textures.push(upload);
                 texture_cache.insert(key, index);
@@ -278,7 +282,9 @@ pub fn convert_scene(
             .map(|&id| (id, glam::Mat4::IDENTITY))
             .collect();
         while let Some((node_id, parent_world)) = stack.pop() {
-            let Some(node) = scene.node(node_id) else { continue };
+            let Some(node) = scene.node(node_id) else {
+                continue;
+            };
             // solid_rs may link a different glam version than the workspace.
             // Convert via the column array (same memory layout across versions).
             let node_mat = node.transform.to_matrix();
@@ -327,7 +333,8 @@ pub fn convert_scene(
         for &raw_node_transform in world_transforms {
             let node_transform = scale_mat * raw_node_transform;
             for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
-                let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
+                let (vertices, indices) =
+                    mesh_converter::convert_primitive(mesh, primitive, config)?;
 
                 let mesh_name = if mesh.name.is_empty() {
                     if mesh.primitives.len() > 1 {
@@ -383,7 +390,11 @@ pub fn convert_scene(
             let xform = sub.node_transform;
             let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
             let tangent_mat = glam::Mat3::from_mat4(xform);
-            let handedness_sign = if xform.determinant() < 0.0 { -1.0_f32 } else { 1.0 };
+            let handedness_sign = if xform.determinant() < 0.0 {
+                -1.0_f32
+            } else {
+                1.0
+            };
 
             for v in &sub.vertices {
                 let pos = xform.transform_point3(glam::Vec3::from(v.position));
@@ -418,8 +429,7 @@ pub fn convert_scene(
         for (i, mat_idx) in material_order.into_iter().enumerate() {
             let base = shared_vertices.len() as u32;
             // Adjust indices to be absolute into the shared vertex array.
-            let abs_indices: Vec<u32> =
-                group_indices[i].iter().map(|&idx| base + idx).collect();
+            let abs_indices: Vec<u32> = group_indices[i].iter().map(|&idx| base + idx).collect();
             shared_vertices.extend_from_slice(&group_verts[i]);
             sections.push(ConvertedMeshSection {
                 indices: abs_indices,
@@ -522,4 +532,3 @@ pub(crate) fn material_asset_from_converted(
         },
     }
 }
-

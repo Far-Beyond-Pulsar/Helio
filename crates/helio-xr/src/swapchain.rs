@@ -48,27 +48,25 @@ impl XrSwapchain {
     ) -> Result<Self> {
         let runtime_formats = session.enumerate_swapchain_formats()?;
         let vk_format = negotiate_vk_format(requested_format, &runtime_formats)?;
-        let format = vk_format_to_wgpu(vk_format)
-            .ok_or(XrError::UnsupportedFormat(requested_format))?;
+        let format =
+            vk_format_to_wgpu(vk_format).ok_or(XrError::UnsupportedFormat(requested_format))?;
 
         let mut array_size = 2u32;
-        let swapchain =
-            match session.create_swapchain(&swapchain_info(vk_format, width, height, 2)) {
-                Ok(swapchain) => swapchain,
-                Err(first) => {
-                    log::warn!(
-                        "runtime rejected a 2-layer swapchain ({first}); retrying with 1 layer"
-                    );
-                    array_size = 1;
-                    session
-                        .create_swapchain(&swapchain_info(vk_format, width, height, 1))
-                        .map_err(|second| {
-                            XrError::Swapchain(format!(
-                                "2-layer failed ({first}), 1-layer retry failed ({second})"
-                            ))
-                        })?
-                }
-            };
+        let swapchain = match session.create_swapchain(&swapchain_info(vk_format, width, height, 2))
+        {
+            Ok(swapchain) => swapchain,
+            Err(first) => {
+                log::warn!("runtime rejected a 2-layer swapchain ({first}); retrying with 1 layer");
+                array_size = 1;
+                session
+                    .create_swapchain(&swapchain_info(vk_format, width, height, 1))
+                    .map_err(|second| {
+                        XrError::Swapchain(format!(
+                            "2-layer failed ({first}), 1-layer retry failed ({second})"
+                        ))
+                    })?
+            }
+        };
 
         let images = swapchain.enumerate_images()?;
         let image_count = images.len() as u32;
@@ -168,10 +166,7 @@ fn swapchain_info(
 /// Prefers the caller's requested wgpu format if the runtime offers the
 /// corresponding `VkFormat`; otherwise falls back to the first runtime format
 /// this crate knows how to wrap.
-fn negotiate_vk_format(
-    requested: wgpu::TextureFormat,
-    runtime_formats: &[u32],
-) -> Result<u32> {
+fn negotiate_vk_format(requested: wgpu::TextureFormat, runtime_formats: &[u32]) -> Result<u32> {
     if let Some(vk) = wgpu_format_to_vk(requested) {
         if runtime_formats.contains(&vk) {
             return Ok(vk);
@@ -210,8 +205,7 @@ pub fn wrap_vk_image(
         XrError::GraphicsUnavailable("wgpu device is not backed by the Vulkan backend".to_string())
     })?;
 
-    let usage =
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
 
     let descriptor = wgpu::TextureDescriptor {
         label: Some("OpenXR Swapchain Image"),

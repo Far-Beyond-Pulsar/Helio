@@ -12,13 +12,13 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    Camera, LightId, Movability, ObjectId, RendererBuilder, RendererConfig, SceneActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, LightId,
+    Movability, ObjectId, RendererBuilder, RendererConfig, SceneActor,
 };
 use helio_default_graphs::build_default_graph_external;
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh,
-    point_light, sphere_mesh, update_point_light,
+    box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
+    sphere_mesh, update_point_light,
 };
 
 use winit::{
@@ -95,24 +95,20 @@ impl ApplicationHandler for App {
         });
         let surface = instance.create_surface(window.clone()).unwrap();
 
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            }),
-        )
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
         .unwrap();
 
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                experimental_features: required_experimental_features(adapter.features()),
-                ..Default::default()
-            }),
-        )
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Main Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        }))
         .unwrap();
 
         let device = Arc::new(device);
@@ -156,24 +152,38 @@ impl ApplicationHandler for App {
 
         // ── Materials ───────────────────────────────────────────────────────
         let gold = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.75, 0.25, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0,
+            [0.95, 0.75, 0.25, 1.0],
+            0.25,
+            0.85,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let marble = renderer.scene_mut().insert_material(make_material(
-            [0.85, 0.83, 0.80, 1.0], 0.55, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.85, 0.83, 0.80, 1.0],
+            0.55,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let crystal = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.6, 1.0, 1.0], 0.05, 0.1, [0.2, 0.4, 1.0], 2.0,
+            [0.3, 0.6, 1.0, 1.0],
+            0.05,
+            0.1,
+            [0.2, 0.4, 1.0],
+            2.0,
         ));
         let floor = renderer.scene_mut().insert_material(make_material(
-            [0.22, 0.22, 0.25, 1.0], 0.7, 0.05, [0.0, 0.0, 0.0], 0.0,
+            [0.22, 0.22, 0.25, 1.0],
+            0.7,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
 
         // ── Sky ─────────────────────────────────────────────────────────────
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::sky(helio::SkyActor::new().with_sky_color([
-                0.15, 0.25, 0.45,
-            ])));
+        renderer.scene_mut().insert_actor(SceneActor::sky(
+            helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
+        ));
 
         // ── Ground ──────────────────────────────────────────────────────────
         let ground_mesh = renderer
@@ -193,7 +203,10 @@ impl ApplicationHandler for App {
         // ── Columns (box pillars + sphere tops) ────────────────────────────
         let pillar_mesh = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.15, 2.0, 0.15])))
+            .insert_actor(SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.15, 2.0, 0.15],
+            )))
             .as_mesh()
             .unwrap();
         let sphere_mesh_id = renderer
@@ -368,12 +381,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _id: DeviceId,
-        event: DeviceEvent,
-    ) {
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let Some(s) = &mut self.state {
             if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
                 if s.cursor_grabbed {
@@ -461,7 +469,10 @@ impl State {
         let rot = glam::Quat::from_rotation_y(elapsed * 0.8)
             * glam::Quat::from_rotation_x((elapsed * 0.5).sin() * 0.3);
         let t = glam::Mat4::from_rotation_translation(rot, glam::vec3(0.0, 2.5, 0.0));
-        let _ = self.renderer.scene_mut().update_object_transform(self.spin_crystal, t);
+        let _ = self
+            .renderer
+            .scene_mut()
+            .update_object_transform(self.spin_crystal, t);
 
         // ── Render ─────────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {

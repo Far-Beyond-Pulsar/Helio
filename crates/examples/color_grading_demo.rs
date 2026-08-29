@@ -13,8 +13,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    Camera, DebugDrawState, HdrOutputMode, Renderer, RendererConfig, Scene, TonemapOperator,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, HdrOutputMode, Renderer, RendererConfig, Scene, TonemapOperator,
 };
 use helio_default_graphs::build_default_graph;
 use helio_pass_postprocess::LutBuilder;
@@ -62,7 +62,7 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     // Grading state
-    grading_mode: u32,          // 0=simple, 1=lift-gamma-gain, 2=LUT
+    grading_mode: u32, // 0=simple, 1=lift-gamma-gain, 2=LUT
     hue_shift: f32,
     lut_intensity: f32,
     lut_size: u32,
@@ -85,7 +85,10 @@ impl App {
         };
         let title = format!(
             "Color Grading — {} | Hue: {:.0}° | LUT: {:.0}% | {}³",
-            mode, state.hue_shift, state.lut_intensity * 100.0, state.lut_size,
+            mode,
+            state.hue_shift,
+            state.lut_intensity * 100.0,
+            state.lut_size,
         );
         state.window.set_title(&title);
     }
@@ -210,19 +213,39 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         let white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.92, 1.0], 0.6, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.9, 0.9, 0.92, 1.0],
+            0.6,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let emissive_red = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0,
+            [1.0, 0.1, 0.1, 1.0],
+            0.3,
+            0.0,
+            [10.0, 0.5, 0.5],
+            10.0,
         ));
         let emissive_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0,
+            [0.1, 1.0, 0.1, 1.0],
+            0.3,
+            0.0,
+            [0.5, 10.0, 0.5],
+            10.0,
         ));
         let emissive_blue = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0,
+            [0.1, 0.1, 1.0, 1.0],
+            0.3,
+            0.0,
+            [0.5, 0.5, 10.0],
+            10.0,
         ));
         let metal = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.93, 0.88, 1.0], 0.1, 1.0, [0.0, 0.0, 0.0], 0.0,
+            [0.95, 0.93, 0.88, 1.0],
+            0.1,
+            1.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
 
         let ground = renderer
@@ -230,9 +253,8 @@ impl ApplicationHandler for App {
             .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 8.0)))
             .as_mesh()
             .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer, ground, white, glam::Mat4::IDENTITY, 8.0,
-        );
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, ground, white, glam::Mat4::IDENTITY, 8.0);
 
         let red_cube = renderer
             .scene_mut()
@@ -240,7 +262,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, red_cube, emissive_red, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            red_cube,
+            emissive_red,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let green_cube = renderer
@@ -249,7 +275,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, green_cube, emissive_green, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            green_cube,
+            emissive_green,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let blue_cube = renderer
@@ -258,7 +288,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, blue_cube, emissive_blue, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            blue_cube,
+            emissive_blue,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         let metal_cube = renderer
@@ -267,7 +301,11 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let _ = v3_demo_common::insert_object(
-            &mut renderer, metal_cube, metal, glam::Mat4::IDENTITY, 0.5,
+            &mut renderer,
+            metal_cube,
+            metal,
+            glam::Mat4::IDENTITY,
+            0.5,
         );
 
         renderer
@@ -347,13 +385,35 @@ impl ApplicationHandler for App {
                 if key_state == ElementState::Pressed {
                     state.keys.insert(code);
                     let changed = match code {
-                        KeyCode::Digit1 => { state.grading_mode = 0; true }
-                        KeyCode::Digit2 => { state.grading_mode = 1; true }
-                        KeyCode::Digit3 => { state.grading_mode = 2; state.lut_generation += 1; true }
-                        KeyCode::KeyQ => { state.hue_shift = (state.hue_shift - 5.0).clamp(-180.0, 180.0); true }
-                        KeyCode::KeyE => { state.hue_shift = (state.hue_shift + 5.0).clamp(-180.0, 180.0); true }
-                        KeyCode::KeyR => { state.lut_intensity = (state.lut_intensity - 0.1).clamp(0.0, 1.0); true }
-                        KeyCode::KeyF => { state.lut_intensity = (state.lut_intensity + 0.1).clamp(0.0, 1.0); true }
+                        KeyCode::Digit1 => {
+                            state.grading_mode = 0;
+                            true
+                        }
+                        KeyCode::Digit2 => {
+                            state.grading_mode = 1;
+                            true
+                        }
+                        KeyCode::Digit3 => {
+                            state.grading_mode = 2;
+                            state.lut_generation += 1;
+                            true
+                        }
+                        KeyCode::KeyQ => {
+                            state.hue_shift = (state.hue_shift - 5.0).clamp(-180.0, 180.0);
+                            true
+                        }
+                        KeyCode::KeyE => {
+                            state.hue_shift = (state.hue_shift + 5.0).clamp(-180.0, 180.0);
+                            true
+                        }
+                        KeyCode::KeyR => {
+                            state.lut_intensity = (state.lut_intensity - 0.1).clamp(0.0, 1.0);
+                            true
+                        }
+                        KeyCode::KeyF => {
+                            state.lut_intensity = (state.lut_intensity + 0.1).clamp(0.0, 1.0);
+                            true
+                        }
                         KeyCode::KeyT => {
                             state.lut_size = match state.lut_size {
                                 16 => 32,
@@ -384,10 +444,12 @@ impl ApplicationHandler for App {
                     let dx = position.x as f32 - center.width as f32 / 2.0;
                     let dy = position.y as f32 - center.height as f32 / 2.0;
                     state.mouse_delta = (dx, dy);
-                    let _ = state.window.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                        center.width as f64 / 2.0,
-                        center.height as f64 / 2.0,
-                    ));
+                    let _ = state
+                        .window
+                        .set_cursor_position(winit::dpi::PhysicalPosition::new(
+                            center.width as f64 / 2.0,
+                            center.height as f64 / 2.0,
+                        ));
                 }
             }
             WindowEvent::MouseInput {
@@ -413,9 +475,7 @@ impl ApplicationHandler for App {
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     state.surface.configure(&state.device, &config);
-                    state
-                        .renderer
-                        .set_render_size(size.width, size.height);
+                    state.renderer.set_render_size(size.width, size.height);
                 }
             }
             WindowEvent::RedrawRequested => {

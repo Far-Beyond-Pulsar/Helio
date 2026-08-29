@@ -383,9 +383,9 @@ impl RenderPass for ShadowDirtyPass {
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ShadowDirty"),
-                timestamp_writes: None,
-            });
+            label: Some("ShadowDirty"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(workgroups, 1, 1);

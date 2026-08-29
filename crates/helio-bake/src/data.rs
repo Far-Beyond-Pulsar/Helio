@@ -104,16 +104,21 @@ impl BakedData {
         // bilinear kernel never reaches beyond the region boundary.
         let half_u = 0.5 / atlas_w as f32;
         let half_v = 0.5 / atlas_h as f32;
-        self.lightmap_atlas_regions.iter().map(|r| {
-            [
-                r.uv_offset[0], r.uv_offset[1],
-                r.uv_scale[0],  r.uv_scale[1],
-                r.uv_offset[0] + half_u,
-                r.uv_offset[1] + half_v,
-                r.uv_offset[0] + r.uv_scale[0] - half_u,
-                r.uv_offset[1] + r.uv_scale[1] - half_v,
-            ]
-        }).collect()
+        self.lightmap_atlas_regions
+            .iter()
+            .map(|r| {
+                [
+                    r.uv_offset[0],
+                    r.uv_offset[1],
+                    r.uv_scale[0],
+                    r.uv_scale[1],
+                    r.uv_offset[0] + half_u,
+                    r.uv_offset[1] + half_v,
+                    r.uv_offset[0] + r.uv_scale[0] - half_u,
+                    r.uv_offset[1] + r.uv_scale[1] - half_v,
+                ]
+            })
+            .collect()
     }
 
     /// Borrowed reflection cubemap view (zero-copy).
@@ -182,11 +187,18 @@ impl BakedData {
         // Each f32 ∈ [0,1] → u8 ∈ [0, 255].
         let len = (ao.width * ao.height) as usize;
         let src: &[f32] = bytemuck::cast_slice(&ao.texels[..len * 4]);
-        let r8: Vec<u8> = src.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect();
+        let r8: Vec<u8> = src
+            .iter()
+            .map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+            .collect();
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Baked AO"),
-            size: wgpu::Extent3d { width: ao.width, height: ao.height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: ao.width,
+                height: ao.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -207,7 +219,11 @@ impl BakedData {
                 bytes_per_row: Some(ao.width),
                 rows_per_image: Some(ao.height),
             },
-            wgpu::Extent3d { width: ao.width, height: ao.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: ao.width,
+                height: ao.height,
+                depth_or_array_layers: 1,
+            },
         );
         let view = Arc::new(tex.create_view(&Default::default()));
         let sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
@@ -218,14 +234,23 @@ impl BakedData {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
-        log::info!("[helio-bake] Uploaded AO texture ({}×{}) to GPU.", ao.width, ao.height);
+        log::info!(
+            "[helio-bake] Uploaded AO texture ({}×{}) to GPU.",
+            ao.width,
+            ao.height
+        );
         self.ao_texture = Some(tex);
         self.ao_view = Some(view);
         self.ao_sampler = Some(sampler);
         self
     }
 
-    fn with_lightmap(mut self, device: &wgpu::Device, queue: &wgpu::Queue, lm: Option<CachedLightmap>) -> Self {
+    fn with_lightmap(
+        mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        lm: Option<CachedLightmap>,
+    ) -> Self {
         let Some(lm) = lm else { return self };
 
         // Always upload as Rgba16Float — universally filterable on all backends (Vulkan, DX12,
@@ -240,7 +265,8 @@ impl BakedData {
         let converted: Vec<u8>;
         let texels: &[u8] = if lm.is_f32 {
             let src: &[f32] = bytemuck::cast_slice(&lm.texels);
-            let dst: Vec<u16> = src.iter()
+            let dst: Vec<u16> = src
+                .iter()
                 .map(|&v| half::f16::from_f32(v).to_bits())
                 .collect();
             converted = bytemuck::cast_slice::<u16, u8>(&dst).to_vec();
@@ -251,7 +277,11 @@ impl BakedData {
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Baked Lightmap"),
-            size: wgpu::Extent3d { width: lm.width, height: lm.height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: lm.width,
+                height: lm.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -272,7 +302,11 @@ impl BakedData {
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(lm.height),
             },
-            wgpu::Extent3d { width: lm.width, height: lm.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: lm.width,
+                height: lm.height,
+                depth_or_array_layers: 1,
+            },
         );
         let view = Arc::new(tex.create_view(&Default::default()));
         let sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
@@ -284,7 +318,12 @@ impl BakedData {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         }));
-        log::info!("[helio-bake] Uploaded lightmap atlas ({}×{}, {:?}) to GPU.", lm.width, lm.height, format);
+        log::info!(
+            "[helio-bake] Uploaded lightmap atlas ({}×{}, {:?}) to GPU.",
+            lm.width,
+            lm.height,
+            format
+        );
         self.lightmap_texture = Some(tex);
         self.lightmap_view = Some(view);
         self.lightmap_sampler = Some(sampler);
@@ -293,9 +332,16 @@ impl BakedData {
         self
     }
 
-    fn with_probes(mut self, device: &wgpu::Device, queue: &wgpu::Queue, probes: Option<CachedProbes>) -> Self {
+    fn with_probes(
+        mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        probes: Option<CachedProbes>,
+    ) -> Self {
         let Some(probes) = probes else { return self };
-        if probes.positions.is_empty() { return self; }
+        if probes.positions.is_empty() {
+            return self;
+        }
 
         let probe_count = probes.positions.len() as u32;
         let res = probes.face_resolution;
@@ -335,7 +381,9 @@ impl BakedData {
                 let face_bytes = (mip_res * mip_res * bytes_per_pixel) as usize;
                 for face in 0..6u32 {
                     let end = (offset + face_bytes).min(probe_end);
-                    if end <= offset { break; }
+                    if end <= offset {
+                        break;
+                    }
                     queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &tex,
@@ -381,7 +429,9 @@ impl BakedData {
         }));
 
         // Upload first probe's SH to a GPU buffer (9 RGB coefficients = 27 × f32 = 108 bytes)
-        let sh_data: Vec<f32> = probes.irradiance_sh.first()
+        let sh_data: Vec<f32> = probes
+            .irradiance_sh
+            .first()
             .map(|sh| sh.iter().flat_map(|&[r, g, b]| [r, g, b]).collect())
             .unwrap_or_else(|| vec![0.0f32; 27]);
         let sh_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -407,7 +457,8 @@ impl BakedData {
         let Some(pvs) = pvs else { return self };
         log::info!(
             "[helio-bake] Loaded PVS ({} cells, {:.1}m cell size).",
-            pvs.cell_count, pvs.cell_size
+            pvs.cell_count,
+            pvs.cell_size
         );
         self.pvs = Some(BakedPvsData {
             world_min: pvs.world_min,

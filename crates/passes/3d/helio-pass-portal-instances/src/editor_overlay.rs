@@ -23,7 +23,9 @@ impl PortalEditorOverlayPass {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PortalEditorOverlay Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/portal_editor_overlay.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/portal_editor_overlay.wgsl").into(),
+            ),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -177,14 +179,20 @@ impl RenderPass for PortalEditorOverlayPass {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("PortalEditorOverlay"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -206,14 +214,23 @@ impl RenderPass for PortalEditorOverlayPass {
             return Ok(());
         };
 
-        let key = (ctx.scene.camera as *const _ as usize, ctx.scene.portal_views as *const _ as usize);
+        let key = (
+            ctx.scene.camera as *const _ as usize,
+            ctx.scene.portal_views as *const _ as usize,
+        );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalEditorOverlay BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: ctx.scene.portal_views.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ctx.scene.portal_views.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);

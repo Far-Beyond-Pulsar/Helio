@@ -106,7 +106,9 @@ impl Scene {
             // read again after this, so move it in rather than cloning it.
             let movable_count = movable_lights.len();
             self.gpu_scene.lights.set_data(movable_lights);
-            self.gpu_scene.light_entity_indices.set_data(movable_entity_indices);
+            self.gpu_scene
+                .light_entity_indices
+                .set_data(movable_entity_indices);
             self.gpu_scene.movable_light_count = movable_count as u32;
 
             if movable_count < light_rec_count {

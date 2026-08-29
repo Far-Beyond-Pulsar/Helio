@@ -21,17 +21,14 @@ impl EditorState {
     ///
     /// Pass a mutable reference to the renderer so the new object can be inserted.
     /// Rebuild `ScenePicker` afterwards so the copy is immediately pickable.
-    pub fn duplicate_selected(
-        &mut self,
-        renderer: &mut Renderer,
-    ) -> Option<SceneActorId> {
+    pub fn duplicate_selected(&mut self, renderer: &mut Renderer) -> Option<SceneActorId> {
         let prev_selected = self.selected()?;
         match prev_selected {
             SceneActorId::Object(id) => {
                 let desc = renderer.scene().get_object_descriptor(id).ok()?;
-                let new_actor = renderer.scene_mut().insert_actor(
-                    crate::scene::SceneActor::object(desc)
-                );
+                let new_actor = renderer
+                    .scene_mut()
+                    .insert_actor(crate::scene::SceneActor::object(desc));
                 let new_id = new_actor.as_object()?;
                 self.replace_selected(Some(SceneActorId::Object(new_id)));
                 self.clear_interaction_state();

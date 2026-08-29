@@ -30,37 +30,36 @@ pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
     DecalId, FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId,
-    MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId,
-    SectionedInstanceId, SublevelId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId,
-    WaterVolumeId,
+    MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
+    SublevelId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
+pub use helio_pass_tsr::TsrQuality;
 /// Portal pair math (`pair_map`, crossing detection, teleport) — CPU-only,
 /// rendering-architecture-agnostic. See [`scene::portal_pose_facing`] and
 /// [`PortalDescriptor`] for the Helio-side portal API these compose with.
 pub use helio_portal_core::{crossing_detected, plane_signed_distance, PortalPair, PortalPose};
-pub use material::{
-    MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
-    TextureUpload, MAX_TEXTURES,
-};
 pub use libhelio::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
+};
+pub use material::{
+    MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
+    TextureUpload, MAX_TEXTURES,
 };
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use picking::{PickHit, ScenePicker};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, BillboardInstance, DebugCameraUniform, DebugDrawPass,
-    DebugDrawState, GiConfig, GraphBuilderFn, GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits,
+    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, GiConfig, GraphBuilderFn,
+    GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererBuilder, RendererConfig,
 };
-pub use helio_pass_tsr::TsrQuality;
 pub use scene::{
-    portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer,
-    FoliageTypeDescriptor, GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject,
-    PortalDescriptor, ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult,
-    Scene, SceneActor, SceneActorId, SceneActorTrait, SceneError, StaticMeshRenderInput,
-    SublevelDescriptor, VoxelMode,
-    VoxelVolumeDescriptor, WaterHitboxActor, WaterHitboxDescriptor, WaterVolumeActor,
+    portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
+    GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
+    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
+    SceneActorId, SceneActorTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
+    VoxelMode, VoxelVolumeDescriptor, WaterHitboxActor, WaterHitboxDescriptor, WaterVolumeActor,
     WaterVolumeDescriptor,
 };
 pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
@@ -77,7 +76,10 @@ pub use helio_core::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
     RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
-pub use libhelio::{HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator, VolumetricClouds};
+pub use libhelio::{
+    HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,
+    VolumetricClouds,
+};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].

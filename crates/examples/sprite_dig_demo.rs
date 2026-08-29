@@ -33,7 +33,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use helio_core::{GpuScene, RenderGraph};
-use helio_pass_radiance_cascades_2d::{RadianceCascades2DPass, RadianceCascadesCompositePass, RadianceCascadesConfig};
+use helio_pass_radiance_cascades_2d::{
+    RadianceCascades2DPass, RadianceCascadesCompositePass, RadianceCascadesConfig,
+};
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 use helio_pass_sprite_cull::SpriteCullPass;
 use image::RgbaImage;
@@ -84,7 +86,11 @@ fn occ_cell(pos: [f32; 2]) -> Option<(u32, u32)> {
         return None;
     }
     let (c, r) = (cf.floor() as u32, rf.floor() as u32);
-    if c < OCC_COLS && r < OCC_ROWS { Some((c, r)) } else { None }
+    if c < OCC_COLS && r < OCC_ROWS {
+        Some((c, r))
+    } else {
+        None
+    }
 }
 
 fn occ_index(c: u32, r: u32) -> u32 {
@@ -104,7 +110,7 @@ struct GpuEmitter {
     g: f32,
     b: f32,
     _pad: f32,
-    _pad2: f32,  // 8 × f32 = 32 bytes, matching shader layout
+    _pad2: f32, // 8 × f32 = 32 bytes, matching shader layout
 }
 
 // Emitters: `cabin` windows emit warm amber light.
@@ -112,7 +118,7 @@ const LIGHT_EMITTER_NAMES: &[&str] = &["cabin"];
 
 fn emitter_style(name: &str) -> ([f32; 3], f32) {
     match name {
-        _ => ([1.0, 0.70, 0.30], 180.0),  // cabin: warm amber window glow
+        _ => ([1.0, 0.70, 0.30], 180.0), // cabin: warm amber window glow
     }
 }
 
@@ -131,7 +137,12 @@ const DEN_MONSTERS: &[&str] = &["boar/walk", "bee/fly", "boar/idle"];
 // Village: bushes around the cabin.
 const VILLAGE_PROPS: &[&str] = &["bush_a", "bush_b", "bush_c"];
 // Market/tail: golden and yellow autumn trees + bushes.
-const MARKET_TREES: &[&str] = &["tree_golden_tall", "tree_golden_med", "tree_yellow_tall", "tree_yellow_med"];
+const MARKET_TREES: &[&str] = &[
+    "tree_golden_tall",
+    "tree_golden_med",
+    "tree_yellow_tall",
+    "tree_yellow_med",
+];
 const MARKET_CLUTTER: &[&str] = &["bush_c", "bush_d"];
 
 enum Animated {
@@ -174,7 +185,11 @@ fn flip_u(uv: [f32; 4]) -> [f32; 4] {
     [uv[2], uv[1], uv[0], uv[3]]
 }
 
-fn world_from_screen(mouse: (f64, f64), window_size: (u32, u32), camera_center: [f32; 2]) -> [f32; 2] {
+fn world_from_screen(
+    mouse: (f64, f64),
+    window_size: (u32, u32),
+    camera_center: [f32; 2],
+) -> [f32; 2] {
     let sx = (mouse.0 as f32 - window_size.0 as f32 * 0.5) / ZOOM;
     let sy = (mouse.1 as f32 - window_size.1 as f32 * 0.5) / ZOOM;
     [camera_center[0] + sx, camera_center[1] - sy]
@@ -187,7 +202,10 @@ fn hit_test(objects: &HashMap<SpriteHandle, Breakable>, p: [f32; 2]) -> Option<S
     for (&handle, b) in objects.iter() {
         let hw = b.size[0] * 0.5;
         let hh = b.size[1] * 0.5;
-        if p[0] >= b.pos[0] - hw && p[0] <= b.pos[0] + hw && p[1] >= b.pos[1] - hh && p[1] <= b.pos[1] + hh
+        if p[0] >= b.pos[0] - hw
+            && p[0] <= b.pos[0] + hw
+            && p[1] >= b.pos[1] - hh
+            && p[1] <= b.pos[1] + hh
             && best.map(|(_, d)| b.depth > d).unwrap_or(true)
         {
             best = Some((handle, b.depth));
@@ -196,7 +214,12 @@ fn hit_test(objects: &HashMap<SpriteHandle, Breakable>, p: [f32; 2]) -> Option<S
     best.map(|(h, _)| h)
 }
 
-fn hotbar_slot_world_pos(camera_center: [f32; 2], window_size: (u32, u32), index: usize, total: usize) -> [f32; 2] {
+fn hotbar_slot_world_pos(
+    camera_center: [f32; 2],
+    window_size: (u32, u32),
+    index: usize,
+    total: usize,
+) -> [f32; 2] {
     let n = total.max(1) as f32;
     let x_offset = (index as f32 - (n - 1.0) * 0.5) * HOTBAR_SLOT_SPACING / ZOOM;
     let y_offset = window_size.1 as f32 * 0.5 / ZOOM - HOTBAR_MARGIN_TOP;
@@ -210,7 +233,10 @@ impl Rng {
         Rng(seed)
     }
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
     fn next_f32(&mut self) -> f32 {
@@ -248,7 +274,9 @@ fn load_all_sprites() -> Vec<(String, RgbaImage)> {
     EMBEDDED_SPRITES
         .iter()
         .map(|(name, bytes)| {
-            let img = image::load_from_memory(bytes).unwrap_or_else(|e| panic!("decode embedded sprite {name}: {e}")).to_rgba8();
+            let img = image::load_from_memory(bytes)
+                .unwrap_or_else(|e| panic!("decode embedded sprite {name}: {e}"))
+                .to_rgba8();
             (name.to_string(), img)
         })
         .collect()
@@ -257,7 +285,11 @@ fn load_all_sprites() -> Vec<(String, RgbaImage)> {
 fn point_seg_dist(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
     let (dx, dy) = (x1 - x0, y1 - y0);
     let len2 = dx * dx + dy * dy;
-    let t = if len2 > 0.0 { ((px - x0) * dx + (py - y0) * dy) / len2 } else { 0.0 };
+    let t = if len2 > 0.0 {
+        ((px - x0) * dx + (py - y0) * dy) / len2
+    } else {
+        0.0
+    };
     let t = t.clamp(0.0, 1.0);
     let (cx, cy) = (x0 + t * dx, y0 + t * dy);
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
@@ -378,7 +410,13 @@ fn trim_content(img: &RgbaImage) -> Option<RgbaImage> {
     if max_x < min_x || max_y < min_y {
         return None;
     }
-    Some(crop_rect(img, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+    Some(crop_rect(
+        img,
+        min_x,
+        min_y,
+        max_x - min_x + 1,
+        max_y - min_y + 1,
+    ))
 }
 
 fn avg_color(img: &RgbaImage) -> (u32, u32, u32) {
@@ -406,7 +444,14 @@ enum SliceSpec {
     /// are dropped; cells are trimmed to their opaque content. With `group`,
     /// all frames across every sheet in the group are re-normalized to one
     /// shared box (see above) and indexed as `{group}_{key}_{i}`.
-    Grid { cell_w: u32, cell_h: u32, cols: u32, rows: u32, group: Option<&'static str>, key: &'static str },
+    Grid {
+        cell_w: u32,
+        cell_h: u32,
+        cols: u32,
+        rows: u32,
+        group: Option<&'static str>,
+        key: &'static str,
+    },
     /// Hand-picked sub-rectangles `(x, y, w, h)` in sheet pixels, each its
     /// own sprite, trimmed to content.
     Rects(&'static [(&'static str, (u32, u32, u32, u32))]),
@@ -422,36 +467,162 @@ fn slice_spec(path: &str) -> SliceSpec {
     use SliceSpec::*;
     match path {
         // ── Hero — normalized to a shared box across every animation. ──────
-        "Character/Idle/Idle-Sheet" => Grid { cell_w: 64, cell_h: 80, cols: 4, rows: 1, group: Some("player"), key: "idle" },
-        "Character/Run/Run-Sheet" => Grid { cell_w: 80, cell_h: 80, cols: 8, rows: 1, group: Some("player"), key: "run" },
-        "Character/Attack-01/Attack-01-Sheet" => Grid { cell_w: 96, cell_h: 80, cols: 8, rows: 1, group: Some("player"), key: "attack" },
-        "Character/Jumlp-All/Jump-All-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 15, rows: 1, group: Some("player"), key: "jump" },
-        "Character/Jump-Start/Jump-Start-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("player"), key: "jump_start" },
-        "Character/Jump-End/Jump-End-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 3, rows: 1, group: Some("player"), key: "jump_end" },
-        "Character/Dead/Dead-Sheet" => Grid { cell_w: 80, cell_h: 64, cols: 8, rows: 1, group: Some("player"), key: "dead" },
+        "Character/Idle/Idle-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 80,
+            cols: 4,
+            rows: 1,
+            group: Some("player"),
+            key: "idle",
+        },
+        "Character/Run/Run-Sheet" => Grid {
+            cell_w: 80,
+            cell_h: 80,
+            cols: 8,
+            rows: 1,
+            group: Some("player"),
+            key: "run",
+        },
+        "Character/Attack-01/Attack-01-Sheet" => Grid {
+            cell_w: 96,
+            cell_h: 80,
+            cols: 8,
+            rows: 1,
+            group: Some("player"),
+            key: "attack",
+        },
+        "Character/Jumlp-All/Jump-All-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 15,
+            rows: 1,
+            group: Some("player"),
+            key: "jump",
+        },
+        "Character/Jump-Start/Jump-Start-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 4,
+            rows: 1,
+            group: Some("player"),
+            key: "jump_start",
+        },
+        "Character/Jump-End/Jump-End-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 3,
+            rows: 1,
+            group: Some("player"),
+            key: "jump_end",
+        },
+        "Character/Dead/Dead-Sheet" => Grid {
+            cell_w: 80,
+            cell_h: 64,
+            cols: 8,
+            rows: 1,
+            group: Some("player"),
+            key: "dead",
+        },
         // ── Boar. ─────────────────────────────────────────────────────────
-        "Mob/Boar/Idle/Idle-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 4, rows: 1, group: Some("boar"), key: "idle" },
-        "Mob/Boar/Run/Run-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 6, rows: 1, group: Some("boar"), key: "run" },
-        "Mob/Boar/Walk/Walk-Base-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 6, rows: 1, group: Some("boar"), key: "walk" },
-        "Mob/Boar/Hit-Vanish/Hit-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 4, rows: 1, group: Some("boar"), key: "hit" },
+        "Mob/Boar/Idle/Idle-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 4,
+            rows: 1,
+            group: Some("boar"),
+            key: "idle",
+        },
+        "Mob/Boar/Run/Run-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 6,
+            rows: 1,
+            group: Some("boar"),
+            key: "run",
+        },
+        "Mob/Boar/Walk/Walk-Base-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 6,
+            rows: 1,
+            group: Some("boar"),
+            key: "walk",
+        },
+        "Mob/Boar/Hit-Vanish/Hit-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 4,
+            rows: 1,
+            group: Some("boar"),
+            key: "hit",
+        },
         // ── Bee. ──────────────────────────────────────────────────────────
-        "Mob/Small Bee/Attack/Attack-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "attack" },
-        "Mob/Small Bee/Fly/Fly-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "fly" },
-        "Mob/Small Bee/Hit/Hit-Sheet" => Grid { cell_w: 64, cell_h: 64, cols: 4, rows: 1, group: Some("bee"), key: "hit" },
+        "Mob/Small Bee/Attack/Attack-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 4,
+            rows: 1,
+            group: Some("bee"),
+            key: "attack",
+        },
+        "Mob/Small Bee/Fly/Fly-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 4,
+            rows: 1,
+            group: Some("bee"),
+            key: "fly",
+        },
+        "Mob/Small Bee/Hit/Hit-Sheet" => Grid {
+            cell_w: 64,
+            cell_h: 64,
+            cols: 4,
+            rows: 1,
+            group: Some("bee"),
+            key: "hit",
+        },
         // ── Snail. ────────────────────────────────────────────────────────
-        "Mob/Snail/walk-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "walk" },
-        "Mob/Snail/Hide-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "hide" },
-        "Mob/Snail/Dead-Sheet" => Grid { cell_w: 48, cell_h: 32, cols: 8, rows: 1, group: Some("snail"), key: "dead" },
+        "Mob/Snail/walk-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 8,
+            rows: 1,
+            group: Some("snail"),
+            key: "walk",
+        },
+        "Mob/Snail/Hide-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 8,
+            rows: 1,
+            group: Some("snail"),
+            key: "hide",
+        },
+        "Mob/Snail/Dead-Sheet" => Grid {
+            cell_w: 48,
+            cell_h: 32,
+            cols: 8,
+            rows: 1,
+            group: Some("snail"),
+            key: "dead",
+        },
         // ── 16px terrain tileset (classified by color in `classify_tiles`). ─
-        "Assets/Tiles" => Grid { cell_w: 16, cell_h: 16, cols: 25, rows: 25, group: None, key: "" },
+        "Assets/Tiles" => Grid {
+            cell_w: 16,
+            cell_h: 16,
+            cols: 25,
+            rows: 25,
+            group: None,
+            key: "",
+        },
         // ── Hand-composed tiles. ──────────────────────────────────────────
         // Tree-Assets.png (336×400): right column only — four bush variants.
         // The left cave-dressing cluster is no longer used.
         "Assets/Tree-Assets" => Rects(&[
-            ("bush_a",    (210,   5, 124,  86)),
-            ("bush_b",    (210, 101, 124,  86)),
-            ("bush_c",    (210, 197, 124,  86)),
-            ("bush_d",    (210, 293, 124,  86)),
+            ("bush_a", (210, 5, 124, 86)),
+            ("bush_b", (210, 101, 124, 86)),
+            ("bush_c", (210, 197, 124, 86)),
+            ("bush_d", (210, 293, 124, 86)),
         ]),
         // Buildings.png, Hive.png, Interior-01.png, Props-Rocks.png — not used.
         "Assets/Buildings" | "Assets/Hive" | "Assets/Interior-01" | "Assets/Props-Rocks" => Skip,
@@ -459,51 +630,51 @@ fn slice_spec(path: &str) -> SliceSpec {
         // Full content fills the sheet — no transparent margins.
         "cabin" => Single("cabin"),
         // Large pine-tree canvases (1344×1200):
-//   Each column (x=0, x=112, x=224) is one depth layer of the same tree.
-//   All three layers must be rendered at the same world XY, composited
-//   back-to-front, to produce one complete tree.
-        "Trees/Green-Tree"  => Rects(&[
-    ("tree_green_tall_0", (  0,   0, 107, 368)),
-    ("tree_green_tall_1", (112,   0, 107, 368)),
-    ("tree_green_tall_2", (224,   0, 107, 368)),
-    ("tree_green_med_0",  (  0, 391, 107, 313)),
-    ("tree_green_med_1",  (112, 391, 107, 313)),
-    ("tree_green_med_2",  (224, 391, 107, 313)),
+        //   Each column (x=0, x=112, x=224) is one depth layer of the same tree.
+        //   All three layers must be rendered at the same world XY, composited
+        //   back-to-front, to produce one complete tree.
+        "Trees/Green-Tree" => Rects(&[
+            ("tree_green_tall_0", (0, 0, 107, 368)),
+            ("tree_green_tall_1", (112, 0, 107, 368)),
+            ("tree_green_tall_2", (224, 0, 107, 368)),
+            ("tree_green_med_0", (0, 391, 107, 313)),
+            ("tree_green_med_1", (112, 391, 107, 313)),
+            ("tree_green_med_2", (224, 391, 107, 313)),
         ]),
-"Trees/Red-Tree"    => Rects(&[
-    ("tree_red_tall_0",   (  0,   0, 107, 368)),
-    ("tree_red_tall_1",   (112,   0, 107, 368)),
-    ("tree_red_tall_2",   (224,   0, 107, 368)),
-    ("tree_red_med_0",    (  0, 391, 107, 313)),
-    ("tree_red_med_1",    (112, 391, 107, 313)),
-    ("tree_red_med_2",    (224, 391, 107, 313)),
+        "Trees/Red-Tree" => Rects(&[
+            ("tree_red_tall_0", (0, 0, 107, 368)),
+            ("tree_red_tall_1", (112, 0, 107, 368)),
+            ("tree_red_tall_2", (224, 0, 107, 368)),
+            ("tree_red_med_0", (0, 391, 107, 313)),
+            ("tree_red_med_1", (112, 391, 107, 313)),
+            ("tree_red_med_2", (224, 391, 107, 313)),
         ]),
-"Trees/Dark-Tree"   => Rects(&[
-    ("tree_dark_tall_0",  (  0,   0, 107, 368)),
-    ("tree_dark_tall_1",  (112,   0, 107, 368)),
-    ("tree_dark_tall_2",  (224,   0, 107, 368)),
-    ("tree_dark_med_0",   (  0, 391, 107, 313)),
-    ("tree_dark_med_1",   (112, 391, 107, 313)),
-    ("tree_dark_med_2",   (224, 391, 107, 313)),
-]),
-"Trees/Golden-Tree" => Rects(&[
-    ("tree_golden_tall_0",(  0,   0, 107, 368)),
-    ("tree_golden_tall_1",(112,   0, 107, 368)),
-    ("tree_golden_tall_2",(224,   0, 107, 368)),
-    ("tree_golden_med_0", (  0, 391, 107, 313)),
-    ("tree_golden_med_1", (112, 391, 107, 313)),
-    ("tree_golden_med_2", (224, 391, 107, 313)),
-]),
-"Trees/Yellow-Tree" => Rects(&[
-    ("tree_yellow_tall_0",(  0,   0, 107, 368)),
-    ("tree_yellow_tall_1",(112,   0, 107, 368)),
-    ("tree_yellow_tall_2",(224,   0, 107, 368)),
-    ("tree_yellow_med_0", (  0, 391, 107, 313)),
-    ("tree_yellow_med_1", (112, 391, 107, 313)),
-    ("tree_yellow_med_2", (224, 391, 107, 313)),
-]),
+        "Trees/Dark-Tree" => Rects(&[
+            ("tree_dark_tall_0", (0, 0, 107, 368)),
+            ("tree_dark_tall_1", (112, 0, 107, 368)),
+            ("tree_dark_tall_2", (224, 0, 107, 368)),
+            ("tree_dark_med_0", (0, 391, 107, 313)),
+            ("tree_dark_med_1", (112, 391, 107, 313)),
+            ("tree_dark_med_2", (224, 391, 107, 313)),
+        ]),
+        "Trees/Golden-Tree" => Rects(&[
+            ("tree_golden_tall_0", (0, 0, 107, 368)),
+            ("tree_golden_tall_1", (112, 0, 107, 368)),
+            ("tree_golden_tall_2", (224, 0, 107, 368)),
+            ("tree_golden_med_0", (0, 391, 107, 313)),
+            ("tree_golden_med_1", (112, 391, 107, 313)),
+            ("tree_golden_med_2", (224, 391, 107, 313)),
+        ]),
+        "Trees/Yellow-Tree" => Rects(&[
+            ("tree_yellow_tall_0", (0, 0, 107, 368)),
+            ("tree_yellow_tall_1", (112, 0, 107, 368)),
+            ("tree_yellow_tall_2", (224, 0, 107, 368)),
+            ("tree_yellow_med_0", (0, 391, 107, 313)),
+            ("tree_yellow_med_1", (112, 391, 107, 313)),
+            ("tree_yellow_med_2", (224, 391, 107, 313)),
+        ]),
         // 896×256 parallax forest silhouette strip — tiled behind the terrain.
-        "Trees/Background"  => Single("background_trees"),
+        "Trees/Background" => Single("background_trees"),
         "Background/Background" => Single("background"),
         // Recolor variants, the packed `all.png`, and the HUD sheet aren't
         // used by this demo.
@@ -538,14 +709,23 @@ fn slice_sheets(sheets: Vec<(String, RgbaImage)>) -> SliceOutput {
                     }
                 }
             }
-            SliceSpec::Grid { cell_w, cell_h, cols, rows, group, key } => {
+            SliceSpec::Grid {
+                cell_w,
+                cell_h,
+                cols,
+                rows,
+                group,
+                key,
+            } => {
                 for r in 0..rows {
                     for c in 0..cols {
                         let cell = crop_rect(&img, c * cell_w, r * cell_h, cell_w, cell_h);
                         if let Some(t) = trim_content(&cell) {
                             match group {
                                 Some(g) => groups.entry(g).or_default().push((key, t)),
-                                None if path == "Assets/Tiles" => frames.push((format!("tile_{r}_{c}"), t)),
+                                None if path == "Assets/Tiles" => {
+                                    frames.push((format!("tile_{r}_{c}"), t))
+                                }
                                 None => frames.push((format!("{path}#{r}_{c}"), t)),
                             }
                         }
@@ -557,8 +737,9 @@ fn slice_sheets(sheets: Vec<(String, RgbaImage)>) -> SliceOutput {
 
     // Normalize every animation group to a common box.
     for (group, raw) in groups {
-        let (box_w, box_h) =
-            raw.iter().fold((0u32, 0u32), |(w, h), (_, im)| (w.max(im.width()), h.max(im.height())));
+        let (box_w, box_h) = raw.iter().fold((0u32, 0u32), |(w, h), (_, im)| {
+            (w.max(im.width()), h.max(im.height()))
+        });
         let mut order: HashMap<&'static str, Vec<String>> = HashMap::new();
         for (i, (key, im)) in raw.into_iter().enumerate() {
             let name = format!("{group}_{key}_{i}");
@@ -669,9 +850,21 @@ fn place_prop(
     let uv = if flip { flip_u(s.uv) } else { s.uv };
     let pos = [x, top + s.h * 0.5 + y_offset];
     let handle = sprite_pass.insert_sprite(
-        SpriteInstance::new(pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
+        SpriteInstance::new(pos, [s.w, s.h])
+            .with_uv_rect(uv)
+            .with_depth(depth)
+            .with_atlas_layer(atlas_layer),
     );
-    objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
+    objects.insert(
+        handle,
+        Breakable {
+            pos,
+            size: [s.w, s.h],
+            depth,
+            name: name.to_string(),
+            terrain_cell: None,
+        },
+    );
     s
 }
 
@@ -693,7 +886,17 @@ fn lay_row(
     for &name in names {
         let s = atlas[name];
         cursor += s.w * 0.5;
-        place_prop(sprite_pass, atlas, atlas_layer, objects, name, cursor, depth, false, 0.0);
+        place_prop(
+            sprite_pass,
+            atlas,
+            atlas_layer,
+            objects,
+            name,
+            cursor,
+            depth,
+            false,
+            0.0,
+        );
         cursor += s.w * 0.5 + gap;
     }
     cursor
@@ -736,13 +939,27 @@ fn scatter_band(
                 let uv = if flip { flip_u(s.uv) } else { s.uv };
                 let pos = [x, top + s.h * 0.5];
                 let handle = sprite_pass.insert_sprite(
-                    SpriteInstance::new(pos, [s.w, s.h]).with_uv_rect(uv).with_depth(depth).with_atlas_layer(atlas_layer),
+                    SpriteInstance::new(pos, [s.w, s.h])
+                        .with_uv_rect(uv)
+                        .with_depth(depth)
+                        .with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
+                objects.insert(
+                    handle,
+                    Breakable {
+                        pos,
+                        size: [s.w, s.h],
+                        depth,
+                        name: name.to_string(),
+                        terrain_cell: None,
+                    },
+                );
             }
             Animated::Critter => {
                 let frames = &anims[name];
-                let s = *atlas.get(&frames[0]).expect("critter frame missing from atlas");
+                let s = *atlas
+                    .get(&frames[0])
+                    .expect("critter frame missing from atlas");
                 let base_pos = [x, top + s.h * 0.5];
                 let handle = sprite_pass.insert_sprite(
                     SpriteInstance::new(base_pos, [s.w, s.h])
@@ -753,7 +970,13 @@ fn scatter_band(
                 let name_owned = frames[0].clone();
                 objects.insert(
                     handle,
-                    Breakable { pos: base_pos, size: [s.w, s.h], depth, name: name_owned, terrain_cell: None },
+                    Breakable {
+                        pos: base_pos,
+                        size: [s.w, s.h],
+                        depth,
+                        name: name_owned,
+                        terrain_cell: None,
+                    },
                 );
                 critters.push(Critter {
                     handle,
@@ -767,9 +990,21 @@ fn scatter_band(
                 let s = atlas[name];
                 let base_pos = [x, top + s.h * 0.5 + 10.0];
                 let handle = sprite_pass.insert_sprite(
-                    SpriteInstance::new(base_pos, [s.w, s.h]).with_uv_rect(s.uv).with_depth(depth).with_atlas_layer(atlas_layer),
+                    SpriteInstance::new(base_pos, [s.w, s.h])
+                        .with_uv_rect(s.uv)
+                        .with_depth(depth)
+                        .with_atlas_layer(atlas_layer),
                 );
-                objects.insert(handle, Breakable { pos: base_pos, size: [s.w, s.h], depth, name: name.to_string(), terrain_cell: None });
+                objects.insert(
+                    handle,
+                    Breakable {
+                        pos: base_pos,
+                        size: [s.w, s.h],
+                        depth,
+                        name: name.to_string(),
+                        terrain_cell: None,
+                    },
+                );
                 items.push(Item {
                     handle,
                     base_pos,
@@ -810,7 +1045,16 @@ fn place_tree(
         );
         // Only register layer 0 as a breakable so it isn't triple-counted.
         if i == 0 {
-            objects.insert(handle, Breakable { pos, size: [s.w, s.h], depth: layer_depth, name: key, terrain_cell: None });
+            objects.insert(
+                handle,
+                Breakable {
+                    pos,
+                    size: [s.w, s.h],
+                    depth: layer_depth,
+                    name: key,
+                    terrain_cell: None,
+                },
+            );
         }
     }
 }
@@ -832,22 +1076,32 @@ fn scatter_trees(
     let mut col = col_start;
     loop {
         col += rng.range_i32(step.0, step.1);
-        if col >= col_end { break; }
+        if col >= col_end {
+            break;
+        }
         let x = col as f32 * TILE + rng.range_i32(-6, 6) as f32;
         let base = base_names[rng.range_usize(base_names.len())];
         let flip = rng.bool();
-        place_tree(sprite_pass, atlas, atlas_layer, objects, base, x, depth, flip);
+        place_tree(
+            sprite_pass,
+            atlas,
+            atlas_layer,
+            objects,
+            base,
+            x,
+            depth,
+            flip,
+        );
     }
 }
 
-
 fn anim_fps(key: &str) -> f32 {
     if key.contains("boar") {
-        9.0   // 4/6 frames — weighty trot
+        9.0 // 4/6 frames — weighty trot
     } else if key.contains("bee") {
-        16.0  // 4 frames — rapid wing-flap
+        16.0 // 4 frames — rapid wing-flap
     } else if key.contains("snail") {
-        5.0   // 8 frames — very slow crawl
+        5.0 // 8 frames — very slow crawl
     } else {
         10.0
     }
@@ -990,7 +1244,12 @@ impl ApplicationHandler for App {
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
         surface.configure(
             &device,
@@ -1008,11 +1267,17 @@ impl ApplicationHandler for App {
         );
 
         let loaded = load_all_sprites();
-        log::info!("[sprite_dig_demo] loaded {} embedded sprite files", loaded.len());
+        log::info!(
+            "[sprite_dig_demo] loaded {} embedded sprite files",
+            loaded.len()
+        );
         let sliced = slice_sheets(loaded);
         let anims = sliced.anims;
         let mut loaded = sliced.frames;
-        loaded.push(("__white".to_string(), RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255]))));
+        loaded.push((
+            "__white".to_string(),
+            RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255])),
+        ));
         for stage in 1..=3u32 {
             loaded.push((format!("__crack_{stage}"), make_crack_image(stage)));
         }
@@ -1023,13 +1288,27 @@ impl ApplicationHandler for App {
             atlas_img.height(),
             atlas.len()
         );
-        let crack_uvs = [atlas["__crack_1"].uv, atlas["__crack_2"].uv, atlas["__crack_3"].uv];
+        let crack_uvs = [
+            atlas["__crack_1"].uv,
+            atlas["__crack_2"].uv,
+            atlas["__crack_3"].uv,
+        ];
 
         let mut graph = RenderGraph::new(&device, &queue);
         let mut sprite_pass = SpriteBatchPass::new(&device, &queue, format);
-        sprite_pass.set_clear_color(Some(wgpu::Color { r: 0.42, g: 0.70, b: 0.94, a: 1.0 }));
-        let atlas_layer =
-            sprite_pass.add_atlas_layer(&device, &queue, atlas_img.width(), atlas_img.height(), atlas_img.as_raw());
+        sprite_pass.set_clear_color(Some(wgpu::Color {
+            r: 0.42,
+            g: 0.70,
+            b: 0.94,
+            a: 1.0,
+        }));
+        let atlas_layer = sprite_pass.add_atlas_layer(
+            &device,
+            &queue,
+            atlas_img.width(),
+            atlas_img.height(),
+            atlas_img.as_raw(),
+        );
 
         sprite_pass.reserve(&device, POOL_CAPACITY);
         let mut sprite_cull = SpriteCullPass::new(
@@ -1040,8 +1319,17 @@ impl ApplicationHandler for App {
             POOL_CAPACITY as u32,
             POOL_CAPACITY as u32,
         );
-        sprite_cull.set_view_rect([0.0, 0.0], [size.width as f32 * 0.5 / ZOOM, size.height as f32 * 0.5 / ZOOM]);
-        sprite_pass.use_gpu_culling(sprite_cull.draw_order_buf.clone(), sprite_cull.indirect_buf.clone());
+        sprite_cull.set_view_rect(
+            [0.0, 0.0],
+            [
+                size.width as f32 * 0.5 / ZOOM,
+                size.height as f32 * 0.5 / ZOOM,
+            ],
+        );
+        sprite_pass.use_gpu_culling(
+            sprite_cull.draw_order_buf.clone(),
+            sprite_cull.indirect_buf.clone(),
+        );
 
         // Terrain tiles from `Assets/Tiles.png` by direct cell mapping (16×16 grid):
         // tile_1_1 = rgb(70,83,5)  fully-opaque solid green ground = surface/grass fill
@@ -1051,7 +1339,7 @@ impl ApplicationHandler for App {
         // matching the visual style of dirt but in cool stone tones.
         // tile_17_3 = rgb(49,138,175) water — confirmed by pixel scan
         let grass_uv = atlas["tile_1_1"].uv;
-        let dirt_uv  = atlas["tile_3_1"].uv;
+        let dirt_uv = atlas["tile_3_1"].uv;
         let stone_uv = atlas["tile_6_1"].uv;
         let water_uv = atlas["tile_17_3"].uv;
         let mut objects: HashMap<SpriteHandle, Breakable> = HashMap::new();
@@ -1078,7 +1366,11 @@ impl ApplicationHandler for App {
             let in_lake = col >= LAKE_START && col < LAKE_END;
             let jitter = 0.92 + hash01(col as u32 * 7 + 1) * 0.16;
             let pos = [col as f32 * TILE, top - TILE * 0.5];
-            let (surface_uv, surface_name) = if in_lake { (water_uv, "tile_17_3") } else { (grass_uv, "tile_1_1") };
+            let (surface_uv, surface_name) = if in_lake {
+                (water_uv, "tile_17_3")
+            } else {
+                (grass_uv, "tile_1_1")
+            };
             let handle = sprite_pass.insert_sprite(
                 SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
                     .with_uv_rect(surface_uv)
@@ -1107,11 +1399,11 @@ impl ApplicationHandler for App {
                 //   warm/cool hue shifts per tile — no two stone tiles look identical.
                 let color = if is_stone {
                     let base = 0.38 + (hash01(col as u32 * 17 + r as u32 * 53) - 0.5) * 0.10;
-                    let hue  = (hash01(col as u32 * 41 + r as u32 * 71) - 0.5) * 0.04;
+                    let hue = (hash01(col as u32 * 41 + r as u32 * 71) - 0.5) * 0.04;
                     [
-                        (base + hue)         / 0.247_f32,
-                        base                 / 0.212_f32,
-                        (base - hue * 0.5)   / 0.133_f32,
+                        (base + hue) / 0.247_f32,
+                        base / 0.212_f32,
+                        (base - hue * 0.5) / 0.133_f32,
                         1.0_f32,
                     ]
                 } else {
@@ -1160,8 +1452,20 @@ impl ApplicationHandler for App {
         macro_rules! scatter {
             ($start:expr, $end:expr, $step:expr, $names:expr, $anim:expr, $depth:expr) => {
                 scatter_band(
-                    &mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, &mut critters, &mut items,
-                    $start, $end, $step, $names, $anim, $depth, &anims,
+                    &mut sprite_pass,
+                    &atlas,
+                    atlas_layer,
+                    &mut objects,
+                    &mut rng,
+                    &mut critters,
+                    &mut items,
+                    $start,
+                    $end,
+                    $step,
+                    $names,
+                    $anim,
+                    $depth,
+                    &anims,
                 )
             };
         }
@@ -1171,37 +1475,166 @@ impl ApplicationHandler for App {
 
         // ── Forest A: green trees spaced generously (they are wide clusters),
         // bushy ground cover, and a little wildlife.
-        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, SPAWN_END, FOREST_A_END, (4, 8), TREES, 0.15);
-        scatter!(SPAWN_END, FOREST_A_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
-        scatter!(SPAWN_END, FOREST_A_END, (10, 16), FOREST_CRITTERS, Animated::Critter, 0.3);
+        scatter_trees(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            &mut rng,
+            SPAWN_END,
+            FOREST_A_END,
+            (4, 8),
+            TREES,
+            0.15,
+        );
+        scatter!(
+            SPAWN_END,
+            FOREST_A_END,
+            (2, 4),
+            FOREST_CLUTTER,
+            Animated::None,
+            0.2
+        );
+        scatter!(
+            SPAWN_END,
+            FOREST_A_END,
+            (10, 16),
+            FOREST_CRITTERS,
+            Animated::Critter,
+            0.3
+        );
 
         // ── Village: cabin as the centrepiece, bushes either side.
         let village_x = VILLAGE_COL as f32 * TILE;
         let cabin_spr = atlas["cabin"];
-        let building = place_prop(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "cabin", village_x + cabin_spr.w * 1.5, 0.15, false, -TILE);
+        let building = place_prop(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            "cabin",
+            village_x + cabin_spr.w * 1.5,
+            0.15,
+            false,
+            -TILE,
+        );
         lay_row(
-            &mut sprite_pass, &atlas, atlas_layer, &mut objects, VILLAGE_PROPS,
-            village_x - building.w * 0.5 - 30.0, 0.2, 14.0,
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            VILLAGE_PROPS,
+            village_x - building.w * 0.5 - 30.0,
+            0.2,
+            14.0,
         );
 
         // ── Mining zone: dark trees and bushes (no structures).
-        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MINING_START, MINING_END, (4, 8), DEN_TREES, 0.15);
-        scatter!(MINING_START, MINING_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
+        scatter_trees(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            &mut rng,
+            MINING_START,
+            MINING_END,
+            (4, 8),
+            DEN_TREES,
+            0.15,
+        );
+        scatter!(
+            MINING_START,
+            MINING_END,
+            (2, 4),
+            FOREST_CLUTTER,
+            Animated::None,
+            0.2
+        );
 
         // ── Monster den: dark + red trees for atmosphere, mobs.
-        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MINING_END, DEN_END, (4, 7), DEN_TREES, 0.1);
-        scatter!(MINING_END, DEN_END, (5, 8), DEN_MONSTERS, Animated::Critter, 0.3);
+        scatter_trees(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            &mut rng,
+            MINING_END,
+            DEN_END,
+            (4, 7),
+            DEN_TREES,
+            0.1,
+        );
+        scatter!(
+            MINING_END,
+            DEN_END,
+            (5, 8),
+            DEN_MONSTERS,
+            Animated::Critter,
+            0.3
+        );
 
         // ── Forest B: a second, wilder patch of woods with a big green
         // landmark tree centred on the hut column.
-        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, DEN_END, FOREST_B_END, (4, 8), TREES, 0.15);
-        scatter!(DEN_END, FOREST_B_END, (2, 4), FOREST_CLUTTER, Animated::None, 0.2);
-        scatter!(DEN_END, FOREST_B_END, (12, 18), FOREST_CRITTERS, Animated::Critter, 0.3);
-        place_tree(&mut sprite_pass, &atlas, atlas_layer, &mut objects, "tree_green_tall", HUT_COL as f32 * TILE, 0.12, false);
+        scatter_trees(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            &mut rng,
+            DEN_END,
+            FOREST_B_END,
+            (4, 8),
+            TREES,
+            0.15,
+        );
+        scatter!(
+            DEN_END,
+            FOREST_B_END,
+            (2, 4),
+            FOREST_CLUTTER,
+            Animated::None,
+            0.2
+        );
+        scatter!(
+            DEN_END,
+            FOREST_B_END,
+            (12, 18),
+            FOREST_CRITTERS,
+            Animated::Critter,
+            0.3
+        );
+        place_tree(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            "tree_green_tall",
+            HUT_COL as f32 * TILE,
+            0.12,
+            false,
+        );
 
         // ── Market / tail: golden and yellow autumn trees + bushes.
-        scatter_trees(&mut sprite_pass, &atlas, atlas_layer, &mut objects, &mut rng, MARKET_START, MARKET_START + 20, (3, 6), MARKET_TREES, 0.15);
-        scatter!(MARKET_START, TAIL_END, (2, 4), MARKET_CLUTTER, Animated::None, 0.2);
+        scatter_trees(
+            &mut sprite_pass,
+            &atlas,
+            atlas_layer,
+            &mut objects,
+            &mut rng,
+            MARKET_START,
+            MARKET_START + 20,
+            (3, 6),
+            MARKET_TREES,
+            0.15,
+        );
+        scatter!(
+            MARKET_START,
+            TAIL_END,
+            (2, 4),
+            MARKET_CLUTTER,
+            Animated::None,
+            0.2
+        );
 
         // ── Lighting: 2D radiance cascades reading the occupancy grid built
         // above (occluders) plus every placed interior prop that is a light
@@ -1211,12 +1644,31 @@ impl ApplicationHandler for App {
             .filter(|b| LIGHT_EMITTER_NAMES.contains(&b.name.as_str()))
             .map(|b| {
                 let (color, radius) = emitter_style(&b.name);
-                GpuEmitter { pos: b.pos, radius, r: color[0], g: color[1], b: color[2], _pad: 0.0, _pad2: 0.0 }
+                GpuEmitter {
+                    pos: b.pos,
+                    radius,
+                    r: color[0],
+                    g: color[1],
+                    b: color[2],
+                    _pad: 0.0,
+                    _pad2: 0.0,
+                }
             })
             .collect();
         let real_emitter_count = gpu_emitters.len() as u32;
         let max_emitters = real_emitter_count.max(1);
-        gpu_emitters.resize(max_emitters as usize, GpuEmitter { pos: [0.0, 0.0], radius: 0.0, r: 0.0, g: 0.0, b: 0.0, _pad: 0.0, _pad2: 0.0 });
+        gpu_emitters.resize(
+            max_emitters as usize,
+            GpuEmitter {
+                pos: [0.0, 0.0],
+                radius: 0.0,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                _pad: 0.0,
+                _pad2: 0.0,
+            },
+        );
         log::info!("[sprite_dig_demo] {real_emitter_count} light emitters");
 
         let occupancy_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -1237,7 +1689,10 @@ impl ApplicationHandler for App {
         let mut radiance_pass = RadianceCascades2DPass::new(
             &device,
             &queue,
-            RadianceCascadesConfig { max_emitters, ..Default::default() },
+            RadianceCascadesConfig {
+                max_emitters,
+                ..Default::default()
+            },
             occupancy_buf.clone(),
             (OCC_COLS, OCC_ROWS),
             TILE,
@@ -1250,7 +1705,7 @@ impl ApplicationHandler for App {
             &queue,
             format,
             radiance_pass.radiance_view(),
-            [1.35, 1.25, 1.10],  // bright, warm daytime sky ambient
+            [1.35, 1.25, 1.10], // bright, warm daytime sky ambient
             2.0,
         );
 
@@ -1258,12 +1713,18 @@ impl ApplicationHandler for App {
         let player_frame = &anims["player/idle"][0];
         let player_spr = atlas[player_frame];
         let spawn_col = 4;
-        let player_pos = [spawn_col as f32 * TILE, surface_top_world_y(spawn_col) + player_spr.h * PLAYER_SCALE * 0.5];
+        let player_pos = [
+            spawn_col as f32 * TILE,
+            surface_top_world_y(spawn_col) + player_spr.h * PLAYER_SCALE * 0.5,
+        ];
         let player_handle = sprite_pass.insert_sprite(
-            SpriteInstance::new(player_pos, [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE])
-                .with_uv_rect(player_spr.uv)
-                .with_depth(0.5)
-                .with_atlas_layer(atlas_layer),
+            SpriteInstance::new(
+                player_pos,
+                [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE],
+            )
+            .with_uv_rect(player_spr.uv)
+            .with_depth(0.5)
+            .with_atlas_layer(atlas_layer),
         );
 
         // ── Parallax background: the whole-sky `Background/Background.png`,
@@ -1274,13 +1735,10 @@ impl ApplicationHandler for App {
         let bg_scale = (size.height as f32 / bg_spr.h).max(2.0) * 1.1;
         let bg_draw = [bg_spr.w * bg_scale, bg_spr.h * bg_scale];
         let bg_handle = sprite_pass.insert_sprite(
-            SpriteInstance::new(
-                [bg_draw[0] * 0.5, size.height as f32 * 0.5],
-                bg_draw,
-            )
-            .with_uv_rect(bg_spr.uv)
-            .with_depth(-10.0)
-            .with_atlas_layer(atlas_layer),
+            SpriteInstance::new([bg_draw[0] * 0.5, size.height as f32 * 0.5], bg_draw)
+                .with_uv_rect(bg_spr.uv)
+                .with_depth(-10.0)
+                .with_atlas_layer(atlas_layer),
         );
         let bg_uv = bg_spr.uv;
 
@@ -1293,7 +1751,11 @@ impl ApplicationHandler for App {
         let scene = GpuScene::new(device.clone(), queue.clone());
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1369,7 +1831,9 @@ impl ApplicationHandler for App {
                 state.graph.set_render_size(s.width, s.height);
                 state.window_size = (s.width, s.height);
             }
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 if let PhysicalKey::Code(code) = key_event.physical_key {
                     match key_event.state {
                         ElementState::Pressed => {
@@ -1384,12 +1848,23 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.mouse_pos = (position.x, position.y);
             }
-            WindowEvent::MouseInput { state: btn_state, button, .. } => match (button, btn_state) {
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => match (button, btn_state) {
                 (MouseButton::Left, ElementState::Pressed) => {
-                    let world = world_from_screen(state.mouse_pos, state.window_size, state.camera_center);
+                    let world =
+                        world_from_screen(state.mouse_pos, state.window_size, state.camera_center);
                     if let Some(handle) = hit_test(&state.objects, world) {
                         let target = state.objects[&handle].clone();
-                        state.breaking = Some(Breaking { handle, target, start: Instant::now(), crack_handle: None, stage: 0 });
+                        state.breaking = Some(Breaking {
+                            handle,
+                            target,
+                            start: Instant::now(),
+                            crack_handle: None,
+                            stage: 0,
+                        });
                     }
                 }
                 (MouseButton::Left, ElementState::Released) => {
@@ -1405,7 +1880,11 @@ impl ApplicationHandler for App {
                 }
                 (MouseButton::Right, ElementState::Pressed) => {
                     if !state.hotbar.is_empty() {
-                        let world = world_from_screen(state.mouse_pos, state.window_size, state.camera_center);
+                        let world = world_from_screen(
+                            state.mouse_pos,
+                            state.window_size,
+                            state.camera_center,
+                        );
                         let sel = state.hotbar_selected.min(state.hotbar.len() - 1);
                         let (name, uv, w, h) = {
                             let s = &state.hotbar[sel];
@@ -1418,9 +1897,21 @@ impl ApplicationHandler for App {
                             .find_pass_mut::<SpriteBatchPass>()
                             .expect("sprite batch pass missing from graph");
                         let handle = sprite_pass.insert_sprite(
-                            SpriteInstance::new(snapped, [w, h]).with_uv_rect(uv).with_depth(0.2).with_atlas_layer(atlas_layer),
+                            SpriteInstance::new(snapped, [w, h])
+                                .with_uv_rect(uv)
+                                .with_depth(0.2)
+                                .with_atlas_layer(atlas_layer),
                         );
-                        state.objects.insert(handle, Breakable { pos: snapped, size: [w, h], depth: 0.2, name, terrain_cell: None });
+                        state.objects.insert(
+                            handle,
+                            Breakable {
+                                pos: snapped,
+                                size: [w, h],
+                                depth: 0.2,
+                                name,
+                                terrain_cell: None,
+                            },
+                        );
                         state.hotbar[sel].count -= 1;
                         if state.hotbar[sel].count == 0 {
                             let removed = state.hotbar.remove(sel);
@@ -1442,7 +1933,8 @@ impl ApplicationHandler for App {
                     if dy.abs() > 0.01 {
                         let n = state.hotbar.len() as i32;
                         let dir = if dy > 0.0 { -1 } else { 1 };
-                        state.hotbar_selected = (state.hotbar_selected as i32 + dir).rem_euclid(n) as usize;
+                        state.hotbar_selected =
+                            (state.hotbar_selected as i32 + dir).rem_euclid(n) as usize;
                     }
                 }
             }
@@ -1452,26 +1944,32 @@ impl ApplicationHandler for App {
                 state.last_frame = now;
                 let time = state.start_time.elapsed().as_secs_f32();
 
-                let sprite_pass =
-                    state.graph.find_pass_mut::<SpriteBatchPass>().expect("sprite batch pass missing from graph");
+                let sprite_pass = state
+                    .graph
+                    .find_pass_mut::<SpriteBatchPass>()
+                    .expect("sprite batch pass missing from graph");
                 let atlas_layer = state.atlas_layer;
 
                 // ── Mining: advance the crack overlay, or finalize a break.
                 let mut should_finish = false;
                 if let Some(breaking) = state.breaking.as_mut() {
                     let elapsed = breaking.start.elapsed().as_secs_f32();
-                    let stage = ((elapsed / BREAK_STAGE_DURATION).floor() as u32).min(BREAK_TOTAL_STAGES);
+                    let stage =
+                        ((elapsed / BREAK_STAGE_DURATION).floor() as u32).min(BREAK_TOTAL_STAGES);
                     if stage != breaking.stage {
                         breaking.stage = stage;
                         if stage >= 1 {
                             let crack_uv = state.crack_uvs[(stage - 1) as usize];
-                            let inst = SpriteInstance::new(breaking.target.pos, breaking.target.size)
-                                .with_uv_rect(crack_uv)
-                                .with_depth(breaking.target.depth + 0.01)
-                                .with_atlas_layer(atlas_layer);
+                            let inst =
+                                SpriteInstance::new(breaking.target.pos, breaking.target.size)
+                                    .with_uv_rect(crack_uv)
+                                    .with_depth(breaking.target.depth + 0.01)
+                                    .with_atlas_layer(atlas_layer);
                             match breaking.crack_handle {
                                 Some(ch) => sprite_pass.update_sprite(ch, inst),
-                                None => breaking.crack_handle = Some(sprite_pass.insert_sprite(inst)),
+                                None => {
+                                    breaking.crack_handle = Some(sprite_pass.insert_sprite(inst))
+                                }
                             }
                         }
                     }
@@ -1496,22 +1994,42 @@ impl ApplicationHandler for App {
                             let idx = occ_index(c, r);
                             let word = (idx / 32) as usize;
                             state.occupancy_words[word] &= !(1 << (idx % 32));
-                            state.queue.write_buffer(&state.occupancy_buf, (word * 4) as u64, bytemuck::bytes_of(&state.occupancy_words[word]));
+                            state.queue.write_buffer(
+                                &state.occupancy_buf,
+                                (word * 4) as u64,
+                                bytemuck::bytes_of(&state.occupancy_words[word]),
+                            );
                         }
                     }
-                    if let Some(slot) = state.hotbar.iter_mut().find(|s| s.name == breaking.target.name) {
+                    if let Some(slot) = state
+                        .hotbar
+                        .iter_mut()
+                        .find(|s| s.name == breaking.target.name)
+                    {
                         slot.count += 1;
                     } else {
                         let s = state.atlas[&breaking.target.name];
                         let index = state.hotbar.len();
-                        let pos = hotbar_slot_world_pos(state.camera_center, state.window_size, index, index + 1);
+                        let pos = hotbar_slot_world_pos(
+                            state.camera_center,
+                            state.window_size,
+                            index,
+                            index + 1,
+                        );
                         let handle = sprite_pass.insert_sprite(
                             SpriteInstance::new(pos, [HOTBAR_ICON_SIZE, HOTBAR_ICON_SIZE])
                                 .with_uv_rect(s.uv)
                                 .with_depth(0.9)
                                 .with_atlas_layer(atlas_layer),
                         );
-                        state.hotbar.push(HotbarSlot { name: breaking.target.name, count: 1, handle, uv: s.uv, w: s.w, h: s.h });
+                        state.hotbar.push(HotbarSlot {
+                            name: breaking.target.name,
+                            count: 1,
+                            handle,
+                            uv: s.uv,
+                            w: s.w,
+                            h: s.h,
+                        });
                     }
                 }
 
@@ -1522,7 +2040,8 @@ impl ApplicationHandler for App {
                 if state.keys.contains(&KeyCode::KeyA) || state.keys.contains(&KeyCode::ArrowLeft) {
                     move_dir -= 1.0;
                 }
-                if state.keys.contains(&KeyCode::KeyD) || state.keys.contains(&KeyCode::ArrowRight) {
+                if state.keys.contains(&KeyCode::KeyD) || state.keys.contains(&KeyCode::ArrowRight)
+                {
                     move_dir += 1.0;
                 }
                 if move_dir != 0.0 {
@@ -1536,7 +2055,8 @@ impl ApplicationHandler for App {
                 }
                 state.player_pos[0] += state.player_vel[0] * dt;
                 state.player_pos[1] += state.player_vel[1] * dt;
-                state.player_pos[0] = state.player_pos[0].clamp(TILE * 1.0, (WORLD_COLS as f32 - 2.0) * TILE);
+                state.player_pos[0] =
+                    state.player_pos[0].clamp(TILE * 1.0, (WORLD_COLS as f32 - 2.0) * TILE);
 
                 let col = (state.player_pos[0] / TILE).round() as i32;
                 let ground_y = ground_y_at(col, &state.broken_terrain) + state.player_box[1] * 0.5;
@@ -1551,7 +2071,11 @@ impl ApplicationHandler for App {
                 // ── Player animation: idle/run from the character sheet, and
                 // a two-pose jump (rising frames / falling frames).
                 let new_anim = if !state.player_on_ground {
-                    if state.player_vel[1] > 0.0 { PlayerAnim::Jump } else { PlayerAnim::Fall }
+                    if state.player_vel[1] > 0.0 {
+                        PlayerAnim::Jump
+                    } else {
+                        PlayerAnim::Fall
+                    }
                 } else if state.player_vel[0].abs() > 1.0 {
                     PlayerAnim::Run
                 } else {
@@ -1564,15 +2088,19 @@ impl ApplicationHandler for App {
                     state.player_anim_time += dt;
                 }
                 let (group, fps) = match state.player_anim {
-                    PlayerAnim::Idle => ("player/idle", 7.0),   // 4 frames — gentle sway
-                    PlayerAnim::Run  => ("player/run",  12.0),  // 8 frames — brisk sprint
-                    PlayerAnim::Jump => ("player/jump", 14.0),  // 15 frames — snappy arc
+                    PlayerAnim::Idle => ("player/idle", 7.0), // 4 frames — gentle sway
+                    PlayerAnim::Run => ("player/run", 12.0),  // 8 frames — brisk sprint
+                    PlayerAnim::Jump => ("player/jump", 14.0), // 15 frames — snappy arc
                     PlayerAnim::Fall => ("player/jump_end", 10.0), // 3 frames — loop landing
                 };
                 let frames = &state.anims[group];
                 let frame_idx = ((state.player_anim_time * fps) as usize) % frames.len();
                 let spr = state.atlas[&frames[frame_idx]];
-                let uv = if state.player_facing_right { spr.uv } else { flip_u(spr.uv) };
+                let uv = if state.player_facing_right {
+                    spr.uv
+                } else {
+                    flip_u(spr.uv)
+                };
                 let player_pos = state.player_pos;
                 sprite_pass.update_sprite(
                     state.player_handle,
@@ -1623,9 +2151,7 @@ impl ApplicationHandler for App {
                 let bg_size = state.bg_size;
                 let drift_x = state.camera_center[0] * 0.05;
                 let bg_pos = [
-                    state.camera_center[0]
-                        + drift_x.rem_euclid(bg_size[0])
-                        - bg_size[0] * 0.5,
+                    state.camera_center[0] + drift_x.rem_euclid(bg_size[0]) - bg_size[0] * 0.5,
                     // upper ~35 % of the screen (Y-up: add half window height)
                     state.camera_center[1] + state.window_size.1 as f32 * 0.35,
                 ];
@@ -1643,7 +2169,11 @@ impl ApplicationHandler for App {
                 let n = state.hotbar.len();
                 for (i, slot) in state.hotbar.iter().enumerate() {
                     let pos = hotbar_slot_world_pos(state.camera_center, state.window_size, i, n);
-                    let tint = if i == state.hotbar_selected { [1.35, 1.25, 0.55, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
+                    let tint = if i == state.hotbar_selected {
+                        [1.35, 1.25, 0.55, 1.0]
+                    } else {
+                        [1.0, 1.0, 1.0, 1.0]
+                    };
                     sprite_pass.update_sprite(
                         slot.handle,
                         SpriteInstance::new(pos, [HOTBAR_ICON_SIZE, HOTBAR_ICON_SIZE])
@@ -1655,17 +2185,26 @@ impl ApplicationHandler for App {
                 }
 
                 let (win_w, win_h) = state.window_size;
-                sprite_pass.set_camera(state.camera_center, Some([win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM]));
+                sprite_pass.set_camera(
+                    state.camera_center,
+                    Some([win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM]),
+                );
                 state
                     .graph
                     .find_pass_mut::<SpriteCullPass>()
                     .expect("sprite cull pass missing from graph")
-                    .set_view_rect(state.camera_center, [win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM]);
+                    .set_view_rect(
+                        state.camera_center,
+                        [win_w as f32 * 0.5 / ZOOM, win_h as f32 * 0.5 / ZOOM],
+                    );
                 state
                     .graph
                     .find_pass_mut::<RadianceCascades2DPass>()
                     .expect("radiance cascades pass missing from graph")
-                    .set_view(state.camera_center, [win_w as f32 * 0.5, win_h as f32 * 0.5]);
+                    .set_view(
+                        state.camera_center,
+                        [win_w as f32 * 0.5, win_h as f32 * 0.5],
+                    );
 
                 state.fps_frames += 1;
                 if state.fps_last_print.elapsed().as_secs_f32() >= 1.0 {
@@ -1681,14 +2220,18 @@ impl ApplicationHandler for App {
                 }
 
                 let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
                     _ => {
                         state.window.request_redraw();
                         return;
                     }
                 };
                 let view = output.texture.create_view(&Default::default());
-                if let Err(e) = state.graph.execute(&state.scene, &view, &state.dummy_depth_view) {
+                if let Err(e) = state
+                    .graph
+                    .execute(&state.scene, &view, &state.dummy_depth_view)
+                {
                     log::error!("graph execute error: {e:?}");
                 }
                 state.queue.present(output);

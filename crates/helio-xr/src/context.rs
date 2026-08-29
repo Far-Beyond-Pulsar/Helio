@@ -15,9 +15,9 @@
 
 use ash::vk::{self, Handle as _};
 use wgpu::{
+    hal::{api::Vulkan, Api},
     Adapter, Device, DeviceDescriptor, ExperimentalFeatures, Features, Instance, InstanceFlags,
     MemoryBudgetThresholds, MemoryHints, Queue, Trace,
-    hal::{api::Vulkan, Api},
 };
 
 use crate::{Result, XrError};
@@ -50,7 +50,8 @@ pub fn create_wgpu_instance(
         )));
     }
 
-    let vk_entry = unsafe { ash::Entry::load().map_err(|e| XrError::Platform(format!("ash: {e}")))? };
+    let vk_entry =
+        unsafe { ash::Entry::load().map_err(|e| XrError::Platform(format!("ash: {e}")))? };
 
     let flags = InstanceFlags::empty();
     let extensions =
@@ -84,7 +85,10 @@ pub fn create_wgpu_instance(
         .map_err(|e| XrError::Platform(format!("OpenXR create_vulkan_instance: {e}")))?
         .map_err(|e| XrError::Platform(format!("Vulkan create_vulkan_instance: {e}")))?;
     let vk_instance = unsafe {
-        ash::Instance::load(vk_entry.static_fn(), vk::Instance::from_raw(vk_instance as _))
+        ash::Instance::load(
+            vk_entry.static_fn(),
+            vk::Instance::from_raw(vk_instance as _),
+        )
     };
 
     let hal_instance = unsafe {
@@ -135,11 +139,14 @@ pub fn create_wgpu_device(
         xr_instance.vulkan_graphics_device(xr_system, raw_instance.handle().as_raw() as _)
     };
     let vk_physical_device = vk_physical_device.map_err(|e| {
-        XrError::Platform(format!("OpenXR vulkan_graphics_device: {e} (is the runtime running?)"))
+        XrError::Platform(format!(
+            "OpenXR vulkan_graphics_device: {e} (is the runtime running?)"
+        ))
     })?;
     let vk_physical_device = vk::PhysicalDevice::from_raw(vk_physical_device as _);
 
-    let vk_device_properties = unsafe { raw_instance.get_physical_device_properties(vk_physical_device) };
+    let vk_device_properties =
+        unsafe { raw_instance.get_physical_device_properties(vk_physical_device) };
     if vk_device_properties.api_version < vk::API_VERSION_1_1 {
         return Err(XrError::Platform(format!(
             "Vulkan physical device does not support 1.1 (multiview) — got {}",
@@ -149,7 +156,9 @@ pub fn create_wgpu_device(
 
     let hal_adapter = hal_instance
         .expose_adapter(vk_physical_device)
-        .ok_or_else(|| XrError::GraphicsUnavailable("wgpu-hal could not expose the HMD adapter".to_string()))?;
+        .ok_or_else(|| {
+            XrError::GraphicsUnavailable("wgpu-hal could not expose the HMD adapter".to_string())
+        })?;
 
     // Mask the requested feature set down to what the adapter supports, the
     // same way helio's required_wgpu_features does (required | (wanted & available)).
@@ -186,12 +195,13 @@ pub fn create_wgpu_device(
     limits.max_buffer_size = limits.max_buffer_size.min(u32::MAX as u64);
 
     // The device extensions wgpu needs for the requested features.
-    let device_extensions = hal_adapter.adapter.required_device_extensions(required_features);
+    let device_extensions = hal_adapter
+        .adapter
+        .required_device_extensions(required_features);
     let device_extensions_cchar: Vec<_> = device_extensions.iter().map(|s| s.as_ptr()).collect();
-    let mut enabled_physical_device_features =
-        hal_adapter
-            .adapter
-            .physical_device_features(&device_extensions, required_features);
+    let mut enabled_physical_device_features = hal_adapter
+        .adapter
+        .physical_device_features(&device_extensions, required_features);
 
     let queue_family_index = unsafe {
         raw_instance
@@ -234,9 +244,8 @@ pub fn create_wgpu_device(
     let vk_device = vk_device
         .map_err(|e| XrError::Platform(format!("OpenXR create_vulkan_device: {e}")))?
         .map_err(|e| XrError::Platform(format!("Vulkan create_vulkan_device: {e}")))?;
-    let vk_device = unsafe {
-        ash::Device::load(raw_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _))
-    };
+    let vk_device =
+        unsafe { ash::Device::load(raw_instance.fp_v1_0(), vk::Device::from_raw(vk_device as _)) };
 
     let memory_hints = MemoryHints::default();
     let hal_device = unsafe {
@@ -262,10 +271,8 @@ pub fn create_wgpu_device(
         memory_hints,
         trace: Trace::default(),
     };
-    let (device, queue) =
-        unsafe { wgpu_adapter.create_device_from_hal(hal_device, &device_desc) }.map_err(|e| {
-            XrError::GraphicsUnavailable(format!("wgpu create_device_from_hal: {e:?}"))
-        })?;
+    let (device, queue) = unsafe { wgpu_adapter.create_device_from_hal(hal_device, &device_desc) }
+        .map_err(|e| XrError::GraphicsUnavailable(format!("wgpu create_device_from_hal: {e:?}")))?;
 
     Ok((wgpu_adapter, device, queue))
 }

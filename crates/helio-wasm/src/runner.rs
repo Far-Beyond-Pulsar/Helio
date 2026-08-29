@@ -184,7 +184,11 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 }
             },
 
-            WindowEvent::MouseInput { button, state: elem_state, .. } => {
+            WindowEvent::MouseInput {
+                button,
+                state: elem_state,
+                ..
+            } => {
                 let grab_button = T::grab_cursor_button();
 
                 // Handle cursor grab / release via the configured button.
@@ -208,8 +212,12 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 // Track left-button press/release for demos that need click events.
                 if button == MouseButton::Left {
                     match elem_state {
-                        ElementState::Pressed  => { state.mouse_left_just_pressed  = true; }
-                        ElementState::Released => { state.mouse_left_just_released = true; }
+                        ElementState::Pressed => {
+                            state.mouse_left_just_pressed = true;
+                        }
+                        ElementState::Released => {
+                            state.mouse_left_just_released = true;
+                        }
                     }
                 }
             }
@@ -397,13 +405,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         }))
         .build(device.clone(), queue.clone(), width, height, surface_format);
 
-    let demo = T::init(
-        &mut renderer,
-        device.clone(),
-        queue.clone(),
-        width,
-        height,
-    );
+    let demo = T::init(&mut renderer, device.clone(), queue.clone(), width, height);
 
     let now = now_secs();
     *state_cell.borrow_mut() = Some(RunnerState {
@@ -437,9 +439,9 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     let delta = state.mouse_delta;
     state.mouse_delta = (0.0, 0.0);
 
-    let just_left_pressed  = state.mouse_left_just_pressed;
+    let just_left_pressed = state.mouse_left_just_pressed;
     let just_left_released = state.mouse_left_just_released;
-    state.mouse_left_just_pressed  = false;
+    state.mouse_left_just_pressed = false;
     state.mouse_left_just_released = false;
 
     let viewport = state.window.inner_size();

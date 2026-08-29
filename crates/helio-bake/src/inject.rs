@@ -56,7 +56,9 @@ impl RenderPass for BakeInjectPass {
             frame.baked_lightmap.write(view.as_ref(), "BakeInject");
         }
         if let Some(ref sampler) = self.data.lightmap_sampler {
-            frame.baked_lightmap_sampler.write(sampler.as_ref(), "BakeInject");
+            frame
+                .baked_lightmap_sampler
+                .write(sampler.as_ref(), "BakeInject");
         }
 
         // Reflection cubemap
@@ -64,7 +66,9 @@ impl RenderPass for BakeInjectPass {
             frame.baked_reflection.write(view.as_ref(), "BakeInject");
         }
         if let Some(ref sampler) = self.data.reflection_sampler {
-            frame.baked_reflection_sampler.write(sampler.as_ref(), "BakeInject");
+            frame
+                .baked_reflection_sampler
+                .write(sampler.as_ref(), "BakeInject");
         }
 
         // Irradiance SH GPU buffer
@@ -74,15 +78,18 @@ impl RenderPass for BakeInjectPass {
 
         // PVS — CPU-side bitfield for visibility queries
         if let Some(ref pvs) = self.data.pvs {
-            frame.baked_pvs.write(libhelio::BakedPvsRef {
-                world_min: pvs.world_min,
-                world_max: pvs.world_max,
-                grid_dims: pvs.grid_dims,
-                cell_size: pvs.cell_size,
-                cell_count: pvs.cell_count,
-                words_per_cell: pvs.words_per_cell,
-                bits: &pvs.bits,
-            }, "BakeInject");
+            frame.baked_pvs.write(
+                libhelio::BakedPvsRef {
+                    world_min: pvs.world_min,
+                    world_max: pvs.world_max,
+                    grid_dims: pvs.grid_dims,
+                    cell_size: pvs.cell_size,
+                    cell_count: pvs.cell_count,
+                    words_per_cell: pvs.words_per_cell,
+                    bits: &pvs.bits,
+                },
+                "BakeInject",
+            );
         }
     }
 

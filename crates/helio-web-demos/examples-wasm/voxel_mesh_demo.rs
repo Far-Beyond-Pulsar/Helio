@@ -63,7 +63,8 @@ impl Demo {
     /// every touched brick dirty so the surface-extract compute re-meshes it.
     fn upload_all(renderer: &mut Renderer, queue: &Arc<wgpu::Queue>, world: &mut VoxelTerrain) {
         if let Some(pass) = renderer.find_pass_mut::<VoxelMeshPass>() {
-            let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
+            let (meta_buf, data_buf) =
+                (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
             let touched = world.upload_all_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE);
             for (brick_idx, origin, occupied) in touched {
                 pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
@@ -85,9 +86,13 @@ impl Demo {
             if let Some(pass) = renderer.find_pass_mut::<VoxelMeshPass>() {
                 let (meta_buf, data_buf) =
                     (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-                let touched =
-                    self.world
-                        .upload_range_mesh(&self.queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
+                let touched = self.world.upload_range_mesh(
+                    &self.queue,
+                    &meta_buf,
+                    &data_buf,
+                    VOXEL_SIZE,
+                    range,
+                );
                 for (brick_idx, origin, occupied) in touched {
                     pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
                 }
@@ -120,7 +125,11 @@ impl HelioWasmApp for Demo {
         // "pre_aa" and blits to the swapchain, doubling as anti-aliasing and the
         // final present. Mirrors the native voxel demo's graph exactly.
         let mut graph = RenderGraph::new(device, queue);
-        graph.add_pass(Box::new(VoxelMeshPass::new(device, queue, config.surface_format)));
+        graph.add_pass(Box::new(VoxelMeshPass::new(
+            device,
+            queue,
+            config.surface_format,
+        )));
         graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
         graph.lock(config.width, config.height);
         Some(graph)
@@ -144,11 +153,41 @@ impl HelioWasmApp for Demo {
                 movability: Some(Movability::Stationary),
                 mode: Some(VoxelMode::Auto),
                 material_palette: vec![
-                    GpuVoxelMaterial { color: [0.0, 0.0, 0.0], roughness: 1.0, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // air
-                    GpuVoxelMaterial { color: [0.3, 0.7, 0.25], roughness: 0.8, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // grass
-                    GpuVoxelMaterial { color: [0.45, 0.3, 0.15], roughness: 0.9, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // dirt
-                    GpuVoxelMaterial { color: [0.5, 0.5, 0.52], roughness: 0.85, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // stone
-                    GpuVoxelMaterial { color: [0.9, 0.75, 0.2], roughness: 0.4, metalness: 0.8, emissive: 0.0, _pad: [0; 2] }, // ore
+                    GpuVoxelMaterial {
+                        color: [0.0, 0.0, 0.0],
+                        roughness: 1.0,
+                        metalness: 0.0,
+                        emissive: 0.0,
+                        _pad: [0; 2],
+                    }, // air
+                    GpuVoxelMaterial {
+                        color: [0.3, 0.7, 0.25],
+                        roughness: 0.8,
+                        metalness: 0.0,
+                        emissive: 0.0,
+                        _pad: [0; 2],
+                    }, // grass
+                    GpuVoxelMaterial {
+                        color: [0.45, 0.3, 0.15],
+                        roughness: 0.9,
+                        metalness: 0.0,
+                        emissive: 0.0,
+                        _pad: [0; 2],
+                    }, // dirt
+                    GpuVoxelMaterial {
+                        color: [0.5, 0.5, 0.52],
+                        roughness: 0.85,
+                        metalness: 0.0,
+                        emissive: 0.0,
+                        _pad: [0; 2],
+                    }, // stone
+                    GpuVoxelMaterial {
+                        color: [0.9, 0.75, 0.2],
+                        roughness: 0.4,
+                        metalness: 0.8,
+                        emissive: 0.0,
+                        _pad: [0; 2],
+                    }, // ore
                 ],
             });
 
@@ -234,12 +273,24 @@ impl HelioWasmApp for Demo {
 
         // ── Move ──────────────────────────────────────────────────────────
         let mut accel = Vec3::ZERO;
-        if input.keys.contains(&KeyCode::KeyW) { accel += forward; }
-        if input.keys.contains(&KeyCode::KeyS) { accel -= forward; }
-        if input.keys.contains(&KeyCode::KeyA) { accel -= right; }
-        if input.keys.contains(&KeyCode::KeyD) { accel += right; }
-        if input.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
-        if input.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
+        if input.keys.contains(&KeyCode::KeyW) {
+            accel += forward;
+        }
+        if input.keys.contains(&KeyCode::KeyS) {
+            accel -= forward;
+        }
+        if input.keys.contains(&KeyCode::KeyA) {
+            accel -= right;
+        }
+        if input.keys.contains(&KeyCode::KeyD) {
+            accel += right;
+        }
+        if input.keys.contains(&KeyCode::Space) {
+            accel += Vec3::Y;
+        }
+        if input.keys.contains(&KeyCode::ShiftLeft) {
+            accel -= Vec3::Y;
+        }
         if accel.length_squared() > 0.0 {
             accel = accel.normalize();
         }
@@ -248,10 +299,18 @@ impl HelioWasmApp for Demo {
         self.cam_pos += self.velocity * dt;
 
         // ── Material selection ────────────────────────────────────────────
-        if input.keys.contains(&KeyCode::Digit1) { self.current_material = 1; }
-        if input.keys.contains(&KeyCode::Digit2) { self.current_material = 2; }
-        if input.keys.contains(&KeyCode::Digit3) { self.current_material = 3; }
-        if input.keys.contains(&KeyCode::Digit4) { self.current_material = 4; }
+        if input.keys.contains(&KeyCode::Digit1) {
+            self.current_material = 1;
+        }
+        if input.keys.contains(&KeyCode::Digit2) {
+            self.current_material = 2;
+        }
+        if input.keys.contains(&KeyCode::Digit3) {
+            self.current_material = 3;
+        }
+        if input.keys.contains(&KeyCode::Digit4) {
+            self.current_material = 4;
+        }
 
         // ── Regenerate (R, edge-triggered) ────────────────────────────────
         let regen = input.keys.contains(&KeyCode::KeyR);

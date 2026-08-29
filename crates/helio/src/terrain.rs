@@ -453,7 +453,10 @@ mod tests {
         terrain.generate(1);
 
         assert!(terrain.materials.contains(&MAT_AIR));
-        assert!(terrain.materials.iter().any(|&material| material != MAT_AIR));
+        assert!(terrain
+            .materials
+            .iter()
+            .any(|&material| material != MAT_AIR));
     }
 
     #[test]

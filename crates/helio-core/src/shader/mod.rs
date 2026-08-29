@@ -153,8 +153,7 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
     // diagnostic offset.
     // Only rewritten when a directive is actually present, so every other shader is
     // concatenated byte-for-byte as before.
-    let is_directive =
-        |line: &str| line.starts_with("enable ") || line.starts_with("requires ");
+    let is_directive = |line: &str| line.starts_with("enable ") || line.starts_with("requires ");
     let body: Cow<'_, str> = if source.lines().any(|line| is_directive(line.trim_start())) {
         let mut hoisted = String::with_capacity(source.len());
         for line in source.lines() {

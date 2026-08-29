@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuMaterial, Renderer, RendererConfig,
-    Scene, SceneActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    GpuMaterial, Renderer, RendererConfig, Scene, SceneActor,
 };
 use helio_default_graphs::build_default_graph;
 use helio_pass_gbuffer::GBufferPass;
@@ -202,18 +202,24 @@ impl ApplicationHandler for App {
         let glass_class = renderer
             .template_registry_mut()
             .register_partial_str("glass", glass_wgsl.to_string());
-        log::info!("[RADIANT] Glass (gbuffer) template registered as class {}", glass_class);
+        log::info!(
+            "[RADIANT] Glass (gbuffer) template registered as class {}",
+            glass_class
+        );
 
         // Register transparent version at the gbuffer glass class ID so the
         // transparent pass finds the glass shader instead of falling back to default.
         let glass_transparent_wgsl = include_str!("../helio/templates/glass_transparent.wgsl");
-        let glass_transparent_src =
-            renderer.transparent_template_registry_mut()
-                .compose_transparent_override(glass_transparent_wgsl);
-        renderer.transparent_template_registry_mut().register_str_at(
-            glass_class, "glass_transparent", glass_transparent_src
+        let glass_transparent_src = renderer
+            .transparent_template_registry_mut()
+            .compose_transparent_override(glass_transparent_wgsl);
+        renderer
+            .transparent_template_registry_mut()
+            .register_str_at(glass_class, "glass_transparent", glass_transparent_src);
+        log::info!(
+            "[RADIANT] Glass (transparent) template registered as class {}",
+            glass_class
         );
-        log::info!("[RADIANT] Glass (transparent) template registered as class {}", glass_class);
 
         // ── Register water template ─────────────────────────────────────────
 
@@ -221,15 +227,24 @@ impl ApplicationHandler for App {
         let water_class = renderer
             .template_registry_mut()
             .register_partial_str("water", water_wgsl.to_string());
-        log::info!("[RADIANT] Water (gbuffer) template registered as class {}", water_class);
+        log::info!(
+            "[RADIANT] Water (gbuffer) template registered as class {}",
+            water_class
+        );
 
         // Also register a transparent water template so the transparent pass
         // renders it with real alpha blending instead of the fixed overlay.
         let water_transparent_wgsl = include_str!("../helio/templates/water_transparent.wgsl");
         let water_transparent_class = renderer
             .transparent_template_registry_mut()
-            .register_transparent_partial_str("water_transparent", water_transparent_wgsl.to_string());
-        log::info!("[RADIANT] Water (transparent) template registered as class {}", water_transparent_class);
+            .register_transparent_partial_str(
+                "water_transparent",
+                water_transparent_wgsl.to_string(),
+            );
+        log::info!(
+            "[RADIANT] Water (transparent) template registered as class {}",
+            water_transparent_class
+        );
 
         // ── Register graph snippet ──────────────────────────────────────────
 
@@ -443,8 +458,12 @@ impl ApplicationHandler for App {
         });
         renderer
             .scene_mut()
-            .set_material_class(glass_mat, glass_class, 0,
-                Some(libhelio::FLAG_TRANSPARENT_ONLY))
+            .set_material_class(
+                glass_mat,
+                glass_class,
+                0,
+                Some(libhelio::FLAG_TRANSPARENT_ONLY),
+            )
             .unwrap();
 
         // ── Water material ────────────────────────────────────────────────────

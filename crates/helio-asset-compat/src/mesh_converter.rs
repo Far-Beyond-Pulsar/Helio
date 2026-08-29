@@ -113,7 +113,11 @@ pub fn convert_primitive(
 
         log::debug!(
             "Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
-            mesh.name, min_u, max_u, min_v, max_v
+            mesh.name,
+            min_u,
+            max_u,
+            min_v,
+            max_v
         );
 
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
@@ -134,7 +138,9 @@ pub fn convert_primitive(
     if max_index >= vertices_len as u32 {
         log::error!(
             "Mesh '{}': index out of bounds — max_index={}, vertices={}; first 10: {:?}",
-            mesh.name, max_index, vertices_len,
+            mesh.name,
+            max_index,
+            vertices_len,
             &indices[0..indices.len().min(10)]
         );
     }
@@ -173,7 +179,11 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
 
         log::debug!(
             "Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
-            mesh.name, min_u, max_u, min_v, max_v
+            mesh.name,
+            min_u,
+            max_u,
+            min_v,
+            max_v
         );
 
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
@@ -247,4 +257,3 @@ mod tests {
         assert_eq!(packed.tex_coords1, [0.0, 0.0]);
     }
 }
-

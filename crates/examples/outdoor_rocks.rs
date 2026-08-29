@@ -24,13 +24,14 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer,
-    RendererConfig, Scene, VirtualMeshUpload, VirtualObjectDescriptor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, LightId, Renderer, RendererConfig, Scene, VirtualMeshUpload,
+    VirtualObjectDescriptor,
 };
-use helio_default_graphs::build_default_graph;
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
 };
+use helio_default_graphs::build_default_graph;
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -235,15 +236,35 @@ impl ApplicationHandler for App {
         let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cull Stats Buffer"),
             size: 32,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+        let graph = build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None,
+        );
         let mut renderer = Renderer::new(
-            device.clone(), queue.clone(),
-            config.surface_format, config.width, config.height, config.render_scale,
-            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+            device.clone(),
+            queue.clone(),
+            config.surface_format,
+            config.width,
+            config.height,
+            config.render_scale,
+            config,
+            scene,
+            graph,
+            debug_state,
+            debug_camera_buf,
+            cull_stats_buf,
         );
         renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]); // overcast sky blue
         renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
@@ -251,15 +272,33 @@ impl ApplicationHandler for App {
         // ── Sun light ─────────────────────────────────────────────────────
         let sun_angle: f32 = 0.62; // radians above horizon
         let sun_dir = Vec3::new(-sun_angle.cos(), -sun_angle.sin(), -0.6).normalize();
-        let sun_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-            sun_dir.to_array(),
-            [1.0, 0.93, 0.75],
-            4.2,
-        ))).as_light().unwrap();
+        let sun_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(directional_light(
+                sun_dir.to_array(),
+                [1.0, 0.93, 0.75],
+                4.2,
+            )))
+            .as_light()
+            .unwrap();
 
         // Small fill lights to break up flatness
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0)));
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0)));
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [0.0, 8.0, 0.0],
+                [0.6, 0.7, 1.0],
+                12.0,
+                50.0,
+            )));
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [60.0, 4.0, -40.0],
+                [1.0, 0.85, 0.5],
+                8.0,
+                30.0,
+            )));
 
         // ── Ground plane ──────────────────────────────────────────────────
         let ground_mat = renderer.scene_mut().insert_material(make_material(
@@ -269,7 +308,15 @@ impl ApplicationHandler for App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let ground_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0))).as_mesh().unwrap();        let _ = v3_demo_common::insert_object(
+        let ground_mesh = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(v3_demo_common::plane_mesh(
+                [0.0, 0.0, 0.0],
+                250.0,
+            )))
+            .as_mesh()
+            .unwrap();
+        let _ = v3_demo_common::insert_object(
             &mut renderer,
             ground_mesh,
             ground_mat,
@@ -295,7 +342,11 @@ impl ApplicationHandler for App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let fallback_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
+        let fallback_mesh = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .as_mesh()
+            .unwrap();
         // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
         let rock_vg: Vec<Option<Vec<(helio::VirtualMeshId, u32)>>> = rock_paths
             .iter()
@@ -321,10 +372,14 @@ impl ApplicationHandler for App {
                     .meshes
                     .iter()
                     .map(|mesh| {
-                        let vm_id = renderer.scene_mut().insert_actor(helio::SceneActor::virtual_mesh(VirtualMeshUpload {
-                            vertices: mesh.vertices.clone(),
-                            indices: mesh.indices.clone(),
-                        })).as_virtual_mesh().unwrap();
+                        let vm_id = renderer
+                            .scene_mut()
+                            .insert_actor(helio::SceneActor::virtual_mesh(VirtualMeshUpload {
+                                vertices: mesh.vertices.clone(),
+                                indices: mesh.indices.clone(),
+                            }))
+                            .as_virtual_mesh()
+                            .unwrap();
                         let mat_id = mesh
                             .material_index
                             .and_then(|idx| mat_ids.get(idx))
@@ -382,15 +437,17 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(vm_id, mat_slot) in entries {
-                            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::virtual_object(VirtualObjectDescriptor {
-                                virtual_mesh: vm_id,
-                                material_id: mat_slot,
-                                transform,
-                                bounds: [center.x, center.y, center.z, bounds_radius],
-                                flags: 0,
-                                groups: helio::GroupMask::NONE,
-                                movability: None, // Static rocks
-                            }));
+                            let _ = renderer.scene_mut().insert_actor(
+                                helio::SceneActor::virtual_object(VirtualObjectDescriptor {
+                                    virtual_mesh: vm_id,
+                                    material_id: mat_slot,
+                                    transform,
+                                    bounds: [center.x, center.y, center.z, bounds_radius],
+                                    flags: 0,
+                                    groups: helio::GroupMask::NONE,
+                                    movability: None, // Static rocks
+                                }),
+                            );
                         }
                     }
                 }
@@ -420,10 +477,14 @@ impl ApplicationHandler for App {
                                 .iter()
                                 .map(|v| Vec3::from_array(v.position).length())
                                 .fold(0.5_f32, f32::max);
-                            let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                                vertices: mesh.vertices.clone(),
-                                indices: mesh.indices.clone(),
-                            })).as_mesh().unwrap();
+                            let mesh_id = renderer
+                                .scene_mut()
+                                .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                                    vertices: mesh.vertices.clone(),
+                                    indices: mesh.indices.clone(),
+                                }))
+                                .as_mesh()
+                                .unwrap();
                             let mat = mesh
                                 .material_index
                                 .and_then(|idx| mat_ids.get(idx))
@@ -444,7 +505,12 @@ impl ApplicationHandler for App {
             }
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
-                let ship_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5))).as_mesh().unwrap();                let ship_mat = renderer.scene_mut().insert_material(make_material(
+                let ship_mesh = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
+                    .as_mesh()
+                    .unwrap();
+                let ship_mat = renderer.scene_mut().insert_material(make_material(
                     [0.55, 0.70, 0.90, 1.0],
                     0.25,
                     0.75,
@@ -563,7 +629,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                if let Some(pass) = state
+                    .renderer
+                    .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+                {
                     pass.set_enabled(state.debug_overlay_enabled);
                 }
                 println!("[debug] debug overlay = {:?}", state.debug_overlay_enabled);
@@ -733,6 +802,3 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
-
-
-
