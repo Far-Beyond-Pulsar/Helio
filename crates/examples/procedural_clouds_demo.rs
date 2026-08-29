@@ -78,7 +78,7 @@ impl ApplicationHandler for App{
     let cam=Camera{inv_view_proj:inv.to_cols_array_2d(), position:[s.pos.x,s.pos.y,s.pos.z], _pad:0.0};
     s.queue.write_buffer(&s.cam_buf,0,bytemuck::bytes_of(&cam));
     let params=Params{
-     time_pack:[s.time, s.time*0.7, s.time*0.5, 0.28],
+     time_pack:[s.time, s.time*0.7, s.time*0.5, 0.14],
      alt_pack:[0.35,0.6,0.7,0.5],
      scale_pack:[0.8,0.35,2.0,0.6],
      extra_pack:[0.75,6.0,18.0,0.0],
