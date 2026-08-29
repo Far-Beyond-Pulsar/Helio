@@ -6,6 +6,14 @@
 // matrix / interleaved blue-noise pattern ensures each pixel in a 4x4 block
 // evaluates only ONE full ray march per frame, offset by frame index.
 //
+// PIPELINE NOTE: This volumetric pass supports two density modes:
+//  - Box volume (legacy, for localized cloud volumes via cloud_volume 3D texture)
+//  - Skydome mode (procedural clouds): entire sky dome has clouds spread across it,
+//    not a bounded box. In skydome mode, weather_map is tiled infinitely across
+//    the horizon via repeating UV and ray march intersects a dome shell between
+//    bottom/top altitude (see intersectSkydome), so coverage tiles the whole sky.
+//    Procedural path (procedural_clouds.wgsl) is authoritative for skydome mode.
+//
 // Pipeline stage: 1/3 — Quarter-Res Ray March → Temporal Reprojection → Bilateral Upsample
 // Target FPS: >200 FPS via 16x shading reduction + temporal accumulation
 // =============================================================================
@@ -107,15 +115,23 @@ fn height_gradient_fraction(world_y: f32, cloud_type: f32) -> f32 {
 // Coarse-to-Fine Traversal — 2D Weather Map
 // Pre-evaluate low-frequency 2D weather map (coverage, type, height) before
 // fine-grained sampling. If coarse density is zero, Space Leaping.
+// In skydome mode this weather_map is tiled infinitely (repeat) across the
+// entire sky dome — coverage spreads the dome, not a clamped box.
 // ---------------------------------------------------------------------------
 fn sample_weather_map(world_pos: vec3<f32>) -> vec3<f32> {
     // weather_map stores: r=coverage, g=cloud type, b=height modulation
     let bounds_min = params.bounds_min_density.xyz;
     let bounds_max = params.bounds_max_shadow.xyz;
     let extent = bounds_max - bounds_min;
-    let uv = (world_pos.xz - bounds_min.xz) / max(extent.xz, vec2<f32>(0.001));
-    let clamped = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
-    return textureSampleLevel(weather_map, weather_sampler, clamped, 0.0).rgb;
+    // Dome tiling: repeat XZ infinitely so weather covers entire skydome horizon
+    let uv_repeat = (world_pos.xz - bounds_min.xz) / max(extent.xz, vec2<f32>(0.001));
+    let uv_tiled = fract(uv_repeat * 2.5); // scale tiles to horizon frequency; fract gives repeat
+    let uv_clamped = clamp(uv_tiled, vec2<f32>(0.0), vec2<f32>(1.0));
+    // Sample with repeat sampler; tiled path covers whole dome, clamped fallback for box volume
+    let tiled = textureSampleLevel(weather_map, weather_sampler, uv_tiled, 0.0).rgb;
+    let clamped = textureSampleLevel(weather_map, weather_sampler, uv_clamped, 0.0).rgb;
+    // Blend: prefer tiled for skydome reach, but clamp helps box-local volumes
+    return mix(clamped, tiled, 0.75);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +241,33 @@ fn intersect_box(ray_origin: vec3<f32>, ray_direction: vec3<f32>, bounds_min: ve
     let near_d = max(max(near_v.x, near_v.y), near_v.z);
     let far_d = min(min(far_v.x, far_v.y), far_v.z);
     return vec2<f32>(near_d, far_d);
+}
+
+const SKYDOME_RADIUS_H: f32 = 80000.0;
+const EARTH_RADIUS_CS: f32 = 6360000.0;
+// Skydome shell intersect — entire sky dome has clouds spread across it.
+// For procedural skydome mode, ray is intersected with altitude shell [bottom, top]
+// rather than a bounded box, giving infinite horizon tiling. Horizontal extent
+// limited to SKYDOME_RADIUS_H; gentle curvature approximates spherical dome.
+fn intersect_skydome(ray_origin: vec3<f32>, ray_direction: vec3<f32>, bottom: f32, top: f32) -> vec2<f32> {
+    let eps = 0.0001;
+    if (abs(ray_direction.y) < eps) {
+        if (ray_origin.y >= bottom && ray_origin.y <= top) {
+            let horizLen = max(length(ray_direction.xz), eps);
+            let tF = SKYDOME_RADIUS_H / horizLen;
+            return vec2<f32>(0.0, tF);
+        } else {
+            return vec2<f32>(1e5, -1e5);
+        }
+    }
+    var t0 = (bottom - ray_origin.y) / ray_direction.y;
+    var t1 = (top - ray_origin.y) / ray_direction.y;
+    var tNear = min(t0, t1);
+    var tFar = max(t0, t1);
+    tFar = min(tFar, SKYDOME_RADIUS_H);
+    if (tFar < 0.0) { return vec2<f32>(1e5, -1e5); }
+    tNear = max(tNear, 0.0);
+    return vec2<f32>(tNear, tFar);
 }
 
 // Ambient Light / Ground Albedo: height-gradient ambient term

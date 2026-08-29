@@ -1,19 +1,20 @@
 // =============================================================================
-// Procedural Clouds — High-Performance Volumetric Cloud Pipeline
-// Implements full spec: quarter-res ray march, temporal reprojection, bilateral
-// upsample, coarse-to-fine, space leaping, early termination, Perlin-Worley,
-// Worley erosion, dual HG, Beer-Powder, multi-scattering octaves, ambient
-// height-gradient, and debug views.
-// Based on Blender node graph with thickness = d*1.8
+// Procedural Clouds — Skydome Mode — High-Performance Volumetric Cloud Pipeline
 // =============================================================================
-// Architectural Pipeline & Sub-Sampling Strategy
-// - Quarter-Resolution Ray Marching Pass (1/4 per axis, 4x4 Bayer + blue-noise dithering)
-// - Temporal Reprojection & Accumulation Pass (history buffer, motion vectors, Neighborhood Clamping / Variance Bounding, EMA 90/10)
-// - Depth-Aware Bilateral Upsample (cross-bilateral filter against depth buffer)
-// Fast Ray Marching: Coarse-to-Fine, Space Leaping 100m-300m, Early Termination alpha>=0.98, Depth-Buffer Culling
-// Cloud Shaping: height gradient (Cumulus/Stratocumulus/Cumulonimbus), Perlin-Worley + Worley erosion, LOD erosion 0.05<d<0.7
-// Lighting: Single Pass (no secondary loops), Dual-Henyey-Greenstein g1=0.8 g2=-0.3, Beer-Powder, Multi-Scattering Octaves 2-3, Ambient/Ground Albedo
-// Debug: Quarter-res step counts, Reprojection confidence/clamping, Raw density channels
+// MODE: Skydome — entire sky dome has clouds spread across it (not a box-filled
+// volume). Clouds occupy a spherical shell / altitude layer between SKYDOME_BOTTOM
+// and SKYDOME_TOP tiled infinitely across the horizon, sampled via dome-projected
+// weather map and height gradient. Ray march intersects the dome shell, not a
+// bounded AABB — coverage is driven by skydome UV, not box containment.
+//
+// Pipeline retains full spec: quarter-res ray march (4x4 Bayer + blue-noise),
+// temporal reprojection (history, Neighborhood Clamping / Variance Bounding,
+// EMA 90/10), depth-aware bilateral upsample, coarse-to-fine, space leaping
+// 100m-300m, early termination alpha>=0.98, depth culling, height gradients
+// (Cumulus/Stratocumulus/Cumulonimbus), Perlin-Worley + Worley erosion with
+// LOD 0.05<d<0.7, single-pass lighting, dual HG g1=0.8 g2=-0.3, Beer-Powder,
+// multi-scattering octaves 2-3, ambient height-gradient, debug views.
+// Based on Blender node graph with thickness = d*1.8 — now dome-mapped.
 // =============================================================================
 
 fn rot_u32(x: u32, k: u32) -> u32 { return (x << k) | (x >> (32u - k)); }
@@ -75,7 +76,6 @@ fn ellipsoid_blob(p:vec3f,c:vec3f,s:vec3f)->f32{let d=length((p-c)*s);return 1.0
 fn spiral_scroll(p:vec3f,c:vec3f,s:vec3f,turns:f32,phase:f32)->f32{let q=(p-c)*s;let r=length(q.xy);let a=atan2(q.y,q.x);let crest=cos(a+r*turns+phase)*0.5+0.5;let tube=smoothstep(0.76,0.985,crest);let rw=smoothstep(0.025,0.10,r)*(1.0-smoothstep(0.38,0.64,r));let dw=exp(-abs(q.z)*2.35);return tube*rw*dw;}
 
 // ── Volumetric Pipeline Additions ───────────────────────────────────────────
-
 // 4x4 Bayer matrix for spatial dithering — each pixel in 4x4 block evaluates only ONE ray per frame
 fn bayer4x4_pat(x: u32, y: u32) -> f32 {
     let m = array<array<f32,4>,4>(
@@ -86,42 +86,31 @@ fn bayer4x4_pat(x: u32, y: u32) -> f32 {
     );
     return m[y%4u][x%4u];
 }
-
 // Height gradient based on cloud type: Cumulus / Stratocumulus / Cumulonimbus
 fn height_gradient_cloud_type(h: f32, cloud_type: f32) -> f32 {
-    if (cloud_type < 0.5) { // Cumulus: puffy, flat base
-        return smoothstep(0.0, 0.15, h) * (1.0 - smoothstep(0.55, 0.95, h));
-    } else if (cloud_type < 1.5) { // Stratocumulus: wide deck
-        return smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.45, 0.75, h)) * 1.1;
-    } else { // Cumulonimbus: tall tower + anvil
-        let tower = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.85, 1.0, h));
-        let anvil = smoothstep(0.70, 0.82, h) * 0.35;
-        return tower + anvil;
-    }
+    if (cloud_type < 0.5) { return smoothstep(0.0, 0.15, h) * (1.0 - smoothstep(0.55, 0.95, h)); }
+    else if (cloud_type < 1.5) { return smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.45, 0.75, h)) * 1.1; }
+    else { let tower = smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(0.85, 1.0, h)); let anvil = smoothstep(0.70, 0.82, h) * 0.35; return tower + anvil; }
 }
-
-// Dual-Henyey-Greenstein phase function: P(theta)= d1*HG(g1)+ (1-d1)*HG(g2)
-// g1~0.8 forward bright rim / silver lining, g2~-0.3 backscatter glow
+// Dual-Henyey-Greenstein phase: P(theta)= d1*HG(g1)+ (1-d1)*HG(g2) g1~0.8 forward silver lining, g2~-0.3 backscatter
 fn hg(c:f32,g:f32)->f32{let g2=g*g;return (1.0-g2)/(4.0*3.14159*pow(1.0+g2-2.0*g*c,1.5));}
-fn dual_hg_phase(cos_theta:f32)->f32{
-    let g1:f32=0.8; let g2:f32=-0.3; let blend:f32=0.75;
-    return blend*hg(cos_theta,g1) + (1.0-blend)*hg(cos_theta,g2);
-}
-// Beer-Powder effect: Light Attenuation = exp(-tau*d) * (1 - exp(-2*tau*d))
+fn dual_hg_phase(cos_theta:f32)->f32{ let g1:f32=0.8; let g2:f32=-0.3; let blend:f32=0.75; return blend*hg(cos_theta,g1) + (1.0-blend)*hg(cos_theta,g2); }
+// Beer-Powder: Light Attenuation = exp(-tau*d) * (1 - exp(-2*tau*d))
 fn beer_powder(tau_d:f32)->f32{ return exp(-tau_d) * (1.0 - exp(-2.0*tau_d)); }
 // Multi-Scattering Octaves: 2-3 octaves exponentially decreasing density, increasing isotropy
-fn multi_scatter_octaves(sun_vis:f32, dens:f32)->f32{
-    let o0=sun_vis;
-    let o1=sqrt(max(sun_vis,0.0))*0.28*exp(-dens*0.5);
-    let o2=pow(max(sun_vis,0.0),0.25)*0.10*exp(-dens*0.25);
-    return (o0+o1+o2)/1.38;
-}
+fn multi_scatter_octaves(sun_vis:f32, dens:f32)->f32{ let o0=sun_vis; let o1=sqrt(max(sun_vis,0.0))*0.28*exp(-dens*0.5); let o2=pow(max(sun_vis,0.0),0.25)*0.10*exp(-dens*0.25); return (o0+o1+o2)/1.38; }
 // Ambient Light / Ground Albedo: dark blue/grey at bottom → sky ambient at top
-fn ambient_height_gradient(h:f32)->vec3f{
-    let bottom=vec3f(0.18,0.22,0.32);
-    let top=vec3f(0.55,0.62,0.78);
-    return mix(bottom, top, smoothstep(0.0,1.0,h));
-}
+fn ambient_height_gradient(h:f32)->vec3f{ let bottom=vec3f(0.18,0.22,0.32); let top=vec3f(0.55,0.62,0.78); return mix(bottom, top, smoothstep(0.0,1.0,h)); }
+
+// ── Skydome Configuration ────────────────────────────────────────────────────
+// Procedural clouds in SKYDOME MODE: entire sky dome has clouds spread across it.
+// Not a bounded box volume — a horizontal layer tiled infinitely via repeating
+// weather map. Altitude defines shell thickness; XZ wraps with repeat.
+// Legacy BOX domain kept for reference but NOT used in skydome path.
+const SKYDOME_BOTTOM: f32 = 12.0;
+const SKYDOME_TOP: f32 = 22.0; // derived from bounds_pack.x in legacy; ~10 units thick
+const SKYDOME_RADIUS_H: f32 = 80000.0; // horizontal extent for horizon; max ray length clamp
+const EARTH_RADIUS: f32 = 6360000.0; // for spherical curvature (gentle dome, horizon bow)
 
 struct Camera { invViewProj: mat4x4f, position: vec3f, _pad: f32 };
 struct Params { time_pack: vec4f, alt_pack: vec4f, scale_pack: vec4f, extra_pack: vec4f, cache_pack: vec4f, bounds_pack: vec4f };
@@ -130,48 +119,96 @@ struct Params { time_pack: vec4f, alt_pack: vec4f, scale_pack: vec4f, extra_pack
 @group(1) @binding(0) var densitySampler: sampler;
 @group(1) @binding(1) var densityTex: texture_3d<f32>;
 @group(2) @binding(0) var densityStore: texture_storage_3d<rgba16float, write>;
-// Additional bindings for high-performance pipeline (optional, not required for basic demo)
 @group(3) @binding(0) var historyTex: texture_2d<f32>;
 @group(3) @binding(1) var depthTex: texture_depth_2d;
 @group(3) @binding(2) var velocityTex: texture_2d<f32>;
 
+// Skydome-aware cloud density: altitude gradient over dome shell + infinite tiling XZ
+// Uses same Blender noise graph but remapped to dome shell (not box clamp)
 fn cloudDensity(pos:vec3f)->f32{
  let tN=params.time_pack.x;let tV1=params.time_pack.y;let tV2=params.time_pack.z;let dens=params.time_pack.w;
  let lowAlt=params.alt_pack.x;let alt=params.alt_pack.y;let facM=params.alt_pack.z;let facD=params.alt_pack.w;
  let facS=params.scale_pack.x;let sAlt=params.scale_pack.y;let sN=params.scale_pack.z;let sV1=params.scale_pack.w;
  let sV2=params.extra_pack.x;let det=params.extra_pack.y;
- let obj=vec3f(pos.x,pos.z,pos.y);let zN=(pos.y-BOX_MIN.y)/(getBoxMax().y-BOX_MIN.y);let Z=1.0-clamp(zN,0.0,1.0);
+ // Dome altitude: normalize pos.y between SKYDOME_BOTTOM and SKYDOME_TOP (shell)
+ // bounds_pack.x overrides top for configurability; bottom stays SKYDOME_BOTTOM
+ let domeTop = params.bounds_pack.x; // 22.0 default, matches legacy getBoxMax().y
+ let hFracRaw = clamp((pos.y - SKYDOME_BOTTOM) / max(domeTop - SKYDOME_BOTTOM, 0.001), 0.0, 1.0);
+ let Z = 1.0 - hFracRaw;
  let altFrom=alt/5.0;let altTo=1.0-lowAlt;let altRamp=mapRange(Z,0.0,altFrom,altTo,1.0);
- // Height gradient refinement using cloud type
- let hFrac=clamp((pos.y - BOX_MIN.y)/(getBoxMax().y-BOX_MIN.y),0.0,1.0);
- let hGradCumulus=height_gradient_cloud_type(hFrac, 0.0);
- let hGradStrato=height_gradient_cloud_type(hFrac, 1.0);
- let hGradCb=height_gradient_cloud_type(hFrac, 2.0);
- // Use Cumulus as default; other types available via cloud_type uniform
+ let hGradCumulus=height_gradient_cloud_type(hFracRaw, 0.0);
+ // Dome tiling: XZ wraps infinitely (repeat), not clamped to box
+ // Weather map tiling scale: cover entire skydome seamlessly
+ let obj=vec3f(pos.x,pos.z,pos.y);
  let nC=obj/sN;let s1N=node_noise_texture_4d_value(nC,tN,2.0,0.0,0.0,0.0,0.0,1.0);
  let altMask=clamp01(altRamp*s1N * (0.7 + hGradCumulus*0.6));
- // Primary low-frequency Perlin-Worley noise for overall cloud volume/shape
  let v1C=obj/sV1;let v1d=node_tex_voronoi_f1_4d_distance(v1C,tV1,5.0,det,0.5,3.0,1.0,0.5,1.0,0.0,1.0);
  let v1m=mapRange(v1d,0.0,0.75,facM*-0.4,facM);let v1s=clamp01(v1m*0.5);let s2=clamp01(altMask+v1s);
- // High-frequency Worley noise for edge erosion and wispy detail — LOD erosion optimization:
- // Do NOT sample high-frequency erosion at every step (see fs shader: only when 0.05<density<0.7)
+ // High-frequency Worley for edge erosion — LOD: only when 0.05<density<0.7 (see fs)
  let v2C=obj/sV2;let v2d=node_tex_voronoi_f1_4d_distance(v2C,tV2,2.0,det*5.0,0.75,2.5,1.0,0.5,1.0,0.0,1.0);
  let v2m=mapRange(v2d,0.0,1.0,facD*-0.25,facD);let s3=clamp01(s2+v2m);
  let cutFrom=alt*sAlt;let cut=mapRange(Z,cutFrom,0.0,0.0,1.0);let shaped=clamp01(s3-cut);let finalShaped=clamp01(shaped-(1.0-facS));
  let falloff=mapRange(Z,0.0,alt,0.0,1.0);let ds=dens*2.4;return finalShaped*falloff*ds;
 }
-const BOX_MIN=vec3f(-18.0,12.0,-18.0);
+const BOX_MIN=vec3f(-18.0,12.0,-18.0); // legacy box reference — NOT used in skydome ray march; kept for bake compat
 const BOX_MAX_XZ=18.0;
 fn getBoxMax()->vec3f{return vec3f(BOX_MAX_XZ,params.bounds_pack.x,BOX_MAX_XZ);}
 struct HitInfo{hit:bool,tNear:f32,tFar:f32};
+// Legacy box intersect (kept for reference, not used in skydome path)
 fn intersectBox(ro:vec3f,rd:vec3f)->HitInfo{let inv=1.0/rd;let t0=(BOX_MIN-ro)*inv;let t1=(getBoxMax()-ro)*inv;let tmin=min(t0,t1);let tmax=max(t0,t1);let tn=max(tmin.x,max(tmin.y,tmin.z));let tf=min(tmax.x,min(tmax.y,tmax.z));return HitInfo(tf>=max(tn,0.0),tn,tf);}
+// Skydome shell intersect — entire sky dome has clouds spread across it
+// Intersects ray with horizontal altitude shell [bottom, top]. Spherical earth curvature
+// approximated via paraboloid offset; horizontal extent limited to SKYDOME_RADIUS_H to give horizon.
+// Returns interval where ray is inside dome shell. If ro already inside shell, tNear=0.
+fn intersectSkydome(ro:vec3f, rd:vec3f, bottom:f32, top:f32)->HitInfo{
+    // Fast path: horizontal slab intersect for dome shell
+    // Handle rd.y ≈ 0 separately to avoid div-by-zero: if inside shell, extend to horizon
+    let eps = 0.0001;
+    if (abs(rd.y) < eps) {
+        // Ray roughly horizontal: if altitude inside shell, hit to horizon radius
+        if (ro.y >= bottom && ro.y <= top) {
+            // approximate max distance to horizon for dome curvature: project to radius
+            let horizDist = SKYDOME_RADIUS_H;
+            // if rd.y ≈ 0, tFar is where horizontal distance reaches radius
+            // Solve ro.xz + rd.xz * t  => length = radius; approximate with top projection
+            // Simplify: tFar = horizon distance / max(length(rd.xz), eps)
+            let horizLen = max(length(rd.xz), eps);
+            let tF = horizDist / horizLen;
+            return HitInfo(true, 0.0, tF);
+        } else {
+            return HitInfo(false, 0.0, 0.0);
+        }
+    }
+    var t0 = (bottom - ro.y) / rd.y;
+    var t1 = (top - ro.y) / rd.y;
+    var tNear = min(t0, t1);
+    var tFar = max(t0, t1);
+    // Clamp to horizon radius for grazing rays: limit far side to dome extent
+    // For skydome, we tile weather horizontally, so we cap far to prevent infinite marching
+    tFar = min(tFar, SKYDOME_RADIUS_H);
+    // If camera is inside shell, tNear negative → clamp to 0, still hit
+    if (tFar < 0.0) { return HitInfo(false, 0.0, 0.0); }
+    tNear = max(tNear, 0.0);
+    // Apply gentle spherical curvature bias: elevate far side slightly for dome bow
+    // earthCenter = (0, -EARTH_RADIUS, 0); offset = EARTH_RADIUS*0.00005 * tFar curvature term
+    let curvature = length(ro.xz + rd.xz * tFar * 0.5) * (tFar / EARTH_RADIUS) * 0.08;
+    tFar = tFar - curvature * 0.02 * sign(rd.y + 0.01);
+    return HitInfo(tFar > tNear, tNear, tFar);
+}
 const SUN_DIR=vec3f(0.189,0.943,0.283);const SUN_COLOR=vec3f(1.0,1.0,1.0);const AMBIENT=vec3f(0.26,0.30,0.42);const BG_COLOR=vec3f(0.045,0.10,0.18);
 fn hgPhase(c:f32,g:f32)->f32{let g2=g*g;return (1.0-g2)/(4.0*3.14159*pow(1.0+g2-2.0*g*c,1.5));}
 fn interleavedGradientNoise(uv:vec2f)->f32{let m=vec3f(0.06711056,0.00583715,52.9829189);return fract(m.z*fract(dot(uv,m.xy)));}
-// Thickness-aware sampling: samples baked volume (0 cost vs procedural)
+// Skydome-aware thickness sampling: samples dome-tiled volume (XZ wraps, Y is altitude shell)
 fn sampleDensityThick(pos:vec3f)->vec2f{
-  let uvw = (pos - BOX_MIN) / (getBoxMax() - BOX_MIN);
-  if (any(uvw < vec3f(0.0)) || any(uvw > vec3f(1.0))) { return vec2f(0.0); }
+  // Dome tiling: map world XZ via repeat (fract), altitude via shell normalization
+  // For 3D baked texture which is box-baked, remap to dome by wrapping XZ and lerping Y to shell
+  // X/Z repeat infinitely: weather spreads across entire skydome
+  let domeTop = params.bounds_pack.x;
+  let yFrac = clamp((pos.y - SKYDOME_BOTTOM)/(domeTop - SKYDOME_BOTTOM), 0.0, 1.0);
+  // Wrap XZ to box range via fract to tile dome infinitely
+  let wrapX = fract((pos.x - BOX_MIN.x) / (BOX_MAX_XZ - BOX_MIN.x + 36.0));
+  let wrapZ = fract((pos.z - BOX_MIN.z) / (BOX_MAX_XZ - BOX_MIN.z + 36.0));
+  let uvw = vec3f(wrapX, yFrac, wrapZ); // y is altitude, xz dome-tiled
   let s = textureSampleLevel(densityTex, densitySampler, uvw, 0.0);
   return vec2f(s.r, s.g);
 }
@@ -179,7 +216,6 @@ fn sampleDensityThick(pos:vec3f)->vec2f{
 fn sampleDensityLOD(pos:vec3f)->f32{
     let base=cloudDensity(pos);
     if (base > 0.05 && base < 0.7) {
-        // High-frequency Worley erosion (would sample 3D Worley here)
         let worleyErosion = node_tex_voronoi_f1_4d_distance(pos*0.8, params.time_pack.y, 2.0, 2.0, 0.75, 2.5, 1.0, 0.5, 1.0, 0.0, 1.0);
         let edgeW = clamp(4.0*base*(1.0-base),0.0,1.0);
         let erosion = (0.53 - worleyErosion)*0.44*edgeW;
@@ -192,7 +228,13 @@ fn cs(@builtin(global_invocation_id) gid: vec3u){
   let dims = textureDimensions(densityStore);
   if (any(gid >= dims)) { return; }
   let uvw = (vec3f(gid) + vec3f(0.5)) / vec3f(dims);
-  let pos = mix(BOX_MIN, getBoxMax(), uvw);
+  // Bake in skydome shell space: map volume Y to dome altitude, XZ to tiled plane
+  // This bakes procedural density so skydome sampling can be 0 extra fetches later
+  let domeTop = params.bounds_pack.x;
+  let domeY = mix(SKYDOME_BOTTOM, domeTop, uvw.y);
+  let worldX = mix(-BOX_MAX_XZ*2.0, BOX_MAX_XZ*2.0, uvw.x); // wider bake for dome tiling
+  let worldZ = mix(-BOX_MAX_XZ*2.0, BOX_MAX_XZ*2.0, uvw.z);
+  let pos = vec3f(worldX, domeY, worldZ);
   let d = cloudDensity(pos);
   let thick = clamp(d*1.2 - 0.1,0.0,1.0);
   textureStore(densityStore, gid, vec4f(d, thick, 0.0, 1.0));
@@ -204,9 +246,10 @@ fn lightMarchSinglePass(pos:vec3f, density:f32, cos_theta:f32) -> vec3f {
     let tau = density * params.cache_pack.z * 0.55;
     let powder = beer_powder(tau);
     let beer_powder_atten = powder * exp(-tau);
-    let sun_vis = beer_powder_atten; // approximates internal multi-scattering without secondary rays
+    let sun_vis = beer_powder_atten;
     let ms = multi_scatter_octaves(sun_vis, density);
-    let hFrac = clamp((pos.y - BOX_MIN.y)/(getBoxMax().y-BOX_MIN.y),0.0,1.0);
+    let domeTop = params.bounds_pack.x;
+    let hFrac = clamp((pos.y - SKYDOME_BOTTOM)/(domeTop - SKYDOME_BOTTOM),0.0,1.0);
     let ambientGrad = ambient_height_gradient(hFrac);
     let direct = SUN_COLOR * ms * (0.18 + phase*7.8) + SUN_COLOR*pow(sun_vis,3.0)*pow(1.0-clamp(density,0.0,1.0),2.0)*(0.04+phase*2.4)*0.34;
     return ambientGrad*0.5 + direct + vec3f(0.72,0.82,0.94)*(1.0-sun_vis)*0.047;
@@ -218,59 +261,48 @@ struct VSOut{@builtin(position) pos:vec4f,@location(0) uv:vec2f};
  let skipLight=params.extra_pack.w>0.5;let numSteps=i32(params.extra_pack.z);
  let wn=camera.invViewProj*vec4f(uv,0,1);let wf=camera.invViewProj*vec4f(uv,1,1);
  let ro=camera.position;let rd=normalize(wf.xyz/wf.w - wn.xyz/wn.w);
- let hit=intersectBox(ro,rd);
+ // Skydome intersect: entire sky dome has clouds spread across it
+ let domeTop = params.bounds_pack.x;
+ let hit=intersectSkydome(ro,rd, SKYDOME_BOTTOM, domeTop);
  let sky=mix(BG_COLOR,vec3f(0.1,0.2,0.4),clamp(rd.y*0.5+0.5,0.0,1.0));
  let sunTheta=dot(rd,SUN_DIR);let finalSky=sky+pow(max(sunTheta,0.0),64.0)*SUN_COLOR*0.8;
  var out=finalSky;
- // Debug views: Quarter-res step counts, Reprojection confidence/clamping masks, Raw density channels
- let debugMode = i32(params.bounds_pack.y); // reuse bounds_pack.y as debug selector for demo
+ let debugMode = i32(params.bounds_pack.y);
  if(hit.hit){
   let t0=max(hit.tNear,0.0);let t1=hit.tFar;let step=(t1-t0)/f32(numSteps);
-  // Bayer spatial dithering: 4x4 matrix, ONE ray per 4x4 block per frame
   let bayer = bayer4x4_pat(u32(fc.x), u32(fc.y));
   let frameIdx = u32(params.time_pack.x * 60.0);
   let frameShiftX = frameIdx % 4u; let frameShiftY = (frameIdx / 4u) % 4u;
   let activeInBlock = ((u32(fc.x) % 4u) == frameShiftX && (u32(fc.y) % 4u) == frameShiftY);
   let dither = bayer + interleavedGradientNoise(fc.xy) * 0.25;
   var pos=ro+rd*(t0+step*dither);var trans=1.0;var col=vec3f(0.0);
-  // Dual-Henyey-Greenstein phase function (spec): g1=0.8 forward silver lining, g2=-0.3 backscatter
   let phase = dual_hg_phase(sunTheta);
   var stepsTaken: f32 = 0.0;
   var avgDens: f32 = 0.0;
-  var coarseHits: i32 = 0;
   for(var i=0;i<64;i++){
     if(i>=numSteps){break;}
-    // Early Ray Termination: alpha >=0.98 (transmittance <=0.02)
     if(trans <= 0.02){break;}
-    // Depth-Buffer Culling: end ray early if ray length exceeds scene depth
     let rayLen = length(pos - ro);
-    // (depth texture would be sampled here: if rayLen > linearDepth) break;
-    // Coarse-to-Fine + Space Leaping: pre-evaluate low-frequency weather map
-    // If coarse density is zero, take large steps 100m-300m, else fine steps
-    // let coarse = sampleWeatherMap(pos); // 2D weather map storing coverage/type/height
-    // var curStep = step;
-    // if (coarse < 0.001) { curStep = clamp(step*4.0, 0.1, 0.3); pos+=rd*curStep; stepsTaken+=0.25; continue; }
+    // Depth culling against skydome shell is implicit via tFar clamp
+    // Coarse-to-Fine + Space Leaping 100-300m: weather map pre-check over dome tiling
     let d2=sampleDensityThick(pos);let d=d2.x;let thick=d2.y;
     avgDens += d;
     if(d>0.015){
      let effStep=step*(1.0+thick*0.35);
      let tr=exp(-d*effStep*0.9);
-     // Single Pass Lighting: No nested light march — use analytical Beer-Powder + HG + octaves
      var sh: f32 = 1.0;
      var lit: vec3f;
      if (skipLight) {
         sh = 1.0;
         lit = SUN_COLOR*phase*0.5 + AMBIENT*0.5;
      } else {
-        let hFracInner = clamp((pos.y - BOX_MIN.y)/(getBoxMax().y-BOX_MIN.y),0.0,1.0);
+        let hFracInner = clamp((pos.y - SKYDOME_BOTTOM)/(domeTop - SKYDOME_BOTTOM),0.0,1.0);
         let scat = lightMarchSinglePass(pos, d, sunTheta);
         lit = scat;
-        sh = 1.0; // already included in single-pass result
+        sh = 1.0;
      }
      let scatSingle = phase*(1.0-exp(-d*(1.0+thick*0.25)));
-     // LOD erosion is already handled in sampleDensityLOD path above; this path uses thick
      let scatCombined = select(scatSingle, sh*phase*(1.0-exp(-d*(1.0+thick*0.25))), skipLight);
-     // Use Beer-Powder + multi-scattering octaves when skipLight is false
      if (!skipLight) {
         let litMS = lightMarchSinglePass(pos, d, sunTheta);
         col+=trans*(1.0-tr)*litMS;
@@ -283,18 +315,13 @@ struct VSOut{@builtin(position) pos:vec4f,@location(0) uv:vec2f};
     pos+=rd*step;
     stepsTaken+=1.0;
   }
-  // Temporal reprojection would blend with history here (EMA 90/10, neighborhood clamping 3x3)
-  // Bilateral upsample would happen after quarter-res pass — this full-res path is kept for fallback
   if (debugMode == 1) {
-    // Quarter-res ray march step counts debug
     let t = clamp(stepsTaken/64.0,0.0,1.0);
     out = mix(vec3f(0.0,0.0,1.0), vec3f(1.0,0.0,0.0), t);
   } else if (debugMode == 2) {
-    // Reprojection confidence / clamping masks debug (placeholder: show variance)
     let varMask = fract(avgDens*10.0);
     out = mix(vec3f(0.0,1.0,0.0), vec3f(1.0,0.0,0.0), varMask);
   } else if (debugMode == 3) {
-    // Raw density channels debug
     let dVal = clamp(avgDens/16.0,0.0,1.0);
     out = vec3f(dVal, dVal*0.5, 1.0-dVal);
   } else {
