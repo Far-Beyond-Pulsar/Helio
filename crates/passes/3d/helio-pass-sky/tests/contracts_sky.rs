@@ -1,4 +1,4 @@
-use helio_pass_cloud_volume::{
+use helio_pass_sky::{
     RenderParams, SimParams, RENDER_PARAMS_SIZE, SIM_PARAMS_SIZE, VOLUME_SIZE,
 };
 
@@ -16,8 +16,8 @@ fn authored_contract_sizes_and_volume_are_exact() {
 
 #[test]
 fn authored_shaders_are_kept_verbatim_in_source() {
-    assert!(helio_pass_cloud_volume::SIM_SHADER.contains("@workgroup_size(4, 4, 4)"));
-    assert!(helio_pass_cloud_volume::SIM_SHADER.contains("fn main("));
-    assert!(!helio_pass_cloud_volume::SIM_SHADER.contains("fn cs_main("));
-    assert!(helio_pass_cloud_volume::RENDER_SHADER.contains("array<vec2<f32>, 3>"));
+    assert!(helio_pass_sky::SIM_SHADER.contains("@workgroup_size(4, 4, 4)"));
+    assert!(helio_pass_sky::SIM_SHADER.contains("fn main("));
+    assert!(!helio_pass_sky::SIM_SHADER.contains("fn cs_main("));
+    assert!(helio_pass_sky::RENDER_SHADER.contains("array<vec2<f32>, 3>"));
 }

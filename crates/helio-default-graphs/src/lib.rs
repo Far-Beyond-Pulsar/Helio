@@ -38,7 +38,6 @@ use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
-use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
@@ -140,13 +139,13 @@ fn add_common_early_passes(
     )));
 
     if scene.sky_context().has_sky {
-        graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
-
-        graph.add_pass(Box::new(SkyPass::new(
-            device,
-            camera_buf,
-            config.surface_format,
-        )));
+        let mut sky_pass = SkyPass::new(device, camera_buf, config.surface_format);
+        if let Some(clouds) = scene.sky_context().clouds {
+            if clouds.infinite_extent {
+                sky_pass.set_infinite_extent(true);
+            }
+        }
+        graph.add_pass(Box::new(sky_pass));
     }
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(

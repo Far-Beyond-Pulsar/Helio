@@ -40,7 +40,6 @@ helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
-helio-pass-sky-lut = { path = "../passes/3d/helio-pass-sky-lut" }
 helio-pass-tsr = { workspace = true }
 helio-pass-radiance-cascades = { path = "../passes/3d/helio-pass-radiance-cascades" }
 helio-pass-volumetric-fog = { workspace = true }

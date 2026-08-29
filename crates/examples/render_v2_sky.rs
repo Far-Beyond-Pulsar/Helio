@@ -311,6 +311,7 @@ impl ApplicationHandler for App {
                 wind_z: 0.2,
                 speed: 1.3,
                 skylight_intensity: 0.25,
+                infinite_extent: true,
             }),
         ));
 

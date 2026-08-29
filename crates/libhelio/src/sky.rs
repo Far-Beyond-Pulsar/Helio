@@ -33,6 +33,8 @@ pub struct VolumetricClouds {
     pub speed: f32,
     /// Skylight intensity contribution from clouds
     pub skylight_intensity: f32,
+    /// When true, clouds have infinite horizontal extent and tile across the entire skydome.
+    pub infinite_extent: bool,
 }
 
 impl Default for VolumetricClouds {
@@ -46,7 +48,61 @@ impl Default for VolumetricClouds {
             wind_z: 0.0,
             speed: 0.0,
             skylight_intensity: 0.0,
+            infinite_extent: false,
         }
+    }
+}
+
+impl VolumetricClouds {
+    /// Create a new volumetric clouds descriptor with boundless (infinite) extent.
+    /// Covers the entire skydome horizon via tiled weather + dome shell.
+    pub fn boundless(coverage: f32, density: f32) -> Self {
+        Self {
+            coverage: coverage.clamp(0.0, 1.0),
+            density: density.clamp(0.0, 2.0),
+            base: 1200.0,
+            top: 2000.0,
+            wind_x: 0.8,
+            wind_z: 0.2,
+            speed: 1.2,
+            skylight_intensity: 0.25,
+            infinite_extent: true,
+        }
+    }
+
+    /// Enable infinite horizontal extent (covers entire skydome when enabled).
+    pub fn with_infinite_extent(mut self, enabled: bool) -> Self {
+        self.infinite_extent = enabled;
+        self
+    }
+
+    /// Set coverage (0..1).
+    pub fn with_coverage(mut self, v: f32) -> Self {
+        self.coverage = v.clamp(0.0, 1.0);
+        self
+    }
+    /// Set density (thickness).
+    pub fn with_density(mut self, v: f32) -> Self {
+        self.density = v.clamp(0.0, 2.0);
+        self
+    }
+    /// Set altitude range [base, top] in world units.
+    pub fn with_altitude(mut self, base: f32, top: f32) -> Self {
+        self.base = base;
+        self.top = top.max(base + 10.0);
+        self
+    }
+    /// Set wind (x,z) and speed multiplier.
+    pub fn with_wind(mut self, x: f32, z: f32, speed: f32) -> Self {
+        self.wind_x = x;
+        self.wind_z = z;
+        self.speed = speed;
+        self
+    }
+    /// Enable/disable boundless skydome tiling fluently.
+    pub fn boundless_enabled(mut self, enabled: bool) -> Self {
+        self.infinite_extent = enabled;
+        self
     }
 }
 

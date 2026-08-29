@@ -1382,7 +1382,6 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
  "helio-pass-sky",
- "helio-pass-sky-lut",
  "helio-pass-ssr",
  "helio-pass-transparent",
  "helio-pass-tsr",
@@ -1410,17 +1409,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-cloud-volume"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "libhelio",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -1784,16 +1772,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-sky-lut"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "libhelio",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
