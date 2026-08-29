@@ -49,7 +49,7 @@ impl ApplicationHandler for App{
   surface.configure(&device,&cfg);
   let cam_buf=device.create_buffer(&wgpu::BufferDescriptor{label:Some("cam"),size:80,usage:wgpu::BufferUsages::UNIFORM|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
   let params_buf=device.create_buffer(&wgpu::BufferDescriptor{label:Some("params"),size:96,usage:wgpu::BufferUsages::UNIFORM|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
-  let bgl0=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl0"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
+  let bgl0=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl0"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
   let bgl1=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl1"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Texture{sample_type:wgpu::TextureSampleType::Float{filterable:true},view_dimension:wgpu::TextureViewDimension::D3,multisampled:false},count:None}]});
   let bgl2=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl2"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::StorageTexture{access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba16Float,view_dimension:wgpu::TextureViewDimension::D3},count:None}]});
   let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("proc"),source:wgpu::ShaderSource::Wgsl(SHADER.into())});
@@ -96,22 +96,25 @@ impl ApplicationHandler for App{
      bounds_pack:[22.0,0.0,0.0,0.0],
     };
     s.queue.write_buffer(&s.params_buf,0,bytemuck::bytes_of(&params));
-    // Bake procedural density into 3D texture (64x32x64) - ~0.05ms, then raymarch samples it (cheap)
-    let mut enc=s.device.create_command_encoder(&Default::default());
+    // Bake 64x32x64 volume
     {
-        let mut cpass=enc.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("bake"),timestamp_writes:None});
-        cpass.set_pipeline(&s.compute_pipeline);
-        cpass.set_bind_group(0,&s.bind, &[]);
-        cpass.set_bind_group(1,&s.density_bind, &[]);
-        cpass.set_bind_group(2,&s.density_store_bind, &[]);
-        cpass.dispatch_workgroups(16,8,16);
+        let mut enc=s.device.create_command_encoder(&Default::default());
+        {
+            let mut cpass=enc.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("bake"),timestamp_writes:None});
+            cpass.set_pipeline(&s.compute_pipeline);
+            cpass.set_bind_group(0,&s.bind, &[]);
+            cpass.set_bind_group(1,&s.density_bind, &[]);
+            cpass.set_bind_group(2,&s.density_store_bind, &[]);
+            cpass.dispatch_workgroups(16,8,16);
+        }
+        s.queue.submit([enc.finish()]);
     }
     let surface_texture = match s.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         _ => return,
     };
     let view=surface_texture.texture.create_view(&Default::default());
-    // Re-use same encoder for render after compute (no extra submit)
+    let mut enc=s.device.create_command_encoder(&Default::default());
     {let mut p=enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:Some("proc"),color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view,resolve_target:None,depth_slice:None,ops:wgpu::Operations{load:wgpu::LoadOp::Clear(wgpu::Color{r:0.045,g:0.10,b:0.18,a:1.0}),store:wgpu::StoreOp::Store}})],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None});
      p.set_pipeline(&s.pipeline); p.set_bind_group(0,&s.bind, &[]); p.set_bind_group(1,&s.density_bind, &[]); p.draw(0..3,0..1);}
     s.queue.submit([enc.finish()]); s.queue.present(surface_texture); s.window.request_redraw();
