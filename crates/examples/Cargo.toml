@@ -276,6 +276,8 @@ helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry
 helio-voxel-core = { path = "../helio-voxel-core" }
 helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
+helio-controls = { workspace = true, features = ["winit"] }
+microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 rapier3d = "0.24"
 image = { workspace = true, features = ["png"] }
@@ -307,3 +309,11 @@ path = "sprite_dig_demo.rs"
 [[bin]]
 name = "foliage_demo"
 path = "foliage_demo.rs"
+
+[[bin]]
+name = "cloud_engine"
+path = "cloud_engine.rs"
+
+[[bin]]
+name = "cloud_engine_curve"
+path = "cloud_engine_curve.rs"

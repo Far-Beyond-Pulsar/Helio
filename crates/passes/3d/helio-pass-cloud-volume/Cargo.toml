@@ -1,9 +1,8 @@
 [package]
-name = "helio-pass-vt-density"
+name = "helio-pass-cloud-volume"
 version = "0.1.0"
 edition = "2021"
-authors = ["Helio Contributors"]
-description = "Texel-streaming demand feedback: quarter-res density target + compaction (Helio#238)"
+description = "Helio-owned authored cloud volume simulation and raymarch pass"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -11,7 +10,6 @@ helio-core = { workspace = true }
 libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
-log = { workspace = true }
+
 [dev-dependencies]
 pollster = { workspace = true }
-

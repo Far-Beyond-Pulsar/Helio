@@ -104,14 +104,7 @@ fn spawn_with_asset(world: &mut World, asset: &str, _vert_count: usize) -> Entit
     let upload = helio_component::subsystems::load_mesh_upload(&project_root().join(asset)).expect("load fixture mesh");
     world.insert(
         e,
-        // ..Default::default() covers the Helio#237 texture slots (empty path
-        // = ZERO semantics; this file exercises only the mesh chain).
-        StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new(asset),
-            vertices: upload.vertices,
-            indices: upload.indices,
-            ..Default::default()
-        },
+        StaticMeshComponent { mesh_asset: MeshAssetPath::new(asset), vertices: upload.vertices, indices: upload.indices },
     );
     e
 }

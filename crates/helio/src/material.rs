@@ -38,9 +38,6 @@ pub struct TextureUpload {
     pub height: u32,
     pub format: wgpu::TextureFormat,
     pub data: Vec<u8>,
-    /// `.ptex` geometry for the VT meta row (Helio#238), when this upload is a
-    /// streamed asset. `None` binds the slot as unmanaged (fully resident).
-    pub vt: Option<libhelio::VtTextureMeta>,
     pub sampler: TextureSamplerDesc,
 }
 
@@ -64,7 +61,6 @@ impl TextureUpload {
             },
             data,
             sampler,
-            vt: None,
         }
     }
 }

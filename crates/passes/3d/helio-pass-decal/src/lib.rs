@@ -3,7 +3,7 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct DecalGlobals { decal_count: u32, viewport_height: f32, _pad1: u32, _pad2: u32 }
+struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
 pub struct DecalPass {
     material_binding: libhelio::MaterialBindingConfig,
@@ -12,10 +12,6 @@ pub struct DecalPass {
     bgl_collect: wgpu::BindGroupLayout,
     bgl_apply: wgpu::BindGroupLayout,
     bgl_textures: wgpu::BindGroupLayout,
-    /// Group 2 (Helio#238): VT meta + density target for the collect shader.
-    vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
-    bg_vt: Option<wgpu::BindGroup>,
-    bg_vt_key: helio_core::shader::vt_binder::VtGroupKey,
     bg_collect: Option<wgpu::BindGroup>,
     bg_apply: Option<wgpu::BindGroup>,
     bg_textures: Option<wgpu::BindGroup>,
@@ -36,9 +32,6 @@ impl DecalPass {
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue, _decal_buf: &wgpu::Buffer,
                _camera_buf: &wgpu::Buffer, _w: u32, _h: u32) -> Self {
         let material_binding = libhelio::MaterialBindingConfig::for_device(device);
-        // The VT module resolves into the source FIRST (the `//!use helio_vt`
-        // marker), then the platform fixups run — they only rewrite group-1
-        // bindless patterns and must see the final binding surface.
         let collect_src = decal_collect_source(material_binding);
         let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Collect"),
@@ -73,12 +66,9 @@ impl DecalPass {
             ],
         });
         let bgl_textures = create_decal_texture_bgl(device, material_binding);
-        // Group 2 (Helio#238): VT meta rows + density target.
-        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
-        let bgl_vt = vt_binder.layout().clone();
         let collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Decal Collect PL"),
-            bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures), Some(&bgl_vt)],
+            bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures)],
             immediate_size: 0,
         });
         let collect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -114,9 +104,6 @@ impl DecalPass {
         Self {
             material_binding,
             collect_pipeline, apply_pipeline, bgl_collect, bgl_apply, bgl_textures,
-            vt_binder,
-            bg_vt: None,
-            bg_vt_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             bg_collect: None, bg_apply: None, bg_textures: None,
             bg_collect_key: None, bg_apply_key: None, bg_textures_version: None,
             globals_buf, temp_albedo: None, temp_normal: None, temp_orm: None, temp_emissive: None,
@@ -155,9 +142,6 @@ fn make_temp(device: &wgpu::Device, format: wgpu::TextureFormat, label: &str, si
 /// the shader must agree exactly or `create_bind_group` fails validation.
 fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> String {
     let src = include_str!("../shaders/decal_collect.wgsl");
-    // Expand `//!use helio_vt` (and any other markers) into the exact text
-    // the GPU will compile, before platform fixups touch bindless patterns.
-    let src = helio_core::shader::resolve(src);
     if material_binding.uses_binding_arrays() {
         src.replace(
             "binding_array<texture_2d<f32>, 256>",
@@ -174,7 +158,7 @@ fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> St
             ),
         )
     } else {
-        libhelio::shader::apply_webgpu_decal_bindings(&src, material_binding.max_textures)
+        libhelio::shader::apply_webgpu_decal_bindings(src, material_binding.max_textures)
     }
 }
 
@@ -212,7 +196,7 @@ impl RenderPass for DecalPass {
     fn publish<'a>(&'a self, _: &mut libhelio::FrameResources<'a>) {}
     fn render_pass_descriptor<'a>(&'a self, _: &'a wgpu::TextureView, _: &'a wgpu::TextureView, _: &'a libhelio::FrameResources<'a>) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&DecalGlobals { decal_count: ctx.scene.decals.len() as u32, viewport_height: ctx.height as f32, _pad1: 0, _pad2: 0 }));
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&DecalGlobals { decal_count: ctx.scene.decals.len() as u32, _pad0: 0, _pad1: 0, _pad2: 0 }));
         Ok(())
     }
 
@@ -259,27 +243,12 @@ impl RenderPass for DecalPass {
             self.bg_textures_version = Some(tex_version);
         }
 
-        // Group 2 (Helio#238): VT meta + density target, same rebuild cadence
-        // as the texture table (version) plus frame-transient buffer identity.
-        let vt_meta_buf = main_scene.vt_bindings.get().map(|v| v.vt_meta_buffer);
-        let vt_density_view = ctx.resource_pool.get_view("vt_density");
-        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
-            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
-            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
-            version: tex_version,
-        };
-        if self.bg_vt_key != vt_key || self.bg_vt.is_none() {
-            self.bg_vt = Some(self.vt_binder.bind_group(ctx.device, vt_meta_buf, vt_density_view));
-            self.bg_vt_key = vt_key;
-        }
-
         {
             let mut cp = unsafe { &mut *ctx.encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("DecalCollect"), timestamp_writes: None });
             cp.set_pipeline(&self.collect_pipeline);
             cp.set_bind_group(0, self.bg_collect.as_ref().unwrap(), &[]);
             cp.set_bind_group(1, self.bg_textures.as_ref().unwrap(), &[]);
-            cp.set_bind_group(2, self.bg_vt.as_ref().unwrap(), &[]);
             cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);
         }
 

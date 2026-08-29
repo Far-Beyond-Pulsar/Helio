@@ -1,5 +1,3 @@
-//!use helio_vt
-
 enable wgpu_binding_array;
 
 struct Camera {
@@ -94,7 +92,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal:   vec3<f32>,
     @location(2) tex_coords:     vec2<f32>,
-    @location(3) material_id:    u32,
+    @location(3) @interpolate(flat) material_id:    u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -121,11 +119,7 @@ fn sample_texture(slot: MaterialTextureSlot, uv: vec2<f32>, fallback: vec4<f32>)
     let c = slot.rotation.y;
     let s = slot.rotation.x;
     let rotated = vec2<f32>(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
-    // Pre-transformed UV semantics preserved byte-for-byte: the fetch and the
-    // demand record both see exactly `rotated + slot.offset_scale.xy`.
-    let final_uv = rotated + slot.offset_scale.xy;
-    vt_record_demand(slot.texture_index, final_uv);
-    return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], final_uv);
+    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], rotated + slot.offset_scale.xy);
 }
 
 // Default transparent evaluation — simple ambient + normal shading
@@ -144,7 +138,6 @@ fn radiant_eval_transparent(material: GpuMaterial,
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    vt_frame_begin(input.clip_position.xy);
     let material = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
 

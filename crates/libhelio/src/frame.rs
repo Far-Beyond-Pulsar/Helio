@@ -64,31 +64,11 @@ pub struct MaterialTextureBindings<'a> {
     pub version: u64,
 }
 
-/// Frame-transient VT bindings (Helio#238): the meta-row array every
-/// `//!use helio_vt` shader reads at `@group(2) @binding(0)`.
-///
-/// The BUFFER is rebuilt/refilled by the renderer EVERY frame from the
-/// scene's texture records and dropped with the frame — no renderer field,
-/// no cache, nothing derivable retained. Residency columns inside the rows
-/// are whatever the engine last published via `Scene::set_vt_residency`;
-/// passes treat them as immutable frame input, which is exactly the
-/// promote-before-bind ordering the issue demands (frame N's flush lands
-/// before frame N+1 builds this buffer).
-#[derive(Clone, Copy)]
-pub struct VtFrameBindings<'a> {
-    pub vt_meta_buffer: &'a wgpu::Buffer,
-}
-
 /// Frame-local scene inputs for the high-level Helio renderer.
 #[derive(Clone, Copy)]
 pub struct MainSceneResources<'a> {
     pub mesh_buffers: MeshBuffers<'a>,
     pub material_textures: MaterialTextureBindings<'a>,
-    /// Frame-transient VT meta rows (see [`VtFrameBindings`]). Left unwritten
-    /// when the scene has no streamed textures — passes then bind a 1-row
-    /// unmanaged fallback rather than skipping group 2 entirely, so shader
-    /// layouts never diverge.
-    pub vt_bindings: Tracked<VtFrameBindings<'a>>,
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,

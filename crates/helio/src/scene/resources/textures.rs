@@ -101,19 +101,6 @@ impl super::super::Scene {
             view,
             sampler,
             ref_count: 0,
-            vt_meta: texture
-                .vt
-                .map(|m| {
-                    libhelio::GpuVtMetaRow::for_asset(
-                        m.width,
-                        m.height,
-                        m.mip_count,
-                        m.format_discriminant,
-                        m.srgb,
-                        m.block_bytes,
-                    )
-                })
-                .unwrap_or_default(),
         });
         self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         Ok(id)
@@ -164,38 +151,6 @@ impl super::super::Scene {
     /// A monotonically increasing version number (wraps on overflow).
     pub fn texture_binding_version(&self) -> u64 {
         self.texture_binding_version
-    }
-
-    // ── Texel-streaming meta rows (Helio#238 §4) ────────────────────────────
-
-    /// Builds the full 256-row VT meta table FRESH for one frame.
-    ///
-    /// Called once per frame by the renderer; the returned `Vec` is uploaded
-    /// into a frame-transient buffer and dropped with it. Nothing here caches:
-    /// the table is re-derived from the same per-slot records every frame,
-    /// which is exactly what lets the statelessness gate tear down and rebuild
-    /// everything around it.
-    pub fn vt_meta_rows(&self) -> Vec<libhelio::GpuVtMetaRow> {
-        let mut rows = vec![libhelio::GpuVtMetaRow::UNMANAGED; libhelio::VT_SLOT_COUNT];
-        for slot in 0..libhelio::VT_SLOT_COUNT {
-            if let Some(record) = self.textures.get_by_slot(slot) {
-                rows[slot] = record.vt_meta;
-            }
-        }
-        rows
-    }
-
-    /// Publishes new residency for one slot's row — the hook an ENGINE calls
-    /// between frames after running the pure tier policy against its
-    /// SceneDB store and flushing. Helio itself never invokes this: the
-    /// renderer stays stateless, residency decisions live outside.
-    ///
-    /// The row recomputes its floor scalar from the rank prefix so sampling
-    /// never promises pages the store has not committed.
-    pub fn set_vt_residency(&mut self, id: crate::handles::TextureId, resident_through_rank: u32) {
-        if let Some((_, record)) = self.textures.get_mut_with_slot(id) {
-            record.vt_meta.set_resident_through(resident_through_rank);
-        }
     }
 
     /// Material binding representation shared by every pass for this scene.

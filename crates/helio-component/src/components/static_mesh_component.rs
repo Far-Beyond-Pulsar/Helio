@@ -14,22 +14,12 @@ use std::collections::HashMap;
 
 use crate::asset_component::AssetComponentRegistration;
 use crate::subsystems::{load_mesh_upload, resolve_asset_path};
-use crate::texture_cache::{TexturePayload, TextureSemantic};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
         asset_kind: plugin_editor_api::AssetKind::Mesh,
         class_name: "StaticMeshComponent",
         data_field: "mesh_asset",
-    }
-}
-// Helio#237: a dropped texture lands on the primary color slot — the same
-// drop-to-assign UX meshes have, pointed at this class's first texture chain.
-pulsar_reflection::inventory::submit! {
-    AssetComponentRegistration {
-        asset_kind: plugin_editor_api::AssetKind::Texture,
-        class_name: "StaticMeshComponent",
-        data_field: "base_color_asset",
     }
 }
 // Mat4/Quat/Vec3 used to build the transform passed to sync_mesh_object.
@@ -326,272 +316,6 @@ fn mesh_asset_editor(
 #[allow(dead_code)]
 type RegisteredMeshAssetPath = MeshAssetPath;
 
-// ── TextureAssetPath (Helio#237) ─────────────────────────────────────────────
-
-/// Strongly-typed wrapper for texture asset paths — the seven-slot twin of
-/// [`MeshAssetPath`] (Helio#237 texel-streaming S1). Using this as a field
-/// type causes the property inspector to render a texture-asset search
-/// browser (`.ptex` plus raw source images) instead of a plain text box.
-///
-/// Serialises transparently as a JSON string, so scene files keep storing
-/// plain paths — the user-facing API is unchanged; content identity and
-/// SceneDB tiering are derived entirely from the path at hydrate time.
-///
-/// # Example
-///
-/// ```ignore
-/// #[property]
-/// pub base_color_asset: TextureAssetPath,
-/// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TextureAssetPath(pub String);
-
-impl TextureAssetPath {
-    /// Create a new `TextureAssetPath` from any string-like value.
-    pub fn new(path: impl Into<String>) -> Self {
-        Self(path.into())
-    }
-
-    /// Borrow the inner path string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Returns `true` if the path is empty.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-/// SceneDB's content-identity seam for textures — byte-for-byte the same
-/// contract as `MeshAssetPath`'s impl above: an empty path is
-/// [`pulsar_scenedb::handle_ledger::HandleId::ZERO`]; otherwise resolve the
-/// project-relative path like `hydrate_static_mesh_component` does and defer
-/// to `texture_cache::content_id_for_path` (native `.ptex`: a header read;
-/// anything else: the shared canonical-path + mtime/len memoized hash). Path
-/// aliases converge onto one id; a real edit mints a new one; dangling
-/// references behave like "no asset", never an error.
-impl pulsar_scenedb::handle_ledger::ContentAddressed for TextureAssetPath {
-    fn content_id(&self) -> pulsar_scenedb::handle_ledger::HandleId {
-        use pulsar_scenedb::handle_ledger::HandleId;
-
-        let path = self.0.trim();
-        if path.is_empty() {
-            return HandleId::ZERO;
-        }
-        let Some(project_root) = engine_state::get_project_path() else {
-            return HandleId::ZERO;
-        };
-        let abs_path = crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), path);
-        crate::texture_cache::content_id_for_path(&abs_path).map(HandleId).unwrap_or(HandleId::ZERO)
-    }
-}
-
-impl std::fmt::Display for TextureAssetPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for TextureAssetPath {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for TextureAssetPath {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-// ── TextureAssetPath reflection registration ────────────────────────────────
-
-fn serialize_texture_asset_path_json(
-    value: &TextureAssetPath,
-) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    Ok(serde_json::json!(value.0))
-}
-
-fn deserialize_texture_asset_path_json(
-    value: serde_json::Value,
-) -> pulsar_reflection::ReflectResult<TextureAssetPath> {
-    value
-        .as_str()
-        .map(|s| TextureAssetPath(s.to_string()))
-        .ok_or_else(|| ReflectError::TypeMismatch {
-            expected: "TextureAssetPath",
-            found: format!("{:?}", value),
-        })
-}
-
-// ── TextureAssetPath property editor ─────────────────────────────────────────
-
-/// Property editor for [`TextureAssetPath`] — a searchable texture-asset
-/// browser, cloned from [`MeshAssetEditor`]'s shape but filtered to texture
-/// sources (native `.ptex` plus the importable raster formats).
-pub struct TextureAssetEditor {
-    label: String,
-    id_prefix: String,
-    prop_name: String,
-    picker: gpui::Entity<ui_common::asset_picker::MeshAssetPicker>,
-    path: String,
-    write_back: pulsar_reflection::PropertyWriteBack,
-    _subs: Vec<gpui::Subscription>,
-}
-
-/// Extensions the texture picker offers, in browse order.
-const TEXTURE_PICKER_EXTENSIONS: &[&str] =
-    &["ptex", "png", "jpg", "jpeg", "bmp", "tga", "webp"];
-
-impl TextureAssetEditor {
-    fn new(
-        args: &pulsar_reflection::PropertyEditorArgs<'_>,
-        window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> Self {
-        use gpui::AppContext as _;
-        use ui_common::asset_picker::{AssetPickedEvent, AssetQuery};
-
-        let path = args
-            .current_value
-            .downcast_ref::<TextureAssetPath>()
-            .map(|p| p.0.clone())
-            .unwrap_or_default();
-
-        let project_root = engine_state::get_project_path().map(std::path::PathBuf::from);
-        // No builtin textures exist (unlike BUILTIN_MESHES): every entry comes
-        // from the project's own assets.
-        let queries = TEXTURE_PICKER_EXTENSIONS
-            .iter()
-            .map(|&e| AssetQuery::extension(e))
-            .collect();
-
-        let picker = cx.new(|cx| {
-            ui_common::asset_picker::MeshAssetPicker::new(path.clone(), Vec::new(), project_root, queries, window, cx)
-        });
-
-        let subs = vec![cx.subscribe_in(
-            &picker,
-            window,
-            |this: &mut Self, picker, _event: &AssetPickedEvent, window, cx| {
-                let selected = picker.read(cx).selected_path().to_string();
-                if this.path == selected {
-                    return;
-                }
-                this.path = selected.clone();
-                (this.write_back)(Box::new(TextureAssetPath(selected)), window, cx);
-                cx.notify();
-            },
-        )];
-
-        Self {
-            label: args.display_name.to_string(),
-            id_prefix: args.id_prefix.to_string(),
-            prop_name: args.prop_name.to_string(),
-            picker,
-            path,
-            write_back: args.write_back.clone(),
-            _subs: subs,
-        }
-    }
-
-    /// Accept a texture assigned elsewhere — e.g. dropped straight onto the
-    /// viewport or another row's editor.
-    fn set_value(&mut self, path: &TextureAssetPath, cx: &mut gpui::Context<Self>) {
-        if self.path == path.0 {
-            return;
-        }
-        self.path = path.0.clone();
-        self.picker.update(cx, |picker, _| {
-            picker.set_selected_path(path.0.clone());
-        });
-        cx.notify();
-    }
-}
-
-impl gpui::Render for TextureAssetEditor {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> impl gpui::IntoElement {
-        use gpui::prelude::*;
-        use ui::button::{Button, ButtonVariants as _};
-        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover};
-
-        let display = if self.path.is_empty() {
-            "No texture selected".to_string()
-        } else {
-            std::path::Path::new(&self.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&self.path)
-                .to_string()
-        };
-
-        let picker = self.picker.clone();
-
-        h_flex()
-            .w_full()
-            .justify_between()
-            .items_center()
-            .gap_2()
-            .py_1()
-            .child(
-                gpui::div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.label.clone()),
-            )
-            .child(
-                Popover::<ui_common::asset_picker::MeshAssetPicker>::new(format!(
-                    "texture-asset-picker-{}-{}",
-                    self.id_prefix, self.prop_name
-                ))
-                .anchor(gpui::Corner::BottomRight)
-                .trigger(
-                    Button::new(format!(
-                        "texture-asset-picker-btn-{}-{}",
-                        self.id_prefix, self.prop_name
-                    ))
-                    .label(display)
-                    .small()
-                    .ghost()
-                    .dropdown_caret(true),
-                )
-                .content(move |_window, _cx| picker.clone()),
-            )
-    }
-}
-
-fn texture_asset_editor(
-    args: &pulsar_reflection::PropertyEditorArgs<'_>,
-    window: &mut gpui::Window,
-    cx: &mut gpui::App,
-) -> pulsar_reflection::BoundPropertyEditor {
-    use gpui::AppContext as _;
-
-    let entity = cx.new(|cx| TextureAssetEditor::new(args, window, cx));
-    pulsar_reflection::BoundPropertyEditor::new(
-        entity,
-        |editor: &mut TextureAssetEditor, value: &TextureAssetPath, _window, cx| {
-            editor.set_value(value, cx)
-        },
-    )
-}
-
-/// Register `TextureAssetPath` with the reflection system (same mechanics as
-/// `RegisteredMeshAssetPath`: JSON-transparent string + browser editor).
-#[pulsar_reflection::pulsar_type(
-    serialize_json_with = serialize_texture_asset_path_json,
-    deserialize_json_with = deserialize_texture_asset_path_json,
-    editor = texture_asset_editor
-)]
-#[allow(dead_code)]
-type RegisteredTextureAssetPath = TextureAssetPath;
-
 // ── StaticMeshComponent ───────────────────────────────────────────────────────
 
 /// Attaches a mesh asset to a scene object.
@@ -646,73 +370,6 @@ pub struct StaticMeshComponent {
     #[gpu(mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
-
-    // ── Texture slots (Helio#237 texel-streaming S1) ─────────────────────
-    //
-    // Seven authored slots mirroring `libhelio::MaterialTextures`, each a
-    // (path wrapper, texel payload) pair following the exact mesh_asset
-    // pattern: the wrapper is the light, JSON-visible authored field; the
-    // `Vec<TexturePayload>` is the heavy GPU payload interned by its
-    // wrapper's content id (one chain per slot — sharing a texture across
-    // entities stores it once; two meshes sharing ONLY base_color share
-    // exactly that one chain). Missing/unloadable = empty payload = ZERO
-    // semantics: absent slots leave defaults and the component still
-    // hydrates (see `hydrate_static_mesh_component`). Scene JSON still
-    // stores plain paths; nothing renderer-side changes (no shader/sampling
-    // work here — that's S2/Helio#238).
-    /// Base color / albedo (`MaterialTextures::base_color`).
-    #[property]
-    pub base_color_asset: TextureAssetPath,
-    /// Normal map (`MaterialTextures::normal`); BC5 X/Y — Z is reconstructed
-    /// at sample time (S2), never stored.
-    #[property]
-    pub normal_asset: TextureAssetPath,
-    /// Roughness (R) + metallic (G) packed pair
-    /// (`MaterialTextures::roughness_metallic`).
-    #[property]
-    pub roughness_metallic_asset: TextureAssetPath,
-    /// Emissive color (`MaterialTextures::emissive`).
-    #[property]
-    pub emissive_asset: TextureAssetPath,
-    /// Ambient occlusion mask (`MaterialTextures::occlusion`).
-    #[property]
-    pub occlusion_asset: TextureAssetPath,
-    /// Specular color (`MaterialTextures::specular_color`).
-    #[property]
-    pub specular_color_asset: TextureAssetPath,
-    /// Specular weight scalar (`MaterialTextures::specular_weight`).
-    #[property]
-    pub specular_weight_asset: TextureAssetPath,
-
-    /// Canonical coarse-first `.ptex` body bytes for [`Self::base_color_asset`]
-    /// — see `texture_cache`'s module doc for the container/segment contract.
-    #[gpu(mirror = Once, content_id = "base_color_asset")]
-    #[serde(skip)]
-    pub base_color_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the normal chain.
-    #[gpu(mirror = Once, content_id = "normal_asset")]
-    #[serde(skip)]
-    pub normal_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the roughness/metallic chain.
-    #[gpu(mirror = Once, content_id = "roughness_metallic_asset")]
-    #[serde(skip)]
-    pub roughness_metallic_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the emissive chain.
-    #[gpu(mirror = Once, content_id = "emissive_asset")]
-    #[serde(skip)]
-    pub emissive_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the occlusion chain.
-    #[gpu(mirror = Once, content_id = "occlusion_asset")]
-    #[serde(skip)]
-    pub occlusion_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the specular-color chain.
-    #[gpu(mirror = Once, content_id = "specular_color_asset")]
-    #[serde(skip)]
-    pub specular_color_data: Vec<TexturePayload>,
-    /// See [`Self::base_color_data`] — the specular-weight chain.
-    #[gpu(mirror = Once, content_id = "specular_weight_asset")]
-    #[serde(skip)]
-    pub specular_weight_data: Vec<TexturePayload>,
 }
 
 #[register_scene_props_applier]
@@ -721,31 +378,14 @@ impl ScenePropsProjector for StaticMeshComponent {
 
     fn apply_scene_props(props: &mut HashMap<String, Value>, component_data: Option<&Value>) {
         props.remove("mesh_asset");
-        // Helio#237: the seven texture slots project exactly like mesh_asset —
-        // stripped from the generic props, re-inserted only when authored
-        // non-empty (an empty slot means "no texture", not "clear to path ''").
-        props.remove("base_color_asset");
-        props.remove("normal_asset");
-        props.remove("roughness_metallic_asset");
-        props.remove("emissive_asset");
-        props.remove("occlusion_asset");
-        props.remove("specular_color_asset");
-        props.remove("specular_weight_asset");
         let Some(data) = component_data else { return };
-        let Some(object) = data.as_object() else { return };
-        for key in [
-            "mesh_asset",
-            "base_color_asset",
-            "normal_asset",
-            "roughness_metallic_asset",
-            "emissive_asset",
-            "occlusion_asset",
-            "specular_color_asset",
-            "specular_weight_asset",
-        ] {
-            if let Some(path) = object.get(key).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-                props.insert(key.to_string(), Value::from(path));
-            }
+        if let Some(path) = data
+            .as_object()
+            .and_then(|o| o.get("mesh_asset"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            props.insert("mesh_asset".to_string(), Value::from(path));
         }
     }
 }
@@ -803,69 +443,6 @@ fn hydrate_static_mesh_component(
                 tracing::warn!(
                     "StaticMeshComponent hydrate: no project path available, cannot resolve mesh_asset '{}'",
                     mesh_asset
-                );
-            }
-        }
-    }
-
-    // Helio#237: the seven texture slots resolve+decode exactly like
-    // mesh_asset above, once, here at hydrate time. A native `.ptex` parses
-    // its own container; a raw source image runs the import pipeline in
-    // memory (no writes). The slot's semantic drives the BCn mapping only for
-    // that raw-source path. A missing/unloadable slot is NOT a hydrate
-    // failure — identical tolerance to the mesh arm: the component still
-    // hydrates, just with that chain empty (ZERO semantics).
-    let project = engine_state::get_project_path();
-    let texture_slots: [(&TextureAssetPath, TextureSemantic, &mut Vec<TexturePayload>); 7] = [
-        (&parsed.base_color_asset, TextureSemantic::BaseColor, &mut parsed.base_color_data),
-        (&parsed.normal_asset, TextureSemantic::Normal, &mut parsed.normal_data),
-        (
-            &parsed.roughness_metallic_asset,
-            TextureSemantic::MetallicRoughness,
-            &mut parsed.roughness_metallic_data,
-        ),
-        (&parsed.emissive_asset, TextureSemantic::Emissive, &mut parsed.emissive_data),
-        (&parsed.occlusion_asset, TextureSemantic::Occlusion, &mut parsed.occlusion_data),
-        (
-            &parsed.specular_color_asset,
-            TextureSemantic::SpecularColor,
-            &mut parsed.specular_color_data,
-        ),
-        (
-            &parsed.specular_weight_asset,
-            TextureSemantic::SpecularWeight,
-            &mut parsed.specular_weight_data,
-        ),
-    ];
-    for (slot, semantic, data) in texture_slots {
-        let path = slot.as_str().trim();
-        if path.is_empty() {
-            continue;
-        }
-        let Some(project_root) = project.as_deref() else {
-            tracing::warn!(
-                "StaticMeshComponent hydrate: no project path available, cannot resolve texture '{}' ({})",
-                path,
-                semantic.suffix()
-            );
-            continue;
-        };
-        let abs_path = resolve_asset_path(std::path::Path::new(project_root), path);
-        match crate::texture_cache::decoded_body_for_path(&abs_path, semantic) {
-            Some(body) => {
-                tracing::info!(
-                    "StaticMeshComponent hydrate: loaded texture '{}' ({}, {} bytes)",
-                    abs_path.display(),
-                    semantic.suffix(),
-                    body.len()
-                );
-                *data = body.iter().copied().map(TexturePayload).collect();
-            }
-            None => {
-                tracing::warn!(
-                    "StaticMeshComponent hydrate: failed to load texture '{}' ({})",
-                    path,
-                    abs_path.display()
                 );
             }
         }

@@ -1,5 +1,3 @@
-//!use helio_vt
-
 enable wgpu_binding_array;
 
 struct Camera {
@@ -23,12 +21,7 @@ const DT_AN: u32 = 0u; const DT_NO: u32 = 1u; const DT_EM: u32 = 2u; const DT_AL
 // Matches GpuMaterial::NO_TEXTURE — decal uses tint only.
 const NO_TEXTURE: u32 = 0xFFFFFFFFu;
 
-/// decal_count, then the render-target height the shared `//!use helio_vt`
-/// module needs for analytic demand density (this compute context has no
-/// derivatives). The projection's [1][1] comes from the already-bound
-/// `cameras` array, so no extra uniform is needed. Same 16-byte struct as
-/// before — viewport_height fills a former pad slot.
-struct DecalGlobals { decal_count: u32, viewport_height: f32, _pad1: u32, _pad2: u32 }
+struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: DecalGlobals;
@@ -95,7 +88,6 @@ fn decal_tangent_to_world(m: mat4x4<f32>, n: vec3<f32>) -> vec3<f32> {
 
 @compute @workgroup_size(16, 16, 1)
 fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
-    vt_frame_begin(vec2<f32>(vec2<u32>(id.xy)));
     let pxl = vec2<i32>(id.xy);
     let sz = textureDimensions(gbuf_albedo);
     if id.x >= u32(sz.x) || id.y >= u32(sz.y) { return; }
@@ -136,27 +128,6 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         // channel below (including emissive) rather than just albedo.
         let opa = tint.a * da * decal_albedo.a;
         if opa <= 0.0 { continue; }
-
-        // ── Demand feedback — APPROXIMATE (no derivatives in compute) ─────
-        // Distance-based analytic density: decal extent comes from the
-        // inverse transform's column norms (world→decal ⇒ columns carry the
-        // reciprocal scale), distance from camera, projection scale from the
-        // globals. See `vt_analytic_wanted_mip` in the shared module.
-        if d.albedo_texture_index < arrayLength(&vt_meta) {
-            let vt_row = vt_meta[d.albedo_texture_index];
-            let inv_extent = max(length(d.transform[0].xyz), length(d.transform[1].xyz));
-            let dist = distance(cameras[0].position_near.xyz, world_pos);
-            // proj[1][1] == 1/tan(fovY/2): the pinhole scale the analytic
-            // estimate needs, read from the camera binding already present.
-            let wanted = vt_analytic_wanted_mip(
-                vt_row,
-                1.0 / max(inv_extent, 1e-4),
-                dist,
-                globals.viewport_height,
-                cameras[0].proj[1][1],
-            );
-            vt_feedback_write(d.albedo_texture_index, wanted);
-        }
 
         let wn = normalize(en.xyz);
         let dc = vec4<f32>(decal_albedo.rgb * tint.rgb, opa);

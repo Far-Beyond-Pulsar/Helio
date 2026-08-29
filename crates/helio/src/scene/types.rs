@@ -263,13 +263,6 @@ pub(crate) struct TextureRecord {
 
     /// Number of materials currently using this texture.
     pub ref_count: u32,
-
-    /// VT meta row (Helio#238): dims/mip geometry/residency floor this slot
-    /// publishes to the frame-transient meta buffer. Scene CONTENT state —
-    /// mirrors the view/sampler the way any other per-asset fact does; never
-    /// touched by the renderer between frames except through
-    /// [`Scene::set_vt_residency`] after an engine-side policy flush.
-    pub vt_meta: libhelio::GpuVtMetaRow,
 }
 
 /// Internal record for a virtual mesh (meshlet-based LOD mesh).

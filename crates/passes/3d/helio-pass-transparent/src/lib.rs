@@ -45,10 +45,6 @@ pub struct TransparentPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize)>,
-    /// Group 2 (Helio#238): `//!use helio_vt` meta rows + density target.
-    vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
-    bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
 }
@@ -149,12 +145,9 @@ impl TransparentPass {
             ],
         });
 
-        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
-        let bgl_2 = vt_binder.layout().clone();
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Transparent PL"),
-            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
 
@@ -189,9 +182,6 @@ impl TransparentPass {
             bind_group_layout_1: bgl_1,
             bind_group_1: None,
             bind_group_1_key: None,
-            vt_binder,
-            bind_group_2: None,
-            bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             globals_buf,
             surface_format,
         }
@@ -324,28 +314,10 @@ impl RenderPass for TransparentPass {
             self.bind_group_1_key = Some(bg1_key);
         }
 
-        // Group 2 (Helio#238) — VT meta + density target; same version-keyed
-        // rebuild cadence as BG1 (see the GBuffer pass's contract comment).
-        let vt_meta_buf = ms.vt_bindings.get().map(|v| v.vt_meta_buffer);
-        let vt_density_view = ctx.resource_pool.get_view("vt_density");
-        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
-            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
-            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
-            version: main_scene.as_ref().map(|m| m.material_textures.version).unwrap_or(0),
-        };
-        if self.bind_group_2_key != vt_key || self.bind_group_2.is_none() {
-            self.bind_group_2 = Some(
-                self.vt_binder
-                    .bind_group(ctx.device, vt_meta_buf, vt_density_view),
-            );
-            self.bind_group_2_key = vt_key;
-        }
-
         let indirect = ctx.scene.indirect;
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_bind_group(0, &self.bind_group, &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        rp.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
         rp.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
 

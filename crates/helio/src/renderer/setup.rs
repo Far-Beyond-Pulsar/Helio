@@ -12,7 +12,6 @@ use helio_core::RenderGraph;
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::renderer_impl::{
-    VtFeedbackReadbackState,
     CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer,
 };
 
@@ -201,15 +200,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Texel-streaming feedback staging (Helio#238): one copy of the
-        // compaction output, mapped a frame behind like cull stats.
-        let vt_feedback_staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VT Feedback Staging"),
-            size: libhelio::VT_FEEDBACK_WORDS as u64 * 4,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
         // Camera jitter is only valid when a temporal pass reconstructs it.
         // Applying it to FXAA/non-temporal graphs shifts the final image every
         // frame and presents as whole-scene shimmer.
@@ -244,9 +234,6 @@ impl Renderer {
             enable_foliage: config.enable_foliage,
             foliage_blades_per_m2: config.foliage_blades_per_m2,
             enable_portals: config.enable_portals,
-            virtual_texturing_enabled: config.virtual_texturing_enabled,
-            texture_stream_pool_mb: config.texture_stream_pool_mb,
-            vt_tile_size_px: config.vt_tile_size_px,
             enable_planar_reflections: config.enable_planar_reflections,
             enable_environment_reflections: config.enable_environment_reflections,
             debug_mode: config.debug_mode,
@@ -274,9 +261,6 @@ impl Renderer {
             cull_stats_staging,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
-            vt_feedback_staging,
-            vt_feedback_readback_state: VtFeedbackReadbackState::Idle,
-            vt_feedback: None,
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,

@@ -1,0 +1,15 @@
+[package]
+name = "helio-controls"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-neutral semantic input and camera controllers for Helio"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[features]
+default = []
+winit = ["dep:winit", "winit/wayland", "winit/wayland-dlopen", "winit/x11"]
+
+[dependencies]
+glam = { workspace = true, features = ["libm"] }
+winit = { workspace = true, optional = true }

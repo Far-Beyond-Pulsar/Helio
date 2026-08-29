@@ -1,5 +1,3 @@
-//!use helio_vt
-
 enable wgpu_binding_array;
 
 //! G-buffer write pass (GPU-driven).
@@ -298,17 +296,13 @@ fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
     return rotated + slot.offset_scale.xy;
 }
 
-/// Sample texture from bindless array, or return fallback if NO_TEXTURE.
-/// The sampling itself routes through the shared `//!use helio_vt` contract
-/// (floor-clamped / page-probed fetch — tier-invisible); the one added
-/// statement records this fragment's demand beside the sample.
+/// Sample texture from bindless array, or return fallback if NO_TEXTURE
 fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
     if slot.texture_index == NO_TEXTURE {
         return fallback;
     }
     let uv = select_uv(slot, base_uv);
-    vt_record_demand(slot.texture_index, uv);
-    return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], uv);
+    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
 }
 
 fn resolve_specular_f0(
@@ -430,7 +424,6 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
-    vt_frame_begin(input.clip_position.xy);
     let material = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
 

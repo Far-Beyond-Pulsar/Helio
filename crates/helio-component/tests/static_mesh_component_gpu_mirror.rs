@@ -86,8 +86,6 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(1.0), v(2.0), v(3.0)],
             indices: vec![0, 1, 2],
-            // Helio#237 texture slots: empty path = ZERO semantics.
-            ..Default::default()
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -142,7 +140,6 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(1.0), v(2.0), v(3.0), v(4.0)],
             indices: (0..6).collect(),
-            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -157,7 +154,6 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx"),
             vertices: vec![v(9.0)],
             indices: vec![0],
-            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");
@@ -202,7 +198,6 @@ fn scene_mesh_buffers_reads_back_data_written_through_a_rebound_static_mesh_comp
             mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
             vertices: vec![v(11.0), v(22.0), v(33.0)],
             indices: vec![0, 1, 2],
-            ..Default::default() // Helio#237 texture slots: empty = ZERO semantics
         },
     );
     world.flush_gpu_mirror(ctx.queue()).expect("mirror attached");

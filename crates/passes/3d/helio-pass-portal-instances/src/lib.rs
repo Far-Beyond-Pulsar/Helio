@@ -66,10 +66,6 @@ pub struct PortalInstancePass {
     bind_group_0_key: Option<PortalBindGroupKey>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
-    /// Group 2 (Helio#238): `//!use helio_vt` meta rows + density target.
-    vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
-    bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey,
 
     draw_count: u32,
 }
@@ -123,17 +119,9 @@ impl PortalInstancePass {
         });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
 
-        // Group 2 (Helio#238): VT meta rows + quarter-res density target.
-        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
-        let bind_group_layout_2 = vt_binder.layout().clone();
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PortalInstance PL"),
-            bind_group_layouts: &[
-                Some(&bind_group_layout_0),
-                Some(&bind_group_layout_1),
-                Some(&bind_group_layout_2),
-            ],
+            bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
             immediate_size: 0,
         });
 
@@ -224,9 +212,6 @@ impl PortalInstancePass {
             bind_group_0_key: None,
             bind_group_1: None,
             bind_group_1_version: None,
-            vt_binder,
-            bind_group_2: None,
-            bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             draw_count: 0,
         }
     }
@@ -234,11 +219,17 @@ impl PortalInstancePass {
 
 fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Cow<'static, str> {
     let source = include_str!("../shaders/gbuffer_portal.wgsl");
+    // Expand `//!use helio_vt` (and any other markers) into the exact text
+    // the GPU will compile, before platform fixups touch bindless patterns.
+    // Without this the shader dies at `create_shader_module` with
+    // "no definition in scope for `vt_record_demand`" — the marker is an
+    // ordinary WGSL comment until `resolve` prepends `vt_sample.wgsl`.
+    let resolved = helio_core::shader::resolve(source);
     if material_binding.uses_binding_arrays() {
-        Cow::Borrowed(source)
+        Cow::Owned(resolved.into_owned())
     } else {
         Cow::Owned(libhelio::shader::apply_webgpu_material_bindings(
-            source,
+            &resolved,
             material_binding.max_textures,
         ))
     }
@@ -433,23 +424,6 @@ impl RenderPass for PortalInstancePass {
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
-        // Group 2 (Helio#238) — same rebuild cadence as BG1; see the GBuffer
-        // pass's comment for the promote-before-bind contract.
-        let vt_meta_buf = main_scene.vt_bindings.get().map(|v| v.vt_meta_buffer);
-        let vt_density_view = ctx.resource_pool.get_view("vt_density");
-        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
-            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
-            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
-            version: main_scene.material_textures.version,
-        };
-        if self.bind_group_2_key != vt_key || self.bind_group_2.is_none() {
-            self.bind_group_2 = Some(
-                self.vt_binder
-                    .bind_group(ctx.device, vt_meta_buf, vt_density_view),
-            );
-            self.bind_group_2_key = vt_key;
-        }
-
         let vertices = main_scene.mesh_buffers.vertices;
         let indices = main_scene.mesh_buffers.indices;
 
@@ -459,7 +433,6 @@ impl RenderPass for PortalInstancePass {
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
 
         // One indirect command per draw group (mesh+material), same shape
         // as the plain non-portal G-buffer pass — every chain's surviving
@@ -487,7 +460,9 @@ mod tests {
         assert!(!source.contains("binding_array<"));
         assert!(source.contains("@group(1) @binding(2) var scene_texture_0"));
         assert!(source.contains("@group(1) @binding(5) var scene_sampler_1"));
-        assert!(source.contains("case 1u: { return textureSampleLevel"));
+        // VT path rewrites `vt_sample(...)` per-slot; legacy path rewrites
+        // `textureSample(...)`. Either switch is evidence the fixup ran.
+        assert!(source.contains("case 1u: { return vt_sample") || source.contains("case 1u: { return textureSampleLevel"));
     }
 
     #[test]
@@ -497,8 +472,14 @@ mod tests {
             max_textures: 256,
         });
 
-        assert!(matches!(source, std::borrow::Cow::Borrowed(_)));
+        // VT expansion always makes the source owned (the `//!use helio_vt`
+        // marker is resolved into the full `vt_sample.wgsl` text), but the
+        // binding_array declarations themselves must survive untouched.
         assert!(source.contains("enable wgpu_binding_array;"));
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
+        // VT contract must be present — this is what the runtime panic was
+        // about (missing `vt_record_demand`).
+        assert!(source.contains("fn vt_record_demand"));
+        assert!(source.contains("fn vt_sample"));
     }
 }

@@ -1,5 +1,3 @@
-//!use helio_vt
-
 enable wgpu_binding_array;
 
 //! Portal-duplicate G-buffer write — draws the instances `helio-pass-portal-cull`
@@ -303,8 +301,7 @@ fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<
         return fallback;
     }
     let uv = select_uv(slot, base_uv);
-    vt_record_demand(slot.texture_index, uv);
-    return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], uv);
+    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
 }
 
 fn resolve_specular_f0(
@@ -338,7 +335,6 @@ fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
-    vt_frame_begin(input.clip_position.xy);
     let chain = portal_chains[input.chain_idx];
     let p0 = portal_views[chain.portals[0]];
 

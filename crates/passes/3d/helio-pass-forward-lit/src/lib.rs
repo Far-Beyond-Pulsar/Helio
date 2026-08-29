@@ -39,10 +39,6 @@ pub struct ForwardLitPass {
     bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
-    /// Group 2 (Helio#238): `//!use helio_vt` meta rows + density target.
-    vt_binder: helio_core::shader::vt_binder::VtGroupBinder,
-    bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     /// When true, renders from `material_class_ranges` (all opaque draws)
@@ -159,17 +155,9 @@ impl ForwardLitPass {
 
         let bind_group_layout_1 = create_material_bgl(device, material_binding);
 
-        // ── Group 2 (Helio#238): VT meta rows + quarter-res density target ────
-        let vt_binder = helio_core::shader::vt_binder::VtGroupBinder::new(device);
-        let bind_group_layout_2 = vt_binder.layout().clone();
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ForwardLit PL"),
-            bind_group_layouts: &[
-                Some(&bind_group_layout_0),
-                Some(&bind_group_layout_1),
-                Some(&bind_group_layout_2),
-            ],
+            bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
             immediate_size: 0,
         });
 
@@ -210,9 +198,6 @@ impl ForwardLitPass {
             bind_group_0_key: None,
             bind_group_1: None,
             bind_group_1_version: None,
-            vt_binder,
-            bind_group_2: None,
-            bind_group_2_key: helio_core::shader::vt_binder::VtGroupKey::default(),
             globals_buf,
             surface_format,
             render_all_opaque: false,
@@ -550,28 +535,10 @@ impl RenderPass for ForwardLitPass {
             self.bind_group_1_version = Some(ms.material_textures.version);
         }
 
-        // Group 2 (Helio#238) — same rebuild cadence as group 1; see the
-        // GBuffer pass's comment for the promote-before-bind contract.
-        let vt_meta_buf = ms.vt_bindings.get().map(|v| v.vt_meta_buffer);
-        let vt_density_view = ctx.resource_pool.get_view("vt_density");
-        let vt_key = helio_core::shader::vt_binder::VtGroupKey {
-            meta_ptr: vt_meta_buf.map(|b| b as *const _ as usize).unwrap_or(0),
-            density_ptr: vt_density_view.map(|v| v as *const _ as usize).unwrap_or(0),
-            version: ms.material_textures.version,
-        };
-        if self.bind_group_2_key != vt_key || self.bind_group_2.is_none() {
-            self.bind_group_2 = Some(
-                self.vt_binder
-                    .bind_group(ctx.device, vt_meta_buf, vt_density_view),
-            );
-            self.bind_group_2_key = vt_key;
-        }
-
         let indirect = ctx.scene.indirect;
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
         pass.set_index_buffer(
             ms.mesh_buffers.indices.slice(..),

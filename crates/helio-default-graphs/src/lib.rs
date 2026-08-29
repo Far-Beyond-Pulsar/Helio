@@ -45,7 +45,6 @@ use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
-use helio_pass_vt_density::{VtDensityCompactPass, VtFeedbackClearPass, VtHeatmapPass};
 
 use helio_core::RenderGraph;
 
@@ -196,14 +195,6 @@ fn add_geometry_passes(
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    // Texel-streaming clear (Helio#238) — FIRST of the frame's feedback
-    // pair. Zeroes the quarter-res density target before any texel-producing
-    // raster pass runs; a compute store rather than a load-op clear because
-    // the target is storage-bound from five fragment stages, never an
-    // attachment. The matching compaction dispatch sits after the LAST
-    // writer (see the VtDensityCompactPass registration below).
-    graph.add_pass(Box::new(VtFeedbackClearPass::new(device, config.internal_width(), config.internal_height())));
-
     // Foliage placement is a compute pass and must be added *before* GBufferPass, not
     // between it and FoliageGBufferPass. It is deliberately not `chain_transparent` (it
     // records on the main encoder so it reads this frame's Hi-Z rather than last
@@ -293,11 +284,6 @@ fn add_forward_geometry_passes(
     render_all_opaque: bool,
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
-
-    // Texel-streaming clear (Helio#238) — before the first feedback writer of
-    // the forward path; see the twin comment in add_geometry_passes and the
-    // compaction registration for the pairing.
-    graph.add_pass(Box::new(VtFeedbackClearPass::new(device, config.internal_width(), config.internal_height())));
 
     let mut fl_pass = ForwardLitPass::new(device, config.surface_format);
     fl_pass.render_all_opaque = render_all_opaque;
@@ -678,21 +664,6 @@ fn build_default_graph_internal(
     let camera_buf = scene.gpu_scene().camera.buffer();
     let instances_buf = scene.gpu_scene().instances.buffer();
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
-
-    // Texel-streaming compaction (Helio#238) — deliberately HERE, after the
-    // transparent pass, not "right after the gbuffer": the density target is
-    // written from FIVE passes whose last writer in this graph is
-    // TransparentPass (it runs post-lighting), with VG and the portal
-    // duplicates also later than the gbuffer proper. Compaction is a compute
-    // dispatch over the finished quarter-res target, so it must dominate all
-    // five writers or their demand silently vanishes for a frame. The clear
-    // half of the pair sits at the other end of the frame, before the first
-    // writer in add_geometry_passes / add_forward_geometry_passes.
-    graph.add_pass(Box::new(VtDensityCompactPass::new(device, iw, ih)));
-    // Debug viewmode overlay (Helio#238): Off by default — zero draws until a
-    // host flips it via find_pass_mut::<VtHeatmapPass>(). Renders demand heat
-    // / page-miss flash from the finished feedback target.
-    graph.add_pass(Box::new(VtHeatmapPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,
@@ -1437,21 +1408,6 @@ fn build_forward_graph_internal(
     let camera_buf = scene.gpu_scene().camera.buffer();
     let instances_buf = scene.gpu_scene().instances.buffer();
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
-
-    // Texel-streaming compaction (Helio#238) — deliberately HERE, after the
-    // transparent pass, not "right after the gbuffer": the density target is
-    // written from FIVE passes whose last writer in this graph is
-    // TransparentPass (it runs post-lighting), with VG and the portal
-    // duplicates also later than the gbuffer proper. Compaction is a compute
-    // dispatch over the finished quarter-res target, so it must dominate all
-    // five writers or their demand silently vanishes for a frame. The clear
-    // half of the pair sits at the other end of the frame, before the first
-    // writer in add_geometry_passes / add_forward_geometry_passes.
-    graph.add_pass(Box::new(VtDensityCompactPass::new(device, iw, ih)));
-    // Debug viewmode overlay (Helio#238): Off by default — zero draws until a
-    // host flips it via find_pass_mut::<VtHeatmapPass>(). Renders demand heat
-    // / page-miss flash from the finished feedback target.
-    graph.add_pass(Box::new(VtHeatmapPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,

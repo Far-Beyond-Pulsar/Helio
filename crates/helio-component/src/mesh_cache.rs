@@ -104,11 +104,8 @@ fn leak_static<T: 'static>(val: T) -> &'static T {
     Box::leak(Box::new(val))
 }
 
-/// Build a `&'static` enum-shaped `RuntimeTypeInfo` over `u64` discriminants
-/// for an import-options field. `pub(crate)` since `texture_cache`'s import
-/// schema reuses it (Helio#237) — the leak-based shape is modal-lifetime by
-/// design (import schemas live for the process).
-pub(crate) fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeTypeInfo {    let variants: Vec<&'static str> = choices
+fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeTypeInfo {
+    let variants: Vec<&'static str> = choices
         .iter()
         .map(|c| Box::leak(c.clone().into_boxed_str()) as &'static str)
         .collect();
@@ -292,16 +289,7 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
             }
         }
     }
-    memoized_content_id_for_file(abs_path)
-}
 
-/// The canonicalize → mtime/len-validated memoize → xxh3-128 tail shared by
-/// EVERY non-native asset path resolution in this crate: `content_id_for_path`
-/// (after its `.mesh` header fast path) and `texture_cache::
-/// content_id_for_path` (after its `.ptex` one, Helio#237). One memoization
-/// domain per canonical path means a mesh and a texture can never disagree
-/// about the same file's identity.
-pub(crate) fn memoized_content_id_for_file(abs_path: &Path) -> Option<u128> {
     let canonical = std::fs::canonicalize(abs_path).ok()?;
     let meta = std::fs::metadata(&canonical).ok()?;
     let mtime = meta.modified().ok()?;

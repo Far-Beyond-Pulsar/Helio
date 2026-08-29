@@ -1,5 +1,4 @@
 //! Shared WGSL prelude.
-//! (Module docs continue below the sub-module declarations.)
 //!
 //! naga has no `#include`, and wgpu compiles a shader only at
 //! `create_shader_module` — with a live device, at runtime. The combination is
@@ -39,8 +38,6 @@
 //! shader point into the combined source, offset by [`PRELUDE_LINES`]. That is
 //! the price of concatenation over a real preprocessor; keeping the prelude small
 //! and stable keeps it manageable.
-
-pub mod vt_binder;
 
 use std::borrow::Cow;
 
@@ -88,24 +85,6 @@ pub const WIND: &str = include_str!("foliage_wind.wgsl");
 /// Marker opting a shader into the foliage wind model. Must appear in the source.
 pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
 
-/// Virtual-texturing sampling library + demand-feedback writes (Helio#238).
-///
-/// Unlike every module above, [`VT`] OWNS its bindings (`@group(2)` meta rows
-/// and the quarter-res density target): the binding layout is part of the
-/// shared sampling contract all five raster passes and the decal pass build
-/// identically, so a mismatch fails at pipeline creation instead of silently
-/// misbinding residency rows. See vt_sample.wgsl's header for the two-rule
-/// contract this module exists to serve.
-///
-/// Registering a module here is the step that is easy to miss — see the
-/// caution on [`PBR`] above: an unregistered marker is an inert comment and
-/// the shader dies at `create_shader_module` with "no definition in scope"
-/// for functions that plainly exist in the source tree.
-pub const VT: &str = include_str!("vt_sample.wgsl");
-
-/// Marker opting a shader into the VT sampling library. Must appear in the source.
-pub const VT_MARKER: &str = "//!use helio_vt";
-
 /// Returns `true` if `source` opts into the prelude.
 pub fn uses_prelude(source: &str) -> bool {
     source.contains(MARKER)
@@ -126,11 +105,6 @@ pub fn uses_pbr(source: &str) -> bool {
     source.contains(PBR_MARKER)
 }
 
-/// Returns `true` if `source` opts into the VT sampling library.
-pub fn uses_vt(source: &str) -> bool {
-    source.contains(VT_MARKER)
-}
-
 /// Lines prepended ahead of `source`, for offsetting diagnostics back to the
 /// original file. Depends on which markers the source opts into.
 pub fn expanded_lines(source: &str) -> usize {
@@ -147,9 +121,6 @@ pub fn expanded_lines(source: &str) -> usize {
     if uses_wind(source) {
         lines += WIND.lines().count() + 1;
     }
-    if uses_vt(source) {
-        lines += VT.lines().count() + 1;
-    }
     lines
 }
 
@@ -163,8 +134,7 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
     let hiz = uses_hiz(source);
     let pbr = uses_pbr(source);
     let wind = uses_wind(source);
-    let vt = uses_vt(source);
-    if !prelude && !hiz && !pbr && !wind && !vt {
+    if !prelude && !hiz && !pbr && !wind {
         return Cow::Borrowed(source);
     }
 
@@ -227,14 +197,6 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
     // is the obvious future case) without another reshuffle.
     if wind {
         out.push_str(WIND);
-        out.push('\n');
-    }
-    // After wind, before the body: VT owns its own group-2 bindings and leans
-    // on nothing above it, so its position only decides diagnostics offsets.
-    // It must precede the body because the including shaders' entry points
-    // call into it.
-    if vt {
-        out.push_str(VT);
         out.push('\n');
     }
     out.push_str(&body);
@@ -372,76 +334,5 @@ mod tests {
                 "wind include must not declare bindings: {line}"
             );
         }
-    }
-
-    #[test]
-    fn vt_declares_the_shared_contract_surface() {
-        // Same reasoning as prelude/hiz/wind: a rename breaks all five raster
-        // passes and the decal pass at `create_shader_module` time — pin the
-        // names so it surfaces here instead.
-        for symbol in [
-            "struct VtMetaRow",
-            "fn vt_sample",
-            "fn vt_sample_level",
-            "fn vt_feedback_write",
-            "fn vt_frame_begin",
-            "fn vt_mip_resident",
-        ] {
-            assert!(VT.contains(symbol), "vt include is missing {symbol}");
-        }
-    }
-
-    #[test]
-    fn vt_bindings_are_exactly_group_two_zero_and_one() {
-        // The binding layout IS the shared contract (unlike prelude modules):
-        // every including pass builds group 2 from these exact slots. Pin them
-        // so an accidental renumber fails here rather than as misbound rows.
-        let mut groups = VT
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("@group(2) @binding("))
-            .map(|rest| rest[..1].to_string())
-            .collect::<Vec<_>>();
-        groups.sort();
-        assert_eq!(groups, ["0", "1"], "VT must own exactly group-2 slots 0 and 1");
-    }
-
-    #[test]
-    fn vt_expansion_tracks_resolve_like_every_other_module() {
-        let src = "//!use helio_vt\nfoo";
-        let resolved = resolve(src);
-        let offset = resolved.lines().count() - src.lines().count();
-        assert_eq!(offset, expanded_lines(src));
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn vt_module_compiles_under_naga_when_included() {
-        // wgsl_validation walks the tree but skips entry-point-less fragments,
-        // which vt_sample.wgsl is — so validate the exact resolved text a
-        // including shader would compile here, where a regression fails in
-        // `cargo test` instead of on someone's GPU at runtime.
-        let src = concat!(
-            "//!use helio_vt\n",
-            "enable wgpu_binding_array;\n",
-            "@group(1) @binding(2) var scene_textures: binding_array<texture_2d<f32>, 256>;\n",
-            "@group(1) @binding(3) var scene_samplers: binding_array<sampler, 256>;\n",
-            "@fragment\n",
-            "fn fs_main(@builtin(position) px: vec4<f32>) -> @location(0) vec4<f32> {\n",
-            "    vt_frame_begin(px.xy);\n",
-            "    let row = vt_meta[0];\n",
-            "    let s = vt_sample(scene_textures[0], scene_samplers[0], row, px.xy * 0.1);\n",
-            "    vt_feedback_write(0u, 3u);\n",
-            "    return s;\n",
-            "}\n",
-        );
-        let resolved = resolve(src);
-        let module = naga::front::wgsl::parse_str(&resolved)
-            .unwrap_or_else(|e| panic!("vt-including shader failed to parse: {}", e.emit_to_string(&resolved)));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .expect("vt-including shader failed to validate");
     }
 }

@@ -30,7 +30,6 @@ pub mod shadow;
 pub mod sky;
 pub mod water;
 pub mod wind;
-pub mod vt;
 
 pub use camera::*;
 pub use corona::*;
@@ -41,7 +40,6 @@ pub use frame::*;
 pub use instance::*;
 pub use light::*;
 pub use material::*;
-pub use vt::*;
 pub use meshlet::*;
 pub use movability::*;
 pub use portal::*;
