@@ -64,6 +64,9 @@ struct Camera { invViewProj: mat4x4f, position: vec3f, _pad: f32 };
 struct Params { time_pack: vec4f, alt_pack: vec4f, scale_pack: vec4f, extra_pack: vec4f, cache_pack: vec4f, bounds_pack: vec4f };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> params: Params;
+@group(1) @binding(0) var densitySampler: sampler;
+@group(1) @binding(1) var densityTex: texture_3d<f32>;
+@group(2) @binding(0) var densityStore: texture_storage_3d<rgba16float, write>;
 
 fn cloudDensity(pos:vec3f)->f32{
  let tN=params.time_pack.x;let tV1=params.time_pack.y;let tV2=params.time_pack.z;let dens=params.time_pack.w;
@@ -79,7 +82,7 @@ fn cloudDensity(pos:vec3f)->f32{
  let v2C=obj/sV2;let v2d=node_tex_voronoi_f1_4d_distance(v2C,tV2,2.0,det*5.0,0.75,2.5,1.0,0.5,1.0,0.0,1.0);
  let v2m=mapRange(v2d,0.0,1.0,facD*-0.25,facD);let s3=clamp01(s2+v2m);
  let cutFrom=alt*sAlt;let cut=mapRange(Z,cutFrom,0.0,0.0,1.0);let shaped=clamp01(s3-cut);let finalShaped=clamp01(shaped-(1.0-facS));
- let falloff=mapRange(Z,0.0,alt,0.0,1.0);let ds=dens*1.8;return finalShaped*falloff*ds*0.35;
+ let falloff=mapRange(Z,0.0,alt,0.0,1.0);let ds=dens*2.4;return finalShaped*falloff*ds;
 }
 const BOX_MIN=vec3f(-18.0,12.0,-18.0);
 const BOX_MAX_XZ=18.0;
@@ -89,8 +92,23 @@ fn intersectBox(ro:vec3f,rd:vec3f)->HitInfo{let inv=1.0/rd;let t0=(BOX_MIN-ro)*i
 const SUN_DIR=vec3f(0.189,0.943,0.283);const SUN_COLOR=vec3f(1.0,1.0,1.0);const AMBIENT=vec3f(0.26,0.30,0.42);const BG_COLOR=vec3f(0.045,0.10,0.18);
 fn hgPhase(c:f32,g:f32)->f32{let g2=g*g;return (1.0-g2)/(4.0*3.14159*pow(1.0+g2-2.0*g*c,1.5));}
 fn interleavedGradientNoise(uv:vec2f)->f32{let m=vec3f(0.06711056,0.00583715,52.9829189);return fract(m.z*fract(dot(uv,m.xy)));}
-// Thickness-aware sampling: returns (density, thickness) - thin edges, thick core
-fn sampleDensityThick(pos:vec3f)->vec2f{let d=cloudDensity(pos);let thick=clamp(d*1.2 - 0.1,0.0,1.0);return vec2f(d,thick);}
+// Thickness-aware sampling: samples baked volume (0 cost vs procedural)
+fn sampleDensityThick(pos:vec3f)->vec2f{
+  let uvw = (pos - BOX_MIN) / (getBoxMax() - BOX_MIN);
+  if (any(uvw < vec3f(0.0)) || any(uvw > vec3f(1.0))) { return vec2f(0.0); }
+  let s = textureSampleLevel(densityTex, densitySampler, uvw, 0.0);
+  return vec2f(s.r, s.g);
+}
+@compute @workgroup_size(4,4,4)
+fn cs(@builtin(global_invocation_id) gid: vec3u){
+  let dims = textureDimensions(densityStore);
+  if (any(gid >= dims)) { return; }
+  let uvw = (vec3f(gid) + vec3f(0.5)) / vec3f(dims);
+  let pos = mix(BOX_MIN, getBoxMax(), uvw);
+  let d = cloudDensity(pos);
+  let thick = clamp(d*1.2 - 0.1,0.0,1.0);
+  textureStore(densityStore, gid, vec4f(d, thick, 0.0, 1.0));
+}
 fn lightMarch(pos:vec3f)->f32{var s=0.0;let steps=i32(params.cache_pack.y);let sz=0.15;for(var i=1;i<=steps;i++){let p=pos+SUN_DIR*(f32(i)*sz);s+=sampleDensityThick(p).x*sz;}return exp(-s*params.cache_pack.z);}
 struct VSOut{@builtin(position) pos:vec4f,@location(0) uv:vec2f};
 @vertex fn vs(@builtin(vertex_index) vi:u32)->VSOut{let p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VSOut;o.pos=vec4f(p[vi],0,1);o.uv=p[vi];return o;}

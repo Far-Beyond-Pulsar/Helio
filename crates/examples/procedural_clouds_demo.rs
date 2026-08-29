@@ -29,6 +29,8 @@ struct App{state: Option<State>}
 struct State{
  window: Arc<Window>, surface: wgpu::Surface<'static>, device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>,
  pipeline: wgpu::RenderPipeline, bind: wgpu::BindGroup, cam_buf: wgpu::Buffer, params_buf: wgpu::Buffer,
+ density_tex: wgpu::Texture, density_view: wgpu::TextureView, density_sampler: wgpu::Sampler,
+ density_bind: wgpu::BindGroup, density_store_bind: wgpu::BindGroup, compute_pipeline: wgpu::ComputePipeline,
  format: wgpu::TextureFormat,
  pos: glam::Vec3, yaw:f32, pitch:f32, keys: HashSet<KeyCode>, grabbed:bool, delta:(f32,f32), time:f32,
 }
@@ -47,12 +49,20 @@ impl ApplicationHandler for App{
   surface.configure(&device,&cfg);
   let cam_buf=device.create_buffer(&wgpu::BufferDescriptor{label:Some("cam"),size:80,usage:wgpu::BufferUsages::UNIFORM|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
   let params_buf=device.create_buffer(&wgpu::BufferDescriptor{label:Some("params"),size:96,usage:wgpu::BufferUsages::UNIFORM|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
-  let bgl=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
+  let bgl0=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl0"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
+  let bgl1=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl1"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),count:None},wgpu::BindGroupLayoutEntry{binding:1,visibility:wgpu::ShaderStages::FRAGMENT,ty:wgpu::BindingType::Texture{sample_type:wgpu::TextureSampleType::Float{filterable:true},view_dimension:wgpu::TextureViewDimension::D3,multisampled:false},count:None}]});
+  let bgl2=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("bgl2"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::COMPUTE,ty:wgpu::BindingType::StorageTexture{access:wgpu::StorageTextureAccess::WriteOnly,format:wgpu::TextureFormat::Rgba16Float,view_dimension:wgpu::TextureViewDimension::D3},count:None}]});
   let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("proc"),source:wgpu::ShaderSource::Wgsl(SHADER.into())});
-  let pl=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("pl"),bind_group_layouts:&[Some(&bgl)],immediate_size:0});
+  let pl=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("pl"),bind_group_layouts:&[Some(&bgl0),Some(&bgl1),Some(&bgl2)],immediate_size:0});
   let pipeline=device.create_render_pipeline(&wgpu::RenderPipelineDescriptor{label:Some("pipe"),layout:Some(&pl),vertex:wgpu::VertexState{module:&shader,entry_point:Some("vs"),buffers:&[],compilation_options:Default::default()},fragment:Some(wgpu::FragmentState{module:&shader,entry_point:Some("fs"),targets:&[Some(wgpu::ColorTargetState{format:fmt,blend:None,write_mask:wgpu::ColorWrites::ALL})],compilation_options:Default::default()}),primitive:Default::default(),depth_stencil:None,multisample:Default::default(),multiview_mask:None,cache:None});
-  let bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("bg"),layout:&bgl,entries:&[wgpu::BindGroupEntry{binding:0,resource:cam_buf.as_entire_binding()},wgpu::BindGroupEntry{binding:1,resource:params_buf.as_entire_binding()}]});
-  self.state=Some(State{window,surface,device:Arc::new(device),queue:Arc::new(queue),pipeline,bind,cam_buf,params_buf,format:fmt,pos:glam::Vec3::new(0.0,2.5,7.0),yaw:0.0,pitch:-0.2,keys:HashSet::new(),grabbed:false,delta:(0.0,0.0),time:0.0});
+  let bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("bg"),layout:&bgl0,entries:&[wgpu::BindGroupEntry{binding:0,resource:cam_buf.as_entire_binding()},wgpu::BindGroupEntry{binding:1,resource:params_buf.as_entire_binding()}]});
+  let density_tex=device.create_texture(&wgpu::TextureDescriptor{label:Some("densityTex"),size:wgpu::Extent3d{width:64,height:32,depth_or_array_layers:64},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D3,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::STORAGE_BINDING,view_formats:&[]});
+  let density_view=density_tex.create_view(&Default::default());
+  let density_sampler=device.create_sampler(&wgpu::SamplerDescriptor{label:Some("densitySampler"),address_mode_u:wgpu::AddressMode::ClampToEdge,address_mode_v:wgpu::AddressMode::ClampToEdge,address_mode_w:wgpu::AddressMode::ClampToEdge,mag_filter:wgpu::FilterMode::Linear,min_filter:wgpu::FilterMode::Linear,..Default::default()});
+  let density_bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("density_bind"),layout:&bgl1,entries:&[wgpu::BindGroupEntry{binding:0,resource:wgpu::BindingResource::Sampler(&density_sampler)},wgpu::BindGroupEntry{binding:1,resource:wgpu::BindingResource::TextureView(&density_view)}]});
+  let density_store_bind=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("density_store"),layout:&bgl2,entries:&[wgpu::BindGroupEntry{binding:0,resource:wgpu::BindingResource::TextureView(&density_view)}]});
+  let compute_pipeline=device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor{label:Some("cs"),layout:Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("cs_pl"),bind_group_layouts:&[Some(&bgl0),Some(&bgl1),Some(&bgl2)],immediate_size:0})),module:&shader,entry_point:Some("cs"),compilation_options:Default::default(),cache:None});
+  self.state=Some(State{window,surface,device:Arc::new(device),queue:Arc::new(queue),pipeline,bind,cam_buf,params_buf,density_tex,density_view,density_sampler,density_bind,density_store_bind,compute_pipeline,format:fmt,pos:glam::Vec3::new(0.0,2.5,7.0),yaw:0.0,pitch:-0.2,keys:HashSet::new(),grabbed:false,delta:(0.0,0.0),time:0.0});
  }
  fn window_event(&mut self, el:&ActiveEventLoop, _id:WindowId, e:WindowEvent){
   let Some(s)=&mut self.state else{return};
@@ -78,7 +88,7 @@ impl ApplicationHandler for App{
     let cam=Camera{inv_view_proj:inv.to_cols_array_2d(), position:[s.pos.x,s.pos.y,s.pos.z], _pad:0.0};
     s.queue.write_buffer(&s.cam_buf,0,bytemuck::bytes_of(&cam));
     let params=Params{
-     time_pack:[s.time, s.time*0.7, s.time*0.5, 0.14],
+     time_pack:[s.time, s.time*0.7, s.time*0.5, 0.22],
      alt_pack:[0.35,0.6,0.7,0.5],
      scale_pack:[0.8,0.35,2.0,0.6],
      extra_pack:[0.75,6.0,18.0,0.0],
@@ -86,14 +96,24 @@ impl ApplicationHandler for App{
      bounds_pack:[22.0,0.0,0.0,0.0],
     };
     s.queue.write_buffer(&s.params_buf,0,bytemuck::bytes_of(&params));
+    // Bake procedural density into 3D texture (64x32x64) - ~0.05ms, then raymarch samples it (cheap)
+    let mut enc=s.device.create_command_encoder(&Default::default());
+    {
+        let mut cpass=enc.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("bake"),timestamp_writes:None});
+        cpass.set_pipeline(&s.compute_pipeline);
+        cpass.set_bind_group(0,&s.bind, &[]);
+        cpass.set_bind_group(1,&s.density_bind, &[]);
+        cpass.set_bind_group(2,&s.density_store_bind, &[]);
+        cpass.dispatch_workgroups(16,8,16);
+    }
     let surface_texture = match s.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         _ => return,
     };
     let view=surface_texture.texture.create_view(&Default::default());
-    let mut enc=s.device.create_command_encoder(&Default::default());
+    // Re-use same encoder for render after compute (no extra submit)
     {let mut p=enc.begin_render_pass(&wgpu::RenderPassDescriptor{label:Some("proc"),color_attachments:&[Some(wgpu::RenderPassColorAttachment{view:&view,resolve_target:None,depth_slice:None,ops:wgpu::Operations{load:wgpu::LoadOp::Clear(wgpu::Color{r:0.045,g:0.10,b:0.18,a:1.0}),store:wgpu::StoreOp::Store}})],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,multiview_mask:None});
-     p.set_pipeline(&s.pipeline); p.set_bind_group(0,&s.bind, &[]); p.draw(0..3,0..1);}
+     p.set_pipeline(&s.pipeline); p.set_bind_group(0,&s.bind, &[]); p.set_bind_group(1,&s.density_bind, &[]); p.draw(0..3,0..1);}
     s.queue.submit([enc.finish()]); s.queue.present(surface_texture); s.window.request_redraw();
    }
    _=>{}
