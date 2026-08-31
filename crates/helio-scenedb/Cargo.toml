@@ -1,0 +1,124 @@
+[package]
+name = "helio-scenedb"
+version = "0.1.0"
+edition = "2021"
+description = "Helio <-> SceneDB binding seam: SceneDbBinding binds SceneDB-owned GPU buffers into Helio's bind-group model (M3-a T9, design Rev 2 S5)"
+license = "MIT OR Apache-2.0"
+# Same reasoning and mechanism as `helio_component`'s identical override
+# (Pulsar-Native#561 Phase D, `engine_backend` now depends on this crate
+# directly): `helio`/`libhelio` MUST resolve to the exact same copies
+# `engine_backend`'s own `helio::Scene`/`MeshId`/etc do -- `HelioRender
+# Subsystem::apply_to` is handed a live `&mut helio::Scene` constructed by
+# `engine_backend`'s `helio::RendererBuilder`, so a second, independently-
+# resolved `helio` copy (Helio's own nested workspace vs. Pulsar-Native's
+# root, git-vs-path SourceIds even for identical content) would make that a
+# type mismatch, not just a redundant build. `workspace = true` below now
+# resolves against Pulsar-Native's root `[workspace.dependencies]` instead
+# of `crates/renderer/helio/Cargo.toml`'s own.
+workspace = "../../../../.."
+
+[features]
+# `#[derive(SceneStore)]`'s generated code (`pulsar_scenedb_derive`) wraps
+# its GPU-column methods (`register_gpu_columns_growable`,
+# `packed_gpu_component_id`, the world-mirror dispatch registration, ...)
+# in `#[cfg(feature = "gpu")]`. That `cfg` attribute, once spliced into
+# THIS crate's compilation unit by macro expansion, checks THIS crate's
+# own Cargo features -- not `pulsar_scenedb`'s -- so any crate other than
+# `pulsar_scenedb` itself that uses the derive needs its own "gpu" feature
+# of that exact name to make the generated methods compile at all. This
+# crate is unconditionally GPU-oriented (the whole point of the
+# Helio<->SceneDB seam), so "gpu" is on by default rather than opt-in.
+default = ["gpu"]
+gpu = []
+
+[dependencies]
+# `unified-GPU` (Far-Beyond-Pulsar/SceneDB#42) merged to `main` 2026-08-15
+# (Pulsar-Native#561 Phase D) -- this crate's World/Entity render-component
+# work needed APIs that only existed on that branch: `#[gpu(buffer = "key")]`
+# shared named buffers, `GpuSystemContext::bind`, `Bundle`/`spawn_bundle`, and
+# `World::attach_change_tracker`/`SharedChangeTracker`. All now on `main`, so
+# this is a real, CI-safe `git`+`rev` pin again, not a local dev-machine path.
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd", features = ["gpu"] }
+# Promoted from dev-dependencies: the new RenderMaterial/RenderMesh/etc
+# render components (SceneDB<->Helio component integration, see
+# HelioRenderSubsystem) are `#[derive(SceneStore)]`d in this crate's own
+# non-test source, not just in benchmark fixtures.
+# NOTE: must stay byte-for-byte identical to the root workspace's
+# `pulsar_scenedb`/`pulsar_scenedb_derive` rev pins above -- this crate isn't
+# `{workspace = true}`-pinned for these two (unlike everything else it takes
+# via the `workspace = "../../../../.."` override), so a mismatched rev here
+# would silently resolve to a SECOND, non-identical copy of SceneDB with its
+# own separate `inventory::submit!` registry, breaking the GPU-mirror seam
+# between this crate and `engine_backend` (see 27b5f01: variable-length
+# `#[gpu]` fields).
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2ec4929aaa24eec440826c8b731f9c10d768fdfd" }
+helio = { workspace = true }
+libhelio = { workspace = true }
+# RenderTransform stores a glam::Mat4 directly -- ObjectDescriptor::transform
+# (helio::scene::types::ObjectDescriptor) is already a Mat4, so this avoids
+# an array round-trip at every HelioRenderSubsystem translation call.
+glam = { workspace = true }
+# MultiMaterialStaticMeshComponent::materials -- a small, usually-short list
+# of Entity references (each a MaterialSlot entity) without a heap
+# allocation for the common few-materials case. Pinned to the exact version
+# already resolved elsewhere in this workspace's Cargo.lock (transitively,
+# via wgpu/glam) so this doesn't introduce a second semver-incompatible copy.
+smallvec = "1.15"
+# Helio's workspace wgpu = 30 (crates.io) -- MUST resolve to the same major
+# as `pulsar_scenedb`'s own `gpu`-feature wgpu dep (also crates.io 30). Both
+# requirements ("30" here, "30" in pulsar_scenedb/Cargo.toml) unify to ONE
+# Cargo.lock entry (wgpu 30.0.0, crates.io) when this workspace is resolved
+# as a whole -- verified against Pulsar-Native's root Cargo.lock, which
+# carries exactly one crates.io `wgpu 30.0.0` entry (plus an unrelated
+# `wgpu 28.0.0` git-forked entry other Pulsar crates pin, not touched by
+# this seam). Fixed a stale version of this comment (T9 final-review F3)
+# that claimed "two separate Cargo.lock entries" -- not how Cargo.lock
+# unification works for compatible semver requirements in one resolution.
+# What genuinely has no dependency-graph enforcement is the two requirements
+# staying compatible over time: nothing pins them together, so they could
+# drift to incompatible majors in a future edit and Cargo would happily
+# resolve two different `wgpu` versions. `tests/seam_smoke.rs` IS that
+# enforcement in practice -- see that file's doc comment.
+wgpu = { workspace = true }
+# M3-b T5 (cull.rs): `bytemuck::{Pod, Zeroable}` for the Helio-owned derived
+# structs (`DrawCommand`/`CullRecord`/`CullUniforms`) written to/read from
+# the cull pass's own buffers -- same workspace dep every other Helio pass
+# crate already uses (`helio-pass-occlusion-cull`'s `CullParams`, etc.).
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+# Plain version, NOT `{ workspace = true }`: this crate now resolves
+# `workspace = true` against Pulsar-Native's root (see the `[package]`
+# override above), which has no reason to declare a Helio-nested-workspace-
+# only test/bench tool. Matches the exact version Helio's own workspace
+# declares (`crates/renderer/helio/Cargo.toml`) -- dev-dependencies only
+# affect this crate's own test/bench binaries, never the outer build, so
+# pinning it directly here (instead of inheriting) has no cross-workspace
+# identity consequence the way the `[dependencies]` above do.
+pollster = "0.4"
+# naga tracks the same major as Helio's workspace wgpu (crates.io 30) — the
+# Test 3 reflection harness (`tests/binding_layout.rs`, M3-a T10) parses
+# `wgsl::SCENE_BINDINGS_WGSL` with naga's WGSL front end and reflects struct
+# layout via `naga::proc::Layouter`, mirroring `pulsar_scenedb/tests/
+# gpu_layout.rs`'s harness exactly (same naga major, same API forms).
+naga = { version = "30", features = ["wgsl-in"] }
+
+# M3-b T9: cull/draw pass timing + the S14.2 readback-latency decision.
+# `harness = false` (matches `pulsar_scenedb/benches/gpu_timing.rs`'s own
+# choice, same task lineage): TIMESTAMP_QUERY brackets make each iteration
+# self-measuring, so this is a plain `main()` doing its own warm-up/sample-
+# size/statistics and printing a table, not a criterion harness.
+[[bench]]
+name = "pass_timing"
+harness = false
+
+# Helio#211: AAA-scale measurement for the World<->GPU mirror bridge
+# (pulsar_scenedb#24 + follow-ups) -- spawn throughput, sustained churn,
+# reallocation latency, concurrent buffer access, flush cost vs. dirty
+# fraction, swept across realistic entity counts. `harness = false`, same
+# reasoning as `pass_timing`/`legacy_model_bench` upstream: this measures
+# real wall-clock cost of GPU-submitting operations, not a pure-CPU
+# microbenchmark criterion is built for.
+[[bench]]
+name = "world_mirror_scale"
+harness = false
