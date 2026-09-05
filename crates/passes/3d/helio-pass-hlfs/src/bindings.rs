@@ -78,6 +78,7 @@ impl InternalBindings {
                     view(&next.diffuse.view),
                     view(&next.specular.view),
                     view(&next.geometry.view),
+                    t.grid.as_entire_binding(),
                 ],
             )
         });

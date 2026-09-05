@@ -10,19 +10,23 @@ output is linear HDR; the render graph supplies tone mapping and antialiasing.
    so exceeding a list's capacity does not remove illumination.
 2. Each shading pixel evaluates a bounded set of candidates. Separate visible
    and hidden reservoirs combine the previous tile's observed lights with
-   uniform discovery candidates. Reservoir and group probabilities are corrected
+   stratified discovery candidates. Reservoir and group probabilities are corrected
    in the lighting estimate. The hidden selection budget is normally capped at
    20%, relaxed to 50% on disocclusion. Directional proxy weights are limited
    relative to local lights without limiting the resulting lighting energy.
 3. At most four selected lights receive shadow evaluation per shading pixel.
    Duplicate selections reuse visibility. Shadow maps and optional ray queries
-   use the scene's existing resources. Each tile retains the strongest observed
-   light in each of 16 deduplication slots. Eight bounded contact-trace steps use
+   use the scene's existing resources. Parallel workgroup selection gathers up
+   to 16 explicit IDs from 64 deduplication scratch slots, then sorts them for
+   binary-search membership. Visibility is binary; partial shadow coverage does
+   not reduce a visible light's guiding weight. Eight bounded contact-trace steps use
    current-frame 8×8 minimum depth followed by full-resolution depth; a confirmed
    contact occluder avoids the shadow-map lookup.
 4. Separate demodulated diffuse and specular histories use geometry rejection,
    a 5×5 YCoCg variance clamp and distance-dependent history rejection. Geometry
-   history stores octahedral normals, logarithmic depth and age in RGBA16F.
+   history packs octahedral normals, logarithmic depth, age and both signals'
+   luminance second moments into eight bytes. Specular demodulation uses the
+   engine's analytic EnvBRDF fit, including roughness and view angle.
 5. A sparse geometry-aware spatial filter restores material response at output
    resolution. Optional half-resolution shading rotates through each 2×2 block;
    unmatched thin surfaces use a bounded direct-sampling fallback.
@@ -67,21 +71,35 @@ operations. Point, spot and directional lights use the existing light layout;
 there is no rectangular-area-light representation to attach quadrant masks or
 barn-door culling to. Existing optional ray-query support remains available.
 
-Lighting and moments use RGBA16F rather than packed R11G11B10F with separate
-moment textures. This avoids stochastic storage rounding and keeps the shader
-path portable, at a higher full-resolution memory cost. The old fixed 128 MiB
-clip stacks are removed, but total allocation depends on shading resolution;
-removing them does not guarantee lower total memory at every resolution.
+Diffuse and specular use the R11G11B10 unsigned-float bit representation in
+portable R32Uint storage textures. Explicit decode avoids requiring native
+R11G11B10 storage-image support. STBN stochastic rounding covers normal and
+subnormal values. Packed RG32Uint metadata stores octahedral SNORM8 normals,
+FP16 logarithmic depth, two unsigned E6M5 luminance second moments and age.
+Six exponent bits cover squared HDR luminance without overflow. Linear first
+moments are derived from each signal's RGB; spatial filtering uses relative
+variance in the same linear domain. Raw signals and ping-pong
+history total 40 bytes per shading pixel; the full-resolution output is separate.
+At 1080p the pass requests 107.81 MiB at full shading resolution or 45.34 MiB at
+half resolution, including output and grids. This is below the removed 128 MiB
+clip stacks but above the proposal's approximate 34 MB total target.
 
-Candidates retain nonzero probability rather than dropping a fixed set of dim
-lights. Exposure affects importance without silently deleting their combined
-energy. Failed half-resolution reconstruction shades the actual surface with
-a bounded fallback instead of retaining unvalidated history.
+Very dim candidates are culled only when an exact unshadowed contribution bound
+fits a population-divided error budget. Aggregate loss is bounded by 1e-5 per
+pre-exposed channel and never exceeds 1e-5 after removing pre-exposure. Bright
+specular responses and large populations of dim lights retain support. Failed
+half-resolution reconstruction shades the actual surface with a bounded
+fallback instead of retaining unvalidated history. Reconstruction uses a sparse
+geometry-weighted filter; it does not add unvalidated-history reuse or neighbor
+ray reuse. The default remains full resolution.
 
 The benchmark uses GPU timestamps surrounding HLFS on the render encoder.
 It compares the stochastic path with the full-light reference at the same
-resolution; that comparison does not establish speedup over older renderers or
-end-to-end game performance.
+resolution. The cathedral capture separately reports serialized CPU + GPU frame
+latency, excluding image readback. That completed-frame latency includes CPU
+submission and GPU waits; it is not an isolated GPU pass time or asynchronous
+throughput measurement. The validation report also retains a matched capture
+from the previous renderer.
 
 The embedded scalar spatiotemporal blue-noise ranks are independently generated
 by `scripts/generate_hlfs_noise.py`. NumPy is only needed to regenerate the asset;

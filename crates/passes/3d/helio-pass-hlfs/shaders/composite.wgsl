@@ -1,6 +1,6 @@
-@group(2) @binding(0) var filtered_diffuse: texture_2d<f32>;
-@group(2) @binding(1) var filtered_specular: texture_2d<f32>;
-@group(2) @binding(2) var filtered_geometry: texture_2d<f32>;
+@group(2) @binding(0) var filtered_diffuse: texture_2d<u32>;
+@group(2) @binding(1) var filtered_specular: texture_2d<u32>;
+@group(2) @binding(2) var filtered_geometry: texture_2d<u32>;
 @group(2) @binding(3) var screen_depth_bounds: texture_2d<f32>;
 
 @vertex
@@ -17,10 +17,13 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let z=-(cameras[0].view*vec4<f32>(s.position,1.0)).z;
     let sample_pos=fragment.xy/f32(globals.sample_scale)-0.5;
     let center=clamp(vec2<i32>(round(sample_pos)),vec2<i32>(0),vec2<i32>(globals.sample_size)-1);
-    let cd=textureLoad(filtered_diffuse,center,0); let cs=textureLoad(filtered_specular,center,0);
-    let log_d=log2(1.0+luminance(cd.rgb)); let log_s=log2(1.0+luminance(cs.rgb));
-    let variance=max(cd.a-log_d*log_d,cs.a-log_s*log_s);
-    let age=textureLoad(filtered_geometry,center,0).w;
+    let moments=load_moments(filtered_geometry,center);
+    let cd=vec4<f32>(load_radiance(filtered_diffuse,center),moments.x);
+    let cs=vec4<f32>(load_radiance(filtered_specular,center),moments.y);
+    let mean_d=luminance(cd.rgb); let mean_s=luminance(cs.rgb);
+    let variance=max(max(cd.a-mean_d*mean_d,0.0)/max(mean_d*mean_d,0.0001),
+        max(cs.a-mean_s*mean_s,0.0)/max(mean_s*mean_s,0.0001));
+    let age=load_geometry(filtered_geometry,center).w;
     var diffuse=vec3<f32>(0.0); var specular=vec3<f32>(0.0); var weight_sum=0.0;
     if globals.debug_mode!=0u || (globals.sample_scale==1u && (age>globals.max_history || (age>=4.0 && variance<=0.002))) {
         diffuse=cd.rgb; specular=cs.rgb; weight_sum=1.0;
@@ -33,12 +36,12 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
             if radius==2 && abs(x)+abs(y)>2 && ((u32(x+2)+u32(y+2)+phase)&1u)==0u { continue; }
             let p=center+vec2<i32>(x,y);
             if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
-            let geo=textureLoad(filtered_geometry,p,0);
+            let geo=load_geometry(filtered_geometry,p);
             if !geometry_matches(geo,s.normal,z) { continue; }
             let offset=vec2<f32>(p)-sample_pos;
             let spatial=exp(-dot(offset,offset)/f32(radius*radius));
             let weight=spatial*pow(max(dot(oct_decode(geo.xy),s.normal),0.0),32.0);
-            let d=textureLoad(filtered_diffuse,p,0).rgb; let sp=textureLoad(filtered_specular,p,0).rgb;
+            let d=load_radiance(filtered_diffuse,p); let sp=load_radiance(filtered_specular,p);
             // Tonemapped accumulation for disocclusions suppresses sparse fireflies.
             if age<4.0 {
                 diffuse+=d/(1.0+luminance(d))*weight; specular+=sp/(1.0+luminance(sp))*weight;
@@ -79,7 +82,7 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     if globals.has_lightmap!=0u && lm_uv.x>=0.0 {
         indirect=textureSampleLevel(baked_lightmap,lightmap_sampler,lm_uv,0.0).rgb*s.albedo;
     }
-    let direct=(diffuse*s.albedo+specular*max(s.f0,vec3<f32>(0.04)))/globals.exposure;
+    let direct=(diffuse*s.albedo+specular*s.specular_factor)/globals.exposure;
     let emissive=textureLoad(gbuf_emissive,pixel,0).rgb;
     return vec4<f32>(finite_color(direct+indirect+emissive),1.0);
 }

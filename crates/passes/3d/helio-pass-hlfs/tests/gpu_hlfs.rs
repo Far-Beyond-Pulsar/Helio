@@ -3,6 +3,94 @@ mod support;
 
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn packed_hdr_rounding_preserves_energy_and_subnormals() {
+    pollster::block_on(async {
+        let f = support::Fixture::new(1, 1).await;
+        let source = [include_str!("../shaders/common.wgsl"), r#"
+@group(0) @binding(8) var<storage,read_write> results: array<vec4<f32>>;
+@compute @workgroup_size(64)
+fn check_packing(@builtin(global_invocation_id) id: vec3<u32>) {
+    let values=array<f32,12>(0.0,0.0000001,0.00001,0.000061,0.00123,0.0317,0.137,0.993,1.017,31.75,1234.5,60000.0);
+    let value=values[id.x/256u];
+    let noise=(f32(id.x%256u)+0.5)/256.0;
+    results[id.x]=vec4<f32>(value,unpack_ufloat(pack_ufloat(value,6u,noise),6u),unpack_ufloat(pack_ufloat(value,5u,noise),5u),unpack_moment(pack_moment(value*value,noise)));
+}
+"#].concat();
+        let module = f.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Packed HDR numeric validation"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let pipeline = f
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Packed HDR validation"),
+                layout: None,
+                module: &module,
+                entry_point: Some("check_packing"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let size = 12 * 256 * 16;
+        let output = f.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = f.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = f.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 8,
+                resource: output.as_entire_binding(),
+            }],
+        });
+        let mut encoder = f.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(48, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &read, 0, size);
+        f.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        f.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let mapped = read.slice(..).get_mapped_range().unwrap();
+        let rows: &[[f32; 4]] = bytemuck::cast_slice(&mapped);
+        for values in rows.chunks_exact(256) {
+            let expected = values[0][0];
+            for (channel, bits, expected, minimum_exponent) in [
+                (1, 6, expected, -14),
+                (2, 5, expected, -14),
+                (3, 5, expected * expected, -30),
+            ] {
+                let step = 2f32
+                    .powf(expected.max(2f32.powi(minimum_exponent)).log2().floor() - bits as f32);
+                assert!(values.iter().all(|v| v[channel].is_finite()
+                    && v[channel] >= 0.0
+                    && (v[channel] - expected).abs() <= step * 1.001));
+                let average = values.iter().map(|v| v[channel] as f64).sum::<f64>() / 256.0;
+                assert!(
+                    (average - expected as f64).abs() <= step as f64 / 256.0 + 1e-10,
+                    "R{bits} mean drift: {expected} -> {average}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
 fn rendered_energy_survives_light_growth_overflow_and_removal() {
     use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
     use support::*;
@@ -49,6 +137,83 @@ fn rendered_energy_survives_light_growth_overflow_and_removal() {
             "removed lights persist in history: {}",
             mean(&dark)
         );
+        let ambient = mean(&dark);
+        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 0.005)]);
+        let mut means = Vec::new();
+        for mode in [HlfsDebugMode::Reference, HlfsDebugMode::Final] {
+            f.config(HlfsConfig {
+                debug_mode: mode,
+                pre_exposure: 0.01,
+                ..Default::default()
+            });
+            let mut total = 0.0;
+            for _ in 0..32 {
+                f.frame();
+                total += mean(&f.read()) / 32.0;
+            }
+            means.push(total - ambient);
+        }
+        eprintln!(
+            "Low pre-exposure direct reference={} final={}",
+            means[0], means[1]
+        );
+        assert!(
+            means[0] > 0.00001 && means[1] > means[0] * 0.9,
+            "exposure threshold removes perceptible direct light"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn hidden_strong_light_is_discovered_after_occlusion_changes() {
+    use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
+    use support::*;
+    pollster::block_on(async {
+        let mut f = Fixture::new(65, 49).await;
+        let mut lights: Vec<_> = (0..32)
+            .map(|i| {
+                point(
+                    [(i % 8) as f32 / 2.0 - 2.0, (i / 8) as f32 - 2.0, 2.0],
+                    [1.0, 0.8, 0.5],
+                    0.2,
+                )
+            })
+            .collect();
+        let mut strong = point([0.0, 0.0, 2.0], [1.0; 3], 256.0);
+        strong.shadow_index = 0;
+        lights.push(strong);
+        f.lights(lights);
+        for visibility in [0.0, 1.0] {
+            f.constant_shadow(visibility);
+            f.config(HlfsConfig {
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
+            f.frame();
+            let reference = mean(&f.read());
+            f.config(HlfsConfig::default());
+            // Warm up with the strong light occluded, then reveal it without a
+            // configuration or light-count change that could reset guiding.
+            f.constant_shadow(0.0);
+            for _ in 0..32 {
+                f.frame();
+            }
+            f.constant_shadow(visibility);
+            let mut measured = 0.0;
+            for frame in 0..64 {
+                f.frame();
+                if frame >= 32 {
+                    measured += mean(&f.read()) / 32.0;
+                }
+            }
+            let error = (measured - reference).abs() / reference;
+            eprintln!("Strong hidden light visibility={visibility}: reference={reference} measured={measured} relative_error={error}");
+            assert!(
+                error < 0.08,
+                "visibility guiding fails after occlusion change"
+            );
+        }
     });
 }
 
@@ -99,6 +264,10 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
         eprintln!(
             "reference mean={}, unfiltered mean={raw_mean}",
             mean(&reference)
+        );
+        assert!(
+            (raw_mean - mean(&reference)).abs() / mean(&reference) < 0.01,
+            "unfiltered estimator loses energy"
         );
         for scale in [1, 2] {
             f.config(HlfsConfig {
@@ -172,12 +341,29 @@ fn creates_pipelines_on_available_adapter() {
             })
             .await
             .unwrap();
-        let _pass = helio_pass_hlfs::HlfsPass::new(
+        let mut pass = helio_pass_hlfs::HlfsPass::new(
             &device,
             &queue,
-            128,
-            96,
+            1920,
+            1080,
             wgpu::TextureFormat::Rgba16Float,
+        );
+        eprintln!("1080p full allocation_bytes={}", pass.allocation_bytes());
+        assert!(
+            pass.allocation_bytes() < 128 * 1024 * 1024,
+            "1080p exceeds the removed clip-stack allocation"
+        );
+        pass.set_config(
+            &device,
+            helio_pass_hlfs::HlfsConfig {
+                sample_scale: 2,
+                ..Default::default()
+            },
+        );
+        eprintln!("1080p half allocation_bytes={}", pass.allocation_bytes());
+        assert!(
+            pass.allocation_bytes() < 64 * 1024 * 1024,
+            "half-resolution budget exceeded"
         );
     });
 }
@@ -383,8 +569,8 @@ fn half_resolution_keeps_isolated_one_pixel_geometry_lit() {
             f.frame();
             let pixels = f.read();
             assert!(
-                (pixels[index][0] - reference[0]).abs() < 0.005,
-                "thin surface loses illumination in phase {phase}: {:?}",
+                (pixels[index][0] - reference[0]).abs() < reference[0] * (2.0 / 64.0) + 0.001,
+                "thin surface exceeds two R11 rounding steps in phase {phase}: {:?}, reference={reference:?}",
                 pixels[index]
             );
             assert!(

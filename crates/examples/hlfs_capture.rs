@@ -31,14 +31,21 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         let mut renderer = RendererBuilder::new(config)
             .with_editor_mode(true)
             .with_graph(Box::new(move |d, q, s, c, ds, cb, cs| {
-                if fxaa { helio_default_graphs::build_fxaa_hlfs_graph(d, q, s, c, ds, cb, cs, None) }
-                else { helio_default_graphs::build_hlfs_graph(d, q, s, c, ds, cb, cs, None) }
+                if fxaa {
+                    helio_default_graphs::build_fxaa_hlfs_graph(d, q, s, c, ds, cb, cs, None)
+                } else {
+                    helio_default_graphs::build_hlfs_graph(d, q, s, c, ds, cb, cs, None)
+                }
             }))
             .build(device.clone(), queue.clone(), width, height, format);
         let _ = populate(&mut renderer);
         renderer.set_editor_mode(false);
         // Populate before rebuilding so passes see the actual scene resources.
-        let build_graph = if fxaa { helio_default_graphs::build_fxaa_hlfs_graph } else { helio_default_graphs::build_hlfs_graph };
+        let build_graph = if fxaa {
+            helio_default_graphs::build_fxaa_hlfs_graph
+        } else {
+            helio_default_graphs::build_hlfs_graph
+        };
         let graph = build_graph(
             &device,
             &queue,
@@ -66,6 +73,7 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         });
         let view = texture.create_view(&Default::default());
         std::fs::create_dir_all(directory).unwrap();
+        let mut frame_times = Vec::new();
         for frame in 0..100 {
             if reference {
                 let pass = renderer
@@ -90,7 +98,12 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
                 0.1,
                 200.0,
             );
+            let start = std::time::Instant::now();
             renderer.render(&camera, &view).expect("cathedral frame");
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            if frame >= 16 {
+                frame_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
             if frame == 0 {
                 eprintln!(
                     "Scene: {} lights, {} movable",
@@ -140,6 +153,8 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
                 eprintln!("Captured cathedral frame {frame}");
             }
         }
+        frame_times.sort_by(f64::total_cmp);
+        eprintln!("Serialized frame latency (CPU + GPU, excluding capture readback): median_ms={:.3} p95_ms={:.3}", frame_times[frame_times.len()/2], frame_times[frame_times.len()*95/100]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });
 }

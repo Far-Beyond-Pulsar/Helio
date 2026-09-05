@@ -59,7 +59,6 @@ fn hash_u32(value: u32) -> u32 {
     var x = value; x = (x ^ (x >> 16u)) * 0x7feb352du;
     x = (x ^ (x >> 15u)) * 0x846ca68bu; return x ^ (x >> 16u);
 }
-fn visible_slot(light: u32) -> u32 { return hash_u32(light) & 15u; }
 fn random(state: ptr<function, u32>) -> f32 {
     *state = hash_u32(*state + 0x9e3779b9u);
     return f32(*state >> 8u) * (1.0 / 16777216.0);
@@ -104,6 +103,63 @@ fn geometry_matches(g: vec4<f32>, normal: vec3<f32>, view_depth: f32) -> bool {
     return g.w > 0.0 && dot(oct_decode(g.xy), normal) > 0.9 && abs(exp2(g.z) - view_depth) < max(0.02, abs(view_depth) * 0.01);
 }
 fn finite_color(v: vec3<f32>) -> vec3<f32> {
-    // Rgba16Float history must never receive Inf/NaN, even with extreme HDR input.
+    // Keep pre-exposed lighting finite within the packed HDR representation.
     return min(select(vec3<f32>(0.0), v, v >= vec3<f32>(0.0)), vec3<f32>(60000.0));
+}
+
+// Unsigned floats use five exponent bits and five or six mantissa bits.
+// Stochastic rounding preserves the expectation between adjacent values,
+// including the subnormal interval, instead of accumulating truncation bias.
+fn pack_ufloat(value: f32, mantissa_bits: u32, noise: f32) -> u32 {
+    let v=clamp(value,0.0,60000.0);
+    let step=exp2(max(floor(log2(max(v,exp2(-14.0)))),-14.0)-f32(mantissa_bits));
+    let rounded=floor(v/step+noise)*step;
+    if rounded<exp2(-14.0) { return u32(rounded*exp2(14.0+f32(mantissa_bits))); }
+    return (bitcast<u32>(rounded)>>(23u-mantissa_bits))-(112u<<mantissa_bits);
+}
+fn unpack_ufloat(bits: u32, mantissa_bits: u32) -> f32 {
+    let exponent=bits>>mantissa_bits;
+    let mantissa=bits&((1u<<mantissa_bits)-1u);
+    if exponent==0u { return f32(mantissa)*exp2(-14.0-f32(mantissa_bits)); }
+    return bitcast<f32>((bits+(112u<<mantissa_bits))<<(23u-mantissa_bits));
+}
+fn pack_radiance(color: vec3<f32>, pixel: vec2<u32>, dimension: u32) -> vec4<u32> {
+    let c=finite_color(color);
+    return vec4<u32>(pack_ufloat(c.r,6u,stbn(pixel,dimension)) |
+        (pack_ufloat(c.g,6u,stbn(pixel,dimension+1u))<<11u) |
+        (pack_ufloat(c.b,5u,stbn(pixel,dimension+2u))<<22u),0u,0u,0u);
+}
+fn load_radiance(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec3<f32> {
+    let bits=textureLoad(signal,pixel,0).r;
+    return vec3<f32>(unpack_ufloat(bits&2047u,6u),unpack_ufloat((bits>>11u)&2047u,6u),unpack_ufloat(bits>>22u,5u));
+}
+// Squared luminance needs six exponent bits. E6M5 covers the full squared
+// radiance range while retaining small moments without a shared scale factor.
+fn pack_moment(value: f32, noise: f32) -> u32 {
+    let v=clamp(value,0.0,3600000000.0);
+    let step=exp2(max(floor(log2(max(v,exp2(-30.0)))),-30.0)-5.0);
+    let rounded=floor(v/step+noise)*step;
+    if rounded<exp2(-30.0) { return u32(rounded*exp2(35.0)); }
+    return (bitcast<u32>(rounded)>>18u)-(96u<<5u);
+}
+fn unpack_moment(bits: u32) -> f32 {
+    if (bits>>5u)==0u { return f32(bits&31u)*exp2(-35.0); }
+    return bitcast<f32>((bits+(96u<<5u))<<18u);
+}
+// Two words hold an octahedral normal, logarithmic depth, both luminance
+// second moments and age. The first moments are derived from signal RGB.
+fn pack_geometry(geometry: vec4<f32>, moments: vec2<f32>, pixel: vec2<u32>) -> vec4<u32> {
+    let normal=pack4x8snorm(vec4<f32>(geometry.xy,0.0,0.0))&65535u;
+    let depth=pack2x16float(vec2<f32>(geometry.z,0.0))&65535u;
+    let variance=pack_moment(moments.x,stbn(pixel,17u)) |
+        (pack_moment(moments.y,stbn(pixel,18u))<<11u);
+    return vec4<u32>(normal|(depth<<16u),variance|(u32(geometry.w)<<22u),0u,0u);
+}
+fn load_geometry(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec4<f32> {
+    let bits=textureLoad(signal,pixel,0).rg;
+    return vec4<f32>(unpack4x8snorm(bits.x&65535u).xy,unpack2x16float(bits.x>>16u).x,f32(bits.y>>22u));
+}
+fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
+    let bits=textureLoad(signal,pixel,0).g;
+    return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
 }

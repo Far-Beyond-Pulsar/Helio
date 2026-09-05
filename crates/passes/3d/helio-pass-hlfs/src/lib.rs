@@ -38,7 +38,8 @@ pub enum HlfsDebugMode {
 pub struct HlfsConfig {
     /// Shadowed light samples per shading pixel, clamped to 1..=4.
     pub samples_per_pixel: u32,
-    /// Importance candidates per sample, clamped to 1..=16.
+    /// Steady-state candidates per sample, clamped to 1..=16. Disocclusion
+    /// doubles discovery candidates up to the hard limit of 16.
     pub candidates_per_sample: u32,
     /// 1 = full resolution, 2 = quarter as many shading pixels.
     pub sample_scale: u32,
@@ -251,7 +252,7 @@ impl HlfsPass {
         let output = u64::from(t.width)
             * u64::from(t.height)
             * u64::from(self.output_format.block_copy_size(None).unwrap_or(4));
-        pixels * 64
+        pixels * 40
             + u64::from(t.width.div_ceil(TILE_SIZE)) * u64::from(t.height.div_ceil(TILE_SIZE)) * 4
             + output
             + t.coarse.size()

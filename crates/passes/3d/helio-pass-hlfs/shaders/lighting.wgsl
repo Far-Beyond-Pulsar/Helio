@@ -3,6 +3,17 @@ struct Lighting { diffuse: vec3<f32>, specular: vec3<f32>, }
 struct Surface {
     position: vec3<f32>, normal: vec3<f32>, view: vec3<f32>,
     albedo: vec3<f32>, f0: vec3<f32>, roughness: f32, metallic: f32,
+    specular_factor: vec3<f32>,
+}
+fn specular_modulation(s: Surface) -> vec3<f32> {
+    // The engine's analytic split-sum DFG fit factors view angle and roughness
+    // out of the filtered specular signal along with the material reflectance.
+    let c0=vec4<f32>(-1.0,-0.0275,-0.572,0.022);
+    let c1=vec4<f32>(1.0,0.0425,1.04,-0.04);
+    let r=s.roughness*c0+c1;
+    let a004=min(r.x*r.x,exp2(-9.28*max(dot(s.normal,s.view),0.0)))*r.x+r.y;
+    let ab=vec2<f32>(-1.04,1.04)*a004+r.zw;
+    return max(s.f0*ab.x+ab.y,vec3<f32>(0.01));
 }
 fn surface_at(pixel: vec2<u32>) -> Surface {
     let p=vec2<i32>(pixel);
@@ -10,9 +21,11 @@ fn surface_at(pixel: vec2<u32>) -> Surface {
     let albedo=max(textureLoad(gbuf_albedo,p,0).rgb,vec3<f32>(0.0));
     let orm=textureLoad(gbuf_orm,p,0).rgb;
     let metallic=clamp(orm.b,0.0,1.0);
-    return Surface(position,safe_normalize(textureLoad(gbuf_normal,p,0).xyz),
+    var s=Surface(position,safe_normalize(textureLoad(gbuf_normal,p,0).xyz),
         safe_normalize(cameras[0].position_near.xyz-position),albedo,
-        mix(vec3<f32>(0.04),albedo,metallic),clamp(orm.g,0.02,1.0),metallic);
+        mix(vec3<f32>(0.04),albedo,metallic),clamp(orm.g,0.02,1.0),metallic,vec3<f32>(1.0));
+    s.specular_factor=specular_modulation(s);
+    return s;
 }
 fn incident(light: GpuLight, position: vec3<f32>) -> Incident {
     if light.light_type==0u {
@@ -37,7 +50,17 @@ fn importance(id: u32, s: Surface) -> f32 {
     let ndl=max(dot(s.normal,inc.direction),0.0);
     // Cheap, positive proxy. The PDF correction below does not require an exact BRDF.
     // Log weighting prevents one very bright/occluded light monopolizing candidates.
-    return log2(1.0+max(luminance(inc.radiance)*ndl*globals.exposure,0.0));
+    let proxy=log2(1.0+max(luminance(inc.radiance)*ndl*globals.exposure,0.0));
+    if proxy<0.0001 && globals.debug_mode!=1u {
+        // Only a tiny proxy pays for the exact unshadowed bound. Dividing the
+        // exposure-space error budget by population bounds aggregate loss even
+        // when a scene contains thousands of individually dim lights.
+        let bound=evaluate_light(id,s,1.0);
+        let color=bound.diffuse*s.albedo+bound.specular*s.specular_factor;
+        let budget=0.00001*min(globals.exposure,1.0);
+        if max(color.r,max(color.g,color.b))*f32(globals.light_count)<budget { return 0.0; }
+    }
+    return proxy;
 }
 fn evaluate_light(id: u32, s: Surface, visibility: f32) -> Lighting {
     let inc=incident(lights[id],s.position);
@@ -52,7 +75,7 @@ fn evaluate_light(id: u32, s: Surface, visibility: f32) -> Lighting {
     let g=(ndv/(ndv*(1.0-k)+k+0.0001))*(ndl/(ndl*(1.0-k)+k+0.0001));
     let f=s.f0+(1.0-s.f0)*pow5(1.0-clamp(dot(h,s.view),0.0,1.0));
     let energy=inc.radiance*(ndl*visibility*globals.exposure);
-    // Demodulate before filtering. Albedo and F0 are restored at full resolution.
+    // Demodulate before filtering; material response returns at full resolution.
     return Lighting((1.0-f)*(1.0-s.metallic)*energy/PI,
-        d*g*f*energy/((4.0*ndv*ndl+0.0001)*max(s.f0,vec3<f32>(0.04))));
+        d*g*f*energy/((4.0*ndv*ndl+0.0001)*s.specular_factor));
 }

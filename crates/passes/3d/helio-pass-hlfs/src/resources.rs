@@ -87,16 +87,7 @@ impl Targets {
             width.div_ceil(config.sample_scale),
             height.div_ceil(config.sample_scale),
         );
-        let color = |label| {
-            Image::new(
-                device,
-                label,
-                sw,
-                sh,
-                wgpu::TextureFormat::Rgba16Float,
-                true,
-            )
-        };
+        let color = |label| Image::new(device, label, sw, sh, wgpu::TextureFormat::R32Uint, true);
         let history = std::array::from_fn(|_| History {
             diffuse: color("HLFS diffuse history"),
             specular: color("HLFS specular history"),
@@ -105,7 +96,7 @@ impl Targets {
                 "HLFS geometry history",
                 sw,
                 sh,
-                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rg32Uint,
                 true,
             ),
             visible: buffer(

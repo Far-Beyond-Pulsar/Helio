@@ -74,6 +74,13 @@ fn texture(dimension: wgpu::TextureViewDimension, depth: bool) -> wgpu::BindingT
         multisampled: false,
     }
 }
+fn uint_texture() -> wgpu::BindingType {
+    wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Uint,
+        view_dimension: wgpu::TextureViewDimension::D2,
+        multisampled: false,
+    }
+}
 fn storage_texture(format: wgpu::TextureFormat) -> wgpu::BindingType {
     wgpu::BindingType::StorageTexture {
         access: wgpu::StorageTextureAccess::WriteOnly,
@@ -155,26 +162,37 @@ impl Pipelines {
                 entry(0, storage(true), S::COMPUTE),
                 entry(1, storage(true), S::COMPUTE),
                 entry(2, storage(false), S::COMPUTE),
-                entry(3, storage_texture(F::Rgba16Float), S::COMPUTE),
-                entry(4, storage_texture(F::Rgba16Float), S::COMPUTE),
-                entry(5, texture(D::D2, false), S::COMPUTE),
+                entry(3, storage_texture(F::R32Uint), S::COMPUTE),
+                entry(4, storage_texture(F::R32Uint), S::COMPUTE),
+                entry(5, uint_texture(), S::COMPUTE),
                 entry(6, texture(D::D2, false), S::COMPUTE),
             ],
         );
         let mut temporal_entries: Vec<_> = (0..5)
-            .map(|i| entry(i, texture(D::D2, false), S::COMPUTE))
+            .map(|i| entry(i, uint_texture(), S::COMPUTE))
             .collect();
         temporal_entries.extend([
-            entry(5, storage_texture(F::Rgba16Float), S::COMPUTE),
-            entry(6, storage_texture(F::Rgba16Float), S::COMPUTE),
-            entry(7, storage_texture(F::Rgba16Float), S::COMPUTE),
+            entry(5, storage_texture(F::R32Uint), S::COMPUTE),
+            entry(6, storage_texture(F::R32Uint), S::COMPUTE),
+            entry(7, storage_texture(F::Rg32Uint), S::COMPUTE),
+            entry(8, storage(true), S::COMPUTE),
         ]);
         let temporal_bgl = bgl(device, "HLFS temporal layout", &temporal_entries);
         let composite_bgl = bgl(
             device,
             "HLFS composite layout",
             &(0..4)
-                .map(|i| entry(i, texture(D::D2, false), S::FRAGMENT))
+                .map(|i| {
+                    entry(
+                        i,
+                        if i < 3 {
+                            uint_texture()
+                        } else {
+                            texture(D::D2, false)
+                        },
+                        S::FRAGMENT,
+                    )
+                })
                 .collect::<Vec<_>>(),
         );
         let module = |name| {
