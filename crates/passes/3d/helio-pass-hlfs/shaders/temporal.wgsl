@@ -1,12 +1,10 @@
-@group(2) @binding(0) var raw_diffuse: texture_2d<u32>;
-@group(2) @binding(1) var raw_specular: texture_2d<u32>;
-@group(2) @binding(2) var history_diffuse: texture_2d<u32>;
-@group(2) @binding(3) var history_specular: texture_2d<u32>;
-@group(2) @binding(4) var history_geometry: texture_2d<u32>;
-@group(2) @binding(5) var out_diffuse: texture_storage_2d<r32uint,write>;
-@group(2) @binding(6) var out_specular: texture_storage_2d<r32uint,write>;
-@group(2) @binding(7) var out_geometry: texture_storage_2d<rg32uint,write>;
-@group(2) @binding(8) var<storage,read> grid: array<LightTile>;
+@group(2) @binding(0) var raw_lighting: texture_2d<u32>;
+@group(2) @binding(1) var history_lighting: texture_2d<u32>;
+@group(2) @binding(2) var history_geometry: texture_2d<u32>;
+@group(2) @binding(3) var out_lighting: texture_storage_2d<rg32uint,write>;
+@group(2) @binding(4) var out_geometry: texture_storage_2d<rg32uint,write>;
+@group(2) @binding(5) var<storage,read> grid: array<LightTile>;
+@group(2) @binding(6) var<storage,read> visible: array<VisibleTile>;
 
 fn to_ycocg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.25*c.r+0.5*c.g+0.25*c.b,0.5*c.r-0.5*c.b,-0.25*c.r+0.5*c.g-0.25*c.b); }
 fn from_ycocg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(c.x+c.y-c.z,c.x+c.z,c.x-c.y-c.z); }
@@ -27,7 +25,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let full=sample_pixel(gid.xy,globals.frame);
     let depth=textureLoad(gbuf_depth,vec2<i32>(full),0);
     if depth>=1.0 {
-        textureStore(out_diffuse,p,vec4<u32>(0u)); textureStore(out_specular,p,vec4<u32>(0u));
+        textureStore(out_lighting,p,vec4<u32>(0u));
         textureStore(out_geometry,p,vec4<u32>(0u)); return;
     }
     let normal=safe_normalize(textureLoad(gbuf_normal,vec2<i32>(full),0).xyz);
@@ -36,8 +34,8 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     let tile=(full.y/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+full.x/TILE_SIZE;
     let count=grid[tile].count;
     let exact=select(count,globals.light_count,count>GRID_CAPACITY)<=globals.sample_count || globals.debug_mode==1u;
-    let diff=vec4<f32>(load_radiance(raw_diffuse,p),select(0.0,1.0,exact));
-    let spec=vec4<f32>(load_radiance(raw_specular,p),0.0);
+    let diff=vec4<f32>(load_radiance(raw_lighting,p,0u),select(0.0,1.0,exact));
+    let spec=vec4<f32>(load_radiance(raw_lighting,p,1u),0.0);
     var result_diff=vec4<f32>(diff.rgb,moment(diff.rgb));
     var result_spec=vec4<f32>(spec.rgb,moment(spec.rgb));
     // An age above the configured cap marks an exactly evaluated light set.
@@ -58,20 +56,23 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let n=safe_normalize(textureLoad(gbuf_normal,vec2<i32>(fp),0).xyz);
                 let wp=world_position(vec2<f32>(fp)+0.5,d);
                 if d>=1.0 || dot(n,normal)<0.9 || abs(dot(wp-position,normal))>max(0.02,abs(z)*0.01) { continue; }
-                let cd=to_ycocg(load_radiance(raw_diffuse,q));
-                let cs=to_ycocg(load_radiance(raw_specular,q));
+                let cd=to_ycocg(load_radiance(raw_lighting,q,0u));
+                let cs=to_ycocg(load_radiance(raw_lighting,q,1u));
                 mean_d+=cd; mean_s+=cs; squared_d+=cd*cd; squared_s+=cs*cs; count+=1.0;
             }}
             mean_d/=max(count,1.0); mean_s/=max(count,1.0);
             let extent_d=2.0*sqrt(max(squared_d/max(count,1.0)-mean_d*mean_d,vec3<f32>(0.0)));
             let extent_s=2.0*sqrt(max(squared_s/max(count,1.0)-mean_s*mean_s,vec3<f32>(0.0)));
             age=min(geo.w+1.0,globals.max_history);
-            result_diff=filtered_history(diff.rgb,vec4<f32>(load_radiance(history_diffuse,old),load_moments(history_geometry,old).x),mean_d,extent_d,age-1.0);
-            result_spec=filtered_history(spec.rgb,vec4<f32>(load_radiance(history_specular,old),load_moments(history_geometry,old).y),mean_s,extent_s,age-1.0);
+            result_diff=filtered_history(diff.rgb,vec4<f32>(load_radiance(history_lighting,old,0u),load_moments(history_geometry,old).x),mean_d,extent_d,age-1.0);
+            result_spec=filtered_history(spec.rgb,vec4<f32>(load_radiance(history_lighting,old,1u),load_moments(history_geometry,old).y),mean_s,extent_s,age-1.0);
         }
     }
-    textureStore(out_diffuse,p,pack_radiance(result_diff.rgb,gid.xy,10u));
-    textureStore(out_specular,p,pack_radiance(result_spec.rgb,gid.xy,13u));
+    textureStore(out_lighting,p,vec4<u32>(pack_radiance(result_diff.rgb,gid.xy,10u).x,pack_radiance(result_spec.rgb,gid.xy,13u).x,0u,0u));
+    let tile_id=(gid.y/TILE_SIZE)*div_ceil(globals.sample_size,TILE_SIZE).x+gid.x/TILE_SIZE;
+    let lane=(gid.y%TILE_SIZE)*TILE_SIZE+gid.x%TILE_SIZE;
+    let confidence_bits=select(visible[tile_id].confidence_low,visible[tile_id].confidence_high,lane>=32u);
+    let confidence=(confidence_bits&(1u<<(lane%32u)))!=0u;
     // Log depth retains relative rejection precision across large view ranges.
-    textureStore(out_geometry,p,pack_geometry(vec4<f32>(oct_encode(normal),log2(max(z,1e-4)),age),vec2<f32>(result_diff.a,result_spec.a),gid.xy));
+    textureStore(out_geometry,p,pack_geometry(vec4<f32>(oct_encode(normal),log2(max(z,1e-4)),age),vec2<f32>(result_diff.a,result_spec.a),gid.xy,confidence));
 }

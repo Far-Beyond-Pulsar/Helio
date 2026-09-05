@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<LightId>)) {
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
+    let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
     let fxaa = std::env::var_os("HLFS_FXAA").is_some();
     pollster::block_on(async {
         let instance =
@@ -75,15 +76,23 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
         for frame in 0..100 {
-            if reference {
+            if reference || performance {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
                 pass.set_config(
                     &device,
                     helio_pass_hlfs::HlfsConfig {
-                        debug_mode: helio_pass_hlfs::HlfsDebugMode::Reference,
-                        ..Default::default()
+                        debug_mode: if reference {
+                            helio_pass_hlfs::HlfsDebugMode::Reference
+                        } else {
+                            helio_pass_hlfs::HlfsDebugMode::Final
+                        },
+                        ..if performance {
+                            helio_pass_hlfs::HlfsConfig::performance()
+                        } else {
+                            Default::default()
+                        }
                     },
                 );
             }

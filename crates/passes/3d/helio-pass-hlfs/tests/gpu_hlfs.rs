@@ -269,9 +269,10 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
             (raw_mean - mean(&reference)).abs() / mean(&reference) < 0.01,
             "unfiltered estimator loses energy"
         );
-        for scale in [1, 2] {
+        for (scale, samples) in [(1, 2), (2, 2), (2, 4)] {
             f.config(HlfsConfig {
                 sample_scale: scale,
+                samples_per_pixel: samples,
                 ..Default::default()
             });
             for _ in 0..64 {
@@ -288,7 +289,7 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                 .sqrt()
                 / mean(&reference);
             eprintln!(
-                "mixed lights scale={scale}: relative mean error={error}, normalized RMSE={rmse}"
+                "mixed lights scale={scale} samples={samples}: relative mean error={error}, normalized RMSE={rmse}"
             );
             if let Ok(dir) = std::env::var("HLFS_CAPTURE_DIR") {
                 std::fs::create_dir_all(&dir).unwrap();
@@ -301,7 +302,10 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                     image.save(std::path::Path::new(&dir).join(name)).unwrap();
                 };
                 save("mixed-reference.png", &reference);
-                save(&format!("mixed-scale-{scale}.png"), &sampled);
+                save(
+                    &format!("mixed-scale-{scale}-samples-{samples}.png"),
+                    &sampled,
+                );
             }
             assert!(
                 error < 0.08 && rmse < 0.2,
@@ -349,6 +353,7 @@ fn creates_pipelines_on_available_adapter() {
             wgpu::TextureFormat::Rgba16Float,
         );
         eprintln!("1080p full allocation_bytes={}", pass.allocation_bytes());
+        let output_before = pass.output_texture().clone();
         assert!(
             pass.allocation_bytes() < 128 * 1024 * 1024,
             "1080p exceeds the removed clip-stack allocation"
@@ -359,6 +364,11 @@ fn creates_pipelines_on_available_adapter() {
                 sample_scale: 2,
                 ..Default::default()
             },
+        );
+        assert_eq!(
+            &output_before,
+            pass.output_texture(),
+            "shading-scale changes replace the published output"
         );
         eprintln!("1080p half allocation_bytes={}", pass.allocation_bytes());
         assert!(
@@ -484,6 +494,73 @@ fn benchmark_gpu_light_scaling() {
 }
 
 #[test]
+#[ignore = "explicit 1080p stage benchmark; run serially"]
+fn benchmark_gameplay_resolution_stages() {
+    use helio_pass_hlfs::{HlfsConfig, HlfsPass};
+    use support::*;
+    pollster::block_on(async {
+        let mut f = Fixture::new(1920, 1080).await;
+        assert!(f
+            .graph
+            .find_pass_mut::<HlfsPass>()
+            .unwrap()
+            .enable_timing(&f.device));
+        f.constant_shadow(1.0);
+        for (scale, spp, compact) in [(1, 2, false), (2, 2, false), (2, 4, true)] {
+            if compact {
+                f.compact_output();
+                assert!(f
+                    .graph
+                    .find_pass_mut::<HlfsPass>()
+                    .unwrap()
+                    .enable_timing(&f.device));
+            }
+            for count in [1, 8, 64, 1024] {
+                f.lights(
+                    (0..count)
+                        .map(|i| {
+                            let mut light = point(
+                                [
+                                    (i % 16) as f32 / 4.0 - 2.0,
+                                    (i / 16 % 16) as f32 / 4.0 - 2.0,
+                                    2.0,
+                                ],
+                                [1.0, 0.8, 0.5],
+                                8.0 / count as f32,
+                            );
+                            light.shadow_index = 0;
+                            light
+                        })
+                        .collect(),
+                );
+                f.config(HlfsConfig {
+                    sample_scale: scale,
+                    samples_per_pixel: spp,
+                    ..Default::default()
+                });
+                for _ in 0..16 {
+                    f.frame();
+                }
+                let mut samples = Vec::new();
+                for _ in 0..40 {
+                    f.frame();
+                    samples.push(f.stage_milliseconds());
+                }
+                let mut totals: Vec<f64> =
+                    samples.iter().map(|stages| stages.iter().sum()).collect();
+                totals.sort_by(f64::total_cmp);
+                let medians: [f64; 6] = std::array::from_fn(|i| {
+                    let mut v: Vec<_> = samples.iter().map(|s| s[i]).collect();
+                    v.sort_by(f64::total_cmp);
+                    v[20]
+                });
+                eprintln!("STAGES resolution=1920x1080 scale={scale} spp={spp} compact={compact} lights={count} median_ms={:.3} p95_ms={:.3} coarse_fine_sample_temporal_spatial_composite={medians:?} allocation_bytes={}",totals[20],totals[38],f.graph.find_pass::<HlfsPass>().unwrap().allocation_bytes());
+            }
+        }
+    });
+}
+
+#[test]
 #[ignore = "requires a GPU adapter; run explicitly with --ignored"]
 fn screen_contacts_follow_current_depth_and_clear_after_motion() {
     use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
@@ -494,50 +571,56 @@ fn screen_contacts_follow_current_depth_and_clear_after_motion() {
         light.shadow_index = 0;
         f.lights(vec![light]);
         f.constant_shadow(1.0);
-        let depths: Vec<_> = (0..65)
-            .flat_map(|_| {
-                (0..129).map(|x| {
-                    let wx = (x as f32 + 0.5) / 129.0 * 4.0 - 2.0;
-                    let z = if wx >= 0.0 && wx < 0.2 { 0.05 } else { 0.0 };
-                    (3.0 - z - 0.1) / 9.9
+        for occluder_width in [0.2, 4.0 / 129.0] {
+            let depths: Vec<_> = (0..65)
+                .flat_map(|_| {
+                    (0..129).map(|x| {
+                        let wx = (x as f32 + 0.5) / 129.0 * 4.0 - 2.0;
+                        let z = if wx >= 0.0 && wx < occluder_width {
+                            0.05
+                        } else {
+                            0.0
+                        };
+                        (3.0 - z - 0.1) / 9.9
+                    })
                 })
-            })
-            .collect();
-        f.depth_values(&depths);
-        f.config(HlfsConfig {
-            screen_trace_distance: 0.0,
-            debug_mode: HlfsDebugMode::Reference,
-            ..Default::default()
-        });
-        f.frame();
-        let unshadowed = f.read();
-        f.config(HlfsConfig {
-            screen_trace_distance: 0.5,
-            debug_mode: HlfsDebugMode::Reference,
-            ..Default::default()
-        });
-        f.frame();
-        let contact = f.read();
-        let region = |pixels: &[[f32; 3]]| {
-            (25..40)
-                .flat_map(|y| (52..64).map(move |x| pixels[y * 129 + x][0]))
-                .sum::<f32>()
-        };
-        eprintln!(
-            "Contact region unshadowed={} occluded={}",
-            region(&unshadowed),
-            region(&contact)
-        );
-        assert!(
-            region(&contact) < region(&unshadowed) * 0.8,
-            "current-depth contact shadow missing"
-        );
-        f.depth_values(&vec![(3.0 - 0.1) / 9.9; 129 * 65]);
-        f.frame();
-        assert!(
-            region(&f.read()) > region(&unshadowed) * 0.95,
-            "moving contact occluder leaves stale shadow"
-        );
+                .collect();
+            f.depth_values(&depths);
+            f.config(HlfsConfig {
+                screen_trace_distance: 0.0,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
+            f.frame();
+            let unshadowed = f.read();
+            f.config(HlfsConfig {
+                screen_trace_distance: 2.0,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
+            f.frame();
+            let contact = f.read();
+            let region = |pixels: &[[f32; 3]]| {
+                (25..40)
+                    .flat_map(|y| (52..64).map(move |x| pixels[y * 129 + x][0]))
+                    .sum::<f32>()
+            };
+            eprintln!(
+                "Contact region unshadowed={} occluded={}",
+                region(&unshadowed),
+                region(&contact)
+            );
+            assert!(
+                region(&contact) < region(&unshadowed) * 0.8,
+                "current-depth contact shadow missing"
+            );
+            f.depth_values(&vec![(3.0 - 0.1) / 9.9; 129 * 65]);
+            f.frame();
+            assert!(
+                region(&f.read()) > region(&unshadowed) * 0.95,
+                "moving contact occluder leaves stale shadow"
+            );
+        }
     });
 }
 
@@ -582,5 +665,112 @@ fn half_resolution_keeps_isolated_one_pixel_geometry_lit() {
                 "lighting leaks into sky"
             );
         }
+    });
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn packed_grid_overflow_and_compact_output_preserve_energy() {
+    use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode, HlfsPass};
+    use support::*;
+    pollster::block_on(async {
+        let mut f = Fixture::new(9, 9).await;
+        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0)]);
+        f.config(HlfsConfig {
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
+        f.frame();
+        let expected = mean(&f.read());
+        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0 / 65536.0); 65536]);
+        f.config(HlfsConfig {
+            debug_mode: HlfsDebugMode::Unfiltered,
+            ..Default::default()
+        });
+        let mut measured = 0.0;
+        for _ in 0..32 {
+            f.frame();
+            measured += mean(&f.read()) / 32.0;
+        }
+        assert!(
+            (measured - expected).abs() / expected < 0.04,
+            "16-bit overflow loses light energy: {measured} versus {expected}"
+        );
+        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0)]);
+        f.compact_output();
+        for _ in 0..32 {
+            f.frame();
+        }
+        let measured = mean(&f.read());
+        assert!(
+            (measured - expected).abs() / expected < 0.04,
+            "compact output changes energy"
+        );
+        let mut pass = HlfsPass::new(
+            &f.device,
+            &f.queue,
+            1920,
+            1080,
+            HlfsPass::preferred_output_format(&f.device),
+        );
+        pass.set_config(&f.device, HlfsConfig::performance());
+        eprintln!(
+            "1080p performance allocation_bytes={}",
+            pass.allocation_bytes()
+        );
+        if f.device
+            .features()
+            .contains(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+        {
+            assert!(
+                pass.allocation_bytes() < 34 * 1024 * 1024,
+                "compact 1080p preset exceeds 34 MiB"
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn confidence_tracks_visible_energy_coverage() {
+    use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
+    use support::*;
+    pollster::block_on(async {
+        let mut f = Fixture::new(33, 25).await;
+        let mut coverage = Vec::new();
+        for dominant in [false, true] {
+            f.lights(
+                (0..16)
+                    .map(|i| {
+                        point(
+                            [0.0, 0.0, 2.0],
+                            [1.0; 3],
+                            if dominant && i == 0 { 256.0 } else { 1.0 },
+                        )
+                    })
+                    .collect(),
+            );
+            f.config(HlfsConfig {
+                debug_mode: HlfsDebugMode::Confidence,
+                ..Default::default()
+            });
+            for _ in 0..32 {
+                f.frame();
+            }
+            let mut sum = 0.0;
+            for _ in 0..16 {
+                f.frame();
+                sum += mean(&f.read()) / 16.0;
+            }
+            coverage.push(sum);
+        }
+        eprintln!(
+            "Confidence balanced={} dominant={}",
+            coverage[0], coverage[1]
+        );
+        assert!(
+            coverage[0] < 0.1 && coverage[1] > 0.8,
+            "confidence does not reflect 80% visible energy coverage"
+        );
     });
 }

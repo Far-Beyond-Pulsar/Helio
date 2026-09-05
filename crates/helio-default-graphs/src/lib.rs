@@ -989,12 +989,13 @@ fn build_hlfs_graph_internal(
     )));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
-    let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, wgpu::TextureFormat::Rgba16Float);
+    let lighting_format = HlfsPass::preferred_output_format(device);
+    let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
     let lighting_config = RendererConfig {
-        surface_format: wgpu::TextureFormat::Rgba16Float,
+        surface_format: lighting_format,
         ..config
     };
 
@@ -1180,12 +1181,13 @@ fn build_fxaa_hlfs_graph_internal(
     )));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
-    let mut hlfs_pass = HlfsPass::new(device, queue, w, h, wgpu::TextureFormat::Rgba16Float);
+    let lighting_format = HlfsPass::preferred_output_format(device);
+    let mut hlfs_pass = HlfsPass::new(device, queue, w, h, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
     let lighting_config = RendererConfig {
-        surface_format: wgpu::TextureFormat::Rgba16Float,
+        surface_format: lighting_format,
         ..config
     };
 

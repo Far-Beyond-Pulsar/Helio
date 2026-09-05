@@ -31,6 +31,7 @@ pub enum HlfsDebugMode {
     Final = 0,
     Reference = 1,
     Unfiltered = 2,
+    Confidence = 3,
 }
 
 /// Bounded quality controls. Changes invalidate all history.
@@ -67,6 +68,14 @@ impl Default for HlfsConfig {
     }
 }
 impl HlfsConfig {
+    /// Four samples over each 2x2 shading block: one sample per output pixel.
+    pub fn performance() -> Self {
+        Self {
+            samples_per_pixel: 4,
+            sample_scale: 2,
+            ..Self::default()
+        }
+    }
     fn normalized(mut self) -> Self {
         self.samples_per_pixel = self.samples_per_pixel.clamp(1, 4);
         self.candidates_per_sample = self.candidates_per_sample.clamp(1, 16);
@@ -106,7 +115,7 @@ struct Globals {
     sample_scale: u32,
     candidate_count: u32,
     has_velocity: u32,
-    has_lightmap: u32,
+    surface_flags: u32,
     max_history: f32,
     discovery_fraction: f32,
     exposure: f32,
@@ -131,9 +140,23 @@ pub struct HlfsPass {
     history_valid: bool,
     previous_camera: Option<libhelio::GpuCameraUniforms>,
     previous_light_count: Option<u32>,
+    previous_light_generation: Option<u64>,
     previous_frame: Option<u64>,
+    timing_query: Option<wgpu::QuerySet>,
 }
 impl HlfsPass {
+    /// Compact linear HDR when renderable on this device, with a portable fallback.
+    pub fn preferred_output_format(device: &wgpu::Device) -> wgpu::TextureFormat {
+        if device
+            .features()
+            .contains(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+        {
+            wgpu::TextureFormat::Rg11b10Ufloat
+        } else {
+            wgpu::TextureFormat::Rgba16Float
+        }
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -160,7 +183,7 @@ impl HlfsPass {
     ) -> Self {
         let config = config.normalized();
         let pipelines = Pipelines::new(device, output_format);
-        let targets = Targets::new(device, width, height, output_format, config);
+        let targets = Targets::new(device, width, height, output_format, config, None);
         let internal = InternalBindings::new(device, &pipelines, &targets);
         let uniform = |label, size| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -196,7 +219,9 @@ impl HlfsPass {
             history_valid: false,
             previous_camera: None,
             previous_light_count: None,
+            previous_light_generation: None,
             previous_frame: None,
+            timing_query: None,
         }
     }
     pub fn config(&self) -> HlfsConfig {
@@ -235,7 +260,21 @@ impl HlfsPass {
         self.recreate_targets(device, width, height);
     }
     fn recreate_targets(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.targets = Targets::new(device, width, height, self.output_format, self.config);
+        // Internal shading changes retain the published output handle so
+        // downstream passes can keep their existing bindings.
+        let output = ((width.max(1), height.max(1)) == (self.targets.width, self.targets.height))
+            .then(|| resources::Image {
+                texture: self.targets.output.texture.clone(),
+                view: self.targets.output.view.clone(),
+            });
+        self.targets = Targets::new(
+            device,
+            width,
+            height,
+            self.output_format,
+            self.config,
+            output,
+        );
         self.internal = InternalBindings::new(device, &self.pipelines, &self.targets);
         self.external = ExternalBindings::default();
         self.write_history = 0;
@@ -245,6 +284,24 @@ impl HlfsPass {
     pub fn output_texture(&self) -> &wgpu::Texture {
         &self.targets.output.texture
     }
+    /// Enable seven frame-boundary timestamps: coarse, fine, sampling, temporal,
+    /// spatial, composite and completion. Resolve after the frame submission completes.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("HLFS stage timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 7,
+        }));
+        true
+    }
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
+    }
     /// Exact requested allocation bytes, excluding backend alignment/driver overhead.
     pub fn allocation_bytes(&self) -> u64 {
         let t = &self.targets;
@@ -253,7 +310,13 @@ impl HlfsPass {
             * u64::from(t.height)
             * u64::from(self.output_format.block_copy_size(None).unwrap_or(4));
         pixels * 40
-            + u64::from(t.width.div_ceil(TILE_SIZE)) * u64::from(t.height.div_ceil(TILE_SIZE)) * 4
+            + (0..t.depth_bounds.texture.mip_level_count())
+                .map(|mip| {
+                    u64::from((t.depth_bounds.texture.width() >> mip).max(1))
+                        * u64::from((t.depth_bounds.texture.height() >> mip).max(1))
+                        * 4
+                })
+                .sum::<u64>()
             + output
             + t.coarse.size()
             + t.grid.size()
@@ -271,6 +334,11 @@ impl HlfsPass {
         let parity = self.write_history;
         let common = self.external.common.as_ref().expect("HLFS inputs bound");
         let gbuffer = self.external.gbuffer.as_ref().expect("HLFS GBuffer bound");
+        let timestamp = |encoder: &mut wgpu::CommandEncoder, index| {
+            if let Some(query) = &self.timing_query {
+                encoder.write_timestamp(query, index);
+            }
+        };
         let dispatch = |encoder: &mut wgpu::CommandEncoder,
                         name,
                         pipeline: &wgpu::ComputePipeline,
@@ -291,6 +359,7 @@ impl HlfsPass {
             }
             pass.dispatch_workgroups(x, y, 1);
         };
+        timestamp(encoder, 0);
         dispatch(
             encoder,
             "HLFS coarse light cull",
@@ -300,6 +369,7 @@ impl HlfsPass {
             t.height.div_ceil(COARSE_TILE_SIZE),
             None,
         );
+        timestamp(encoder, 1);
         dispatch(
             encoder,
             "HLFS fine light cull",
@@ -309,16 +379,40 @@ impl HlfsPass {
             t.height.div_ceil(TILE_SIZE),
             None,
         );
-        let ray = p.sample_rt.as_ref().zip(self.external.rt.as_ref());
+        for (index, resources) in self.internal.depth_reduce.iter().enumerate() {
+            let mip = index as u32 + 1;
+            dispatch(
+                encoder,
+                "HLFS depth pyramid",
+                &p.depth_reduce,
+                resources,
+                (t.depth_bounds.texture.width() >> mip).max(1).div_ceil(8),
+                (t.depth_bounds.texture.height() >> mip).max(1).div_ceil(8),
+                None,
+            );
+        }
+        let small = self
+            .previous_light_count
+            .is_some_and(|count| count <= self.config.samples_per_pixel);
+        let sample = if small { &p.sample_small } else { &p.sample };
+        let ray = (if small {
+            &p.sample_small_rt
+        } else {
+            &p.sample_rt
+        })
+        .as_ref()
+        .zip(self.external.rt.as_ref());
+        timestamp(encoder, 2);
         dispatch(
             encoder,
             "HLFS sample and visibility",
-            ray.map_or(&p.sample, |(pipe, _)| pipe),
+            ray.map_or(sample, |(pipe, _)| pipe),
             &self.internal.sample[parity],
             t.sample_width.div_ceil(8),
             t.sample_height.div_ceil(8),
             ray.map(|(_, bg)| bg),
         );
+        timestamp(encoder, 3);
         dispatch(
             encoder,
             "HLFS temporal filter",
@@ -328,6 +422,17 @@ impl HlfsPass {
             t.sample_height.div_ceil(8),
             None,
         );
+        timestamp(encoder, 4);
+        dispatch(
+            encoder,
+            "HLFS spatial filter",
+            &p.spatial,
+            &self.internal.spatial[parity],
+            t.sample_width.div_ceil(8),
+            t.sample_height.div_ceil(8),
+            None,
+        );
+        timestamp(encoder, 5);
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &t.output.view,
@@ -352,6 +457,7 @@ impl HlfsPass {
             pass.set_bind_group(2, &self.internal.composite[parity], &[]);
             pass.draw(0..3, 0..1);
         }
+        timestamp(encoder, 6);
         self.write_history = 1 - parity;
         self.history_valid = true;
     }
@@ -418,9 +524,12 @@ impl RenderPass for HlfsPass {
             sample_scale: self.config.sample_scale,
             candidate_count: self.config.candidates_per_sample,
             has_velocity: ctx.frame_resources.gbuffer_velocity.get().is_some() as u32,
-            has_lightmap: (ctx.frame_resources.baked_lightmap.get().is_some()
+            surface_flags: (ctx.frame_resources.baked_lightmap.get().is_some()
                 && ctx.frame_resources.gbuffer_lightmap_uv.get().is_some())
-                as u32,
+                as u32
+                | (u32::from(
+                    self.previous_light_generation == Some(ctx.scene.movable_lights_generation),
+                ) << 1),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,
@@ -433,6 +542,7 @@ impl RenderPass for HlfsPass {
         self.previous_camera = Some(camera);
         self.previous_frame = Some(ctx.frame_num);
         self.previous_light_count = Some(light_count);
+        self.previous_light_generation = Some(ctx.scene.movable_lights_generation);
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
@@ -498,7 +608,15 @@ impl RenderPass for HlfsPass {
 mod tests {
     #[test]
     fn all_wgsl_stages_validate() {
-        for stage in ["grid", "sample", "temporal", "composite", "sample_rt"] {
+        for stage in [
+            "grid",
+            "depth",
+            "sample",
+            "temporal",
+            "spatial",
+            "composite",
+            "sample_rt",
+        ] {
             let source = super::pipelines::shader_source(stage);
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{stage}: {}", e.emit_to_string(&source)));

@@ -1,0 +1,546 @@
+{
+  "adapter": "NVIDIA RTX 3060",
+  "backend": "Vulkan",
+  "driver": "616.64",
+  "date": "2026-09-05",
+  "warmup_frames": 16,
+  "measured_frames": 40,
+  "stages": [
+    "coarse",
+    "fine_and_depth_pyramid",
+    "sampling",
+    "temporal",
+    "spatial",
+    "composite"
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1,
+      "median_ms": 2.268,
+      "p95_ms": 4.569,
+      "stage_medians_ms": [
+        0.011264,
+        0.180224,
+        0.898048,
+        0.370688,
+        0.177152,
+        0.58368
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 8,
+      "median_ms": 18.359,
+      "p95_ms": 20.551,
+      "stage_medians_ms": [
+        0.011264,
+        0.181248,
+        13.724672,
+        2.164736,
+        1.624064,
+        0.548864
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 64,
+      "median_ms": 24.027,
+      "p95_ms": 25.502,
+      "stage_medians_ms": [
+        0.012288,
+        0.243712,
+        18.750464,
+        2.19136,
+        1.594368,
+        0.551936
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1024,
+      "median_ms": 26.233,
+      "p95_ms": 43.711,
+      "stage_medians_ms": [
+        0.047104,
+        0.123904,
+        20.924416,
+        2.428928,
+        1.639424,
+        0.551936
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1,
+      "median_ms": 1.207,
+      "p95_ms": 3.165,
+      "stage_medians_ms": [
+        0.011264,
+        0.1792,
+        0.253952,
+        0.11776,
+        0.094208,
+        0.541696
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 8,
+      "median_ms": 5.914,
+      "p95_ms": 7.318,
+      "stage_medians_ms": [
+        0.011264,
+        0.182272,
+        3.201024,
+        0.6912,
+        0.428032,
+        0.541696
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 64,
+      "median_ms": 6.171,
+      "p95_ms": 8.409,
+      "stage_medians_ms": [
+        0.012288,
+        0.24576,
+        4.23424,
+        0.571392,
+        0.42496,
+        0.543744
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1024,
+      "median_ms": 8.176,
+      "p95_ms": 9.209,
+      "stage_medians_ms": [
+        0.04608,
+        0.125952,
+        5.96992,
+        0.571392,
+        0.425984,
+        0.549888
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 1,
+      "median_ms": 1.178,
+      "p95_ms": 3.505,
+      "stage_medians_ms": [
+        0.011264,
+        0.1792,
+        0.25088,
+        0.109568,
+        0.09216,
+        0.531456
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 8,
+      "median_ms": 6.867,
+      "p95_ms": 9.176,
+      "stage_medians_ms": [
+        0.011264,
+        0.183296,
+        4.824064,
+        0.73216,
+        0.42496,
+        0.53248
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 64,
+      "median_ms": 8.615,
+      "p95_ms": 12.062,
+      "stage_medians_ms": [
+        0.012288,
+        0.244736,
+        6.483968,
+        0.736256,
+        0.42496,
+        0.535552
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 1,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 1024,
+      "median_ms": 11.377,
+      "p95_ms": 12.755,
+      "stage_medians_ms": [
+        0.04608,
+        0.124928,
+        9.20064,
+        0.73728,
+        0.427008,
+        0.535552
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1,
+      "median_ms": 2.267,
+      "p95_ms": 4.622,
+      "stage_medians_ms": [
+        0.011264,
+        0.18944,
+        0.899072,
+        0.39936,
+        0.178176,
+        0.584704
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 8,
+      "median_ms": 18.787,
+      "p95_ms": 21.436,
+      "stage_medians_ms": [
+        0.011264,
+        0.182272,
+        14.04928,
+        2.185216,
+        1.635328,
+        0.550912
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 64,
+      "median_ms": 24.031,
+      "p95_ms": 25.584,
+      "stage_medians_ms": [
+        0.012288,
+        0.243712,
+        18.108416,
+        2.243584,
+        1.637376,
+        0.55296
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 1,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1024,
+      "median_ms": 27.049,
+      "p95_ms": 44.292,
+      "stage_medians_ms": [
+        0.04608,
+        0.123904,
+        20.789248,
+        2.784256,
+        1.649664,
+        0.553984
+      ],
+      "allocation_bytes": 109380120
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1,
+      "median_ms": 1.218,
+      "p95_ms": 2.503,
+      "stage_medians_ms": [
+        0.011264,
+        0.1792,
+        0.26112,
+        0.130048,
+        0.094208,
+        0.544768
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 8,
+      "median_ms": 5.244,
+      "p95_ms": 7.715,
+      "stage_medians_ms": [
+        0.011264,
+        0.181248,
+        3.13344,
+        0.692224,
+        0.428032,
+        0.54272
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 64,
+      "median_ms": 6.997,
+      "p95_ms": 8.413,
+      "stage_medians_ms": [
+        0.012288,
+        0.244736,
+        4.217856,
+        0.572416,
+        0.42496,
+        0.54272
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 2,
+      "packed_output": false,
+      "lights": 1024,
+      "median_ms": 8.567,
+      "p95_ms": 9.217,
+      "stage_medians_ms": [
+        0.04608,
+        0.124928,
+        5.248,
+        0.572416,
+        0.425984,
+        0.550912
+      ],
+      "allocation_bytes": 43487640
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 1,
+      "median_ms": 1.181,
+      "p95_ms": 2.658,
+      "stage_medians_ms": [
+        0.011264,
+        0.180224,
+        0.251904,
+        0.109568,
+        0.093184,
+        0.534528
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 8,
+      "median_ms": 8.442,
+      "p95_ms": 8.978,
+      "stage_medians_ms": [
+        0.011264,
+        0.183296,
+        4.872192,
+        0.736256,
+        0.436224,
+        0.534528
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 64,
+      "median_ms": 10.445,
+      "p95_ms": 11.129,
+      "stage_medians_ms": [
+        0.012288,
+        0.244736,
+        8.487936,
+        0.73728,
+        0.4352,
+        0.534528
+      ],
+      "allocation_bytes": 35193240
+    },
+    {
+      "run": 2,
+      "output": [
+        1920,
+        1080
+      ],
+      "shading_scale": 2,
+      "samples_per_shading_pixel": 4,
+      "packed_output": true,
+      "lights": 1024,
+      "median_ms": 10.119,
+      "p95_ms": 12.62,
+      "stage_medians_ms": [
+        0.047104,
+        0.124928,
+        8.270848,
+        0.736256,
+        0.4352,
+        0.535552
+      ],
+      "allocation_bytes": 35193240
+    }
+  ]
+}

@@ -36,7 +36,8 @@ impl Fixture {
                     timing_features
                 } else {
                     wgpu::Features::empty()
-                },
+                } | (adapter.features()
+                    & wgpu::Features::RG11B10UFLOAT_RENDERABLE),
                 ..Default::default()
             })
             .await
@@ -205,9 +206,23 @@ impl Fixture {
             .unwrap();
         self.scene.frame_count += 1;
     }
+    pub fn compact_output(&mut self) {
+        let mut pass = HlfsPass::new(
+            &self.device,
+            &self.queue,
+            self.width,
+            self.height,
+            HlfsPass::preferred_output_format(&self.device),
+        );
+        pass.set_config(&self.device, HlfsConfig::performance());
+        self.graph = RenderGraph::new(&self.device, &self.queue);
+        self.graph.add_pass(Box::new(pass));
+        self.graph.lock(self.width, self.height);
+    }
     pub fn read(&self) -> Vec<[f32; 3]> {
         let texture = self.graph.find_pass::<HlfsPass>().unwrap().output_texture();
-        let stride = (self.width * 8).div_ceil(256) * 256;
+        let pixel_bytes = texture.format().block_copy_size(None).unwrap();
+        let stride = (self.width * pixel_bytes).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HLFS capture"),
             size: u64::from(stride * self.height),
@@ -239,7 +254,25 @@ impl Fixture {
         let data = buffer.slice(..).get_mapped_range().unwrap();
         let mut pixels = Vec::new();
         for row in data.chunks(stride as usize) {
-            for pixel in row[..(self.width * 8) as usize].chunks(8) {
+            for pixel in row[..(self.width * pixel_bytes) as usize].chunks(pixel_bytes as usize) {
+                if pixel_bytes == 4 {
+                    let bits = u32::from_le_bytes(pixel.try_into().unwrap());
+                    let decode = |v: u32, m: u32| {
+                        let e = v >> m;
+                        let fraction = v & ((1 << m) - 1);
+                        if e == 0 {
+                            fraction as f32 * 2.0f32.powi(-14 - m as i32)
+                        } else {
+                            (1.0 + fraction as f32 / (1 << m) as f32) * 2.0f32.powi(e as i32 - 15)
+                        }
+                    };
+                    pixels.push([
+                        decode(bits & 2047, 6),
+                        decode((bits >> 11) & 2047, 6),
+                        decode(bits >> 22, 5),
+                    ]);
+                    continue;
+                }
                 pixels.push(std::array::from_fn(|i| {
                     half::f16::from_bits(u16::from_le_bytes([pixel[2 * i], pixel[2 * i + 1]]))
                         .to_f32()
@@ -280,6 +313,42 @@ impl Fixture {
         let start = u64::from_le_bytes(bytes[..8].try_into().unwrap());
         let end = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         (end - start) as f64 * self.queue.get_timestamp_period() as f64 / 1e6
+    }
+    pub fn stage_milliseconds(&self) -> [f64; 6] {
+        let query = self
+            .graph
+            .find_pass::<HlfsPass>()
+            .unwrap()
+            .timing_query()
+            .unwrap();
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 56,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 56,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.resolve_query_set(query, 0..7, &resolve, 0);
+        encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 56);
+        self.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let bytes = read.slice(..).get_mapped_range().unwrap();
+        let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+        std::array::from_fn(|i| {
+            (ticks[i + 1] - ticks[i]) as f64 * self.queue.get_timestamp_period() as f64 / 1e6
+        })
     }
     pub fn constant_shadow(&mut self, depth: f32) {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {

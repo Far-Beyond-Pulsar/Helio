@@ -45,15 +45,14 @@ impl Image {
     }
 }
 pub(crate) struct History {
-    pub diffuse: Image,
-    pub specular: Image,
+    pub lighting: Image,
     pub geometry: Image,
     pub visible: wgpu::Buffer,
 }
 pub(crate) struct Targets {
     pub depth_bounds: Image,
-    pub raw_diffuse: Image,
-    pub raw_specular: Image,
+    pub depth_mips: Vec<wgpu::TextureView>,
+    pub raw_lighting: Image,
     pub history: [History; 2],
     pub output: Image,
     pub coarse: wgpu::Buffer,
@@ -81,16 +80,16 @@ impl Targets {
         height: u32,
         format: wgpu::TextureFormat,
         config: HlfsConfig,
+        output: Option<Image>,
     ) -> Self {
         let (width, height) = (width.max(1), height.max(1));
         let (sw, sh) = (
             width.div_ceil(config.sample_scale),
             height.div_ceil(config.sample_scale),
         );
-        let color = |label| Image::new(device, label, sw, sh, wgpu::TextureFormat::R32Uint, true);
+        let color = |label| Image::new(device, label, sw, sh, wgpu::TextureFormat::Rg32Uint, true);
         let history = std::array::from_fn(|_| History {
-            diffuse: color("HLFS diffuse history"),
-            specular: color("HLFS specular history"),
+            lighting: color("HLFS lighting history"),
             geometry: Image::new(
                 device,
                 "HLFS geometry history",
@@ -102,31 +101,54 @@ impl Targets {
             visible: buffer(
                 device,
                 "HLFS visible light history",
-                tile_count(sw, sh, TILE_SIZE) * (1 + VISIBLE_CAPACITY) * 4,
+                tile_count(sw, sh, TILE_SIZE) * (3 + VISIBLE_CAPACITY) * 4,
             ),
         });
+        let depth_width = width.div_ceil(TILE_SIZE).next_power_of_two();
+        let depth_height = height.div_ceil(TILE_SIZE).next_power_of_two();
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HLFS current depth pyramid"),
+            size: wgpu::Extent3d {
+                width: depth_width,
+                height: depth_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: depth_width.max(depth_height).ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let depth_mips = (0..depth_texture.mip_level_count())
+            .map(|mip| {
+                depth_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let depth_bounds = Image {
+            view: depth_texture.create_view(&Default::default()),
+            texture: depth_texture,
+        };
         Self {
-            depth_bounds: Image::new(
-                device,
-                "HLFS current tile depth",
-                width.div_ceil(TILE_SIZE),
-                height.div_ceil(TILE_SIZE),
-                wgpu::TextureFormat::R32Float,
-                true,
-            ),
-            raw_diffuse: color("HLFS raw diffuse"),
-            raw_specular: color("HLFS raw specular"),
+            depth_bounds,
+            depth_mips,
+            raw_lighting: color("HLFS raw lighting"),
             history,
-            output: Image::new(device, "HLFS output", width, height, format, false),
+            output: output
+                .unwrap_or_else(|| Image::new(device, "HLFS output", width, height, format, false)),
             coarse: buffer(
                 device,
                 "HLFS coarse light grid",
-                tile_count(width, height, COARSE_TILE_SIZE) * (1 + COARSE_CAPACITY) * 4,
+                tile_count(width, height, COARSE_TILE_SIZE) * (1 + COARSE_CAPACITY / 2) * 4,
             ),
             grid: buffer(
                 device,
                 "HLFS fine light grid",
-                tile_count(width, height, TILE_SIZE) * (1 + GRID_CAPACITY) * 4,
+                tile_count(width, height, TILE_SIZE) * (1 + GRID_CAPACITY / 2) * 4,
             ),
             width,
             height,

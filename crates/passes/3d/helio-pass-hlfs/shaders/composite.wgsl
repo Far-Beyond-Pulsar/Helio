@@ -1,7 +1,8 @@
-@group(2) @binding(0) var filtered_diffuse: texture_2d<u32>;
-@group(2) @binding(1) var filtered_specular: texture_2d<u32>;
-@group(2) @binding(2) var filtered_geometry: texture_2d<u32>;
-@group(2) @binding(3) var screen_depth_bounds: texture_2d<f32>;
+@group(2) @binding(0) var filtered_lighting: texture_2d<u32>;
+@group(2) @binding(1) var filtered_geometry: texture_2d<u32>;
+@group(2) @binding(2) var screen_depth_bounds: texture_2d<f32>;
+@group(2) @binding(3) var previous_lighting: texture_2d<u32>;
+@group(2) @binding(4) var previous_geometry: texture_2d<u32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -16,45 +17,49 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let s=surface_at(vec2<u32>(pixel));
     let z=-(cameras[0].view*vec4<f32>(s.position,1.0)).z;
     let sample_pos=fragment.xy/f32(globals.sample_scale)-0.5;
-    let center=clamp(vec2<i32>(round(sample_pos)),vec2<i32>(0),vec2<i32>(globals.sample_size)-1);
-    let moments=load_moments(filtered_geometry,center);
-    let cd=vec4<f32>(load_radiance(filtered_diffuse,center),moments.x);
-    let cs=vec4<f32>(load_radiance(filtered_specular,center),moments.y);
-    let mean_d=luminance(cd.rgb); let mean_s=luminance(cs.rgb);
-    let variance=max(max(cd.a-mean_d*mean_d,0.0)/max(mean_d*mean_d,0.0001),
-        max(cs.a-mean_s*mean_s,0.0)/max(mean_s*mean_s,0.0001));
-    let age=load_geometry(filtered_geometry,center).w;
+    let base=vec2<i32>(floor(sample_pos));
+    let fraction=fract(sample_pos);
     var diffuse=vec3<f32>(0.0); var specular=vec3<f32>(0.0); var weight_sum=0.0;
-    if globals.debug_mode!=0u || (globals.sample_scale==1u && (age>globals.max_history || (age>=4.0 && variance<=0.002))) {
-        diffuse=cd.rgb; specular=cs.rgb; weight_sum=1.0;
-    } else {
-        // One sparse rotated filter, with a narrow footprint for stable signals.
-        let radius=select(1,2,variance>0.02 || age<4.0);
-        let phase=globals.frame&3u;
-        for(var y=-2;y<=2;y++) { for(var x=-2;x<=2;x++) {
-            if abs(x)>radius || abs(y)>radius { continue; }
-            if radius==2 && abs(x)+abs(y)>2 && ((u32(x+2)+u32(y+2)+phase)&1u)==0u { continue; }
-            let p=center+vec2<i32>(x,y);
-            if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
-            let geo=load_geometry(filtered_geometry,p);
-            if !geometry_matches(geo,s.normal,z) { continue; }
-            let offset=vec2<f32>(p)-sample_pos;
-            let spatial=exp(-dot(offset,offset)/f32(radius*radius));
-            let weight=spatial*pow(max(dot(oct_decode(geo.xy),s.normal),0.0),32.0);
-            let d=load_radiance(filtered_diffuse,p); let sp=load_radiance(filtered_specular,p);
-            // Tonemapped accumulation for disocclusions suppresses sparse fireflies.
-            if age<4.0 {
-                diffuse+=d/(1.0+luminance(d))*weight; specular+=sp/(1.0+luminance(sp))*weight;
-            } else { diffuse+=d*weight; specular+=sp*weight; }
-            weight_sum+=weight;
-        }}
+    var selected=vec2<i32>(-1);
+    let roll=stbn(vec2<u32>(pixel),21u);
+    var neighbor_weights: array<f32,4>;
+    // Select one bilinear neighbor after excluding unrelated surfaces.
+    for(var i=0u;i<4u;i++) {
+        let offset=vec2<i32>(vec2<u32>(i&1u,i>>1u)); let p=base+offset;
+        if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
+        let geo=load_geometry(filtered_geometry,p);
+        if !geometry_matches(geo,s.normal,z) { continue; }
+        let weights=select(1.0-fraction,fraction,offset==vec2<i32>(1));
+        let weight=weights.x*weights.y*pow(max(dot(oct_decode(geo.xy),s.normal),0.0),32.0);
+        weight_sum+=weight;
+        neighbor_weights[i]=weight;
     }
-    if weight_sum>0.0 {
-        diffuse/=weight_sum; specular/=weight_sum;
-        if age<4.0 && globals.debug_mode==0u {
-            diffuse/=max(1.0-luminance(diffuse),1e-4); specular/=max(1.0-luminance(specular),1e-4);
+    var remaining=roll*weight_sum;
+    for(var i=0u;i<4u;i++) {
+        if neighbor_weights[i]>0.0 && remaining<neighbor_weights[i] { selected=base+vec2<i32>(vec2<u32>(i&1u,i>>1u)); break; }
+        remaining-=neighbor_weights[i];
+    }
+    if selected.x>=0 {
+        diffuse=load_radiance(filtered_lighting,selected,0u);
+        specular=load_radiance(filtered_lighting,selected,1u);
+        if globals.debug_mode==3u {
+            let confidence=(textureLoad(filtered_geometry,selected,0).y&(1u<<28u))!=0u;
+            return vec4<f32>(vec3<f32>(select(0.0,1.0,confidence)),1.0);
         }
-    } else if globals.light_count>0u {
+    } else if globals.history_valid!=0u && (globals.surface_flags&2u)!=0u {
+        let uv=previous_uv(vec2<u32>(pixel),s.position);
+        let previous_z=-(globals.previous_view*vec4<f32>(s.position,1.0)).z;
+        let previous_base=vec2<i32>(floor(uv*vec2<f32>(globals.sample_size)-0.5));
+        for(var i=0u;i<4u;i++) {
+            let p=previous_base+vec2<i32>(vec2<u32>(i&1u,i>>1u));
+            if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
+            if geometry_matches(load_geometry(previous_geometry,p),s.normal,previous_z) {
+                diffuse=load_radiance(previous_lighting,p,0u);
+                specular=load_radiance(previous_lighting,p,1u); weight_sum=1.0; break;
+            }
+        }
+    }
+    if weight_sum==0.0 && globals.light_count>0u {
         // Thin surfaces may have no matching half-resolution sample. Shade
         // those pixels directly with the same bounded candidate/shadow budget.
         var rng=hash_u32(u32(pixel.x)+u32(pixel.y)*globals.screen_size.x+globals.frame*0x9e3779b9u);
@@ -79,7 +84,7 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let f=s.f0+(max(vec3<f32>(1.0-s.roughness),s.f0)-s.f0)*pow5(1.0-max(dot(s.normal,s.view),0.0));
     var indirect=(1.0-f)*(1.0-s.metallic)*globals.ambient.rgb*s.albedo*clamp(orm.r,0.0,1.0);
     let lm_uv=textureLoad(gbuf_lightmap_uv,pixel,0).xy;
-    if globals.has_lightmap!=0u && lm_uv.x>=0.0 {
+    if (globals.surface_flags&1u)!=0u && lm_uv.x>=0.0 {
         indirect=textureSampleLevel(baked_lightmap,lightmap_sampler,lm_uv,0.0).rgb*s.albedo;
     }
     let direct=(diffuse*s.albedo+specular*s.specular_factor)/globals.exposure;

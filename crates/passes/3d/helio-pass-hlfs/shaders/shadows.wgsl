@@ -163,27 +163,53 @@ fn screen_occluded(light: GpuLight, position: vec3<f32>, normal: vec3<f32>) -> b
     var ray_length=max_distance;
     if light.light_type!=0u { ray_length=min(ray_length,length(light.position_range.xyz-origin)); }
     if ray_length<0.025 || dot(normal,inc.direction)<=0.0 { return false; }
-    // Current-frame 8x8 minimum depth is the coarse level; GBuffer depth is
-    // the fine level. Previous-frame HiZ must not confirm moving occluders.
-    for(var step=1u;step<=8u;step++) {
-        let point=origin+inc.direction*(ray_length*f32(step)/8.0);
-        let clip=cameras[0].view_proj*vec4<f32>(point,1.0);
-        if clip.w<=0.0 { break; }
-        let ndc=clip.xyz/clip.w;
-        let uv=ndc.xy*vec2<f32>(0.5,-0.5)+0.5;
-        if any(uv<vec2<f32>(0.0)) || any(uv>=vec2<f32>(1.0)) || ndc.z<0.0 || ndc.z>=1.0 { break; }
-        let p=vec2<i32>(uv*vec2<f32>(globals.screen_size));
-        let minimum=textureLoad(screen_depth_bounds,p/i32(TILE_SIZE),0).r;
-        if ndc.z<=minimum { continue; }
+    // Traverse current-frame minimum depths from large cells down to pixels.
+    // NDC is linear along a projected segment, including perspective cameras.
+    let clip0=cameras[0].view_proj*vec4<f32>(origin,1.0);
+    let clip1=cameras[0].view_proj*vec4<f32>(origin+inc.direction*ray_length,1.0);
+    if clip0.w<=0.0 || clip1.w<=0.0 { return false; }
+    let ndc0=clip0.xyz/clip0.w; let ndc1=clip1.xyz/clip1.w;
+    let screen=vec2<f32>(globals.screen_size);
+    let start=(ndc0.xy*vec2<f32>(0.5,-0.5)+0.5)*screen;
+    let finish=(ndc1.xy*vec2<f32>(0.5,-0.5)+0.5)*screen;
+    let delta=finish-start;
+    let span=max(abs(delta.x),abs(delta.y));
+    if span<0.5 { return false; }
+    let top=i32(textureNumLevels(screen_depth_bounds))-1;
+    var level=min(top,max(0,i32(floor(log2(max(span/8.0,1.0))))));
+    var t=min(0.5/span,0.5);
+    for(var iteration=0u;iteration<96u;iteration++) {
+        if t>=1.0 { break; }
+        let point=start+delta*t;
+        if any(point<vec2<f32>(0.0)) || any(point>=screen) { break; }
+        let z=mix(ndc0.z,ndc1.z,t);
+        if z<0.0 || z>=1.0 { break; }
+        let cell_size=f32(TILE_SIZE)*exp2(f32(level));
+        let cell=floor(point/cell_size);
+        let boundary=(cell+select(vec2<f32>(0.0),vec2<f32>(1.0),delta>=vec2<f32>(0.0)))*cell_size;
+        let exits=select(vec2<f32>(1e20),(boundary-point)/select(vec2<f32>(1.0),delta,abs(delta)>vec2<f32>(1e-6)),abs(delta)>vec2<f32>(1e-6));
+        let cell_end=min(1.0,t+max(min(exits.x,exits.y),0.0));
+        let minimum=textureLoad(screen_depth_bounds,vec2<i32>(cell),level).r;
+        if max(z,mix(ndc0.z,ndc1.z,cell_end))<=minimum {
+            t=cell_end+0.001/span; level=min(level+1,top); continue;
+        }
+        if level>0 { level-=1; continue; }
+        let p=vec2<i32>(point);
+        let pixel_boundary=floor(point)+select(vec2<f32>(0.0),vec2<f32>(1.0),delta>=vec2<f32>(0.0));
+        let pixel_exits=select(vec2<f32>(1e20),(pixel_boundary-point)/select(vec2<f32>(1.0),delta,abs(delta)>vec2<f32>(1e-6)),abs(delta)>vec2<f32>(1e-6));
+        let pixel_end=min(1.0,t+max(min(pixel_exits.x,pixel_exits.y),0.0));
         let depth=textureLoad(gbuf_depth,p,0);
-        if depth>=1.0 { continue; }
-        let surface=world_position(vec2<f32>(p)+0.5,depth);
-        let ray_z=-(cameras[0].view*vec4<f32>(point,1.0)).z;
-        let surface_z=-(cameras[0].view*vec4<f32>(surface,1.0)).z;
-        let behind=ray_z-surface_z;
-        // A narrow thickness interval avoids treating every depth discontinuity
-        // as an infinitely thick blocker. Misses continue to the shadow map.
-        if behind>0.003 && behind<max(0.025,ray_z*0.002) { return true; }
+        if depth<1.0 {
+            let surface=world_position(vec2<f32>(p)+0.5,depth);
+            let ray_start=world_position(point,z);
+            let ray_end=world_position(start+delta*pixel_end,mix(ndc0.z,ndc1.z,pixel_end));
+            let surface_z=-(cameras[0].view*vec4<f32>(surface,1.0)).z;
+            let z0=-(cameras[0].view*vec4<f32>(ray_start,1.0)).z;
+            let z1=-(cameras[0].view*vec4<f32>(ray_end,1.0)).z;
+            let thickness=max(0.025,max(z0,z1)*0.002);
+            if max(z0,z1)-surface_z>0.003 && min(z0,z1)-surface_z<thickness { return true; }
+        }
+        t=pixel_end+0.001/span;
     }
     return false;
 }

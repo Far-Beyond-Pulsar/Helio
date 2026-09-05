@@ -28,9 +28,11 @@ fn view(v: &wgpu::TextureView) -> wgpu::BindingResource<'_> {
 }
 
 pub(crate) struct InternalBindings {
+    pub depth_reduce: Vec<wgpu::BindGroup>,
     pub grid: wgpu::BindGroup,
     pub sample: [wgpu::BindGroup; 2],
     pub temporal: [wgpu::BindGroup; 2],
+    pub spatial: [wgpu::BindGroup; 2],
     pub composite: [wgpu::BindGroup; 2],
 }
 impl InternalBindings {
@@ -42,9 +44,21 @@ impl InternalBindings {
             &[
                 t.coarse.as_entire_binding(),
                 t.grid.as_entire_binding(),
-                view(&t.depth_bounds.view),
+                view(&t.depth_mips[0]),
             ],
         );
+        let depth_reduce = t
+            .depth_mips
+            .windows(2)
+            .map(|mips| {
+                bind_group(
+                    device,
+                    "HLFS depth reduction resources",
+                    &p.depth_bgl,
+                    &[view(&mips[0]), view(&mips[1])],
+                )
+            })
+            .collect();
         let sample = std::array::from_fn(|write| {
             let previous = &t.history[1 - write];
             bind_group(
@@ -55,8 +69,7 @@ impl InternalBindings {
                     t.grid.as_entire_binding(),
                     previous.visible.as_entire_binding(),
                     t.history[write].visible.as_entire_binding(),
-                    view(&t.raw_diffuse.view),
-                    view(&t.raw_specular.view),
+                    view(&t.raw_lighting.view),
                     view(&previous.geometry.view),
                     view(&t.depth_bounds.view),
                 ],
@@ -70,15 +83,25 @@ impl InternalBindings {
                 "HLFS temporal resources",
                 &p.temporal_bgl,
                 &[
-                    view(&t.raw_diffuse.view),
-                    view(&t.raw_specular.view),
-                    view(&previous.diffuse.view),
-                    view(&previous.specular.view),
+                    view(&t.raw_lighting.view),
+                    view(&previous.lighting.view),
                     view(&previous.geometry.view),
-                    view(&next.diffuse.view),
-                    view(&next.specular.view),
+                    view(&next.lighting.view),
                     view(&next.geometry.view),
                     t.grid.as_entire_binding(),
+                    next.visible.as_entire_binding(),
+                ],
+            )
+        });
+        let spatial = std::array::from_fn(|write| {
+            bind_group(
+                device,
+                "HLFS spatial resources",
+                &p.spatial_bgl,
+                &[
+                    view(&t.history[write].lighting.view),
+                    view(&t.history[write].geometry.view),
+                    view(&t.raw_lighting.view),
                 ],
             )
         });
@@ -89,17 +112,20 @@ impl InternalBindings {
                 "HLFS composite resources",
                 &p.composite_bgl,
                 &[
-                    view(&next.diffuse.view),
-                    view(&next.specular.view),
+                    view(&t.raw_lighting.view),
                     view(&next.geometry.view),
                     view(&t.depth_bounds.view),
+                    view(&t.history[1 - write].lighting.view),
+                    view(&t.history[1 - write].geometry.view),
                 ],
             )
         });
         Self {
+            depth_reduce,
             grid,
             sample,
             temporal,
+            spatial,
             composite,
         }
     }

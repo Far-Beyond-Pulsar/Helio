@@ -34,6 +34,10 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     if lane == 0u { atomicStore(&accepted,0u); }
     workgroupBarrier();
     let lo=group.xy*COARSE_TILE_SIZE;
+    if globals.light_count>65535u {
+        if lane==0u { coarse_grid[group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x].count=INVALID_LIGHT; }
+        return;
+    }
     for (var i=lane; i<globals.light_count; i+=64u) {
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
             let slot=atomicAdd(&accepted,1u);
@@ -44,7 +48,9 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
     let count=atomicLoad(&accepted);
     if lane==0u { coarse_grid[index].count=count; }
-    for(var i=lane;i<min(count,COARSE_CAPACITY);i+=64u) { coarse_grid[index].indices[i]=packed[i]; }
+    for(var i=lane;i<(min(count,COARSE_CAPACITY)+1u)/2u;i+=64u) {
+        coarse_grid[index].indices[i]=packed[2u*i]|(select(65535u,packed[2u*i+1u],2u*i+1u<count)<<16u);
+    }
 }
 @compute @workgroup_size(8,8)
 fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
@@ -70,7 +76,7 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     }
     if zlo<=zhi {
         for(var i=lane;i<coarse_count;i+=64u) {
-            let id=coarse_grid[ci].indices[i];
+            let id=(coarse_grid[ci].indices[i/2u]>>(16u*(i&1u)))&65535u;
             if sphere_in_tile(lights[id],lo,lo+TILE_SIZE,zlo,zhi) {
                 let slot=atomicAdd(&accepted,1u);
                 if slot<GRID_CAPACITY { packed[slot]=id; }
@@ -80,5 +86,7 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     workgroupBarrier();
     let count=atomicLoad(&accepted);
     if lane==0u { fine_grid[ti].count=count; }
-    if lane<min(count,GRID_CAPACITY) { fine_grid[ti].indices[lane]=packed[lane]; }
+    if lane<(min(count,GRID_CAPACITY)+1u)/2u {
+        fine_grid[ti].indices[lane]=packed[2u*lane]|(select(65535u,packed[2u*lane+1u],2u*lane+1u<count)<<16u);
+    }
 }

@@ -15,7 +15,7 @@ struct GpuLight {
 struct Globals {
     frame: u32, sample_count: u32, light_count: u32, history_valid: u32,
     screen_size: vec2<u32>, sample_size: vec2<u32>,
-    sample_scale: u32, candidate_count: u32, has_velocity: u32, has_lightmap: u32,
+    sample_scale: u32, candidate_count: u32, has_velocity: u32, surface_flags: u32,
     max_history: f32, discovery_fraction: f32, exposure: f32, debug_mode: u32,
     ambient: vec4<f32>, csm_splits: vec4<f32>,
     previous_view: mat4x4<f32>,
@@ -47,9 +47,9 @@ const GRID_CAPACITY: u32 = 64u;
 const COARSE_CAPACITY: u32 = 256u;
 const VISIBLE_CAPACITY: u32 = 16u;
 
-struct LightTile { count: u32, indices: array<u32, 64>, }
-struct CoarseTile { count: u32, indices: array<u32, 256>, }
-struct VisibleTile { count: u32, indices: array<u32, 16>, }
+struct LightTile { count: u32, indices: array<u32, 32>, }
+struct CoarseTile { count: u32, indices: array<u32, 128>, }
+struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, }
 
 fn div_ceil(n: vec2<u32>, d: u32) -> vec2<u32> { return (n + d - 1u) / d; }
 fn luminance(v: vec3<f32>) -> f32 { return dot(v, vec3<f32>(0.2126, 0.7152, 0.0722)); }
@@ -129,8 +129,8 @@ fn pack_radiance(color: vec3<f32>, pixel: vec2<u32>, dimension: u32) -> vec4<u32
         (pack_ufloat(c.g,6u,stbn(pixel,dimension+1u))<<11u) |
         (pack_ufloat(c.b,5u,stbn(pixel,dimension+2u))<<22u),0u,0u,0u);
 }
-fn load_radiance(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec3<f32> {
-    let bits=textureLoad(signal,pixel,0).r;
+fn load_radiance(signal: texture_2d<u32>, pixel: vec2<i32>, component: u32) -> vec3<f32> {
+    let bits=textureLoad(signal,pixel,0)[component];
     return vec3<f32>(unpack_ufloat(bits&2047u,6u),unpack_ufloat((bits>>11u)&2047u,6u),unpack_ufloat(bits>>22u,5u));
 }
 // Squared luminance needs six exponent bits. E6M5 covers the full squared
@@ -148,16 +148,16 @@ fn unpack_moment(bits: u32) -> f32 {
 }
 // Two words hold an octahedral normal, logarithmic depth, both luminance
 // second moments and age. The first moments are derived from signal RGB.
-fn pack_geometry(geometry: vec4<f32>, moments: vec2<f32>, pixel: vec2<u32>) -> vec4<u32> {
+fn pack_geometry(geometry: vec4<f32>, moments: vec2<f32>, pixel: vec2<u32>, confidence: bool) -> vec4<u32> {
     let normal=pack4x8snorm(vec4<f32>(geometry.xy,0.0,0.0))&65535u;
     let depth=pack2x16float(vec2<f32>(geometry.z,0.0))&65535u;
     let variance=pack_moment(moments.x,stbn(pixel,17u)) |
         (pack_moment(moments.y,stbn(pixel,18u))<<11u);
-    return vec4<u32>(normal|(depth<<16u),variance|(u32(geometry.w)<<22u),0u,0u);
+    return vec4<u32>(normal|(depth<<16u),variance|(u32(geometry.w)<<22u)|select(0u,1u<<28u,confidence),0u,0u);
 }
 fn load_geometry(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec4<f32> {
     let bits=textureLoad(signal,pixel,0).rg;
-    return vec4<f32>(unpack4x8snorm(bits.x&65535u).xy,unpack2x16float(bits.x>>16u).x,f32(bits.y>>22u));
+    return vec4<f32>(unpack4x8snorm(bits.x&65535u).xy,unpack2x16float(bits.x>>16u).x,f32((bits.y>>22u)&63u));
 }
 fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     let bits=textureLoad(signal,pixel,0).g;

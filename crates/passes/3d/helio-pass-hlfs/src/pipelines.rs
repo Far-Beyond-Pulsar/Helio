@@ -3,6 +3,7 @@ const LIGHTING: &str = include_str!("../shaders/lighting.wgsl");
 const SHADOWS: &str = include_str!("../shaders/shadows.wgsl");
 pub(crate) fn shader_source(stage: &str) -> String {
     match stage {
+        "depth" => include_str!("../shaders/depth_pyramid.wgsl").into(),
         "grid" => [COMMON, include_str!("../shaders/light_grid.wgsl")].concat(),
         "sample" => [
             COMMON,
@@ -11,6 +12,7 @@ pub(crate) fn shader_source(stage: &str) -> String {
             include_str!("../shaders/sample.wgsl"),
         ]
         .concat(),
+        "spatial" => [COMMON, LIGHTING, include_str!("../shaders/spatial.wgsl")].concat(),
         "temporal" => [COMMON, include_str!("../shaders/temporal.wgsl")].concat(),
         "composite" => [
             COMMON,
@@ -102,16 +104,22 @@ fn bgl(
 pub(crate) struct Pipelines {
     pub common_bgl: wgpu::BindGroupLayout,
     pub gbuffer_bgl: wgpu::BindGroupLayout,
+    pub depth_bgl: wgpu::BindGroupLayout,
     pub grid_bgl: wgpu::BindGroupLayout,
     pub sample_bgl: wgpu::BindGroupLayout,
     pub temporal_bgl: wgpu::BindGroupLayout,
+    pub spatial_bgl: wgpu::BindGroupLayout,
     pub composite_bgl: wgpu::BindGroupLayout,
     pub rt_bgl: Option<wgpu::BindGroupLayout>,
+    pub depth_reduce: wgpu::ComputePipeline,
     pub coarse: wgpu::ComputePipeline,
     pub fine: wgpu::ComputePipeline,
     pub sample: wgpu::ComputePipeline,
+    pub sample_small: wgpu::ComputePipeline,
+    pub sample_small_rt: Option<wgpu::ComputePipeline>,
     pub sample_rt: Option<wgpu::ComputePipeline>,
     pub temporal: wgpu::ComputePipeline,
+    pub spatial: wgpu::ComputePipeline,
     pub composite: wgpu::RenderPipeline,
 }
 impl Pipelines {
@@ -146,6 +154,14 @@ impl Pipelines {
         };
         gbuffer_entries[7].ty = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering);
         let gbuffer_bgl = bgl(device, "HLFS GBuffer layout", &gbuffer_entries);
+        let depth_bgl = bgl(
+            device,
+            "HLFS depth layout",
+            &[
+                entry(0, texture(D::D2, false), S::COMPUTE),
+                entry(1, storage_texture(F::R32Float), S::COMPUTE),
+            ],
+        );
         let grid_bgl = bgl(
             device,
             "HLFS light grid layout",
@@ -162,33 +178,44 @@ impl Pipelines {
                 entry(0, storage(true), S::COMPUTE),
                 entry(1, storage(true), S::COMPUTE),
                 entry(2, storage(false), S::COMPUTE),
-                entry(3, storage_texture(F::R32Uint), S::COMPUTE),
-                entry(4, storage_texture(F::R32Uint), S::COMPUTE),
-                entry(5, uint_texture(), S::COMPUTE),
-                entry(6, texture(D::D2, false), S::COMPUTE),
+                entry(3, storage_texture(F::Rg32Uint), S::COMPUTE),
+                entry(4, uint_texture(), S::COMPUTE),
+                entry(5, texture(D::D2, false), S::COMPUTE),
             ],
         );
-        let mut temporal_entries: Vec<_> = (0..5)
-            .map(|i| entry(i, uint_texture(), S::COMPUTE))
-            .collect();
-        temporal_entries.extend([
-            entry(5, storage_texture(F::R32Uint), S::COMPUTE),
-            entry(6, storage_texture(F::R32Uint), S::COMPUTE),
-            entry(7, storage_texture(F::Rg32Uint), S::COMPUTE),
-            entry(8, storage(true), S::COMPUTE),
-        ]);
-        let temporal_bgl = bgl(device, "HLFS temporal layout", &temporal_entries);
+        let temporal_bgl = bgl(
+            device,
+            "HLFS temporal layout",
+            &[
+                entry(0, uint_texture(), S::COMPUTE),
+                entry(1, uint_texture(), S::COMPUTE),
+                entry(2, uint_texture(), S::COMPUTE),
+                entry(3, storage_texture(F::Rg32Uint), S::COMPUTE),
+                entry(4, storage_texture(F::Rg32Uint), S::COMPUTE),
+                entry(5, storage(true), S::COMPUTE),
+                entry(6, storage(true), S::COMPUTE),
+            ],
+        );
+        let spatial_bgl = bgl(
+            device,
+            "HLFS spatial layout",
+            &[
+                entry(0, uint_texture(), S::COMPUTE),
+                entry(1, uint_texture(), S::COMPUTE),
+                entry(2, storage_texture(F::Rg32Uint), S::COMPUTE),
+            ],
+        );
         let composite_bgl = bgl(
             device,
             "HLFS composite layout",
-            &(0..4)
+            &(0..5)
                 .map(|i| {
                     entry(
                         i,
-                        if i < 3 {
-                            uint_texture()
-                        } else {
+                        if i == 2 {
                             texture(D::D2, false)
+                        } else {
+                            uint_texture()
                         },
                         S::FRAGMENT,
                     )
@@ -227,6 +254,12 @@ impl Pipelines {
                 cache: None,
             })
         };
+        let depth_reduce = compute(
+            "HLFS depth reduction",
+            &module("depth"),
+            "reduce_depth",
+            &layout("HLFS depth", &depth_bgl, None),
+        );
         let grid_layout = layout("HLFS grid", &grid_bgl, None);
         let coarse = compute("HLFS coarse culling", &grid_shader, "coarse", &grid_layout);
         let fine = compute(
@@ -241,11 +274,23 @@ impl Pipelines {
             "sample_lights",
             &layout("HLFS sample", &sample_bgl, None),
         );
+        let sample_small = compute(
+            "HLFS small light population",
+            &sample_shader,
+            "sample_small",
+            &layout("HLFS small sample", &sample_bgl, None),
+        );
         let temporal = compute(
             "HLFS temporal denoising",
             &temporal_shader,
             "temporal",
             &layout("HLFS temporal", &temporal_bgl, None),
+        );
+        let spatial = compute(
+            "HLFS spatial denoising",
+            &module("spatial"),
+            "spatial",
+            &layout("HLFS spatial", &spatial_bgl, None),
         );
         let rt_bgl = device
             .features()
@@ -269,6 +314,14 @@ impl Pipelines {
                 &module("sample_rt"),
                 "sample_lights",
                 &layout("HLFS sample RT", &sample_bgl, Some(rt)),
+            )
+        });
+        let sample_small_rt = rt_bgl.as_ref().map(|rt| {
+            compute(
+                "HLFS small ray query population",
+                &module("sample_rt"),
+                "sample_small",
+                &layout("HLFS small RT", &sample_bgl, Some(rt)),
             )
         });
         let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -299,16 +352,22 @@ impl Pipelines {
         Self {
             common_bgl,
             gbuffer_bgl,
+            depth_bgl,
             grid_bgl,
             sample_bgl,
             temporal_bgl,
+            spatial_bgl,
             composite_bgl,
             rt_bgl,
+            depth_reduce,
             coarse,
             fine,
             sample,
+            sample_small,
+            sample_small_rt,
             sample_rt,
             temporal,
+            spatial,
             composite,
         }
     }
