@@ -988,16 +988,23 @@ fn build_hlfs_graph_internal(
         device, queue, decal_buf, camera_buf, iw, ih,
     )));
 
-    let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, config.surface_format);
+    // Lighting stays in linear HDR until the post-process pass tonemaps it.
+    let lighting_format = HlfsPass::preferred_output_format(device);
+    let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+
+    let lighting_config = RendererConfig {
+        surface_format: lighting_format,
+        ..config
+    };
 
     add_late_passes(
         &mut graph,
         device,
         queue,
         scene,
-        &config,
+        &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
@@ -1147,8 +1154,8 @@ fn build_fxaa_hlfs_graph_internal(
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    let w = config.width;
-    let h = config.height;
+    let w = config.internal_width();
+    let h = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
 
@@ -1173,16 +1180,23 @@ fn build_fxaa_hlfs_graph_internal(
         device, queue, decal_buf, camera_buf, w, h,
     )));
 
-    let mut hlfs_pass = HlfsPass::new(device, queue, w, h, config.surface_format);
+    // Lighting stays in linear HDR until the post-process pass tonemaps it.
+    let lighting_format = HlfsPass::preferred_output_format(device);
+    let mut hlfs_pass = HlfsPass::new(device, queue, w, h, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+
+    let lighting_config = RendererConfig {
+        surface_format: lighting_format,
+        ..config
+    };
 
     add_late_passes(
         &mut graph,
         device,
         queue,
         scene,
-        &config,
+        &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,

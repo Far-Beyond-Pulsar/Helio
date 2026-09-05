@@ -263,6 +263,7 @@ helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
+helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-corona = { workspace = true }
 helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
