@@ -262,6 +262,8 @@ impl Renderer {
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
             enable_jitter,
+            camera_jitter_override: None,
+            frame_delta_override: None,
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]

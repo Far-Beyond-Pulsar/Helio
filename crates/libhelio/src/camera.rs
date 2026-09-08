@@ -22,7 +22,8 @@ pub struct GpuCameraUniforms {
     pub position_near: [f32; 4],
     /// Camera forward direction (xyz) + far plane (w)
     pub forward_far: [f32; 4],
-    /// Jitter offset for TAA (xy) + frame index (z) + padding (w)
+    /// Projection translation in NDC (xy), frame index (z), padding (w).
+    /// Ray tracers convert xy with `temporal::ray_jitter_from_ndc`.
     pub jitter_frame: [f32; 4],
     /// Previous frame view-projection (for TAA motion vectors)
     pub prev_view_proj: [f32; 16],

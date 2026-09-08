@@ -28,6 +28,7 @@ pub mod reflection;
 pub mod shader;
 pub mod shadow;
 pub mod sky;
+pub mod temporal;
 pub mod water;
 pub mod wind;
 

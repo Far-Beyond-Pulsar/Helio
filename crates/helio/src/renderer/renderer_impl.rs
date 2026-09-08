@@ -132,6 +132,8 @@ pub struct Renderer {
     /// temporal accumulation pass (TaaPass, TsrPass) need this; non-temporal
     /// graphs (e.g. FXAA-only) disable it to avoid visible shimmer.
     pub(crate) enable_jitter: bool,
+    pub(crate) camera_jitter_override: Option<[f32; 2]>,
+    pub(crate) frame_delta_override: Option<f32>,
     pub(crate) gizmo_camera: Option<crate::scene::Camera>,
     pub(crate) gizmo_viewport_height: f32,
     #[cfg(feature = "bake")]
@@ -412,6 +414,22 @@ impl Renderer {
     /// the final image remains pixel-stable.
     pub fn set_jitter_enabled(&mut self, enabled: bool) {
         self.enable_jitter = enabled;
+    }
+
+    /// Set a deterministic projection offset in internal render-pixel units
+    /// for the standard, non-XR render path.
+    /// `None` restores the graph's normal temporal sampling sequence.
+    pub fn set_camera_jitter_override(&mut self, jitter: Option<[f32; 2]>) {
+        assert!(jitter.is_none_or(|v| v.iter().all(|x| x.is_finite())));
+        self.camera_jitter_override = jitter;
+    }
+
+    /// Fix temporal-filter time for offline captures in the standard, non-XR
+    /// render path so readback latency does not alter history weights.
+    /// `None` restores measured frame time.
+    pub fn set_frame_delta_override(&mut self, seconds: Option<f32>) {
+        assert!(seconds.is_none_or(|v| v.is_finite() && v > 0.0));
+        self.frame_delta_override = seconds;
     }
 
     pub fn set_debug_mode(&mut self, mode: u32) {
