@@ -1,7 +1,8 @@
 //! Hierarchical Light-Field Sampling (HLFS) Pass
 //!
 //! Implements visibility-guided stochastic direct lighting with bounded
-//! per-pixel sampling and shadow evaluation.
+//! per-pixel sampling and shadow evaluation. [`HlfsMode`] selects visibility
+//! evaluation within the shared grid, reservoir and denoising pipeline.
 //!
 //! Architecture:
 //! 1. Conservative coarse-to-fine light culling
@@ -22,6 +23,20 @@ use bindings::{ExternalBindings, Inputs, InternalBindings};
 use pipelines::Pipelines;
 use resources::{Fallbacks, Targets, COARSE_TILE_SIZE, TILE_SIZE};
 
+/// Visibility evaluation used by the shared HLFS pipeline.
+///
+/// Modes share light grids, reservoir storage and denoising history. Only
+/// implemented visibility backends are selectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum HlfsMode {
+    /// Current-frame hierarchical depth tracing with shadow-map fallback.
+    /// Available without ray-query hardware; execution time depends on scene
+    /// visibility and sampling settings. Never selects hardware rays implicitly.
+    #[default]
+    ScreenSpace,
+}
+
 /// Lighting output used by capture/benchmark tools. Reference deliberately
 /// evaluates every light and disables denoising; never use it for gameplay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,9 +49,11 @@ pub enum HlfsDebugMode {
     Confidence = 3,
 }
 
-/// Bounded quality controls. Changes invalidate all history.
+/// Visibility mode and bounded quality controls. Changes invalidate all history.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HlfsConfig {
+    /// Visibility backend, independent of sampling quality and debug output.
+    pub mode: HlfsMode,
     /// Shadowed light samples per shading pixel, clamped to 1..=4.
     pub samples_per_pixel: u32,
     /// Steady-state candidates per sample, clamped to 1..=16. Disocclusion
@@ -56,6 +73,7 @@ pub struct HlfsConfig {
 impl Default for HlfsConfig {
     fn default() -> Self {
         Self {
+            mode: HlfsMode::ScreenSpace,
             samples_per_pixel: 2,
             candidates_per_sample: 8,
             sample_scale: 1,
@@ -182,7 +200,7 @@ impl HlfsPass {
         config: HlfsConfig,
     ) -> Self {
         let config = config.normalized();
-        let pipelines = Pipelines::new(device, output_format);
+        let pipelines = Pipelines::new(device, output_format, config.mode);
         let targets = Targets::new(device, width, height, output_format, config, None);
         let internal = InternalBindings::new(device, &pipelines, &targets);
         let uniform = |label, size| {
@@ -232,8 +250,12 @@ impl HlfsPass {
         if config == self.config {
             return;
         }
+        let mode_changed = config.mode != self.config.mode;
         let resize = config.sample_scale != self.config.sample_scale;
         self.config = config;
+        if mode_changed {
+            self.pipelines.set_mode(device, config.mode);
+        }
         if resize {
             self.recreate_targets(device, self.targets.width, self.targets.height);
         }
@@ -345,7 +367,7 @@ impl HlfsPass {
                         resources: &wgpu::BindGroup,
                         x,
                         y,
-                        rt: Option<&wgpu::BindGroup>| {
+                        visibility_resources: Option<&wgpu::BindGroup>| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(name),
                 timestamp_writes: None,
@@ -354,8 +376,8 @@ impl HlfsPass {
             pass.set_bind_group(0, common, &[]);
             pass.set_bind_group(1, gbuffer, &[]);
             pass.set_bind_group(2, resources, &[]);
-            if let Some(rt) = rt {
-                pass.set_bind_group(3, rt, &[]);
+            if let Some(resources) = visibility_resources {
+                pass.set_bind_group(3, resources, &[]);
             }
             pass.dispatch_workgroups(x, y, 1);
         };
@@ -394,23 +416,15 @@ impl HlfsPass {
         let small = self
             .previous_light_count
             .is_some_and(|count| count <= self.config.samples_per_pixel);
-        let sample = if small { &p.sample_small } else { &p.sample };
-        let ray = (if small {
-            &p.sample_small_rt
-        } else {
-            &p.sample_rt
-        })
-        .as_ref()
-        .zip(self.external.rt.as_ref());
         timestamp(encoder, 2);
         dispatch(
             encoder,
             "HLFS sample and visibility",
-            ray.map_or(sample, |(pipe, _)| pipe),
+            p.visibility.pipeline(small),
             &self.internal.sample[parity],
             t.sample_width.div_ceil(8),
             t.sample_height.div_ceil(8),
-            ray.map(|(_, bg)| bg),
+            None,
         );
         timestamp(encoder, 3);
         dispatch(
@@ -586,7 +600,6 @@ impl RenderPass for HlfsPass {
                 .baked_lightmap_sampler
                 .get()
                 .unwrap_or(&f.linear_sampler),
-            tlas: ctx.resources.main_scene.get().and_then(|s| s.tlas),
         };
         self.external.update(
             ctx.device,
@@ -607,15 +620,35 @@ impl RenderPass for HlfsPass {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn quality_and_reference_settings_retain_screen_space_mode() {
+        use super::{HlfsConfig, HlfsDebugMode, HlfsMode};
+        for preset in [HlfsConfig::default(), HlfsConfig::performance()] {
+            for debug_mode in [
+                HlfsDebugMode::Final,
+                HlfsDebugMode::Reference,
+                HlfsDebugMode::Unfiltered,
+                HlfsDebugMode::Confidence,
+            ] {
+                let config = HlfsConfig {
+                    debug_mode,
+                    ..preset
+                }
+                .normalized();
+                assert_eq!(config.mode, HlfsMode::ScreenSpace);
+            }
+        }
+    }
+
+    #[test]
     fn all_wgsl_stages_validate() {
         for stage in [
             "grid",
             "depth",
-            "sample",
+            "screen_space",
             "temporal",
             "spatial",
             "composite",
-            "sample_rt",
+            "ray_query_prototype",
         ] {
             let source = super::pipelines::shader_source(stage);
             let module = naga::front::wgsl::parse_str(&source)

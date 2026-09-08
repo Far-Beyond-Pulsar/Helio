@@ -3,7 +3,43 @@
 HLFS shades the deferred GBuffer using visibility-guided light sampling. Its
 output is linear HDR; the render graph supplies tone mapping and antialiasing.
 
-## Frame stages
+## Visibility mode
+
+`HlfsConfig::mode` defaults to `HlfsMode::ScreenSpace`. Both `HlfsPass::new`
+and `HlfsConfig::performance()` retain this default. Quality presets and
+`HlfsDebugMode` control sampling and diagnostic output independently of visibility.
+
+```rust
+use helio_pass_hlfs::{HlfsConfig, HlfsMode};
+
+let config = HlfsConfig {
+    mode: HlfsMode::ScreenSpace,
+    ..HlfsConfig::default()
+};
+// Pass config to HlfsPass::with_config(), or apply it with set_config().
+```
+
+ScreenSpace is the quality-first, non-RT-compatible path: current-frame depth
+pyramid tracing, coarse/fine light grids, dual reservoirs, energy confidence and
+validated unrectified history reuse. Tracing misses use the existing shadow maps.
+A TLAS or ray-query-capable device never changes the selected mode automatically.
+Its execution time depends on tracing and reservoir settings; it does not promise
+a strict gameplay frame budget.
+
+The public enum is non-exhaustive and currently exposes only the implemented
+`ScreenSpace` backend. A future `RayTraced` mode will replace visibility evaluation
+and add spatial/temporal candidate pruning before hardware queries. The internal
+`VisibilityPipelines` selection in `pipelines.rs` is the extension point; the
+single `HlfsPass` continues owning common grids, reservoir bindings, demodulated
+histories and spatial filtering. Mode changes replace only the visibility pipelines and
+invalidate history, retaining common resources and bindings. No second lighting pass or duplicate denoiser is needed.
+
+RayTraced implementation and post-merge tracking are follow-up work. The retained
+ray-query WGSL prototype is shader-validated but is not a selectable backend or a
+runtime fallback. The proposed sub-3-4 ms gameplay budget is a future validation
+target, not a guarantee of this ScreenSpace implementation.
+
+## ScreenSpace frame stages
 
 1. A 64×64 screen tile cull builds coarse light lists. An 8×8 depth-aware cull
    refines those lists. Overflow falls back to the complete light population,
@@ -15,8 +51,8 @@ output is linear HDR; the render graph supplies tone mapping and antialiasing.
    20%, relaxed to 50% on disocclusion. Directional proxy weights are limited
    relative to local lights without limiting the resulting lighting energy.
 3. At most four selected lights receive shadow evaluation per shading pixel.
-   Duplicate selections reuse visibility. Shadow maps and optional ray queries
-   use the scene's existing resources. Parallel workgroup selection gathers up
+   Duplicate selections reuse visibility. Shadow maps use the scene's existing
+   resources. Parallel workgroup selection gathers up
    to 16 explicit IDs from 64 deduplication scratch slots, then sorts them for
    binary-search membership. Visibility is binary; partial shadow coverage does
    not reduce a visible light's guiding weight. A current-frame minimum-depth
@@ -79,7 +115,7 @@ Measured results and retained images are in `docs/validation/hlfs/README.md`.
 The visible lists use bounded workgroup memory rather than requiring subgroup
 operations. Point, spot and directional lights use the existing light layout;
 there is no rectangular-area-light representation to attach quadrant masks or
-barn-door culling to. Existing optional ray-query support remains available.
+barn-door culling to. ScreenSpace does not require ray-query device features.
 
 Diffuse and specular use the R11G11B10 unsigned-float bit representation in
 portable RG32Uint storage textures, one packed word per signal. Explicit decode avoids requiring native

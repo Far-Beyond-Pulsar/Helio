@@ -1,4 +1,4 @@
-//! Indoor cathedral example with HLFS (Hierarchical Light-Field Sampling)
+//! Indoor cathedral example with HLFS ScreenSpace visibility
 //!
 //! A large Gothic cathedral interior: a 60 m nave flanked by two side aisles,
 //! 12 stone columns, a raised altar platform with a cross, carved stone pews

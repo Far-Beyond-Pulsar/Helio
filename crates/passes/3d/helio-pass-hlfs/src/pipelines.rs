@@ -1,3 +1,5 @@
+use crate::HlfsMode;
+
 pub(crate) const COMMON: &str = include_str!("../shaders/common.wgsl");
 const LIGHTING: &str = include_str!("../shaders/lighting.wgsl");
 const SHADOWS: &str = include_str!("../shaders/shadows.wgsl");
@@ -5,7 +7,7 @@ pub(crate) fn shader_source(stage: &str) -> String {
     match stage {
         "depth" => include_str!("../shaders/depth_pyramid.wgsl").into(),
         "grid" => [COMMON, include_str!("../shaders/light_grid.wgsl")].concat(),
-        "sample" => [
+        "screen_space" => [
             COMMON,
             LIGHTING,
             SHADOWS,
@@ -21,7 +23,7 @@ pub(crate) fn shader_source(stage: &str) -> String {
             include_str!("../shaders/composite.wgsl"),
         ]
         .concat(),
-        "sample_rt" => {
+        "ray_query_prototype" => {
             let sample = include_str!("../shaders/sample.wgsl").replace(
                 "return shadow_factor(id,surface.position,surface.normal,vec2<f32>(pixel)+0.5,globals.frame);",
                 "return rt_shadow(lights[id],surface.position,surface.normal);");
@@ -101,6 +103,83 @@ fn bgl(
     })
 }
 
+fn compute(
+    device: &wgpu::Device,
+    label: &str,
+    shader: &wgpu::ShaderModule,
+    entry: &str,
+    layout: &wgpu::PipelineLayout,
+) -> wgpu::ComputePipeline {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        module: shader,
+        entry_point: Some(entry),
+        compilation_options: Default::default(),
+        cache: None,
+    })
+}
+
+/// The visibility backend owns only its sampling pipelines. Grid construction,
+/// reservoir bindings and denoising remain in the shared pass.
+pub(crate) enum VisibilityPipelines {
+    ScreenSpace {
+        regular: wgpu::ComputePipeline,
+        small: wgpu::ComputePipeline,
+    },
+}
+impl VisibilityPipelines {
+    fn new(
+        device: &wgpu::Device,
+        mode: HlfsMode,
+        common: &wgpu::BindGroupLayout,
+        gbuffer: &wgpu::BindGroupLayout,
+        reservoirs: &wgpu::BindGroupLayout,
+    ) -> Self {
+        match mode {
+            HlfsMode::ScreenSpace => {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("HLFS ScreenSpace visibility"),
+                    source: wgpu::ShaderSource::Wgsl(shader_source("screen_space").into()),
+                });
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("HLFS ScreenSpace visibility"),
+                    bind_group_layouts: &[Some(common), Some(gbuffer), Some(reservoirs)],
+                    immediate_size: 0,
+                });
+                Self::ScreenSpace {
+                    regular: compute(
+                        device,
+                        "HLFS ScreenSpace visibility",
+                        &shader,
+                        "sample_lights",
+                        &layout,
+                    ),
+                    small: compute(
+                        device,
+                        "HLFS ScreenSpace small population",
+                        &shader,
+                        "sample_small",
+                        &layout,
+                    ),
+                }
+            }
+        }
+    }
+
+    pub fn pipeline(&self, small_population: bool) -> &wgpu::ComputePipeline {
+        match self {
+            Self::ScreenSpace { regular, small } => {
+                if small_population {
+                    small
+                } else {
+                    regular
+                }
+            }
+        }
+    }
+}
+
 pub(crate) struct Pipelines {
     pub common_bgl: wgpu::BindGroupLayout,
     pub gbuffer_bgl: wgpu::BindGroupLayout,
@@ -110,20 +189,26 @@ pub(crate) struct Pipelines {
     pub temporal_bgl: wgpu::BindGroupLayout,
     pub spatial_bgl: wgpu::BindGroupLayout,
     pub composite_bgl: wgpu::BindGroupLayout,
-    pub rt_bgl: Option<wgpu::BindGroupLayout>,
     pub depth_reduce: wgpu::ComputePipeline,
     pub coarse: wgpu::ComputePipeline,
     pub fine: wgpu::ComputePipeline,
-    pub sample: wgpu::ComputePipeline,
-    pub sample_small: wgpu::ComputePipeline,
-    pub sample_small_rt: Option<wgpu::ComputePipeline>,
-    pub sample_rt: Option<wgpu::ComputePipeline>,
+    pub visibility: VisibilityPipelines,
     pub temporal: wgpu::ComputePipeline,
     pub spatial: wgpu::ComputePipeline,
     pub composite: wgpu::RenderPipeline,
 }
 impl Pipelines {
-    pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat) -> Self {
+    pub fn set_mode(&mut self, device: &wgpu::Device, mode: HlfsMode) {
+        self.visibility = VisibilityPipelines::new(
+            device,
+            mode,
+            &self.common_bgl,
+            &self.gbuffer_bgl,
+            &self.sample_bgl,
+        );
+    }
+
+    pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, mode: HlfsMode) -> Self {
         use wgpu::{ShaderStages as S, TextureFormat as F, TextureViewDimension as D};
         let all = S::COMPUTE | S::FRAGMENT;
         let common_bgl = bgl(
@@ -229,7 +314,6 @@ impl Pipelines {
             })
         };
         let grid_shader = module("grid");
-        let sample_shader = module("sample");
         let temporal_shader = module("temporal");
         let composite_shader = module("composite");
         let layout =
@@ -244,86 +328,44 @@ impl Pipelines {
                     immediate_size: 0,
                 })
             };
-        let compute = |label, shader: &wgpu::ShaderModule, entry, layout: &wgpu::PipelineLayout| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                module: shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
-        };
         let depth_reduce = compute(
+            device,
             "HLFS depth reduction",
             &module("depth"),
             "reduce_depth",
             &layout("HLFS depth", &depth_bgl, None),
         );
         let grid_layout = layout("HLFS grid", &grid_bgl, None);
-        let coarse = compute("HLFS coarse culling", &grid_shader, "coarse", &grid_layout);
+        let coarse = compute(
+            device,
+            "HLFS coarse culling",
+            &grid_shader,
+            "coarse",
+            &grid_layout,
+        );
         let fine = compute(
+            device,
             "HLFS fine depth culling",
             &grid_shader,
             "fine",
             &grid_layout,
         );
-        let sample = compute(
-            "HLFS stochastic lighting",
-            &sample_shader,
-            "sample_lights",
-            &layout("HLFS sample", &sample_bgl, None),
-        );
-        let sample_small = compute(
-            "HLFS small light population",
-            &sample_shader,
-            "sample_small",
-            &layout("HLFS small sample", &sample_bgl, None),
-        );
+        let visibility =
+            VisibilityPipelines::new(device, mode, &common_bgl, &gbuffer_bgl, &sample_bgl);
         let temporal = compute(
+            device,
             "HLFS temporal denoising",
             &temporal_shader,
             "temporal",
             &layout("HLFS temporal", &temporal_bgl, None),
         );
         let spatial = compute(
+            device,
             "HLFS spatial denoising",
             &module("spatial"),
             "spatial",
             &layout("HLFS spatial", &spatial_bgl, None),
         );
-        let rt_bgl = device
-            .features()
-            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            .then(|| {
-                bgl(
-                    device,
-                    "HLFS ray query layout",
-                    &[entry(
-                        0,
-                        wgpu::BindingType::AccelerationStructure {
-                            vertex_return: false,
-                        },
-                        S::COMPUTE,
-                    )],
-                )
-            });
-        let sample_rt = rt_bgl.as_ref().map(|rt| {
-            compute(
-                "HLFS stochastic ray query lighting",
-                &module("sample_rt"),
-                "sample_lights",
-                &layout("HLFS sample RT", &sample_bgl, Some(rt)),
-            )
-        });
-        let sample_small_rt = rt_bgl.as_ref().map(|rt| {
-            compute(
-                "HLFS small ray query population",
-                &module("sample_rt"),
-                "sample_small",
-                &layout("HLFS small RT", &sample_bgl, Some(rt)),
-            )
-        });
         let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("HLFS denoise and composite"),
             layout: Some(&layout("HLFS composite", &composite_bgl, None)),
@@ -358,14 +400,10 @@ impl Pipelines {
             temporal_bgl,
             spatial_bgl,
             composite_bgl,
-            rt_bgl,
             depth_reduce,
             coarse,
             fine,
-            sample,
-            sample_small,
-            sample_small_rt,
-            sample_rt,
+            visibility,
             temporal,
             spatial,
             composite,

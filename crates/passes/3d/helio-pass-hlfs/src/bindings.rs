@@ -140,7 +140,6 @@ pub(crate) struct Inputs<'a> {
     /// albedo, normal, ORM, emissive, depth, lightmap UV, lightmap, pre-AA, velocity
     pub textures: [&'a wgpu::TextureView; 9],
     pub lightmap_sampler: &'a wgpu::Sampler,
-    pub tlas: Option<&'a wgpu::Tlas>,
 }
 struct CommonKey {
     buffers: [wgpu::Buffer; 3],
@@ -173,10 +172,8 @@ impl GBufferKey {
 pub(crate) struct ExternalBindings {
     pub common: Option<wgpu::BindGroup>,
     pub gbuffer: Option<wgpu::BindGroup>,
-    pub rt: Option<wgpu::BindGroup>,
     common_key: Option<CommonKey>,
     gbuffer_key: Option<GBufferKey>,
-    tlas: Option<wgpu::Tlas>,
 }
 impl ExternalBindings {
     pub fn update(
@@ -238,12 +235,6 @@ impl ExternalBindings {
                 textures: i.textures.map(Clone::clone),
                 sampler: i.lightmap_sampler.clone(),
             });
-        }
-        if self.tlas.as_ref() != i.tlas {
-            self.rt = p.rt_bgl.as_ref().zip(i.tlas).map(|(bgl, tlas)| {
-                bind_group(device, "HLFS current TLAS", bgl, &[tlas.as_binding()])
-            });
-            self.tlas = i.tlas.cloned();
         }
     }
 }

@@ -1074,6 +1074,7 @@ fn build_hlfs_graph_internal(
     graph
 }
 
+/// Build the shared HLFS graph with default `HlfsMode::ScreenSpace` visibility.
 pub fn build_hlfs_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
@@ -1097,6 +1098,7 @@ pub fn build_hlfs_graph(
     )
 }
 
+/// Build the FXAA graph with default `HlfsMode::ScreenSpace` visibility.
 pub fn build_fxaa_hlfs_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,

@@ -352,6 +352,7 @@ fn creates_pipelines_on_available_adapter() {
             1080,
             wgpu::TextureFormat::Rgba16Float,
         );
+        assert_eq!(pass.config().mode, helio_pass_hlfs::HlfsMode::ScreenSpace);
         eprintln!("1080p full allocation_bytes={}", pass.allocation_bytes());
         let output_before = pass.output_texture().clone();
         assert!(

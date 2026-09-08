@@ -542,5 +542,6 @@
       ],
       "allocation_bytes": 35193240
     }
-  ]
+  ],
+  "visibility_mode": "ScreenSpace"
 }

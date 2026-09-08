@@ -1,12 +1,24 @@
-# HLFS validation
+# HLFS ScreenSpace validation
 
 Validated on 2026-09-05 with an NVIDIA RTX 3060, Vulkan, driver 616.64,
 against main revision `c3106597329f8b52386dfe3cd35eda9f0b9fbf7c`.
 
+The measurements below describe `HlfsMode::ScreenSpace`. Both the full and
+compact presets select that backend; `Reference`/`Final` in benchmark labels
+are `HlfsDebugMode` values, not visibility modes. RayTraced dispatch and candidate
+pruning are follow-up work with a separate gameplay performance target.
+
+The mode API and visibility-pipeline refactor were revalidated on 2026-09-08:
+two CPU tests (defaults and all seven shader programs), eleven GPU regressions,
+the root build/tests and the cathedral example build pass. A 100-frame standard
+cathedral capture completed; saved frames 0, 31, 63 and 99 are pixel-identical to
+the pre-refactor captures. The performance measurements below retain their
+2026-09-05 date and are not new RayTraced measurements.
+
 ## Correctness and rendering
 
 The shader test parses and validates all seven WGSL programs, including the
-optional ray-query variant. Eleven explicit GPU regressions cover pipeline
+non-dispatched ray-query prototype. Eleven explicit GPU regressions cover pipeline
 creation, light-buffer growth, tile-list overflow, removal of lights, extinction
 without changing the light count, mixed colored/directional lights, offscreen
 culling, minimal targets, shadow atlas lookup beyond light index 42, moving
