@@ -87,6 +87,8 @@ impl Default for HlfsConfig {
 }
 impl HlfsConfig {
     /// Four samples over each 2x2 shading block: one sample per output pixel.
+    /// Experimental: reduced-resolution quality gates expose under-lighting
+    /// in some many-light scenes. Full-resolution sampling remains the default.
     pub fn performance() -> Self {
         Self {
             samples_per_pixel: 4,

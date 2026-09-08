@@ -92,10 +92,22 @@ fn check_packing(@builtin(global_invocation_id) id: vec3<u32>) {
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly with --ignored"]
 fn rendered_energy_survives_light_growth_overflow_and_removal() {
+    rendered_energy_survives_light_growth_overflow_and_removal_preset(
+        helio_pass_hlfs::HlfsConfig::default(),
+    );
+}
+
+fn rendered_energy_survives_light_growth_overflow_and_removal_preset(
+    preset: helio_pass_hlfs::HlfsConfig,
+) {
     use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
     use support::*;
     pollster::block_on(async {
+        eprintln!("Dynamic preset: {preset:?}");
         let mut f = Fixture::new(65, 49).await;
+        if preset.sample_scale == 2 {
+            f.compact_output();
+        }
         for count in [0usize, 1, 2, 65, 257, 1024] {
             f.lights(
                 (0..count)
@@ -104,7 +116,7 @@ fn rendered_energy_survives_light_growth_overflow_and_removal() {
             );
             f.config(HlfsConfig {
                 debug_mode: HlfsDebugMode::Reference,
-                ..Default::default()
+                ..preset
             });
             f.frame();
             let reference = f.read();
@@ -112,7 +124,7 @@ fn rendered_energy_survives_light_growth_overflow_and_removal() {
             if count > 0 {
                 assert!(mean(&reference) > 0.05, "nonzero direct light required");
             }
-            f.config(HlfsConfig::default());
+            f.config(preset);
             for _ in 0..32 {
                 f.frame();
             }
@@ -144,7 +156,7 @@ fn rendered_energy_survives_light_growth_overflow_and_removal() {
             f.config(HlfsConfig {
                 debug_mode: mode,
                 pre_exposure: 0.01,
-                ..Default::default()
+                ..preset
             });
             let mut total = 0.0;
             for _ in 0..32 {
@@ -167,10 +179,22 @@ fn rendered_energy_survives_light_growth_overflow_and_removal() {
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly with --ignored"]
 fn hidden_strong_light_is_discovered_after_occlusion_changes() {
+    hidden_strong_light_is_discovered_after_occlusion_changes_preset(
+        helio_pass_hlfs::HlfsConfig::default(),
+    );
+}
+
+fn hidden_strong_light_is_discovered_after_occlusion_changes_preset(
+    preset: helio_pass_hlfs::HlfsConfig,
+) {
     use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
     use support::*;
     pollster::block_on(async {
+        eprintln!("Dynamic preset: {preset:?}");
         let mut f = Fixture::new(65, 49).await;
+        if preset.sample_scale == 2 {
+            f.compact_output();
+        }
         let mut lights: Vec<_> = (0..32)
             .map(|i| {
                 point(
@@ -188,11 +212,11 @@ fn hidden_strong_light_is_discovered_after_occlusion_changes() {
             f.constant_shadow(visibility);
             f.config(HlfsConfig {
                 debug_mode: HlfsDebugMode::Reference,
-                ..Default::default()
+                ..preset
             });
             f.frame();
             let reference = mean(&f.read());
-            f.config(HlfsConfig::default());
+            f.config(preset);
             // Warm up with the strong light occluded, then reveal it without a
             // configuration or light-count change that could reset guiding.
             f.constant_shadow(0.0);
@@ -269,7 +293,16 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
             (raw_mean - mean(&reference)).abs() / mean(&reference) < 0.01,
             "unfiltered estimator loses energy"
         );
-        for (scale, samples) in [(1, 2), (2, 2), (2, 4)] {
+        for (scale, samples, compact) in [
+            (1, 2, false),
+            (2, 2, false),
+            (2, 4, false),
+            (2, 2, true),
+            (2, 4, true),
+        ] {
+            if compact {
+                f.compact_output();
+            }
             f.config(HlfsConfig {
                 sample_scale: scale,
                 samples_per_pixel: samples,
@@ -289,7 +322,7 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                 .sqrt()
                 / mean(&reference);
             eprintln!(
-                "mixed lights scale={scale} samples={samples}: relative mean error={error}, normalized RMSE={rmse}"
+                "mixed lights scale={scale} samples={samples} compact={compact}: relative mean error={error}, normalized RMSE={rmse}"
             );
             if let Ok(dir) = std::env::var("HLFS_CAPTURE_DIR") {
                 std::fs::create_dir_all(&dir).unwrap();
@@ -303,9 +336,17 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                 };
                 save("mixed-reference.png", &reference);
                 save(
-                    &format!("mixed-scale-{scale}-samples-{samples}.png"),
+                    &format!("mixed-scale-{scale}-samples-{samples}-compact-{compact}.png"),
                     &sampled,
                 );
+                // Preserve linear HDR values for exact before/after shader comparisons.
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!(
+                        "mixed-scale-{scale}-samples-{samples}-compact-{compact}.f32"
+                    )),
+                    bytemuck::cast_slice(&sampled),
+                )
+                .unwrap();
             }
             assert!(
                 error < 0.08 && rmse < 0.2,
@@ -507,7 +548,7 @@ fn benchmark_gameplay_resolution_stages() {
             .unwrap()
             .enable_timing(&f.device));
         f.constant_shadow(1.0);
-        for (scale, spp, compact) in [(1, 2, false), (2, 2, false), (2, 4, true)] {
+        for (scale, spp, compact) in [(1, 2, false), (2, 2, false), (2, 4, true), (2, 2, true)] {
             if compact {
                 f.compact_output();
                 assert!(f
@@ -631,40 +672,53 @@ fn half_resolution_keeps_isolated_one_pixel_geometry_lit() {
     use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
     use support::*;
     pollster::block_on(async {
-        let mut f = Fixture::new(65, 49).await;
-        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0)]);
-        let index = 20 * 65 + 21;
-        let mut depths = vec![1.0; 65 * 49];
-        depths[index] = (3.0 - 0.1) / 9.9;
-        f.depth_values(&depths);
-        f.config(HlfsConfig {
-            debug_mode: HlfsDebugMode::Reference,
-            ..Default::default()
-        });
-        f.frame();
-        let reference = f.read()[index];
-        assert!(reference[0] > 0.1);
-        f.config(HlfsConfig {
-            sample_scale: 2,
-            ..Default::default()
-        });
-        for phase in 0..4 {
-            f.scene.frame_count = phase;
+        for preset in [
+            HlfsConfig::default(),
+            HlfsConfig {
+                sample_scale: 2,
+                ..Default::default()
+            },
+            HlfsConfig::performance(),
+        ] {
+            eprintln!("Dynamic preset: {preset:?}");
+            let mut f = Fixture::new(65, 49).await;
+            if preset.sample_scale == 2 {
+                f.compact_output();
+            }
+            f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0)]);
+            let index = 20 * 65 + 21;
+            let mut depths = vec![1.0; 65 * 49];
+            depths[index] = (3.0 - 0.1) / 9.9;
+            f.depth_values(&depths);
+            f.config(HlfsConfig {
+                debug_mode: HlfsDebugMode::Reference,
+                ..preset
+            });
             f.frame();
-            let pixels = f.read();
-            assert!(
+            let reference = f.read()[index];
+            assert!(reference[0] > 0.1);
+            f.config(HlfsConfig {
+                sample_scale: 2,
+                ..preset
+            });
+            for phase in 0..4 {
+                f.scene.frame_count = phase;
+                f.frame();
+                let pixels = f.read();
+                assert!(
                 (pixels[index][0] - reference[0]).abs() < reference[0] * (2.0 / 64.0) + 0.001,
                 "thin surface exceeds two R11 rounding steps in phase {phase}: {:?}, reference={reference:?}",
                 pixels[index]
             );
-            assert!(
-                pixels
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != index)
-                    .all(|(_, p)| p[0] == 0.0),
-                "lighting leaks into sky"
-            );
+                assert!(
+                    pixels
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != index)
+                        .all(|(_, p)| p[0] == 0.0),
+                    "lighting leaks into sky"
+                );
+            }
         }
     });
 }
@@ -774,4 +828,34 @@ fn confidence_tracks_visible_energy_coverage() {
             "confidence does not reflect 80% visible energy coverage"
         );
     });
+}
+
+/// Explicit promotion gate for reduced-resolution settings. Kept separate from
+/// the supported full-resolution regression suite because current half-resolution
+/// shading fails these energy limits. Do not relax limits to promote a preset.
+#[test]
+#[ignore = "known reduced-resolution quality failure; explicit preset promotion audit"]
+fn benchmark_reduced_resolution_quality_gate() {
+    let samples = std::env::var("HLFS_QUALITY_SPP")
+        .unwrap_or_else(|_| "2".into())
+        .parse::<u32>()
+        .unwrap();
+    assert!([2, 4].contains(&samples));
+    let preset = helio_pass_hlfs::HlfsConfig {
+        samples_per_pixel: samples,
+        sample_scale: 2,
+        ..Default::default()
+    };
+    let energy = std::panic::catch_unwind(|| {
+        rendered_energy_survives_light_growth_overflow_and_removal_preset(preset)
+    });
+    let discovery = std::panic::catch_unwind(|| {
+        hidden_strong_light_is_discovered_after_occlusion_changes_preset(preset)
+    });
+    assert!(
+        energy.is_ok() && discovery.is_ok(),
+        "reduced-resolution preset failed promotion: energy={} discovery={}",
+        energy.is_ok(),
+        discovery.is_ok()
+    );
 }

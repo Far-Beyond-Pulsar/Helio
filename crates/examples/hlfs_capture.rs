@@ -5,6 +5,11 @@ use std::sync::Arc;
 pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<LightId>)) {
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
     let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
+    let sample_count = std::env::var("HLFS_SAMPLE_COUNT").ok().map(|value| {
+        value
+            .parse::<u32>()
+            .expect("HLFS_SAMPLE_COUNT must be an integer")
+    });
     let fxaa = std::env::var_os("HLFS_FXAA").is_some();
     pollster::block_on(async {
         let instance =
@@ -76,7 +81,7 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
         for frame in 0..100 {
-            if reference || performance {
+            if reference || performance || sample_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
@@ -88,6 +93,7 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
                         } else {
                             helio_pass_hlfs::HlfsDebugMode::Final
                         },
+                        samples_per_pixel: sample_count.unwrap_or(if performance { 4 } else { 2 }),
                         ..if performance {
                             helio_pass_hlfs::HlfsConfig::performance()
                         } else {

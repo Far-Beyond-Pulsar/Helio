@@ -96,17 +96,20 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 var covered_energy=0.0;
                 var traced_ids=vec4<u32>(INVALID_LIGHT);
                 var traced_visibility=vec4<f32>(-1.0);
+                // The guide and surface are shared by every sample. Preserve
+                // their accumulation order without rescoring the same lights.
+                var guided_directional_weight=0.0; var guided_local_weight=0.0;
+                for(var i=0u;i<guide_count;i++) {
+                    let id=previous_visible[guide_tile].indices[i];
+                    let proxy=importance(id,s);
+                    if lights[id].light_type==0u { guided_directional_weight+=proxy; }
+                    else { guided_local_weight+=proxy; }
+                }
                 for(var sample=0u;sample<globals.sample_count;sample++) {
                     // Replay proposals after computing the directional budget.
                     // Streaming both scans keeps candidates out of private arrays.
                     let candidate_seed=rng;
-                    var directional_weight=0.0; var local_weight=0.0;
-                    for(var i=0u;i<guide_count;i++) {
-                        let id=previous_visible[guide_tile].indices[i];
-                        let proxy=importance(id,s);
-                        if lights[id].light_type==0u { directional_weight+=proxy; }
-                        else { local_weight+=proxy; }
-                    }
+                    var directional_weight=guided_directional_weight; var local_weight=guided_local_weight;
                     let inverse_proposal=f32(population)/f32(candidate_count);
                     for(var candidate=0u;candidate<candidate_count;candidate++) {
                         let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);

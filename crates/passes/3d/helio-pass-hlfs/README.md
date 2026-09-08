@@ -83,6 +83,11 @@ groups are rebuilt when their actual GPU resource handles change.
 without denoising; `Unfiltered` exposes stochastic lighting before denoising.
 `Confidence` displays the 80% energy-coverage flag.
 `HlfsConfig::performance()` uses four samples per 2x2 block.
+Reduced-resolution settings remain experimental: additional energy tests expose
+under-lighting with both two and four samples per block. The faster two-sample
+setting was not promoted to a named preset. See the retained quality gate and
+measurements in `docs/validation/hlfs/README.md`. Full-resolution sampling remains
+the default. Output format is selected separately at pass creation.
 `preferred_output_format()` selects renderable R11G11B10 HDR or RGBA16F fallback.
 `enable_timing()` and `timing_query()` expose six GPU stage durations.
 `output_texture()` supports readback. `allocation_bytes()` reports requested
@@ -107,6 +112,8 @@ cargo run -p examples --bin indoor_cathedral_hlfs -- --capture target/hlfs-captu
 
 Set `HLFS_REFERENCE=1` for the cathedral's matching full-light reference captures.
 Set `HLFS_PERFORMANCE=1` to capture the reduced-resolution preset.
+Set `HLFS_SAMPLE_COUNT=2` together with `HLFS_PERFORMANCE=1` to reproduce the
+experimental two-sample capture. This override is for capture tools only.
 Set `HLFS_FXAA=1` to exercise the FXAA graph variant.
 Measured results and retained images are in `docs/validation/hlfs/README.md`.
 

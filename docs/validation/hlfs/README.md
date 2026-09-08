@@ -1,5 +1,10 @@
 # HLFS ScreenSpace validation
 
+The [2026-09-08 follow-up](followup.md) measures a guide-scoring optimization
+and records failed promotion gates for reduced-resolution sampling. The new
+two-sample preset was rejected; the existing four-sample setting also fails the
+additional energy checks. Full-resolution sampling remains the default.
+
 Validated on 2026-09-05 with an NVIDIA RTX 3060, Vulkan, driver 616.64,
 against main revision `c3106597329f8b52386dfe3cd35eda9f0b9fbf7c`.
 
