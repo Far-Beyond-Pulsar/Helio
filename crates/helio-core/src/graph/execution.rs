@@ -205,6 +205,28 @@ impl RenderGraph {
     pub fn replace_pass_at(&mut self, index: usize, pass: Box<dyn RenderPass>) {
         if index < self.passes.len() {
             self.passes[index] = pass;
+            // Replacing one type can also expose a later instance of the old
+            // type. Rebuild the first-instance map rather than patching one key.
+            self.pass_index_map.clear();
+            for (i, pass) in self.passes.iter().enumerate() {
+                self.pass_index_map
+                    .entry(pass.as_any().type_id())
+                    .or_insert(i);
+            }
+            // The replacement can publish different resources to later passes.
+            // Chain membership alone cannot detect stale dependent bundles.
+            self.gpu_render_bundles.clear();
+            self.pass_cache.clear();
+            if self.locked {
+                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
+                self.locked = false;
+                self.lock(self.output_w, self.output_h);
+                self.resize_pending = true;
+            } else if self.resources_allocated {
+                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
+                self.init_transients(self.output_w, self.output_h);
+                self.resize_pending = true;
+            }
         }
     }
 
@@ -430,6 +452,10 @@ impl RenderGraph {
                     label: Some("Compute Graph"),
                 });
 
+        // Compute is submitted first, graphics second. Span BOTH command
+        // buffers; per-pass markers on compute alone omit all graphics work.
+        self.profiler
+            .begin_gpu_pass(&mut compute_encoder, "__graph_frame");
         let mut visible_frame_resources = *frame_resources;
         let resized_this_frame = self.resize_pending;
 
@@ -720,8 +746,15 @@ impl RenderGraph {
             pass.publish(&mut visible_frame_resources);
         }
 
+        if let Some(mut rp) = chain_rp.take() {
+            unsafe {
+                std::mem::ManuallyDrop::drop(&mut rp);
+            }
+        }
+        self.profiler.end_gpu_pass(&mut encoder, "__graph_frame");
+        // Resolve after the final graphics timestamp, not before graphics runs.
         self.profiler
-            .resolve_gpu_queries(&mut compute_encoder, self.frame_count);
+            .resolve_gpu_queries(&mut encoder, self.frame_count);
         let submission_index = scene
             .queue
             .submit([compute_encoder.finish(), encoder.finish()]);
