@@ -86,9 +86,17 @@ impl Default for HlfsConfig {
     }
 }
 impl HlfsConfig {
+    /// Two samples over each 2x2 shading block. Uses less sampling work than
+    /// `performance()`, with more variance. Output format is selected separately;
+    /// pair with `HlfsPass::preferred_output_format()` for packed HDR.
+    pub fn compact() -> Self {
+        Self {
+            samples_per_pixel: 2,
+            sample_scale: 2,
+            ..Self::default()
+        }
+    }
     /// Four samples over each 2x2 shading block: one sample per output pixel.
-    /// Experimental: reduced-resolution quality gates expose under-lighting
-    /// in some many-light scenes. Full-resolution sampling remains the default.
     pub fn performance() -> Self {
         Self {
             samples_per_pixel: 4,
@@ -624,7 +632,11 @@ mod tests {
     #[test]
     fn quality_and_reference_settings_retain_screen_space_mode() {
         use super::{HlfsConfig, HlfsDebugMode, HlfsMode};
-        for preset in [HlfsConfig::default(), HlfsConfig::performance()] {
+        for preset in [
+            HlfsConfig::default(),
+            HlfsConfig::compact(),
+            HlfsConfig::performance(),
+        ] {
             for debug_mode in [
                 HlfsDebugMode::Final,
                 HlfsDebugMode::Reference,

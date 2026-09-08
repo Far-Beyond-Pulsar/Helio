@@ -141,6 +141,13 @@ fn rendered_energy_survives_light_growth_overflow_and_removal_preset(
                 "lighting energy drift at {count} lights: {error}"
             );
         }
+        // Same population, extinguished intensities must reject old energy too.
+        f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 0.0); 1024]);
+        f.frame();
+        assert!(
+            mean(&f.read()) < 0.02,
+            "same-count light changes leave stale energy"
+        );
         f.lights(vec![]);
         f.frame();
         let dark = f.read();
@@ -662,6 +669,27 @@ fn screen_contacts_follow_current_depth_and_clear_after_motion() {
                 region(&f.read()) > region(&unshadowed) * 0.95,
                 "moving contact occluder leaves stale shadow"
             );
+            for preset in [HlfsConfig::compact(), HlfsConfig::performance()] {
+                f.compact_output();
+                f.config(HlfsConfig {
+                    screen_trace_distance: 2.0,
+                    ..preset
+                });
+                f.depth_values(&depths);
+                for _ in 0..4 {
+                    f.frame();
+                    assert!(
+                        region(&f.read()) < region(&unshadowed) * 0.8,
+                        "reduced-resolution contact shadow missing"
+                    );
+                }
+                f.depth_values(&vec![(3.0 - 0.1) / 9.9; 129 * 65]);
+                f.frame();
+                assert!(
+                    region(&f.read()) > region(&unshadowed) * 0.95,
+                    "reduced-resolution contact shadow persists after removal"
+                );
+            }
         }
     });
 }
@@ -830,32 +858,154 @@ fn confidence_tracks_visible_energy_coverage() {
     });
 }
 
-/// Explicit promotion gate for reduced-resolution settings. Kept separate from
-/// the supported full-resolution regression suite because current half-resolution
-/// shading fails these energy limits. Do not relax limits to promote a preset.
 #[test]
-#[ignore = "known reduced-resolution quality failure; explicit preset promotion audit"]
-fn benchmark_reduced_resolution_quality_gate() {
-    let samples = std::env::var("HLFS_QUALITY_SPP")
-        .unwrap_or_else(|_| "2".into())
-        .parse::<u32>()
-        .unwrap();
-    assert!([2, 4].contains(&samples));
-    let preset = helio_pass_hlfs::HlfsConfig {
-        samples_per_pixel: samples,
-        sample_scale: 2,
-        ..Default::default()
-    };
-    let energy = std::panic::catch_unwind(|| {
-        rendered_energy_survives_light_growth_overflow_and_removal_preset(preset)
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn reduced_resolution_preserves_energy_and_discovers_hidden_lights() {
+    for preset in [
+        helio_pass_hlfs::HlfsConfig::compact(),
+        helio_pass_hlfs::HlfsConfig::performance(),
+    ] {
+        rendered_energy_survives_light_growth_overflow_and_removal_preset(preset);
+        hidden_strong_light_is_discovered_after_occlusion_changes_preset(preset);
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn raw_and_filtered_energy_match_at_odd_and_even_sizes() {
+    use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
+    use support::*;
+    pollster::block_on(async {
+        for (width, height, scale, spp) in [
+            (65, 49, 1, 2),
+            (65, 49, 2, 2),
+            (65, 49, 2, 4),
+            (64, 48, 2, 2),
+            (64, 48, 2, 4),
+        ] {
+            let mut f = Fixture::new(width, height).await;
+            f.compact_output();
+            f.lights(vec![
+                point([0.0, 0.0, 2.0], [1.0, 0.8, 0.5], 8.0 / 65.0);
+                65
+            ]);
+            f.config(HlfsConfig {
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
+            f.frame();
+            let reference = mean(&f.read());
+            for debug_mode in [HlfsDebugMode::Unfiltered, HlfsDebugMode::Final] {
+                f.config(HlfsConfig {
+                    sample_scale: scale,
+                    samples_per_pixel: spp,
+                    debug_mode,
+                    ..Default::default()
+                });
+                f.scene.frame_count = 0;
+                let mut sum = 0.0;
+                for frame in 0..96 {
+                    f.frame();
+                    let m = mean(&f.read());
+                    if frame >= 32 {
+                        sum += m / 64.0;
+                    }
+                    if [0, 3, 15, 31, 63, 95].contains(&frame) {
+                        eprintln!("PROBE size={width}x{height} scale={scale} spp={spp} mode={debug_mode:?} frame={frame} mean={m} reference={reference}");
+                    }
+                }
+                assert!(
+                    (sum - reference).abs() / reference < 0.08,
+                    "raw/filtered energy exceeds existing 8% limit"
+                );
+                eprintln!("PROBE_AVG size={width}x{height} scale={scale} spp={spp} mode={debug_mode:?} mean={sum} reference={reference} relative_error={}",(sum-reference)/reference);
+            }
+        }
     });
-    let discovery = std::panic::catch_unwind(|| {
-        hidden_strong_light_is_discovered_after_occlusion_changes_preset(preset)
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly with --ignored"]
+fn reduced_resolution_tracks_camera_motion() {
+    use glam::{Mat4, Vec3};
+    use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode};
+    use support::*;
+    pollster::block_on(async {
+        for (width, height) in [(65, 49), (128, 96)] {
+            for spp in [2, 4] {
+                let mut f = Fixture::new(width, height).await;
+                let mut oracle = Fixture::new(width, height).await;
+                f.compact_output();
+                oracle.compact_output();
+                let lights: Vec<_> = (0..65)
+                    .map(|i| {
+                        point(
+                            [
+                                (i % 8) as f32 / 2.0 - 2.0,
+                                (i / 8) as f32 / 2.0 - 2.0,
+                                1.0 + (i % 3) as f32,
+                            ],
+                            [1.0, 0.8, 0.5],
+                            8.0 / 65.0,
+                        )
+                    })
+                    .collect();
+                f.lights(lights.clone());
+                oracle.lights(lights);
+                f.config(HlfsConfig {
+                    sample_scale: 2,
+                    samples_per_pixel: spp,
+                    ..Default::default()
+                });
+                oracle.config(HlfsConfig {
+                    debug_mode: HlfsDebugMode::Reference,
+                    ..Default::default()
+                });
+                let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+                let mut previous =
+                    proj * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+                let mut worst_mean = 0.0f32;
+                let mut worst_rmse = 0.0f32;
+                for frame in 0..64 {
+                    let x = if frame < 16 {
+                        0.0
+                    } else {
+                        ((frame - 16) as f32 * 0.1).sin() * 0.75
+                    };
+                    let position = Vec3::new(x, 0.0, 3.0);
+                    let view = Mat4::look_at_rh(position, Vec3::new(x, 0.0, 0.0), Vec3::Y);
+                    for fixture in [&mut f, &mut oracle] {
+                        fixture
+                            .scene
+                            .camera
+                            .update(libhelio::GpuCameraUniforms::new(
+                                view, proj, position, 0.1, 10.0, frame, [0.0; 2], previous,
+                            ));
+                        fixture.frame();
+                    }
+                    previous = proj * view;
+                    let actual = f.read();
+                    let reference = oracle.read();
+                    if frame >= 16 {
+                        let error = (mean(&actual) - mean(&reference)).abs() / mean(&reference);
+                        let rmse = (actual
+                            .iter()
+                            .zip(&reference)
+                            .flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| (a - b).powi(2)))
+                            .sum::<f32>()
+                            / (actual.len() * 3) as f32)
+                            .sqrt()
+                            / mean(&reference);
+                        worst_mean = worst_mean.max(error);
+                        worst_rmse = worst_rmse.max(rmse);
+                    }
+                }
+                eprintln!("MOTION size={width}x{height} spp={spp} worst_mean_error={worst_mean} worst_nrmse={worst_rmse}");
+                assert!(
+                    worst_mean < 0.08 && worst_rmse < 0.2,
+                    "moving camera exceeds existing energy/image limits"
+                );
+            }
+        }
     });
-    assert!(
-        energy.is_ok() && discovery.is_ok(),
-        "reduced-resolution preset failed promotion: energy={} discovery={}",
-        energy.is_ok(),
-        discovery.is_ok()
-    );
 }

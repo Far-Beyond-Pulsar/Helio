@@ -69,7 +69,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 confidence=0.0;
                 let prev_uv=previous_uv(pixel,s.position);
                 let valid_uv=all(prev_uv>=vec2<f32>(0.0)) && all(prev_uv<vec2<f32>(1.0));
-                let prev_pixel=vec2<i32>(prev_uv*vec2<f32>(globals.sample_size));
+                let prev_pixel=vec2<i32>(sample_position_from_uv(prev_uv));
                 let previous_z=-(globals.previous_view*vec4<f32>(s.position,1.0)).z;
                 var valid_history=false;
                 if globals.history_valid!=0u && valid_uv {
@@ -77,7 +77,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 }
                 // Stochastic bilinear tile lookup. Adjacent tiles share support at borders.
                 let tile_dims=div_ceil(globals.sample_size,TILE_SIZE);
-                let tile_f=prev_uv*vec2<f32>(globals.sample_size)/f32(TILE_SIZE)-0.5;
+                let tile_f=sample_position_from_uv(prev_uv)/f32(TILE_SIZE)-0.5;
                 let tile_jitter=vec2<f32>(stbn(gid.xy,0u),stbn(gid.xy,1u));
                 let guide_xy=vec2<u32>(clamp(floor(tile_f+tile_jitter),vec2<f32>(0.0),vec2<f32>(tile_dims-1u)));
                 let guide_tile=guide_xy.y*tile_dims.x+guide_xy.x;
@@ -145,7 +145,11 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     if v>1e-5 && hidden_fraction<1.0 { hidden_budget=min(h,v*hidden_fraction/(1.0-hidden_fraction)); }
                     let p_hidden=hidden_budget/max(v+hidden_budget,1e-20);
                     var chosen=visible_reservoir; var group_probability=1.0-p_hidden;
-                    if visible_reservoir.random_value<p_hidden { chosen=hidden_reservoir; group_probability=p_hidden; }
+                    // Repeated reservoir warps distort the finite noise-rank
+                    // distribution. Each sample needs a separate full-range
+                    // group draw, independent of the selected reservoir stratum.
+                    let group_roll=stbn(gid.xy,28u+sample);
+                    if group_roll<p_hidden { chosen=hidden_reservoir; group_probability=p_hidden; }
                     let selected=chosen.selected;
                     if selected==INVALID_LIGHT { continue; }
                     var vis=-1.0;

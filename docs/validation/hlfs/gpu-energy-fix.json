@@ -1,0 +1,1262 @@
+{
+  "date": "2026-09-08",
+  "adapter": "NVIDIA RTX 3060",
+  "backend": "Vulkan",
+  "driver": "616.64",
+  "baseline_revision": "958d76aa505b25f492c7f907bc1767efb6d0ad43",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "warmup_frames": 16,
+  "measured_frames": 40,
+  "run_order": [
+    "before",
+    "after",
+    "after-repeat",
+    "before-repeat"
+  ],
+  "stage_order": [
+    "coarse",
+    "fine",
+    "sample",
+    "temporal",
+    "spatial",
+    "composite"
+  ],
+  "scope": "Synthetic pass GPU timestamps. Serial runs with builds idle; desktop scheduling variation remains. No claim of an end-to-end or console speedup.",
+  "runs": {
+    "before": [
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 2.276,
+        "p95_ms": 4.507,
+        "stage_medians_ms": [
+          0.012288,
+          0.192512,
+          0.90112,
+          0.400384,
+          0.177152,
+          0.585728
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 17.399,
+        "p95_ms": 19.482,
+        "stage_medians_ms": [
+          0.011264,
+          0.182272,
+          12.81536,
+          2.171904,
+          1.630208,
+          0.548864
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 21.644,
+        "p95_ms": 24.064,
+        "stage_medians_ms": [
+          0.012288,
+          0.24576,
+          16.2304,
+          2.180096,
+          1.632256,
+          0.550912
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 24.149,
+        "p95_ms": 26.525,
+        "stage_medians_ms": [
+          0.047104,
+          0.128,
+          18.945024,
+          2.192384,
+          1.64352,
+          0.562176
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 1.188,
+        "p95_ms": 2.376,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.251904,
+          0.109568,
+          0.09216,
+          0.541696
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 4.553,
+        "p95_ms": 6.86,
+        "stage_medians_ms": [
+          0.012288,
+          0.18432,
+          2.822144,
+          0.570368,
+          0.425984,
+          0.540672
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 6.376,
+        "p95_ms": 9.176,
+        "stage_medians_ms": [
+          0.013312,
+          0.273408,
+          4.29056,
+          0.647168,
+          0.433152,
+          0.600064
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 6.526,
+        "p95_ms": 8.957,
+        "stage_medians_ms": [
+          0.050176,
+          0.132096,
+          4.665344,
+          0.615424,
+          0.457728,
+          0.574464
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.243,
+        "p95_ms": 1.943,
+        "stage_medians_ms": [
+          0.012288,
+          0.193536,
+          0.267264,
+          0.114688,
+          0.093184,
+          0.561152
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 6.686,
+        "p95_ms": 9.095,
+        "stage_medians_ms": [
+          0.012288,
+          0.191488,
+          4.622336,
+          0.602112,
+          0.44544,
+          0.55808
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 8.174,
+        "p95_ms": 10.114,
+        "stage_medians_ms": [
+          0.012288,
+          0.24576,
+          6.223872,
+          0.570368,
+          0.423936,
+          0.535552
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 9.802,
+        "p95_ms": 11.98,
+        "stage_medians_ms": [
+          0.047104,
+          0.126976,
+          7.862272,
+          0.57856,
+          0.42496,
+          0.55808
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.184,
+        "p95_ms": 2.366,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.251904,
+          0.109568,
+          0.09216,
+          0.535552
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 5.284,
+        "p95_ms": 6.129,
+        "stage_medians_ms": [
+          0.012288,
+          0.18432,
+          3.081216,
+          0.570368,
+          0.425984,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 6.865,
+        "p95_ms": 8.194,
+        "stage_medians_ms": [
+          0.012288,
+          0.253952,
+          4.752384,
+          0.59392,
+          0.438272,
+          0.553984
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 6.986,
+        "p95_ms": 8.068,
+        "stage_medians_ms": [
+          0.050176,
+          0.124928,
+          4.980736,
+          0.570368,
+          0.423936,
+          0.535552
+        ],
+        "allocation_bytes": 35193240
+      }
+    ],
+    "after": [
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 2.266,
+        "p95_ms": 3.463,
+        "stage_medians_ms": [
+          0.011264,
+          0.191488,
+          0.900096,
+          0.400384,
+          0.178176,
+          0.582656
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 17.621,
+        "p95_ms": 19.324,
+        "stage_medians_ms": [
+          0.011264,
+          0.182272,
+          12.932096,
+          2.203648,
+          1.629184,
+          0.54784
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 21.749,
+        "p95_ms": 23.07,
+        "stage_medians_ms": [
+          0.012288,
+          0.243712,
+          16.559104,
+          2.208768,
+          1.63328,
+          0.548864
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 24.035,
+        "p95_ms": 25.212,
+        "stage_medians_ms": [
+          0.04608,
+          0.124928,
+          18.840576,
+          2.203648,
+          1.63328,
+          0.559104
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 1.184,
+        "p95_ms": 2.298,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.251904,
+          0.109568,
+          0.09216,
+          0.539648
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 4.903,
+        "p95_ms": 6.401,
+        "stage_medians_ms": [
+          0.011264,
+          0.18432,
+          2.844672,
+          0.575488,
+          0.425984,
+          0.539648
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 6.364,
+        "p95_ms": 9.134,
+        "stage_medians_ms": [
+          0.012288,
+          0.246784,
+          4.415488,
+          0.57856,
+          0.425984,
+          0.541696
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 8.145,
+        "p95_ms": 10.138,
+        "stage_medians_ms": [
+          0.055296,
+          0.142336,
+          5.146624,
+          0.695296,
+          0.502784,
+          0.625664
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.358,
+        "p95_ms": 2.886,
+        "stage_medians_ms": [
+          0.012288,
+          0.208896,
+          0.295936,
+          0.126976,
+          0.094208,
+          0.618496
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 7.009,
+        "p95_ms": 9.724,
+        "stage_medians_ms": [
+          0.012288,
+          0.193536,
+          4.800512,
+          0.59904,
+          0.442368,
+          0.571392
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 8.673,
+        "p95_ms": 10.391,
+        "stage_medians_ms": [
+          0.013312,
+          0.244736,
+          6.614016,
+          0.574464,
+          0.422912,
+          0.53248
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 8.708,
+        "p95_ms": 11.064,
+        "stage_medians_ms": [
+          0.047104,
+          0.124928,
+          7.008256,
+          0.574464,
+          0.421888,
+          0.53248
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.179,
+        "p95_ms": 1.979,
+        "stage_medians_ms": [
+          0.011264,
+          0.1792,
+          0.25088,
+          0.109568,
+          0.093184,
+          0.531456
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 4.552,
+        "p95_ms": 7.299,
+        "stage_medians_ms": [
+          0.011264,
+          0.182272,
+          2.82624,
+          0.57344,
+          0.421888,
+          0.531456
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 6.235,
+        "p95_ms": 8.524,
+        "stage_medians_ms": [
+          0.013312,
+          0.272384,
+          4.204544,
+          0.643072,
+          0.467968,
+          0.589824
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 6.998,
+        "p95_ms": 9.519,
+        "stage_medians_ms": [
+          0.054272,
+          0.139264,
+          4.999168,
+          0.67584,
+          0.497664,
+          0.606208
+        ],
+        "allocation_bytes": 35193240
+      }
+    ],
+    "after-repeat": [
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 2.268,
+        "p95_ms": 4.025,
+        "stage_medians_ms": [
+          0.011264,
+          0.192512,
+          0.90112,
+          0.401408,
+          0.178176,
+          0.58368
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 17.408,
+        "p95_ms": 17.803,
+        "stage_medians_ms": [
+          0.011264,
+          0.182272,
+          12.577792,
+          2.193408,
+          1.624064,
+          0.549888
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 21.497,
+        "p95_ms": 23.157,
+        "stage_medians_ms": [
+          0.012288,
+          0.243712,
+          16.258048,
+          2.210816,
+          1.626112,
+          0.549888
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 25.06,
+        "p95_ms": 40.228,
+        "stage_medians_ms": [
+          0.04608,
+          0.123904,
+          18.844672,
+          3.136512,
+          1.799168,
+          0.548864
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 1.212,
+        "p95_ms": 2.287,
+        "stage_medians_ms": [
+          0.011264,
+          0.178176,
+          0.259072,
+          0.130048,
+          0.093184,
+          0.539648
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 5.425,
+        "p95_ms": 6.419,
+        "stage_medians_ms": [
+          0.011264,
+          0.181248,
+          3.2,
+          0.641024,
+          0.425984,
+          0.5376
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 6.531,
+        "p95_ms": 7.536,
+        "stage_medians_ms": [
+          0.012288,
+          0.241664,
+          4.48512,
+          0.689152,
+          0.432128,
+          0.5376
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 6.896,
+        "p95_ms": 7.611,
+        "stage_medians_ms": [
+          0.04608,
+          0.123904,
+          5.086208,
+          0.57344,
+          0.420864,
+          0.54272
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.187,
+        "p95_ms": 2.282,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.252928,
+          0.110592,
+          0.093184,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 7.161,
+        "p95_ms": 8.177,
+        "stage_medians_ms": [
+          0.011264,
+          0.183296,
+          5.239808,
+          0.709632,
+          0.41984,
+          0.533504
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 9.215,
+        "p95_ms": 10.764,
+        "stage_medians_ms": [
+          0.013312,
+          0.246784,
+          7.158784,
+          0.713728,
+          0.420864,
+          0.531456
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 10.237,
+        "p95_ms": 11.888,
+        "stage_medians_ms": [
+          0.047104,
+          0.125952,
+          8.225792,
+          0.710656,
+          0.421888,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.237,
+        "p95_ms": 2.107,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.252928,
+          0.161792,
+          0.093184,
+          0.535552
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 5.514,
+        "p95_ms": 5.936,
+        "stage_medians_ms": [
+          0.011264,
+          0.183296,
+          3.08224,
+          0.7168,
+          0.42496,
+          0.536576
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 6.787,
+        "p95_ms": 7.85,
+        "stage_medians_ms": [
+          0.012288,
+          0.246784,
+          4.284416,
+          0.723968,
+          0.429056,
+          0.544768
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 7.252,
+        "p95_ms": 7.668,
+        "stage_medians_ms": [
+          0.048128,
+          0.126976,
+          5.052416,
+          0.720896,
+          0.428032,
+          0.539648
+        ],
+        "allocation_bytes": 35193240
+      }
+    ],
+    "before-repeat": [
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 2.282,
+        "p95_ms": 3.843,
+        "stage_medians_ms": [
+          0.012288,
+          0.19456,
+          0.902144,
+          0.400384,
+          0.1792,
+          0.584704
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 17.706,
+        "p95_ms": 19.109,
+        "stage_medians_ms": [
+          0.011264,
+          0.183296,
+          12.855296,
+          2.383872,
+          1.626112,
+          0.550912
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 21.192,
+        "p95_ms": 23.432,
+        "stage_medians_ms": [
+          0.012288,
+          0.243712,
+          16.43008,
+          2.16576,
+          1.625088,
+          0.550912
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 1,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 23.338,
+        "p95_ms": 25.289,
+        "stage_medians_ms": [
+          0.04608,
+          0.123904,
+          18.811904,
+          2.162688,
+          1.625088,
+          0.553984
+        ],
+        "allocation_bytes": 109380120
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1,
+        "median_ms": 1.203,
+        "p95_ms": 1.773,
+        "stage_medians_ms": [
+          0.012288,
+          0.182272,
+          0.249856,
+          0.110592,
+          0.093184,
+          0.541696
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 8,
+        "median_ms": 4.573,
+        "p95_ms": 6.399,
+        "stage_medians_ms": [
+          0.011264,
+          0.18432,
+          2.833408,
+          0.571392,
+          0.428032,
+          0.545792
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 64,
+        "median_ms": 6.647,
+        "p95_ms": 8.63,
+        "stage_medians_ms": [
+          0.013312,
+          0.285696,
+          4.529152,
+          0.681984,
+          0.508928,
+          0.626688
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": false,
+        "lights": 1024,
+        "median_ms": 7.054,
+        "p95_ms": 77.068,
+        "stage_medians_ms": [
+          0.052224,
+          0.139264,
+          4.653056,
+          0.621568,
+          0.448512,
+          0.580608
+        ],
+        "allocation_bytes": 43487640
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.193,
+        "p95_ms": 1.667,
+        "stage_medians_ms": [
+          0.011264,
+          0.180224,
+          0.260096,
+          0.111616,
+          0.094208,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 6.085,
+        "p95_ms": 7.448,
+        "stage_medians_ms": [
+          0.012288,
+          0.18432,
+          4.349952,
+          0.574464,
+          0.428032,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 8.353,
+        "p95_ms": 9.659,
+        "stage_medians_ms": [
+          0.012288,
+          0.243712,
+          6.535168,
+          0.570368,
+          0.422912,
+          0.531456
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 4,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 8.685,
+        "p95_ms": 10.571,
+        "stage_medians_ms": [
+          0.04608,
+          0.123904,
+          6.987776,
+          0.569344,
+          0.422912,
+          0.53248
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1,
+        "median_ms": 1.182,
+        "p95_ms": 2.028,
+        "stage_medians_ms": [
+          0.011264,
+          0.178176,
+          0.251904,
+          0.111616,
+          0.093184,
+          0.535552
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 8,
+        "median_ms": 4.812,
+        "p95_ms": 6.315,
+        "stage_medians_ms": [
+          0.011264,
+          0.182272,
+          2.832384,
+          0.75776,
+          0.441344,
+          0.534528
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 64,
+        "median_ms": 6.16,
+        "p95_ms": 7.367,
+        "stage_medians_ms": [
+          0.012288,
+          0.243712,
+          3.771392,
+          0.758784,
+          0.494592,
+          0.538624
+        ],
+        "allocation_bytes": 35193240
+      },
+      {
+        "scale": 2,
+        "spp": 2,
+        "packed_output": true,
+        "lights": 1024,
+        "median_ms": 6.36,
+        "p95_ms": 7.636,
+        "stage_medians_ms": [
+          0.04608,
+          0.12288,
+          4.215808,
+          0.751616,
+          0.490496,
+          0.533504
+        ],
+        "allocation_bytes": 35193240
+      }
+    ]
+  },
+  "ablation": {
+    "baseline": [
+      "PROBE_AVG scale=1 spp=2 mode=Unfiltered mean=0.1376986 reference=0.13644959 relative_error=0.009153676",
+      "PROBE_AVG scale=1 spp=2 mode=Final mean=0.13341737 reference=0.13644959 relative_error=-0.02222229",
+      "PROBE_AVG scale=2 spp=2 mode=Unfiltered mean=0.13910341 reference=0.13644959 relative_error=0.019449104",
+      "PROBE_AVG scale=2 spp=2 mode=Final mean=0.095948115 reference=0.13644959 relative_error=-0.2968237",
+      "PROBE_AVG scale=2 spp=4 mode=Unfiltered mean=0.14916432 reference=0.13644959 relative_error=0.09318261",
+      "PROBE_AVG scale=2 spp=4 mode=Final mean=0.11022189 reference=0.13644959 relative_error=-0.1922153"
+    ],
+    "temporal_only": [
+      "PROBE_AVG scale=1 spp=2 mode=Unfiltered mean=0.1376986 reference=0.13644959 relative_error=0.009153676",
+      "PROBE_AVG scale=1 spp=2 mode=Final mean=0.13356732 reference=0.13644959 relative_error=-0.021123346",
+      "PROBE_AVG scale=2 spp=2 mode=Unfiltered mean=0.13910341 reference=0.13644959 relative_error=0.019449104",
+      "PROBE_AVG scale=2 spp=2 mode=Final mean=0.09587197 reference=0.13644959 relative_error=-0.29738176",
+      "PROBE_AVG scale=2 spp=4 mode=Unfiltered mean=0.14916432 reference=0.13644959 relative_error=0.09318261",
+      "PROBE_AVG scale=2 spp=4 mode=Final mean=0.11006394 reference=0.13644959 relative_error=-0.19337288"
+    ],
+    "coordinates_only": [
+      "PROBE_AVG scale=1 spp=2 mode=Unfiltered mean=0.1376986 reference=0.13644959 relative_error=0.009153676",
+      "PROBE_AVG scale=1 spp=2 mode=Final mean=0.13341737 reference=0.13644959 relative_error=-0.02222229",
+      "PROBE_AVG scale=2 spp=2 mode=Unfiltered mean=0.13897799 reference=0.13644959 relative_error=0.018529914",
+      "PROBE_AVG scale=2 spp=2 mode=Final mean=0.13304643 reference=0.13644959 relative_error=-0.024940765",
+      "PROBE_AVG scale=2 spp=4 mode=Unfiltered mean=0.14914918 reference=0.13644959 relative_error=0.093071654",
+      "PROBE_AVG scale=2 spp=4 mode=Final mean=0.14914806 reference=0.13644959 relative_error=0.093063466"
+    ],
+    "both_fixes": [
+      "PROBE_AVG scale=1 spp=2 mode=Unfiltered mean=0.13615893 reference=0.13644959 relative_error=-0.002130179",
+      "PROBE_AVG scale=1 spp=2 mode=Final mean=0.13616203 reference=0.13644959 relative_error=-0.002107464",
+      "PROBE_AVG scale=2 spp=2 mode=Unfiltered mean=0.13657989 reference=0.13644959 relative_error=0.0009549003",
+      "PROBE_AVG scale=2 spp=2 mode=Final mean=0.13626891 reference=0.13644959 relative_error=-0.001324127",
+      "PROBE_AVG scale=2 spp=4 mode=Unfiltered mean=0.1362688 reference=0.13644959 relative_error=-0.0013250005",
+      "PROBE_AVG scale=2 spp=4 mode=Final mean=0.13606738 reference=0.13644959 relative_error=-0.0028011429"
+    ]
+  },
+  "quality_gates": "PASS; original 8% mean and 20% image error limits unchanged",
+  "regression_summary": "14 GPU regressions pass; expanded reduced-resolution contact case also passes",
+  "energy_probes": [
+    "PROBE_AVG size=65x49 scale=1 spp=2 mode=Unfiltered mean=0.13615893 reference=0.13644959 relative_error=-0.002130179",
+    "PROBE_AVG size=65x49 scale=1 spp=2 mode=Final mean=0.13616203 reference=0.13644959 relative_error=-0.002107464",
+    "PROBE_AVG size=65x49 scale=2 spp=2 mode=Unfiltered mean=0.13657989 reference=0.13644959 relative_error=0.0009549003",
+    "PROBE_AVG size=65x49 scale=2 spp=2 mode=Final mean=0.13626891 reference=0.13644959 relative_error=-0.001324127",
+    "PROBE_AVG size=65x49 scale=2 spp=4 mode=Unfiltered mean=0.1362688 reference=0.13644959 relative_error=-0.0013250005",
+    "PROBE_AVG size=65x49 scale=2 spp=4 mode=Final mean=0.13606738 reference=0.13644959 relative_error=-0.0028011429",
+    "PROBE_AVG size=64x48 scale=2 spp=2 mode=Unfiltered mean=0.13691664 reference=0.13644351 relative_error=0.0034675652",
+    "PROBE_AVG size=64x48 scale=2 spp=2 mode=Final mean=0.13671905 reference=0.13644351 relative_error=0.0020194245",
+    "PROBE_AVG size=64x48 scale=2 spp=4 mode=Unfiltered mean=0.13625732 reference=0.13644351 relative_error=-0.0013645941",
+    "PROBE_AVG size=64x48 scale=2 spp=4 mode=Final mean=0.13621788 reference=0.13644351 relative_error=-0.0016536762"
+  ],
+  "motion": [
+    "MOTION size=65x49 spp=2 worst_mean_error=0.061644748 worst_nrmse=0.12515917",
+    "MOTION size=65x49 spp=4 worst_mean_error=0.06141307 worst_nrmse=0.12099228",
+    "MOTION size=128x96 spp=2 worst_mean_error=0.02227057 worst_nrmse=0.04906749",
+    "MOTION size=128x96 spp=4 worst_mean_error=0.021921935 worst_nrmse=0.046000767"
+  ],
+  "mixed": [
+    "mixed lights scale=1 samples=2 compact=false: relative mean error=0.001283507, normalized RMSE=0.037816428",
+    "mixed lights scale=2 samples=2 compact=false: relative mean error=0.0013794401, normalized RMSE=0.040378746",
+    "mixed lights scale=2 samples=4 compact=false: relative mean error=0.00021030691, normalized RMSE=0.026920827",
+    "mixed lights scale=2 samples=2 compact=true: relative mean error=0.010064098, normalized RMSE=0.040558808",
+    "mixed lights scale=2 samples=4 compact=true: relative mean error=0.0076447115, normalized RMSE=0.029867493"
+  ],
+  "cathedral_display_metrics": {
+    "default": [
+      {
+        "frame": 0,
+        "mean_absolute_display_error": 0.0,
+        "normalized_display_rmse": 0.0
+      },
+      {
+        "frame": 31,
+        "mean_absolute_display_error": 0.0005166973039215687,
+        "normalized_display_rmse": 0.01932013810986903
+      },
+      {
+        "frame": 63,
+        "mean_absolute_display_error": 0.0006099707244008715,
+        "normalized_display_rmse": 0.02185241885540524
+      },
+      {
+        "frame": 99,
+        "mean_absolute_display_error": 0.0006650099854756718,
+        "normalized_display_rmse": 0.02627193917321805
+      }
+    ],
+    "compact": [
+      {
+        "frame": 0,
+        "mean_absolute_display_error": 0.0,
+        "normalized_display_rmse": 0.0
+      },
+      {
+        "frame": 31,
+        "mean_absolute_display_error": 0.0009349412218591141,
+        "normalized_display_rmse": 0.0608256653907123
+      },
+      {
+        "frame": 63,
+        "mean_absolute_display_error": 0.0010587270787944807,
+        "normalized_display_rmse": 0.06296481143946232
+      },
+      {
+        "frame": 99,
+        "mean_absolute_display_error": 0.0010724400871459695,
+        "normalized_display_rmse": 0.03820639880773853
+      }
+    ],
+    "performance": [
+      {
+        "frame": 0,
+        "mean_absolute_display_error": 0.0,
+        "normalized_display_rmse": 0.0
+      },
+      {
+        "frame": 31,
+        "mean_absolute_display_error": 0.0006002121913580247,
+        "normalized_display_rmse": 0.05788006830111793
+      },
+      {
+        "frame": 63,
+        "mean_absolute_display_error": 0.0006790009985475671,
+        "normalized_display_rmse": 0.05972262774938963
+      },
+      {
+        "frame": 99,
+        "mean_absolute_display_error": 0.0006481084331880901,
+        "normalized_display_rmse": 0.031945997364828206
+      }
+    ]
+  },
+  "display_metric_scope": "Tone-mapped sRGB output in [0,1]; these are image differences, not linear HDR energy measurements.",
+  "shader_sha256": {
+    "common.wgsl": "974ecdfc96afa58265d963f86c2bccdd618710502a5e501de145623edd16968c",
+    "sample.wgsl": "884409347a220b77fce992261f12756907c6b852b972346ce99aafbc837fd437",
+    "temporal.wgsl": "2e0d9cd314977b7364f468b300aa6c25f9e9bda7dbac13595641cdb2886b8f5b",
+    "composite.wgsl": "aaaa808dfc784f7af3c689a75991d821f28ed3e74ed5778b38b343b8f5812d21"
+  }
+}

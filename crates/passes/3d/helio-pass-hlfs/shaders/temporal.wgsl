@@ -42,7 +42,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     var age=select(1.0,globals.max_history+1.0,diff.a>=1.0);
     let uv=previous_uv(full,position);
     if globals.history_valid!=0u && diff.a<1.0 && globals.debug_mode==0u && all(uv>=vec2<f32>(0.0)) && all(uv<vec2<f32>(1.0)) {
-        let old=vec2<i32>(uv*vec2<f32>(globals.sample_size));
+        let old=vec2<i32>(sample_position_from_uv(uv));
         let previous_z=-(globals.previous_view*vec4<f32>(position,1.0)).z;
         let geo=load_geometry(history_geometry,old);
         if geometry_matches(geo,normal,previous_z) {

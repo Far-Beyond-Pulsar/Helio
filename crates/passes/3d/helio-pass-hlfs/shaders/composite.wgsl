@@ -49,7 +49,7 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     } else if globals.history_valid!=0u && (globals.surface_flags&2u)!=0u {
         let uv=previous_uv(vec2<u32>(pixel),s.position);
         let previous_z=-(globals.previous_view*vec4<f32>(s.position,1.0)).z;
-        let previous_base=vec2<i32>(floor(uv*vec2<f32>(globals.sample_size)-0.5));
+        let previous_base=vec2<i32>(floor(sample_position_from_uv(uv)-0.5));
         for(var i=0u;i<4u;i++) {
             let p=previous_base+vec2<i32>(vec2<u32>(i&1u,i>>1u));
             if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }

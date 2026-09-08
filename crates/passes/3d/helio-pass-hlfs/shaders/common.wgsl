@@ -75,6 +75,11 @@ fn sample_pixel(p: vec2<u32>, frame: u32) -> vec2<u32> {
     let offset = vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;
     return min(p * globals.sample_scale + offset, globals.screen_size - 1u);
 }
+fn sample_position_from_uv(uv: vec2<f32>) -> vec2<f32> {
+    // Sample blocks have a fixed full-resolution size. Ceil-rounded texture
+    // extents must not stretch reprojection when an output dimension is odd.
+    return uv*vec2<f32>(globals.screen_size)/f32(globals.sample_scale);
+}
 fn world_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
     let uv = pixel / vec2<f32>(globals.screen_size);
     let h = cameras[0].view_proj_inv * vec4<f32>(uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0), depth, 1.0);

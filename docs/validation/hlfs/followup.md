@@ -1,5 +1,9 @@
 # Guide scoring and reduced-resolution audit
 
+Historical snapshot at `958d76aa`: the failures below are resolved by the
+[reduced-resolution energy fix](energy-fix.md). Reproduce the historical audit
+commands from that revision; the current tests enforce the corrected behavior.
+
 Measured on 2026-09-08 with RTX 3060 / Vulkan / driver 616.64 against
 `49da777f9de6a3d4366bc95c33e47b253102394b`.
 
