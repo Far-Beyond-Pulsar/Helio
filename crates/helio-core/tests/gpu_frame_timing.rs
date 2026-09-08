@@ -57,8 +57,8 @@ fn whole_frame_timestamp_spans_both_encoders_and_nested_scopes() {
         let snapshot = profiler.timing_snapshot();
         assert_eq!(snapshot.gpu_frame_index, Some(17));
         assert_eq!(snapshot.query_overflows, 0);
-        assert_eq!(snapshot.gpu_frame_ms, Some(outer as f32 / 1_000_000.0));
-        assert_eq!(snapshot.total_gpu_ms, snapshot.gpu_frame_ms);
+        assert_eq!(profiler.gpu_frame_ms(), Some(outer as f32 / 1_000_000.0));
+        assert_eq!(snapshot.total_gpu_ms, profiler.gpu_frame_ms());
         assert_eq!(
             snapshot.passes.len(),
             1,

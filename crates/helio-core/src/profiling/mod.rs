@@ -153,6 +153,7 @@ pub struct Profiler {
     gpu: GpuProfiler,
     enabled: bool,
     snapshot: RenderTimingSnapshot,
+    gpu_frame_ms: Option<f32>,
 }
 
 impl Profiler {
@@ -174,6 +175,7 @@ impl Profiler {
             gpu: GpuProfiler::new(device, queue),
             enabled: cfg!(feature = "profiling"),
             snapshot: RenderTimingSnapshot::default(),
+            gpu_frame_ms: None,
         }
     }
 
@@ -358,12 +360,11 @@ impl Profiler {
             });
         }
         self.snapshot.total_cpu_ms = has_cpu.then_some(total_cpu_ms);
-        self.snapshot.gpu_frame_ms = gpu_timings
+        self.gpu_frame_ms = gpu_timings
             .iter()
             .find(|t| t.name == "__graph_frame")
             .map(|t| t.duration_ns as f32 / 1_000_000.0);
         self.snapshot.total_gpu_ms = self
-            .snapshot
             .gpu_frame_ms
             .or_else(|| has_gpu.then_some(total_gpu_ms));
     }
@@ -371,6 +372,14 @@ impl Profiler {
     /// Returns the latest snapshot without allocation or synchronization.
     pub const fn timing_snapshot(&self) -> &RenderTimingSnapshot {
         &self.snapshot
+    }
+
+    /// Complete compute-plus-graphics GPU span for the latest timing sample.
+    /// Excludes CPU work, presentation and host capture readback. `None` means
+    /// no completed whole-graph scope is available; the public snapshot's total
+    /// may still contain the legacy sum of per-pass compute timings.
+    pub const fn gpu_frame_ms(&self) -> Option<f32> {
+        self.gpu_frame_ms
     }
 
     /// Print profiling results to console (blocking - use for debugging only!)
@@ -536,10 +545,6 @@ pub struct RenderTimingSnapshot {
     pub total_cpu_ms: Option<f32>,
     /// Complete graph GPU span when available, otherwise legacy pass sum.
     pub total_gpu_ms: Option<f32>,
-    /// GPU elapsed time spanning compute and graphics command buffers. Excludes
-    /// CPU work, presentation and host capture readback. Individual legacy pass
-    /// markers still cover only compute-encoder commands.
-    pub gpu_frame_ms: Option<f32>,
     pub readback_drops: u64,
     pub query_overflows: u64,
     pub passes: Vec<RenderPassTiming>,
