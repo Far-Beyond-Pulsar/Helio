@@ -491,6 +491,13 @@ impl Renderer {
         self.graph.profiler().timing_snapshot()
     }
 
+    /// GPU time across the graph's compute and graphics work, excluding CPU
+    /// work and presentation. Unlike a legacy per-pass sum, this is `None`
+    /// until a completed whole-graph timing scope is available.
+    pub fn gpu_frame_ms(&self) -> Option<f32> {
+        self.graph.profiler().gpu_frame_ms()
+    }
+
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.scene.mesh_buffers()
     }

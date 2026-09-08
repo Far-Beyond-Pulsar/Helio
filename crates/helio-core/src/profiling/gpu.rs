@@ -218,7 +218,8 @@ impl GpuProfiler {
     ///
     /// # Performance
     ///
-    /// - **O(1)**: Writes a single GPU command (~10ns)
+    /// - Searches at most the fixed query capacity to match an unfinished scope,
+    ///   then writes one GPU timestamp command.
     ///
     /// # Example (Internal)
     ///
@@ -268,22 +269,25 @@ impl GpuProfiler {
     /// profiler.end_pass(&mut encoder, "ShadowPass");
     /// # }
     /// ```
-    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, _name: &'static str) {
+    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
-            let Some((_, _, end_index)) = self.pending_queries.back() else {
-                return;
-            };
-            if *end_index != 0 || self.next_index >= QUERY_CAPACITY {
+            if self.next_index >= QUERY_CAPACITY {
                 return;
             }
+            // Match an unfinished scope by name so a whole-frame scope can
+            // surround individual passes across both command encoders.
+            let Some(scope) = self
+                .pending_queries
+                .iter_mut()
+                .rev()
+                .find(|(scope_name, _, end)| *scope_name == name && *end == 0)
+            else {
+                return;
+            };
             let end_index = self.next_index;
             self.next_index += 1;
             encoder.write_timestamp(query_set, end_index);
-
-            // Update the last pending query with end index
-            if let Some(last) = self.pending_queries.back_mut() {
-                last.2 = end_index;
-            }
+            scope.2 = end_index;
         }
     }
 
