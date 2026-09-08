@@ -12,14 +12,7 @@ use crate::scene::Camera;
 use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
-fn r1_r2_jitter(frame: u64) -> [f32; 2] {
-    const INV_R1: f64 = 0.7548776662466927;
-    const INV_R2: f64 = 0.5698402905980539;
-    const PHASE: f64 = 0.5;
-    let fx = frame as f64 * INV_R1 + PHASE;
-    let fy = frame as f64 * INV_R2 + PHASE;
-    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
-}
+use libhelio::temporal::r1_r2_jitter;
 
 /// Fullscreen-triangle shader for the PC mirror: samples the XR swapchain's
 /// 2-layer array texture and draws eye 0 on the left half, eye 1 on the right.
@@ -165,18 +158,20 @@ impl Renderer {
             .as_secs_f32()
             .min(0.1);
         self.last_render_time = now;
-        self.delta_time = dt;
+        self.delta_time = self.frame_delta_override.unwrap_or(dt);
         self.frame_times[self.frame_times_cursor] = dt;
         self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
-        self.graph.set_delta_time(dt);
+        self.graph.set_delta_time(self.delta_time);
 
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
 
         let frame_idx = self.scene.gpu_scene().frame_count;
-        let (jitter_mat, jx, jy) = if self.enable_jitter {
+        let (jitter_mat, jx, jy) = if self.enable_jitter || self.camera_jitter_override.is_some() {
             // Use R1/R2 plastic-ratio jitter to match TAA and TSR passes.
-            let jitter = r1_r2_jitter(frame_idx);
+            let jitter = self
+                .camera_jitter_override
+                .unwrap_or_else(|| r1_r2_jitter(frame_idx));
             let jx = jitter[0] * 2.0 / (internal_w as f32);
             let jy = jitter[1] * 2.0 / (internal_h as f32);
             let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));

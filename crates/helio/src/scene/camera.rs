@@ -37,7 +37,7 @@ pub struct Camera {
     /// View matrix (world-to-camera transform, right-handed).
     pub view: Mat4,
 
-    /// Projection matrix (camera-to-clip transform, reversed-Z).
+    /// Projection matrix. The default constructor uses forward [0,1] depth.
     pub proj: Mat4,
 
     /// Camera position in world space (used for distance calculations, skybox, etc.).
@@ -128,6 +128,15 @@ impl Camera {
 }
 
 impl Scene {
+    /// Re-express retained camera history after the host changes its floating
+    /// origin. Call once before rendering the next camera, with new minus old
+    /// origin. This does not move scene objects: the host must express their
+    /// current and previous transforms in the same new local coordinates.
+    pub fn rebase_camera_history(&mut self, origin_shift: glam::DVec3) {
+        self.prev_view_proj =
+            libhelio::temporal::rebase_previous_projection(self.prev_view_proj, origin_shift);
+    }
+
     /// Update the scene's camera for the current frame.
     ///
     /// Computes camera uniforms and uploads them to the GPU. Also stores the

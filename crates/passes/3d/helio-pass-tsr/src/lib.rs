@@ -54,18 +54,8 @@ struct VertexOut {
 }
 ";
 
-// ── R1/R2 low-discrepancy jitter ──────────────────────────────────────────────
-
-/// R1/R2 low-discrepancy jitter — same sub-pixel sequence as `TaaPass` so
-/// coverage is coherent between the two passes.
-fn r1_r2_jitter(frame: u64) -> [f32; 2] {
-    const INV_R1: f64 = 0.7548776662466927;
-    const INV_R2: f64 = 0.5698402905980539;
-    const PHASE: f64 = 0.5;
-    let fx = frame as f64 * INV_R1 + PHASE;
-    let fy = frame as f64 * INV_R2 + PHASE;
-    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
-}
+#[cfg(test)]
+mod camera_sampling_tests;
 
 // ── Quality presets ───────────────────────────────────────────────────────────
 
@@ -560,7 +550,13 @@ impl RenderPass for TsrPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let jitter = r1_r2_jitter(ctx.frame_num);
+        // The camera is the sample authority. Reconstructing a separate
+        // sequence here breaks manual offsets and externally owned frame clocks.
+        let ndc = ctx.scene.camera.data().jitter_frame;
+        let jitter = [
+            ndc[0] * ctx.width as f32 * 0.5,
+            ndc[1] * ctx.height as f32 * 0.5,
+        ];
         let reset = if self.first_frame {
             self.first_frame = false;
             1u32
