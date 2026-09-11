@@ -1,10 +1,12 @@
-# Pass isolation specification
+# Helio 3.0 specification
 
-Status: architecture specification, 2026-09-11. Defines a binding rule for `helio-core` and
-`libhelio` going forward, plus the full pass-facing API (current and proposed) that makes the
-rule enforceable rather than aspirational. Supersedes no prior doc — this is the specification
-version of the plan discussed in the dynamic-rendering-executor design thread; that thread's
-phase numbering is kept so the two documents cross-reference cleanly.
+Status: architecture specification, 2026-09-11. Defines the binding rules for `helio-core` and
+`libhelio` going forward — pass isolation and the render/scene resource boundary — plus the full
+pass-facing API (current and proposed) that makes those rules enforceable rather than
+aspirational, and the production-grade requirements the 3.0 line must meet. Supersedes no prior
+doc — this is the specification version of the plan discussed in the dynamic-rendering-executor
+design thread; that thread's phase numbering is kept so the two documents cross-reference
+cleanly.
 
 Revised same day: §13–14 added after an explicit review of whether this spec's API-hygiene work
 alone reaches top-tier renderer quality. It does not, on its own — §13 adds four verified,
