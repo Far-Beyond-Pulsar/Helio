@@ -20,6 +20,7 @@ pub(crate) struct ResourceLifetime {
 impl RenderGraph {
     pub(crate) fn collect_declarations(&mut self) {
         self.resources.clear();
+        self.resource_groups.clear();
         let mut builders: Vec<ResourceBuilder> = (0..self.passes.len())
             .map(|_| ResourceBuilder::new())
             .collect();
@@ -33,6 +34,30 @@ impl RenderGraph {
     }
 
     pub(crate) fn build_resource_lifetimes(&mut self, builders: &[ResourceBuilder]) {
+        // Record `write_group` membership in declaration order — a plain
+        // `Vec` built by walking `builders` (deterministic), not the
+        // `self.resources` hash map (iteration order is unspecified) — so
+        // `allocate_textures()` can later combine each group's writes into
+        // one `PrePassAction::Group` with members in the order the pass
+        // declared them, for any arity, without pattern-matching names.
+        self.resource_groups.clear();
+        for (i, builder) in builders.iter().enumerate() {
+            for d in builder.declarations() {
+                if d.access != crate::graph::ResourceAccess::Write {
+                    continue;
+                }
+                let Some(group) = d.group else { continue };
+                match self
+                    .resource_groups
+                    .iter_mut()
+                    .find(|(pi, g, _)| *pi == i && *g == group)
+                {
+                    Some((_, _, members)) => members.push(d.name),
+                    None => self.resource_groups.push((i, group, vec![d.name])),
+                }
+            }
+        }
+
         #[derive(Clone)]
         struct DeclWrite {
             name: String,
@@ -173,55 +198,30 @@ impl RenderGraph {
             }
         }
 
-        for pi in 0..actions.len() {
-            let mut albedo_idx = None;
-            let mut normal_idx = None;
-            let mut orm_idx = None;
-            let mut emissive_idx = None;
-
-            for (j, action) in actions[pi].iter().enumerate() {
-                if let PrePassAction::Route { name, .. } = action {
-                    match name.as_str() {
-                        "gbuffer_albedo" => albedo_idx = Some(j),
-                        "gbuffer_normal" => normal_idx = Some(j),
-                        "gbuffer_orm" => orm_idx = Some(j),
-                        "gbuffer_emissive" => emissive_idx = Some(j),
-                        _ => {}
-                    }
+        // Combine each declared `write_group`'s individual `Route` entries
+        // into one `PrePassAction::Group`, generically over the group's name
+        // and arity — not a scan for specific string literals. Any pass that
+        // calls `write_group` gets this for free.
+        for (pi, group_name, member_names) in &self.resource_groups {
+            let pi = *pi;
+            if pi >= actions.len() {
+                continue;
+            }
+            let mut members = Vec::with_capacity(member_names.len());
+            for &member_name in member_names {
+                let Some(idx) = actions[pi].iter().position(|a| {
+                    matches!(a, PrePassAction::Route { name, .. } if name == member_name)
+                }) else {
+                    continue;
+                };
+                if let PrePassAction::Route { view, .. } = actions[pi].remove(idx) {
+                    members.push((member_name, view));
                 }
             }
-
-            if let (Some(a), Some(n), Some(o), Some(e)) =
-                (albedo_idx, normal_idx, orm_idx, emissive_idx)
-            {
-                let albedo_v = match &actions[pi][a] {
-                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
-                    _ => unreachable!(),
-                };
-                let normal_v = match &actions[pi][n] {
-                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
-                    _ => unreachable!(),
-                };
-                let orm_v = match &actions[pi][o] {
-                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
-                    _ => unreachable!(),
-                };
-                let emissive_v = match &actions[pi][e] {
-                    PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view),
-                    _ => unreachable!(),
-                };
-
-                let mut indices = vec![a, n, o, e];
-                indices.sort_by(|a, b| b.cmp(a));
-                for idx in indices {
-                    actions[pi].remove(idx);
-                }
-
-                actions[pi].push(PrePassAction::Gbuffer {
-                    albedo: albedo_v,
-                    normal: normal_v,
-                    orm: orm_v,
-                    emissive: emissive_v,
+            if !members.is_empty() {
+                actions[pi].push(PrePassAction::Group {
+                    name: *group_name,
+                    members,
                 });
             }
         }

@@ -388,6 +388,44 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
+    /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
+    /// pass's own compound `FrameResources` field.
+    ///
+    /// The executor calls this once per `write_group` this pass declared,
+    /// resolved to concrete views in declaration order — both once during
+    /// [`RenderGraph::lock`](crate::graph::RenderGraph::lock)'s attachment
+    /// probe, and once per real frame, in both cases *before* this pass's own
+    /// `render_pass_descriptor_with_pool`/`execute` runs (mirroring where a
+    /// pass's own bundle has always become available to it). This is
+    /// deliberately a separate, earlier hook than [`publish`](Self::publish)
+    /// (which runs after `execute`, once the pass has produced its output):
+    /// a pass whose own `render_pass_descriptor` reads back its own bundle to
+    /// build its attachments (as `GBufferPass` does) needs it populated
+    /// beforehand, not after.
+    ///
+    /// The core resolves `write_group` declarations generically — it has no
+    /// notion of what a given group's views mean, only the owning pass does.
+    /// This is how that pass turns them into a named, stable contract (e.g.
+    /// `FrameResources::gbuffer`) for downstream readers, without the core
+    /// ever pattern-matching the group's name. `views` matches the
+    /// declaration order of the `write_group` call's `members` array.
+    ///
+    /// Default no-op — override only if you declared `write_group`.
+    ///
+    /// Deliberately `&self` rather than `&'a self` (unlike
+    /// [`publish`](Self::publish)): `views` and `frame` borrow from the
+    /// executor's resolved textures, not from this pass's own fields, so
+    /// tying the pass borrow's lifetime to `'a` would force it to outlive
+    /// `frame` — which conflicts with `execute(&mut self, ..)` running later
+    /// in the same frame.
+    fn publish_group<'a>(
+        &self,
+        _group_name: &'static str,
+        _views: &[&'a wgpu::TextureView],
+        _frame: &mut libhelio::FrameResources<'a>,
+    ) {
+    }
+
     /// Build a reusable render bundle for passes that require no per-frame CPU work.
     ///
     /// If the pass can record all GPU draw commands in advance, return `Some(bundle)`.

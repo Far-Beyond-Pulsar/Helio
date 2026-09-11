@@ -29,7 +29,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
-use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
@@ -237,30 +237,24 @@ impl RenderPass for GBufferPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw(
-            "gbuffer_albedo",
-            wgpu::TextureFormat::Rgba8Unorm,
+        // The 4 bundled G-buffer targets consumed together downstream as one
+        // `Tracked<GBufferViews>` (see `publish_group` below) — declared as a
+        // single named group so the generic allocator combines them itself,
+        // rather than as 4 independent `write_color_raw` calls. See
+        // `docs/helio_3_0_spec.md` §5.
+        builder.write_group(
+            "gbuffer",
+            [
+                ("gbuffer_albedo", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_normal", ResourceFormat::Rgba16Float),
+                ("gbuffer_orm", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_emissive", ResourceFormat::Rgba16Float),
+            ],
             ResourceSize::MatchSurface,
         );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_normal",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_orm",
-            wgpu::TextureFormat::Rgba8Unorm,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_emissive",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.with_group_extra_usage("gbuffer", wgpu::TextureUsages::STORAGE_BINDING);
+        // The remaining 4 G-buffer targets are each read independently
+        // downstream (no bundling) — plain single-view declarations.
         builder.write_color_raw(
             "gbuffer_lightmap_uv",
             wgpu::TextureFormat::Rg16Float,
@@ -284,6 +278,31 @@ impl RenderPass for GBufferPass {
     }
 
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+
+    fn publish_group<'a>(
+        &self,
+        group_name: &'static str,
+        views: &[&'a wgpu::TextureView],
+        frame: &mut libhelio::FrameResources<'a>,
+    ) {
+        // Turns the generically-resolved "gbuffer" write_group into the
+        // stable bundled contract downstream passes (DeferredLight, SSAO,
+        // SSR, VirtualGeometry, …) read as `frame.gbuffer`. Order matches
+        // the `write_group` call in `declare_resources` above.
+        if group_name == "gbuffer" {
+            if let [albedo, normal, orm, emissive] = *views {
+                frame.gbuffer.write(
+                    libhelio::GBufferViews {
+                        albedo,
+                        normal,
+                        orm,
+                        emissive,
+                    },
+                    "GBufferPass",
+                );
+            }
+        }
+    }
 
     fn render_pass_descriptor<'a>(
         &'a self,

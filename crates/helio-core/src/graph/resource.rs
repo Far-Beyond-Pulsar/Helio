@@ -115,6 +115,12 @@ pub struct ResourceDecl {
     pub layers: u32,
     /// Extra texture usage flags beyond RENDER_ATTACHMENT | TEXTURE_BINDING.
     pub extra_usage: wgpu::TextureUsages,
+    /// Compound-resource tag set by [`ResourceBuilder::write_group`]. Two
+    /// write declarations from the same pass sharing a `group` are resolved
+    /// together into one `PrePassAction::Group` by the allocator, generically
+    /// over arity — see `docs/helio_3_0_spec.md` §5. `None` for every
+    /// ordinary single-view declaration.
+    pub group: Option<&'static str>,
 }
 
 /// Resource dependency builder — used in `RenderPass::declare_resources()`.
@@ -138,11 +144,20 @@ impl ResourceBuilder {
             access: ResourceAccess::Read,
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
+            group: None,
         });
     }
 
-    /// Write a color texture. The graph creates and owns this texture.
-    pub fn write_color(&mut self, name: &'static str, format: ResourceFormat, size: ResourceSize) {
+    /// Shared push path for every single-view write declaration — reused by
+    /// `write_color` and `write_group` so neither duplicates `ResourceDecl`
+    /// construction.
+    fn push_write(
+        &mut self,
+        name: &'static str,
+        format: ResourceFormat,
+        size: ResourceSize,
+        group: Option<&'static str>,
+    ) {
         self.declarations.push(ResourceDecl {
             name,
             format: Some(format),
@@ -150,7 +165,47 @@ impl ResourceBuilder {
             access: ResourceAccess::Write,
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
+            group,
         });
+    }
+
+    /// Write a color texture. The graph creates and owns this texture.
+    pub fn write_color(&mut self, name: &'static str, format: ResourceFormat, size: ResourceSize) {
+        self.push_write(name, format, size, None);
+    }
+
+    /// Declares a named group of `N` color views produced and consumed as one
+    /// unit (e.g. GBuffer's albedo/normal/orm/emissive bundle). The allocator
+    /// groups these by declaration — not by pattern-matching exact string
+    /// suffixes — so any future compound resource gets the same handling with
+    /// no new code in `resource_lifetime.rs`. See `docs/helio_3_0_spec.md` §5.
+    pub fn write_group<const N: usize>(
+        &mut self,
+        group_name: &'static str,
+        members: [(&'static str, ResourceFormat); N],
+        size: ResourceSize,
+    ) {
+        for (name, format) in members {
+            self.push_write(name, format, size, Some(group_name));
+        }
+    }
+
+    /// Add extra usage flags to every declaration tagged with `group_name`
+    /// (i.e. every member pushed by a prior [`write_group`](Self::write_group)
+    /// call for that name). Generic counterpart to
+    /// [`with_extra_usage`](Self::with_extra_usage), which only touches the
+    /// single most-recently-added declaration.
+    pub fn with_group_extra_usage(
+        &mut self,
+        group_name: &'static str,
+        usage: wgpu::TextureUsages,
+    ) -> &mut Self {
+        for decl in self.declarations.iter_mut() {
+            if decl.group == Some(group_name) {
+                decl.extra_usage = usage;
+            }
+        }
+        self
     }
 
     /// Write a depth texture.
@@ -194,6 +249,7 @@ impl ResourceBuilder {
             access: ResourceAccess::Write,
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
+            group: None,
         });
     }
 

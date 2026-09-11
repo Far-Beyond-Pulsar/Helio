@@ -2,7 +2,6 @@ use crate::graph::executor::{format_bpp, format_name};
 use crate::graph::resource::GraphTexturePool;
 use crate::graph::PipelineFormatCache;
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
-use libhelio::GBufferViews;
 use std::any::TypeId;
 use std::collections::HashMap;
 
@@ -21,6 +20,12 @@ pub struct RenderGraph {
     /// "zero locks in the render path" guarantee.
     pub(crate) pipeline_cache: PipelineFormatCache,
     pub(crate) resources: HashMap<String, ResourceLifetime>,
+    /// `write_group` membership in declaration order: `(owning_pass_index,
+    /// group_name, member_names_in_declared_order)`. A plain `Vec`, not a
+    /// hash map, so member order is deterministic regardless of `resources`'
+    /// iteration order. Rebuilt every `collect_declarations()`. See
+    /// `docs/helio_3_0_spec.md` §5.
+    pub(crate) resource_groups: Vec<(usize, &'static str, Vec<&'static str>)>,
     pub(crate) pre_pass_actions: Vec<Vec<PrePassAction>>,
     pub(crate) device: std::sync::Arc<wgpu::Device>,
     pub(crate) internal_w: u32,
@@ -67,6 +72,7 @@ impl RenderGraph {
             pool: GraphTexturePool::new(),
             pipeline_cache: PipelineFormatCache::new(),
             resources: HashMap::new(),
+            resource_groups: Vec::new(),
             pre_pass_actions: Vec::new(),
             device: device.clone(),
             internal_w: 0,
@@ -556,21 +562,17 @@ impl RenderGraph {
                         PrePassAction::Route { name, view } => {
                             route_named_texture(name, view, &mut visible_frame_resources);
                         }
-                        PrePassAction::Gbuffer {
-                            albedo,
-                            normal,
-                            orm,
-                            emissive,
-                        } => {
-                            visible_frame_resources.gbuffer.write(
-                                GBufferViews {
-                                    albedo,
-                                    normal,
-                                    orm,
-                                    emissive,
-                                },
-                                "Graph",
-                            );
+                        PrePassAction::Group { name, members } => {
+                            // Generic: the core resolves a `write_group`'s
+                            // members to concrete views but has no notion of
+                            // what they mean — only the owning pass (this
+                            // pass, since `Group` actions are always stored
+                            // at their group's first-write pass index) knows
+                            // how to publish them into its own bespoke
+                            // `FrameResources` field (e.g. `.gbuffer`).
+                            let views: Vec<&wgpu::TextureView> =
+                                members.iter().map(|(_, v)| v).collect();
+                            pass.publish_group(*name, &views, &mut visible_frame_resources);
                         }
                     }
                 }
@@ -821,28 +823,28 @@ impl RenderGraph {
         // Phase 1: first texture allocation (no alias groups).
         self.allocate_textures();
 
+        // Build a "canon" `FrameResources` for the attachment probe below by
+        // replaying the exact same pre-pass routing the real per-frame loop
+        // performs (see `execute_with_frame_resources`), generically: plain
+        // named routes via `route_named_texture`, and any `write_group`
+        // bundle via the owning pass's `publish_group` — core never
+        // special-cases a specific group's name here.
         let mut canon = libhelio::FrameResources::empty();
-        for (name, _) in &self.resources {
-            if let Some(view) = self.pool.get_view(name) {
-                route_named_texture(name, view, &mut canon);
-            }
-        }
-        if canon.gbuffer.get().is_none() {
-            if let (Some(a), Some(n), Some(o), Some(e)) = (
-                self.pool.get_view("gbuffer_albedo"),
-                self.pool.get_view("gbuffer_normal"),
-                self.pool.get_view("gbuffer_orm"),
-                self.pool.get_view("gbuffer_emissive"),
-            ) {
-                canon.gbuffer.write(
-                    libhelio::GBufferViews {
-                        albedo: a,
-                        normal: n,
-                        orm: o,
-                        emissive: e,
-                    },
-                    "Graph",
-                );
+        for (pi, actions) in self.pre_pass_actions.iter().enumerate() {
+            let Some(pass) = self.passes.get(pi) else {
+                continue;
+            };
+            for action in actions {
+                match action {
+                    PrePassAction::Route { name, view } => {
+                        route_named_texture(name, view, &mut canon);
+                    }
+                    PrePassAction::Group { name, members } => {
+                        let views: Vec<&wgpu::TextureView> =
+                            members.iter().map(|(_, v)| v).collect();
+                        pass.publish_group(*name, &views, &mut canon);
+                    }
+                }
             }
         }
 
@@ -1172,7 +1174,6 @@ fn route_named_texture<'a>(
         "ssr_trace" => frame.ssr_trace.write(view, "Graph"),
         "planar_reflection" => frame.planar_reflection.write(view, "Graph"),
         "ies_textures" => frame.ies_textures.write(view, "Graph"),
-        "gbuffer_albedo" | "gbuffer_normal" | "gbuffer_orm" | "gbuffer_emissive" => {}
         _ => {}
     }
 }

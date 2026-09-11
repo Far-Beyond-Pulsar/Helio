@@ -17,11 +17,16 @@ pub(crate) enum PrePassAction {
         name: String,
         view: wgpu::TextureView,
     },
-    Gbuffer {
-        albedo: wgpu::TextureView,
-        normal: wgpu::TextureView,
-        orm: wgpu::TextureView,
-        emissive: wgpu::TextureView,
+    /// A `write_group` declaration's members, resolved to concrete views and
+    /// combined into one action — order-preserving, matching declaration
+    /// order. Arity-generic: covers GBuffer's 4-view bundle today and any
+    /// future compound resource with zero new code here (see
+    /// `docs/helio_3_0_spec.md` §5). The core never interprets `name` or
+    /// `members`; it only hands them to the owning pass's
+    /// `RenderPass::publish_group`.
+    Group {
+        name: &'static str,
+        members: Vec<(&'static str, wgpu::TextureView)>,
     },
 }
 
