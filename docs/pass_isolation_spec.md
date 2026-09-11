@@ -44,7 +44,30 @@ CI check that fails the build if a banned pattern reappears.
 | `helio-default-graphs` | Composes predefined graphs (forward, deferred, editor, …) out of pass crates | Only pass *construction and ordering* — never a pass's internal resource names, types, or behavior |
 | `helio` | Host-facing `Renderer`, config, public API surface | Only what the host needs to drive the graph generically (camera, resize, editor-mode) — never a specific pass's resource names |
 
-### 1.2 Why this is stricter than "avoid special cases"
+### 1.2 A second, orthogonal rule: render resources vs. scene resources
+
+§1's rule governs *pass-identity* leakage into core crates. There is a second, independent
+boundary this spec also enforces, and it applies one level up — to `helio` (the host `Renderer`)
+as well as `helio-core`/`libhelio`:
+
+> **No crate in the Helio workspace may be a second authority for scene content.** Anything with
+> authoring identity or persistence — a light, a mesh instance, a foliage placement, a water
+> volume, a billboard, a particle emitter, a portal — is a `pulsar_scenedb::World` component,
+> registered through `helio-component`, full stop. What a pass, `PassContext`, or the executor
+> may hold is a **borrowed GPU-handle projection** of that SceneDB-owned data for the current
+> frame — a `&wgpu::Buffer` or `&wgpu::TextureView` reference — never a second CPU-side copy with
+> its own lifecycle, and never something written by calling a `Renderer` method that stores it in
+> a `Vec` the renderer itself owns.
+
+This is not a new principle invented for this spec — it is the host workspace's existing
+non-negotiable rule for scene ownership ("the renderer must not share or lock the CPU scene
+world... no parallel metadata scene database may remain in production," from that workspace's
+own `.agents/SCENEDB_MIGRATION.md` — outside this repository, so not linked here since this doc
+also lives in Helio's own standalone repo), which that rule already enforces at the editor/engine
+layer. §15 audits the same failure mode inside Helio itself, where it had not yet been checked
+against.
+
+### 1.3 Why this is stricter than "avoid special cases"
 
 The audit behind this spec (see §2) found the core already violates the rule in three
 independent places, all for the same underlying reason: the core's resource contract
@@ -413,7 +436,7 @@ Reusing the numbering from the prior planning discussion so the two documents tr
 | 7 | `pass_isolation.rs` CI check (§9, item 2) | Ship alongside Phase 3, once the denylist has something real to check against |
 
 Each phase ships and is tested independently; no phase requires any other phase to be in flight
-simultaneously, and every phase preserves every currently-shipped pass unchanged (per §1.2's
+simultaneously, and every phase preserves every currently-shipped pass unchanged (per §1.3's
 "required = zero core edits" rule applying retroactively to existing passes too — none of them
 are forced to migrate off `FrameResources`/`reads()`/`writes()` on any timeline this spec sets).
 
@@ -670,5 +693,77 @@ first and may be worked in parallel with them.
 | 9 | Parallel command recording (§13.1) | Not started — **P0**, depends on Phase 4 (declarative recipes) for its pipeline-cache-safety precondition |
 | 10 | Persistent + pre-warmed pipeline cache (§13.3) | Not started — **P0**, depends on Phase 4 |
 | 11 | In-engine graph inspector on `wgpui-component` (§13.5) | Not started — P1 |
+| 12 | Delete `helio-core::component::ComponentRegistry` (§15.1) | Not started — **P0**, zero behavior change, pure dead-code removal |
+| 13 | Register `BillboardComponent`/`CoronaEmitterComponent` in `helio-component`; migrate `vg` to an existing or new typed component; thin `render.rs`'s ad hoc `Vec` state down to a GPU-handle projection (§15.2) | Not started — P1, unblocks by Phase 1 landing first (§15.3) |
 
 §13.4 is a documented ceiling, not a phase — there is nothing to schedule.
+
+---
+
+## 15. Render/scene boundary audit (§1.2)
+
+### 15.1 `helio-core::component::ComponentRegistry` — dead, and a standing invitation to regress
+
+**Verified.** `ComponentRegistry` ([component.rs](../crates/helio-core/src/component.rs)) is a
+TypeId-keyed, type-erased `Vec<T>` store, constructed empty by `GpuScene::new`
+(`components: ComponentRegistry::new()`), exposed read-only via `PassContext.components` and
+mutably via `GpuScene::components_mut()`. Its own doc comment calls it "the new Entity-Component
+system." Grepping every crate in this workspace for a call to `.register::<T>()` on it returns
+**zero results outside its own definition and construction site** — no pass, no host code,
+nothing anywhere populates it with a single component type. It is unused.
+
+Its problem is not the wasted bytes; it is that it sits inside a core crate as a second,
+generic-looking ECS primitive, which makes it exactly the kind of thing a future contributor
+reaches for instead of registering a proper `pulsar_scenedb::World` component — the same
+"parallel scene database" failure mode `.agents/SCENEDB_MIGRATION.md` is actively fighting
+elsewhere in this codebase, just not yet noticed inside Helio itself.
+
+**Requirement.** Delete `ComponentRegistry`, `Component`, `ComponentVec`, and the
+`components`/`components_mut()` fields/methods on `GpuScene` and `PassContext`. Zero behavior
+change — nothing reads it — so this is unconditional, not staged behind any other phase.
+
+### 15.2 Billboards, corona emitters, and virtual-geometry data are a second scene authority
+
+**Verified.** `Renderer` owns `billboard_scratch: Vec<BillboardInstance>` and
+`corona_emitters: Vec<libhelio::GpuCoronaEmitter>` directly
+([renderer_impl.rs:106,113](../crates/helio/src/renderer/renderer_impl.rs)), populated by
+whatever public `Renderer` methods the host app calls, and packed into `FrameResources` by hand
+every frame ([render.rs:507,518](../crates/helio/src/renderer/render.rs)). `vg_frame_data()`
+follows the same shape via `self.scene`. None of the three ever touches `pulsar_scenedb::World`.
+Contrast with `helio-component`, which already has typed, GPU-mirrored, SceneDB-registered
+components for eleven other scene domains (light, static mesh, foliage, water volume, portal,
+reflection capture, post-process volume, planet terrain, LOD, material override, script) — and
+with `MainSceneResources`'s mesh/material buffers, which *are* already correct under §1.2: plain
+borrowed handles into SceneDB's own `VarLenGpuPool`, not a second copy.
+
+Billboards, corona emitters, and virtual-geometry instance data are the only three scene-content
+types in Helio that skipped SceneDB registration — which is not a coincidence: they are also
+exactly the three names hardcoded in `validate_dependencies` (V3, §2). V3 is not purely an
+API-hygiene bug; it is the symptom of these three not having a proper component-backed source to
+declare as external in the first place.
+
+**Requirement.**
+
+1. Register `BillboardComponent` and `CoronaEmitterComponent` in `helio-component` following the
+   existing pattern (`#[derive(SceneStore)]`, `#[gpu]`-mirrored fields), and fold
+   virtual-geometry instance data into an existing typed component (most likely alongside
+   `StaticMeshComponent`/LOD, since VG is a mesh-rendering strategy, not a distinct scene-object
+   kind) or a new one if the domains genuinely don't fit.
+2. Migrate `render.rs`'s hand-packed `.billboards.write(...)`/`.corona_emitters.write(...)`/
+   `.vg.write(...)` calls to read the resulting GPU-mirrored buffers the same way
+   `MainSceneResources`'s mesh buffers already do — a borrowed handle, not a host-side `Vec`
+   the renderer maintains itself.
+3. `Renderer::billboard_scratch`/`corona_emitters` and their public `add_billboard`/
+   `add_corona_emitter`-style mutators are removed once every caller goes through the SceneDB
+   component API instead.
+
+### 15.3 Relationship to Phase 1
+
+`declare_external_input` (§6, Phase 1) is not superseded by this — it is the validator-side fix,
+independent of where a resource's value ultimately comes from, and a resource genuinely supplied
+once per frame by a SceneDB-integration layer (rather than by any pass in the graph) is a
+legitimate use of it regardless of whether that layer is today's ad hoc `Renderer` state or
+tomorrow's proper component query. Phase 1 ships first, unchanged by this section; Phase 13
+(§15.2) is what eventually shrinks the *set* of things Phase 1's mechanism needs to register, as
+`billboards`/`corona_emitters`/`vg` stop being external-to-the-graph host state and become
+ordinary SceneDB-component-backed buffer projections instead.
