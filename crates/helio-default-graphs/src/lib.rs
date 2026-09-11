@@ -76,6 +76,24 @@ fn new_graph(
     graph
 }
 
+/// Registers the resource names that every full (non-`simple`) default graph
+/// relies on the host `Renderer` to supply directly into `FrameResources`
+/// every frame, rather than any pass in the graph writing them — see
+/// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
+/// §6. `"main_scene"` is read by nearly every geometry/lighting pass;
+/// `"vg"` is read only by `VirtualGeometryPass` (`add_geometry_passes`/
+/// `add_forward_geometry_passes`); `"billboards"`/`"corona_emitters"` are
+/// read only by `BillboardPass`/`CoronaPass` (`add_late_passes`). Every
+/// graph builder in this file that calls one of those three helpers needs
+/// all four names; `build_simple_graph` uses none of this and is the one
+/// entry point that legitimately calls none of these.
+fn declare_common_external_inputs(graph: &mut RenderGraph) {
+    graph.declare_external_input("main_scene");
+    graph.declare_external_input("vg");
+    graph.declare_external_input("billboards");
+    graph.declare_external_input("corona_emitters");
+}
+
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -560,6 +578,7 @@ fn build_default_graph_internal(
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -821,6 +840,7 @@ fn build_fxaa_graph_internal(
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -966,6 +986,7 @@ fn build_hlfs_graph_internal(
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -1160,6 +1181,7 @@ fn build_fxaa_hlfs_graph_internal(
     let h = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
@@ -1385,6 +1407,7 @@ fn build_forward_graph_internal(
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,

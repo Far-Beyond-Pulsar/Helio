@@ -51,6 +51,11 @@ pub struct RenderGraph {
     /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
     /// Set by graph builders, consumed by the Renderer on construction.
     graph_data: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Resource names registered via [`declare_external_input`](Self::declare_external_input) —
+    /// resources supplied by the host rather than written by any pass in the
+    /// graph. `validate_dependencies` treats every name in this set as
+    /// available from pass index 0. See `docs/helio_3_0_spec.md` §6.
+    external_inputs: std::collections::HashSet<&'static str>,
 }
 
 impl RenderGraph {
@@ -83,6 +88,7 @@ impl RenderGraph {
             frame_count: 0,
             resize_pending: false,
             graph_data: None,
+            external_inputs: std::collections::HashSet::new(),
         }
     }
 
@@ -168,6 +174,20 @@ impl RenderGraph {
         self.detect_subpass_chains();
         self.resources_allocated = true;
         self.rebuild_gpu_render_bundles();
+    }
+
+    /// Registers `name` as supplied by the host rather than by any pass in
+    /// the graph. Called once at graph-build time by whoever writes the
+    /// value every frame (today: `helio`'s `Renderer`, for
+    /// `billboards`/`vg`/`corona_emitters`/`main_scene`).
+    ///
+    /// `validate_dependencies()` treats every registered external input as
+    /// available from pass index 0, replacing the hardcoded literal list —
+    /// a resource that no `declare_external_input` call and no pass's
+    /// `write_group`/`write_color` covers is now a real validation error
+    /// instead of a silent hardcoded exception.
+    pub fn declare_external_input(&mut self, name: &'static str) {
+        self.external_inputs.insert(name);
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
@@ -260,11 +280,7 @@ impl RenderGraph {
     pub fn validate_dependencies(&self) -> std::result::Result<(), String> {
         use std::collections::HashSet;
         let mut available: HashSet<&str> = HashSet::new();
-        available.insert("main_scene");
-        available.insert("vg");
-        available.insert("billboards");
-        available.insert("corona_emitters");
-        available.insert("depth_texture");
+        available.extend(self.external_inputs.iter().copied());
 
         for (i, pass) in self.passes.iter().enumerate() {
             let name = pass.name();
