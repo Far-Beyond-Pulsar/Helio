@@ -742,6 +742,17 @@ exactly the three names hardcoded in `validate_dependencies` (V3, §2). V3 is no
 API-hygiene bug; it is the symptom of these three not having a proper component-backed source to
 declare as external in the first place.
 
+Worth being explicit about what registering them actually buys, since it's more than "a typed
+CPU-side struct": SceneDB's `#[derive(SceneStore)]` + `#[gpu]` macro system natively generates the
+GPU-side buffer storage (in whatever layout the `#[gpu]` field annotations describe) alongside the
+CPU-side property storage, from one component definition — `World::insert`/`World::get_mut` update
+CPU state and queue the GPU mirror; `SceneDb::step`/`flush_gpu_mirror` does the coalesced upload.
+Registering `BillboardComponent`/`CoronaEmitterComponent` this way is not "typed component, then
+separately hand-wire a GPU buffer" — it is one macro-driven definition that produces both, exactly
+the same shape `Transform` and the other ten domains already use. There is no new GPU-buffer
+infrastructure to design for Phase 13; it already exists and just needs pointing at these three
+domains.
+
 **Requirement.**
 
 1. Register `BillboardComponent` and `CoronaEmitterComponent` in `helio-component` following the
