@@ -1,5 +1,6 @@
 use crate::graph::executor::{format_bpp, format_name};
 use crate::graph::resource::GraphTexturePool;
+use crate::graph::PipelineFormatCache;
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
 use libhelio::GBufferViews;
 use std::any::TypeId;
@@ -14,6 +15,11 @@ pub struct RenderGraph {
     pass_index_map: HashMap<TypeId, usize>,
     profiler: Profiler,
     pub(crate) pool: GraphTexturePool,
+    /// Dynamic-rendering pipeline cache shared by every pass's `PassContext`
+    /// this frame, keyed by runtime attachment formats. See
+    /// [`PipelineFormatCache`] for why a `RefCell` here doesn't violate the
+    /// "zero locks in the render path" guarantee.
+    pub(crate) pipeline_cache: PipelineFormatCache,
     pub(crate) resources: HashMap<String, ResourceLifetime>,
     pub(crate) pre_pass_actions: Vec<Vec<PrePassAction>>,
     pub(crate) device: std::sync::Arc<wgpu::Device>,
@@ -54,6 +60,7 @@ impl RenderGraph {
             pass_index_map: HashMap::new(),
             profiler: Profiler::new(device, queue),
             pool: GraphTexturePool::new(),
+            pipeline_cache: PipelineFormatCache::new(),
             resources: HashMap::new(),
             pre_pass_actions: Vec::new(),
             device: device.clone(),
@@ -468,9 +475,12 @@ impl RenderGraph {
                 self.profiler
                     .begin_gpu_pass(&mut compute_encoder, pass_name);
 
-                if let Some(desc) =
-                    pass.render_pass_descriptor(target, depth, &visible_frame_resources)
-                {
+                if let Some(desc) = pass.render_pass_descriptor_with_pool(
+                    target,
+                    depth,
+                    &visible_frame_resources,
+                    &self.pool,
+                ) {
                     let mut pass_encoder = encoder.begin_render_pass(&desc);
                     pass_encoder.execute_bundles(std::iter::once(bundle));
                 } else {
@@ -494,6 +504,7 @@ impl RenderGraph {
                         active_render_pass: None,
                         active_compute_pass: None,
                         components: &scene.components,
+                        pipeline_cache: &self.pipeline_cache,
                         #[cfg(debug_assertions)]
                         chain_transparent: false,
                     };
@@ -555,8 +566,12 @@ impl RenderGraph {
                 .begin_gpu_pass(&mut compute_encoder, pass_name);
 
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
-            if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources)
-            {
+            if let Some(desc) = pass.render_pass_descriptor_with_pool(
+                target,
+                depth,
+                &visible_frame_resources,
+                &self.pool,
+            ) {
                 let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
                 let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
 
@@ -621,6 +636,7 @@ impl RenderGraph {
                             .map(|rp| &mut **rp as *mut _ as *mut _),
                         active_compute_pass: None,
                         components: &scene.components,
+                        pipeline_cache: &self.pipeline_cache,
                         #[cfg(debug_assertions)]
                         chain_transparent: false,
                     };
@@ -694,6 +710,7 @@ impl RenderGraph {
                             active_render_pass: Some(&mut rp as *mut _ as *mut _),
                             active_compute_pass: None,
                             components: &scene.components,
+                            pipeline_cache: &self.pipeline_cache,
                             #[cfg(debug_assertions)]
                             chain_transparent: false,
                         };
@@ -735,6 +752,7 @@ impl RenderGraph {
                     active_render_pass: None,
                     active_compute_pass: None,
                     components: &scene.components,
+                    pipeline_cache: &self.pipeline_cache,
                     #[cfg(debug_assertions)]
                     chain_transparent: bridged,
                 };
@@ -851,7 +869,12 @@ impl RenderGraph {
             .passes
             .iter()
             .map(|pass| {
-                let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
+                let desc = pass.render_pass_descriptor_with_pool(
+                    &dummy_target,
+                    &dummy_depth,
+                    &canon,
+                    &self.pool,
+                )?;
                 let color_len = desc.color_attachments.len();
                 let mut signature: Vec<usize> = desc
                     .color_attachments

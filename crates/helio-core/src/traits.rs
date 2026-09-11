@@ -420,6 +420,32 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>>;
 
+    /// Dynamic-rendering variant of [`render_pass_descriptor`](Self::render_pass_descriptor),
+    /// additionally given the executor's texture registry (`pool`) so the
+    /// descriptor can resolve arbitrary [`AttachmentSlot::Named`](crate::graph::AttachmentSlot::Named)
+    /// resources — not just the fixed set of fields `FrameResources` routes by
+    /// name — before `begin_render_pass` is called.
+    ///
+    /// The executor calls this instead of `render_pass_descriptor` at every
+    /// call site. The default forwards straight to `render_pass_descriptor`
+    /// and ignores `pool`, so every existing pass keeps compiling and
+    /// behaving identically without touching a single line — this method
+    /// only needs overriding by a pass that wants pool-backed symbolic
+    /// attachment resolution (see [`crate::graph::ColorAttachmentIntent`] /
+    /// [`crate::graph::DepthAttachmentIntent`] for a convenience builder).
+    /// Overriding this and leaving `render_pass_descriptor` at its required
+    /// implementation (return `None` there) is the intended pattern.
+    fn render_pass_descriptor_with_pool<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+        pool: &'a crate::graph::GraphTexturePool,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let _ = pool;
+        self.render_pass_descriptor(target, depth, resources)
+    }
+
     /// Returns true if this pass's `execute()` never touches the main render
     /// encoder (`ctx.encoder_ptr` / `ctx.active_render_pass`) — only
     /// `ctx.compute_encoder_ptr` / `ctx.begin_compute_pass()`. Such passes may be
