@@ -450,7 +450,7 @@ pub use libhelio::{
 
 pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
-pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
+pub use crate::acceleration::{AccelerationError, BlasGeometry, BlasManager, TlasInstanceInput, TlasManager};
 pub use crate::scene::managers::*;
 // Re-export core types
 pub use actor::Actor;

@@ -23,20 +23,18 @@ pub(crate) fn shader_source(stage: &str) -> String {
             include_str!("../shaders/composite.wgsl"),
         ]
         .concat(),
-        "ray_query_prototype" => {
-            let sample = include_str!("../shaders/sample.wgsl").replace(
-                "return shadow_factor(id,surface.position,surface.normal,vec2<f32>(pixel)+0.5,globals.frame);",
-                "return rt_shadow(lights[id],surface.position,surface.normal);");
-            [
-                "enable wgpu_ray_query;\n",
-                COMMON,
-                LIGHTING,
-                SHADOWS,
-                include_str!("../shaders/ray_shadow.wgsl"),
-                &sample,
-            ]
-            .concat()
-        }
+        "ray_traced" | "ray_traced_composite" => [
+            "enable wgpu_ray_query;\n",
+            COMMON,
+            LIGHTING,
+            include_str!("../shaders/ray_shadow.wgsl"),
+            if stage == "ray_traced" {
+                include_str!("../shaders/sample.wgsl")
+            } else {
+                include_str!("../shaders/composite.wgsl")
+            },
+        ]
+        .concat(),
         _ => panic!("unknown HLFS shader stage"),
     }
 }
@@ -127,6 +125,10 @@ pub(crate) enum VisibilityPipelines {
         regular: wgpu::ComputePipeline,
         small: wgpu::ComputePipeline,
     },
+    RayTraced {
+        regular: wgpu::ComputePipeline,
+        small: wgpu::ComputePipeline,
+    },
 }
 impl VisibilityPipelines {
     fn new(
@@ -135,6 +137,7 @@ impl VisibilityPipelines {
         common: &wgpu::BindGroupLayout,
         gbuffer: &wgpu::BindGroupLayout,
         reservoirs: &wgpu::BindGroupLayout,
+        rt: Option<&wgpu::BindGroupLayout>,
     ) -> Self {
         match mode {
             HlfsMode::ScreenSpace => {
@@ -164,12 +167,39 @@ impl VisibilityPipelines {
                     ),
                 }
             }
+            HlfsMode::RayTraced => {
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("HLFS RayTraced visibility"),
+                    source: wgpu::ShaderSource::Wgsl(shader_source("ray_traced").into()),
+                });
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("HLFS RayTraced visibility"),
+                    bind_group_layouts: &[Some(common), Some(gbuffer), Some(reservoirs), rt],
+                    immediate_size: 0,
+                });
+                Self::RayTraced {
+                    regular: compute(
+                        device,
+                        "HLFS RayTraced visibility",
+                        &shader,
+                        "sample_lights",
+                        &layout,
+                    ),
+                    small: compute(
+                        device,
+                        "HLFS RayTraced small population",
+                        &shader,
+                        "sample_small",
+                        &layout,
+                    ),
+                }
+            }
         }
     }
 
     pub fn pipeline(&self, small_population: bool) -> &wgpu::ComputePipeline {
         match self {
-            Self::ScreenSpace { regular, small } => {
+            Self::ScreenSpace { regular, small } | Self::RayTraced { regular, small } => {
                 if small_population {
                     small
                 } else {
@@ -196,6 +226,8 @@ pub(crate) struct Pipelines {
     pub temporal: wgpu::ComputePipeline,
     pub spatial: wgpu::ComputePipeline,
     pub composite: wgpu::RenderPipeline,
+    pub rt_bgl: Option<wgpu::BindGroupLayout>,
+    output_format: wgpu::TextureFormat,
 }
 impl Pipelines {
     pub fn set_mode(&mut self, device: &wgpu::Device, mode: HlfsMode) {
@@ -205,12 +237,38 @@ impl Pipelines {
             &self.common_bgl,
             &self.gbuffer_bgl,
             &self.sample_bgl,
+            self.rt_bgl.as_ref(),
+        );
+        self.composite = composite_pipeline(
+            device,
+            self.output_format,
+            mode,
+            &self.common_bgl,
+            &self.gbuffer_bgl,
+            &self.composite_bgl,
+            self.rt_bgl.as_ref(),
         );
     }
 
     pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, mode: HlfsMode) -> Self {
         use wgpu::{ShaderStages as S, TextureFormat as F, TextureViewDimension as D};
         let all = S::COMPUTE | S::FRAGMENT;
+        let rt_bgl = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            .then(|| {
+                bgl(
+                    device,
+                    "HLFS ray-query layout",
+                    &[entry(
+                        0,
+                        wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        all,
+                    )],
+                )
+            });
         let common_bgl = bgl(
             device,
             "HLFS common layout",
@@ -315,7 +373,6 @@ impl Pipelines {
         };
         let grid_shader = module("grid");
         let temporal_shader = module("temporal");
-        let composite_shader = module("composite");
         let layout =
             |label, third: &wgpu::BindGroupLayout, fourth: Option<&wgpu::BindGroupLayout>| {
                 let mut layouts = vec![Some(&common_bgl), Some(&gbuffer_bgl), Some(third)];
@@ -350,8 +407,14 @@ impl Pipelines {
             "fine",
             &grid_layout,
         );
-        let visibility =
-            VisibilityPipelines::new(device, mode, &common_bgl, &gbuffer_bgl, &sample_bgl);
+        let visibility = VisibilityPipelines::new(
+            device,
+            mode,
+            &common_bgl,
+            &gbuffer_bgl,
+            &sample_bgl,
+            rt_bgl.as_ref(),
+        );
         let temporal = compute(
             device,
             "HLFS temporal denoising",
@@ -366,31 +429,15 @@ impl Pipelines {
             "spatial",
             &layout("HLFS spatial", &spatial_bgl, None),
         );
-        let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("HLFS denoise and composite"),
-            layout: Some(&layout("HLFS composite", &composite_bgl, None)),
-            vertex: wgpu::VertexState {
-                module: &composite_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &composite_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let composite = composite_pipeline(
+            device,
+            output_format,
+            mode,
+            &common_bgl,
+            &gbuffer_bgl,
+            &composite_bgl,
+            rt_bgl.as_ref(),
+        );
         Self {
             common_bgl,
             gbuffer_bgl,
@@ -407,6 +454,62 @@ impl Pipelines {
             temporal,
             spatial,
             composite,
+            rt_bgl,
+            output_format,
         }
     }
+}
+
+fn composite_pipeline(
+    device: &wgpu::Device,
+    output_format: wgpu::TextureFormat,
+    mode: HlfsMode,
+    common: &wgpu::BindGroupLayout,
+    gbuffer: &wgpu::BindGroupLayout,
+    composite: &wgpu::BindGroupLayout,
+    rt: Option<&wgpu::BindGroupLayout>,
+) -> wgpu::RenderPipeline {
+    let stage = if mode == HlfsMode::RayTraced {
+        "ray_traced_composite"
+    } else {
+        "composite"
+    };
+    let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(stage),
+        source: wgpu::ShaderSource::Wgsl(shader_source(stage).into()),
+    });
+    let mut layouts = vec![Some(common), Some(gbuffer), Some(composite)];
+    if mode == HlfsMode::RayTraced {
+        layouts.push(rt);
+    }
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("HLFS composite"),
+        bind_group_layouts: &layouts,
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("HLFS denoise and composite"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &composite_shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &composite_shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: output_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }

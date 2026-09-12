@@ -19,6 +19,7 @@ struct Globals {
     max_history: f32, discovery_fraction: f32, exposure: f32, debug_mode: u32,
     ambient: vec4<f32>, csm_splits: vec4<f32>,
     previous_view: mat4x4<f32>,
+    ray_settings: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var<storage, read> cameras: array<Camera, 2>;

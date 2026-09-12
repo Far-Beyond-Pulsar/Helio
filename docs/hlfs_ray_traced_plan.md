@@ -1,5 +1,7 @@
 # Ray-traced HLFS research and implementation plan
 
+Implementation has started in the same [PR #248](https://github.com/Far-Beyond-Pulsar/Helio/pull/248). See the [opaque RT control implementation and validation record](validation/hlfs/ray-traced-control.md) for current behavior and remaining gates. The engine audit below describes the pre-implementation research snapshot.
+
 ## Recommendation
 
 Extend the existing `HlfsPass` with an explicit `HlfsMode::RayTraced`, using native Vulkan ray queries, a scene acceleration structure shared across lights, and bounded light selection before visibility. Start with the existing visibility-guided estimator as the control. Compare tile presampling and full ReSTIR DI reuse experimentally before choosing the production sampler. Retain the common lighting, history, filtering, and output infrastructure; introduce backend-specific resources only where the visibility and sampling algorithms require them.

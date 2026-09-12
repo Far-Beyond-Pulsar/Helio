@@ -3,6 +3,7 @@ use helio::{Camera, LightId, Renderer, RendererBuilder, RendererConfig};
 use std::sync::Arc;
 
 pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<LightId>)) {
+    let ray_traced = std::env::var_os("HLFS_RT").is_some();
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
     let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
     let sample_count = std::env::var("HLFS_SAMPLE_COUNT").ok().map(|value| {
@@ -30,7 +31,12 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
             .unwrap();
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let (width, height) = (640, 360);
+        let (width, height) = match std::env::var("HLFS_RESOLUTION").as_deref() {
+            Ok("1440p") => (2560, 1440),
+            Ok("4k") => (3840, 2160),
+            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1440p or 4k"),
+            Err(_) => (640, 360),
+        };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let config = RendererConfig::new(width, height, format)
             .with_shadow_quality(helio::ShadowQuality::High);
@@ -81,13 +87,18 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
         for frame in 0..100 {
-            if reference || performance || sample_count.is_some() {
+            if ray_traced || reference || performance || sample_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
                 pass.set_config(
                     &device,
                     helio_pass_hlfs::HlfsConfig {
+                        mode: if ray_traced {
+                            helio_pass_hlfs::HlfsMode::RayTraced
+                        } else {
+                            helio_pass_hlfs::HlfsMode::ScreenSpace
+                        },
                         debug_mode: if reference {
                             helio_pass_hlfs::HlfsDebugMode::Reference
                         } else {

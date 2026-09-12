@@ -7,6 +7,9 @@
 //! optimization step is required — the renderer always batches objects sharing
 //! the same mesh and material.
 //!
+//! The experimental opaque RT path additionally scans casters and rebuilds TLAS
+//! each frame; the steady-state figures below describe the raster path.
+//!
 //! ## Zero CPU Cost at Steady State
 //!
 //! - Transform updates are O(1) via cached GPU slot writes
@@ -74,6 +77,7 @@ mod objects;
 mod portals;
 mod postprocess;
 mod resources;
+mod ray_tracing;
 mod stats;
 mod sublevels;
 mod types;
