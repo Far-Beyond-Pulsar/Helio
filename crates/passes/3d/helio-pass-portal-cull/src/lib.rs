@@ -257,9 +257,9 @@ impl RenderPass for PortalCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_calls.len() as u32;
-        self.chain_count = ctx.scene.portal_chains.len() as u32;
-        let planes = extract_frustum_planes(ctx.scene.camera.data().view_proj);
+        self.draw_count = ctx.scene.draw_count;
+        self.chain_count = ctx.scene.portal_chain_count;
+        let planes = extract_frustum_planes(ctx.scene.camera_data.view_proj);
 
         let uniforms = CullUniforms {
             frustum_planes: planes,

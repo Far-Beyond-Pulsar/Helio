@@ -241,7 +241,7 @@ impl RenderPass for PortalMaskPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx.scene.portal_views.len() as u32;
+        self.portal_count = ctx.scene.portal_view_count;
         Ok(())
     }
 

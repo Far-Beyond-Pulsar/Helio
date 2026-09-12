@@ -13,7 +13,7 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, LightId,
-    Movability, ObjectId, RendererBuilder, RendererConfig, SceneActor,
+    Movability, ObjectId, RendererBuilder, RendererConfig, SceneEntity,
 };
 use helio_default_graphs::build_default_graph_external;
 use v3_demo_common::{
@@ -151,44 +151,54 @@ impl ApplicationHandler for App {
             .build(device.clone(), queue.clone(), w, h, surface_format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let gold = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.75, 0.25, 1.0],
-            0.25,
-            0.85,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let marble = renderer.scene_mut().insert_material(make_material(
-            [0.85, 0.83, 0.80, 1.0],
-            0.55,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let crystal = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.6, 1.0, 1.0],
-            0.05,
-            0.1,
-            [0.2, 0.4, 1.0],
-            2.0,
-        ));
-        let floor = renderer.scene_mut().insert_material(make_material(
-            [0.22, 0.22, 0.25, 1.0],
-            0.7,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let gold = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.95, 0.75, 0.25, 1.0],
+                0.25,
+                0.85,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let marble = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.85, 0.83, 0.80, 1.0],
+                0.55,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let crystal = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.6, 1.0, 1.0],
+                0.05,
+                0.1,
+                [0.2, 0.4, 1.0],
+                2.0,
+            ));
+        let floor = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.22, 0.22, 0.25, 1.0],
+                0.7,
+                0.05,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         // ── Sky ─────────────────────────────────────────────────────────────
-        renderer.scene_mut().insert_actor(SceneActor::sky(
-            helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
-        ));
+        renderer
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::sky(
+                helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
+            ));
 
         // ── Ground ──────────────────────────────────────────────────────────
         let ground_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)))
             .as_mesh()
             .unwrap();
         let _ = insert_object_with_movability(
@@ -202,16 +212,16 @@ impl ApplicationHandler for App {
 
         // ── Columns (box pillars + sphere tops) ────────────────────────────
         let pillar_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.15, 2.0, 0.15],
             )))
             .as_mesh()
             .unwrap();
         let sphere_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.4)))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.4)))
             .as_mesh()
             .unwrap();
 
@@ -250,8 +260,8 @@ impl ApplicationHandler for App {
                 [1.0, 0.8, 0.2],
             ];
             let lid = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::light(point_light(
                     [*x, 5.0, *z],
                     colors[i],
                     8.0,
@@ -264,8 +274,8 @@ impl ApplicationHandler for App {
 
         // ── Floating crystal (centre, rotating) ────────────────────────────
         let crystal_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.6)))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.6)))
             .as_mesh()
             .unwrap();
         let spin_crystal = insert_object_with_movability(
@@ -471,7 +481,7 @@ impl State {
         let t = glam::Mat4::from_rotation_translation(rot, glam::vec3(0.0, 2.5, 0.0));
         let _ = self
             .renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .update_object_transform(self.spin_crystal, t);
 
         // ── Render ─────────────────────────────────────────────────────────

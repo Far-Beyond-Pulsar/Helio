@@ -429,7 +429,7 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_calls.len() as u32;
+        self.draw_count = ctx.scene.draw_count;
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,

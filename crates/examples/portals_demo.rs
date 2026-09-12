@@ -26,7 +26,7 @@ mod v3_demo_common;
 use helio::{
     portal_pose_facing, required_experimental_features, required_wgpu_features,
     required_wgpu_limits, Camera, DebugDrawState, LightId, ObjectDescriptor, PortalDescriptor,
-    PortalId, Renderer, RendererConfig, Scene, SceneActor,
+    PortalId, Renderer, RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
@@ -207,44 +207,46 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.72, 0.72, 0.75, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.72, 0.72, 0.75, 1.0],
+                0.8,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18) — same
         // shell as indoor_corridor.rs. No end walls this time: the portals
         // themselves are what closes the hallway off visually.
         let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [HALF_WIDTH, 0.02, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let ceiling = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [HALF_WIDTH, 0.02, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let wall_l = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, HALF_HEIGHT, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let wall_r = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, HALF_HEIGHT, HALF_LENGTH],
             )))
@@ -257,31 +259,35 @@ impl ApplicationHandler for App {
         // open ends (z = ±18) so the mapped duplicate never overlaps the real
         // corridor — that overlap is what the fragment z-clip exists to avoid.
         let room_half_len = 6.0;
-        let far_room_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.55, 0.95, 1.0],
-            0.7,
-            0.0,
-            [0.1, 0.5, 1.0],
-            0.4,
-        ));
-        let near_room_mat = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.6, 0.25, 1.0],
-            0.7,
-            0.0,
-            [1.0, 0.5, 0.1],
-            0.4,
-        ));
+        let far_room_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.55, 0.95, 1.0],
+                0.7,
+                0.0,
+                [0.1, 0.5, 1.0],
+                0.4,
+            ));
+        let near_room_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.95, 0.6, 0.25, 1.0],
+                0.7,
+                0.0,
+                [1.0, 0.5, 0.1],
+                0.4,
+            ));
         let room_floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [HALF_WIDTH, 0.02, room_half_len],
             )))
             .as_mesh()
             .unwrap();
         let room_wall = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, HALF_HEIGHT, room_half_len],
             )))
@@ -290,8 +296,8 @@ impl ApplicationHandler for App {
 
         let mut insert_always = |mesh, material, transform: glam::Mat4, radius: f32| {
             let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::object(ObjectDescriptor {
                     mesh,
                     material,
                     transform,
@@ -364,8 +370,8 @@ impl ApplicationHandler for App {
         for &z in &[-15.0f32, -9.0, -3.0, 3.0, 9.0, 15.0] {
             light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::light(point_light(
                         [0.0, 2.7, z],
                         [0.9, 0.95, 1.0],
                         3.0,
@@ -378,23 +384,27 @@ impl ApplicationHandler for App {
         // Colour-coded markers at each end so it's obvious at a glance which
         // end you're looking at through a portal: warm amber in the +Z room,
         // cool blue in the -Z room.
-        let near_mat = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.6, 0.2, 1.0],
-            0.6,
-            0.0,
-            [1.0, 0.5, 0.1],
-            2.0,
-        ));
-        let far_mat = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.6, 1.0, 1.0],
-            0.6,
-            0.0,
-            [0.1, 0.5, 1.0],
-            2.0,
-        ));
+        let near_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [1.0, 0.6, 0.2, 1.0],
+                0.6,
+                0.0,
+                [1.0, 0.5, 0.1],
+                2.0,
+            ));
+        let far_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.2, 0.6, 1.0, 1.0],
+                0.6,
+                0.0,
+                [0.1, 0.5, 1.0],
+                2.0,
+            ));
         let marker_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.3, 0.3, 0.05],
             )))
@@ -402,8 +412,8 @@ impl ApplicationHandler for App {
             .unwrap();
         let mut insert_always_marker = |mesh, material, transform: glam::Mat4, radius: f32| {
             let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::object(ObjectDescriptor {
                     mesh,
                     material,
                     transform,
@@ -441,8 +451,8 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len],
                     [1.0, 0.6, 0.2],
                     2.5,
@@ -453,8 +463,8 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len)],
                     [0.2, 0.6, 1.0],
                     2.5,
@@ -468,8 +478,8 @@ impl ApplicationHandler for App {
         for &z in &[-27.0, -21.0, 21.0, 27.0] {
             light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::light(point_light(
                         [0.0, 2.7, z],
                         [0.9, 0.95, 1.0],
                         3.0,
@@ -500,7 +510,7 @@ impl ApplicationHandler for App {
         // Looking through the near portal (standing near +Z, facing further
         // +Z) shows what's actually near the far end.
         let portal_near = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .add_portal(PortalDescriptor {
                 a: pose_near,
                 b: pose_far,
@@ -510,7 +520,7 @@ impl ApplicationHandler for App {
         // Looking through the far portal shows what's actually near the near
         // end — the reverse direction, completing the loop.
         let portal_far = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .add_portal(PortalDescriptor {
                 a: pose_far,
                 b: pose_near,
@@ -679,7 +689,7 @@ impl AppState {
         // mapping is built on (re-exported from `helio`) — crossing detection
         // and the position/direction remap are just the CPU-side half of the
         // same portal, unaffected by how it's drawn.
-        let scene = self.renderer.scene_mut();
+        let scene = self.renderer.scene_for_legacy_mut();
         if let Some(pair) = scene.portal_pair(self.portal_near) {
             if helio::crossing_detected(
                 prev_pos,

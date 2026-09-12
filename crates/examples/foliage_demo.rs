@@ -490,25 +490,29 @@ impl ApplicationHandler for App {
         // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
         // colour target each frame, so its absence is what made geometry smear over itself.
         // See `Renderer::rebuild_graph_if_sky_changed`.
-        renderer.scene_mut().insert_actor(helio::SceneActor::sky(
-            helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
-        ));
+        renderer
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::sky(
+                helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
+            ));
 
         // ── Ground ───────────────────────────────────────────────────────────
         // Flat for now: `FoliageTerrainPass` (the top-down height/slope capture the
         // placement shader samples) is a later phase, and until it exists placement falls
         // back to a plane at y=0. This mesh is what that fallback is pretending to be, so
         // the two agree and the grass sits on the ground rather than floating.
-        let ground_mat = renderer.scene_mut().insert_material(make_material(
-            [0.16, 0.22, 0.10, 1.0],
-            0.95,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let ground_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.16, 0.22, 0.10, 1.0],
+                0.95,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
         let ground_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh(
                 [0.0, 0.0, 0.0],
                 FIELD_HALF_EXTENT,
             )))
@@ -522,32 +526,33 @@ impl ApplicationHandler for App {
         // slightly wrong deletes the entire ground the moment a corner leaves the frustum.
         // One object always being submitted costs a single draw; the alternative is a
         // whole-screen artefact.
-        let _ =
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::object(helio::ObjectDescriptor {
-                    mesh: ground_mesh,
-                    material: ground_mat,
-                    transform: glam::Mat4::IDENTITY,
-                    bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
-                    flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+        let _ = renderer
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
+                mesh: ground_mesh,
+                material: ground_mat,
+                transform: glam::Mat4::IDENTITY,
+                bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
+                flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
+                groups: helio::GroupMask::NONE,
+                movability: None,
+                user_tag: 0,
+            }));
 
         // A visible marker for the roaming interactor, so the grass displacement has
         // something obviously attached to it.
-        let marker_mat = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.2, 0.15, 1.0],
-            0.4,
-            0.0,
-            [0.5, 0.05, 0.0],
-            2.0,
-        ));
+        let marker_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.8, 0.2, 0.15, 1.0],
+                0.4,
+                0.0,
+                [0.5, 0.05, 0.0],
+                2.0,
+            ));
         let marker_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.6)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.6)))
             .as_mesh()
             .unwrap();
         let marker_object = v3_demo_common::insert_object(
@@ -560,16 +565,18 @@ impl ApplicationHandler for App {
         .expect("marker object");
 
         // ── Foliage ──────────────────────────────────────────────────────────
-        let grass_mat = renderer.scene_mut().insert_material(make_material(
-            [0.28, 0.46, 0.14, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let grass_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.28, 0.46, 0.14, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let grass = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .add_foliage_type(FoliageTypeDescriptor {
                 density: blades_per_m2,
                 height_range: [0.18, 0.5],
@@ -588,18 +595,20 @@ impl ApplicationHandler for App {
                 ..Default::default()
             });
 
-        renderer.scene_mut().add_foliage_layer(FoliageLayer {
-            types: vec![grass],
-            bounds: [
-                glam::Vec3::new(-FIELD_HALF_EXTENT, -1.0, -FIELD_HALF_EXTENT),
-                glam::Vec3::new(FIELD_HALF_EXTENT, 4.0, FIELD_HALF_EXTENT),
-            ],
-            seed: 0x5EED,
-            has_infinite_extent: true,
-        });
+        renderer
+            .scene_for_legacy_mut()
+            .add_foliage_layer(FoliageLayer {
+                types: vec![grass],
+                bounds: [
+                    glam::Vec3::new(-FIELD_HALF_EXTENT, -1.0, -FIELD_HALF_EXTENT),
+                    glam::Vec3::new(FIELD_HALF_EXTENT, 4.0, FIELD_HALF_EXTENT),
+                ],
+                seed: 0x5EED,
+                has_infinite_extent: true,
+            });
 
         let wind_speed = 2.0;
-        renderer.scene_mut().set_wind(Wind {
+        renderer.scene_for_legacy_mut().set_wind(Wind {
             direction: glam::Vec3::new(1.0, 0.0, 0.35).normalize(),
             speed: wind_speed,
             gust_amplitude: 0.6,
@@ -608,22 +617,25 @@ impl ApplicationHandler for App {
             ..Default::default()
         });
 
-        let interactor_id = renderer
-            .scene_mut()
-            .add_foliage_interactor(FoliageInteractor {
-                position: glam::Vec3::ZERO,
-                radius: 1.2,
-                velocity: glam::Vec3::ZERO,
-            });
+        let interactor_id =
+            renderer
+                .scene_for_legacy_mut()
+                .add_foliage_interactor(FoliageInteractor {
+                    position: glam::Vec3::ZERO,
+                    radius: 1.2,
+                    velocity: glam::Vec3::ZERO,
+                });
 
         // ── Lighting ─────────────────────────────────────────────────────────
-        let sun_light_id = renderer.scene_mut().insert_light(directional_light(
-            [-0.35, -0.8, -0.5],
-            [1.0, 0.96, 0.88],
-            3.0,
-        ));
+        let sun_light_id = renderer
+            .scene_for_legacy_mut()
+            .insert_light(directional_light(
+                [-0.35, -0.8, -0.5],
+                [1.0, 0.96, 0.88],
+                3.0,
+            ));
 
-        renderer.scene_mut().flush();
+        renderer.scene_for_legacy_mut().flush();
 
         let state = AppState {
             window,
@@ -813,7 +825,7 @@ impl AppState {
         // ── Drive the foliage frame state ────────────────────────────────────
         // Three O(1) calls. Nothing here scales with the number of blades on screen —
         // that is the whole claim the design makes, and this loop is what it looks like.
-        let scene = self.renderer.scene_mut();
+        let scene = self.renderer.scene_for_legacy_mut();
 
         let mut wind = scene.wind();
         wind.speed = self.wind_speed;

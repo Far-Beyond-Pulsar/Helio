@@ -110,7 +110,8 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
-use crate::graph::ResourceBuilder;
+use crate::graph::{BindingOverrideBuilder, PipelineRecipeBuilder, ResourceBuilder};
+use crate::shader::ReflectedShader;
 use crate::{PassContext, PrepareContext, Result};
 
 /// Describes a debug visualisation mode that a render pass provides.
@@ -159,10 +160,15 @@ impl<T: std::any::Any> AsAny for T {
 /// # Contract
 ///
 /// Implementations must:
-/// - Be **thread-safe** (`Send + Sync`) for parallel pass compilation (future feature)
+/// - Be **thread-safe** (`Send + Sync`) so independent graph layers can record
+///   on worker threads without pass-local races
 /// - Return a **unique name** for profiling and debugging
 /// - **Record GPU commands** in `execute()` without blocking the CPU
 /// - **Upload uniforms** in `prepare()` if needed (optional)
+/// - Treat declared `reads()`/`writes()` (including `declare_resources()`)
+///   as the complete ordering contract: an independent pass may be recorded
+///   before, after, or concurrently with this pass, so `execute()` must not
+///   rely on incidental ordering or hidden mutable global state
 ///
 /// # Lifecycle
 ///
@@ -333,7 +339,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
 
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
-    /// Return graph resource name strings (e.g. `"pre_aa"`, `"gbuffer"`).
+    /// Return graph resource name strings (for example, `"color_output"`).
     fn reads(&self) -> &'static [&'static str] {
         &[]
     }
@@ -387,6 +393,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Passes should expose only stable resource contracts here (e.g. GBuffer,
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+
+    /// Publishes outputs into the open typed resource registry.
+    ///
+    /// This is the phase 3 migration path. Existing passes may continue to
+    /// implement [`publish`](Self::publish) against the legacy shim; new
+    /// passes should declare a [`libhelio::ResourceKey`] in their own crate
+    /// and publish through this hook instead.
+    fn publish_registry(&self, _registry: &mut libhelio::ResourceRegistry<'_>) {}
 
     /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
     /// pass's own compound `FrameResources` field.
@@ -581,7 +595,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ///
     /// ```rust,ignore
     /// fn declare_resources(&self, builder: &mut ResourceBuilder) {
-    ///     builder.read("gbuffer_albedo");
+    ///     builder.read("color_output");
     ///     builder.read("depth");
     ///     builder.write_color("pre_aa", wgpu::TextureFormat::Rgba16Float, ResSize::Internal);
     /// }
@@ -591,4 +605,22 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// `ResourceSlot`-based [`reads`](Self::reads) / [`writes`](Self::writes)
     /// methods for backward compatibility.
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
+
+    /// Declares pipelines that the executor must resolve before `execute`.
+    ///
+    /// The recipe closure owns pipeline construction, while the executor owns
+    /// cache lifetime and invokes it only for a missing format key. Handles
+    /// are local to this pass and are read from `PassContext::pipelines`.
+    fn declare_pipelines(&self, _declare: &mut PipelineRecipeBuilder) {}
+
+    /// Declares explicit shader-variable to resource-name overrides for
+    /// reflected bindings. The default contract is name matching.
+    fn declare_bindings(&self, _declare: &mut BindingOverrideBuilder) {}
+
+    /// Opts this pass into executor-owned reflected bind groups. The shader
+    /// source must describe the same bind-group interface as the pipeline the
+    /// pass uses; existing/manual passes return `None`.
+    fn reflected_shader(&self) -> Option<ReflectedShader<'_>> {
+        None
+    }
 }

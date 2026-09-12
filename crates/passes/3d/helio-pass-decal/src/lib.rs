@@ -1,6 +1,9 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod components;
+pub use components::{DecalComponent, DecalSceneBinding};
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DecalGlobals {
@@ -341,7 +344,7 @@ impl RenderPass for DecalPass {
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&DecalGlobals {
-                decal_count: ctx.scene.decals.len() as u32,
+                decal_count: ctx.scene.decal_count,
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,

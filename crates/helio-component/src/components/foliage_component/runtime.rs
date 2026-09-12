@@ -123,15 +123,15 @@ fn build_type_descriptor(
 /// Push the component's wind settings into the scene's global wind. The pinned
 /// `helio` does not re-export the `Wind` struct, so we mutate the scene's own
 /// `wind()` value in place — which also preserves the motion-vector clock.
-fn apply_wind(scene: &mut helio::Scene, component: &FoliageComponent) {
+fn apply_wind(renderer: &mut Renderer, component: &FoliageComponent) {
     let wind = &component.wind;
-    let mut current = scene.wind();
+    let mut current = renderer.wind();
     current.direction = glam::Vec3::from_array(wind.wind_direction);
     current.speed = wind.wind_speed;
     current.gust_amplitude = wind.gust_amplitude;
     current.gust_frequency = wind.gust_frequency;
     current.turbulence_scale = wind.turbulence_scale;
-    scene.set_wind(current);
+    renderer.set_wind(current);
 }
 
 fn remove_foliage_with_context(
@@ -141,11 +141,10 @@ fn remove_foliage_with_context(
 ) {
     {
         let renderer = get_subsystem!(context, Renderer);
-        let scene = renderer.scene_mut();
-        let _ = scene.remove_foliage_type(entry.type_id);
-        let _ = scene.remove_foliage_layer(entry.layer_id);
-        let _ = scene.remove_foliage_interactor(entry.interactor_id);
-        let _ = scene.remove_material(entry.material_id);
+        let _ = renderer.remove_foliage_type(entry.type_id);
+        let _ = renderer.remove_foliage_layer(entry.layer_id);
+        let _ = renderer.remove_foliage_interactor(entry.interactor_id);
+        let _ = renderer.remove_material_asset(entry.material_id);
     }
     let cache = get_subsystem!(context, FoliageCache);
     cache.map.remove(key);
@@ -194,7 +193,6 @@ impl ComponentRuntimeBehavior for FoliageComponent {
                 // subsystem access through `context` must be in its own scope.
                 let entry = {
                     let renderer = get_subsystem!(context, Renderer);
-                    let scene = renderer.scene_mut();
 
                     let mut entry = entry;
                     if entry.bounds_hash != bounds_hash {
@@ -203,25 +201,26 @@ impl ComponentRuntimeBehavior for FoliageComponent {
                         // and the infinite-extent flag change. The generation bump the
                         // removal/insertion causes re-rolls the ring, which is exactly
                         // what an edit to "where grass grows" must do.
-                        let _ = scene.remove_foliage_layer(entry.layer_id);
-                        entry.layer_id =
-                            scene.add_foliage_layer(build_layer(component, entry.type_id, position));
+                        let _ = renderer.remove_foliage_layer(entry.layer_id);
+                        entry.layer_id = renderer
+                            .add_foliage_layer(build_layer(component, entry.type_id, position));
                         entry.bounds_hash = bounds_hash;
                     }
                     if entry.descriptor_hash != descriptor_hash {
                         let material_id = if entry.material_hash != material_hash {
-                            let new_material = scene.insert_material(build_material(component));
-                            let _ = scene.remove_material(entry.material_id);
+                            let new_material =
+                                renderer.create_material_projection(build_material(component));
+                            let _ = renderer.remove_material_asset(entry.material_id);
                             new_material
                         } else {
                             entry.material_id
                         };
-                        let _ = scene.update_foliage_type(
+                        let _ = renderer.update_foliage_type(
                             entry.type_id,
                             build_type_descriptor(component, material_id),
                         );
                         if component.wind.wind_enabled && entry.wind_hash != wind_hash {
-                            apply_wind(scene, component);
+                            apply_wind(renderer, component);
                         }
                         entry.material_id = material_id;
                         entry.material_hash = material_hash;
@@ -234,7 +233,7 @@ impl ComponentRuntimeBehavior for FoliageComponent {
                     } else {
                         INTERACTOR_PARKED
                     };
-                    let _ = scene.update_foliage_interactor(
+                    let _ = renderer.update_foliage_interactor(
                         entry.interactor_id,
                         glam::Vec3::from_array(target),
                         glam::Vec3::ZERO,
@@ -253,25 +252,24 @@ impl ComponentRuntimeBehavior for FoliageComponent {
 
                 let (type_id, layer_id, interactor_id, material_id) = {
                     let renderer = get_subsystem!(context, Renderer);
-                    let scene = renderer.scene_mut();
 
-                    let material_id = scene.insert_material(build_material(component));
-                    let type_id =
-                        scene.add_foliage_type(build_type_descriptor(component, material_id));
+                    let material_id = renderer.create_material_projection(build_material(component));
+                    let type_id = renderer
+                        .add_foliage_type(build_type_descriptor(component, material_id));
                     let layer_id =
-                        scene.add_foliage_layer(build_layer(component, type_id, position));
+                        renderer.add_foliage_layer(build_layer(component, type_id, position));
                     let interactor_position = if component.interaction.interactor_enabled {
                         position_v3
                     } else {
                         glam::Vec3::from_array(INTERACTOR_PARKED)
                     };
-                    let interactor_id = scene.add_foliage_interactor(FoliageInteractor {
+                    let interactor_id = renderer.add_foliage_interactor(FoliageInteractor {
                         position: interactor_position,
                         radius: component.interaction.interactor_radius,
                         velocity: glam::Vec3::ZERO,
                     });
                     if component.wind.wind_enabled {
-                        apply_wind(scene, component);
+                        apply_wind(renderer, component);
                     }
                     (type_id, layer_id, interactor_id, material_id)
                 };

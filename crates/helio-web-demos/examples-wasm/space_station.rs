@@ -35,67 +35,83 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let hull_m = renderer.scene_mut().insert_material(make_material(
-            [0.75, 0.75, 0.78, 1.0],
-            0.4,
-            0.6,
-            [0.0; 3],
-            0.0,
-        ));
-        let panel_m = renderer.scene_mut().insert_material(make_material(
-            [0.18, 0.22, 0.35, 1.0],
-            0.5,
-            0.3,
-            [0.02, 0.04, 0.1],
-            0.3,
-        ));
-        let solar_m = renderer.scene_mut().insert_material(make_material(
-            [0.08, 0.12, 0.18, 1.0],
-            0.3,
-            0.1,
-            [0.0, 0.02, 0.05],
-            0.5,
-        ));
-        let window_m = renderer.scene_mut().insert_material(make_material(
-            [0.5, 0.55, 0.7, 1.0],
-            0.05,
-            0.95,
-            [0.1, 0.15, 0.3],
-            0.8,
-        ));
-        let red_m = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.0, 0.0, 1.0],
-            1.0,
-            0.0,
-            [1.0, 0.05, 0.05],
-            5.0,
-        ));
-        let green_m = renderer.scene_mut().insert_material(make_material(
-            [0.0, 0.15, 0.0, 1.0],
-            1.0,
-            0.0,
-            [0.05, 1.0, 0.1],
-            5.0,
-        ));
-        let truss_m = renderer.scene_mut().insert_material(make_material(
-            [0.6, 0.6, 0.62, 1.0],
-            0.5,
-            0.5,
-            [0.0; 3],
-            0.0,
-        ));
-        let thruster_m = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.3, 0.35, 1.0],
-            0.6,
-            0.4,
-            [0.1, 0.15, 0.2],
-            0.5,
-        ));
+        let hull_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.75, 0.75, 0.78, 1.0],
+                0.4,
+                0.6,
+                [0.0; 3],
+                0.0,
+            ));
+        let panel_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.18, 0.22, 0.35, 1.0],
+                0.5,
+                0.3,
+                [0.02, 0.04, 0.1],
+                0.3,
+            ));
+        let solar_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.08, 0.12, 0.18, 1.0],
+                0.3,
+                0.1,
+                [0.0, 0.02, 0.05],
+                0.5,
+            ));
+        let window_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.5, 0.55, 0.7, 1.0],
+                0.05,
+                0.95,
+                [0.1, 0.15, 0.3],
+                0.8,
+            ));
+        let red_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.15, 0.0, 0.0, 1.0],
+                1.0,
+                0.0,
+                [1.0, 0.05, 0.05],
+                5.0,
+            ));
+        let green_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.0, 0.15, 0.0, 1.0],
+                1.0,
+                0.0,
+                [0.05, 1.0, 0.1],
+                5.0,
+            ));
+        let truss_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.6, 0.6, 0.62, 1.0],
+                0.5,
+                0.5,
+                [0.0; 3],
+                0.0,
+            ));
+        let thruster_m = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.3, 0.35, 1.0],
+                0.6,
+                0.4,
+                [0.1, 0.15, 0.2],
+                0.5,
+            ));
 
         // Central hub
         let hub = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 2.5, 4.0],
             )));
@@ -103,8 +119,8 @@ impl HelioWasmApp for Demo {
 
         // Main truss spine
         let spine = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.4, 0.4, 28.0],
             )));
@@ -115,8 +131,8 @@ impl HelioWasmApp for Demo {
             let x = angle.cos() * 5.0;
             let y = angle.sin() * 5.0;
             let ring = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [x, y, 0.0],
                     [1.5, 1.5, 3.0],
                 )));
@@ -125,23 +141,23 @@ impl HelioWasmApp for Demo {
             let sx = x * 0.5;
             let sy = y * 0.5;
             let spoke = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [sx, sy, 0.0],
                     [0.18, 0.18, 3.2],
                 )));
             insert_object(renderer, spoke, truss_m, glam::Mat4::IDENTITY, 3.2).unwrap();
             // Ring windows
             let wm = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [x, y, 1.0],
                     [1.4, 1.4, 0.1],
                 )));
             insert_object(renderer, wm, window_m, glam::Mat4::IDENTITY, 1.4).unwrap();
             let wm2 = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [x, y, -1.0],
                     [1.4, 1.4, 0.1],
                 )));
@@ -154,8 +170,8 @@ impl HelioWasmApp for Demo {
             for (sz, z_off) in [(1.0_f32, 10.0_f32), (-1.0, -10.0)] {
                 // Boom
                 let boom = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, z_off * 0.5],
                         [0.12, 0.12, z_off.abs() - 2.0],
                     )));
@@ -164,29 +180,28 @@ impl HelioWasmApp for Demo {
                 for py in [-0.9_f32, 0.9] {
                     let panel =
                         renderer
-                            .scene_mut()
-                            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                            .scene_for_legacy_mut()
+                            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                                 [sx * 8.0, py, z_off],
                                 [6.0, 0.04, 1.8],
                             )));
                     insert_object(renderer, panel, solar_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     let panel2 =
                         renderer
-                            .scene_mut()
-                            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                            .scene_for_legacy_mut()
+                            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                                 [sx * 16.0, py, z_off],
                                 [6.0, 0.04, 1.8],
                             )));
                     insert_object(renderer, panel2, solar_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     // Panel grid lines
                     for k in -2..=2 {
-                        let grid =
-                            renderer
-                                .scene_mut()
-                                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                                    [sx * 8.0, py, z_off + k as f32 * 0.35],
-                                    [6.0, 0.015, 0.01],
-                                )));
+                        let grid = renderer.scene_for_legacy_mut().insert_entity(
+                            helio::SceneEntity::mesh(box_mesh(
+                                [sx * 8.0, py, z_off + k as f32 * 0.35],
+                                [6.0, 0.015, 0.01],
+                            )),
+                        );
                         insert_object(renderer, grid, panel_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     }
                 }
@@ -196,15 +211,15 @@ impl HelioWasmApp for Demo {
 
         // Docking port (forward)
         let dock = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 5.5],
                 [1.0, 1.0, 1.5],
             )));
         insert_object(renderer, dock, hull_m, glam::Mat4::IDENTITY, 1.5).unwrap();
         let dock_ring = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 6.5],
                 [1.3, 1.3, 0.15],
             )));
@@ -214,8 +229,8 @@ impl HelioWasmApp for Demo {
         for ex in [-0.7_f32, 0.7] {
             for ey in [-0.7_f32, 0.7] {
                 let eng = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [ex, ey, -5.5],
                         [0.3, 0.3, 0.8],
                     )));
@@ -225,23 +240,23 @@ impl HelioWasmApp for Demo {
 
         // Nav lights (port=red, starboard=green)
         let port_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh(
                 [sx_for_nav(-1.0), 0.0, 0.0],
                 0.08,
             )));
         insert_object(renderer, port_cube, red_m, glam::Mat4::IDENTITY, 0.08).unwrap();
         let star_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh(
                 [sx_for_nav(1.0), 0.0, 0.0],
                 0.08,
             )));
         insert_object(renderer, star_cube, green_m, glam::Mat4::IDENTITY, 0.08).unwrap();
 
         let port_light = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [-22.5, 0.0, 0.0],
                 [1.0, 0.05, 0.05],
                 12.0,
@@ -250,8 +265,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let star_light = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [22.5, 0.0, 0.0],
                 [0.05, 1.0, 0.1],
                 12.0,
@@ -263,8 +278,8 @@ impl HelioWasmApp for Demo {
         // Sunlight (directional, no atmosphere)
         let sun_dir = Vec3::new(-0.5, -0.4, 0.8).normalize();
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [sun_dir.x, sun_dir.y, sun_dir.z],
                 [1.0, 0.98, 0.95],
                 1.0,
@@ -318,11 +333,11 @@ impl HelioWasmApp for Demo {
 
         // Nav light blink (1 Hz)
         let blink = ((elapsed * std::f32::consts::TAU).sin() > 0.0) as u8 as f32;
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene_for_legacy_mut().update_light(
             self.port_light,
             point_light([-22.5, 0.0, 0.0], [1.0, 0.05, 0.05], 12.0 * blink, 8.0),
         );
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene_for_legacy_mut().update_light(
             self.star_light,
             point_light(
                 [22.5, 0.0, 0.0],

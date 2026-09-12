@@ -461,7 +461,7 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx.scene.lights.len() as u32;
+        let light_count = ctx.scene.light_count;
         let sky = ctx.frame_resources.sky.sky_color;
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],

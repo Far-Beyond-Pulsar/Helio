@@ -18,8 +18,8 @@
 //!
 //! Unlike `StaticMeshComponent`/`LightComponent`/`PortalComponent`, this
 //! goes through `Scene::insert_reflection_capture`/etc. directly rather than
-//! `SceneActor::reflection_capture(..)` + `Scene::insert_actor`: those
-//! components need the `SceneActor`/tag machinery specifically for
+//! `SceneEntity::reflection_capture(..)` + `Scene::insert_entity`: those
+//! components need the `SceneEntity`/tag machinery specifically for
 //! click-to-select picking, which reflection captures don't have wired up
 //! yet (deferred, along with gizmo interaction, for a follow-up — this pass
 //! is the data-sync mechanism, not full editor interaction). The direct
@@ -38,10 +38,55 @@ use pulsar_reflection::{
     RuntimeComponentOwner,
 };
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
+use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
+use pulsar_scenedb_derive::SceneStore;
 
 use crate::subsystems::ReflectionCaptureCache;
 
 pub const REFLECTION_CAPTURE_CLASS_NAME: &str = "ReflectionCaptureComponent";
+
+/// Packed SceneDB projection for a reflection probe.
+///
+/// `ReflectionCaptureComponent` remains the author-facing value.  This
+/// companion is the GPU-facing row and deliberately contains no Helio arena
+/// handle or renderer-owned lifetime.  Probe cubemap residency is frame
+/// derived; `cubemap_index == -1` means that no resident layer is available.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "reflection_captures")]
+pub struct ReflectionCaptureGpuComponent {
+    #[gpu] pub position_radius: [f32; 4],
+    #[gpu] pub extents_transition: [f32; 4],
+    #[gpu] pub world_to_local: [[f32; 4]; 4],
+    #[gpu] pub cubemap_index: i32,
+    #[gpu] pub shape: u32,
+    #[gpu] pub mobility: u32,
+    #[gpu] pub brightness: f32,
+}
+
+impl From<libhelio::GpuReflectionCapture> for ReflectionCaptureGpuComponent {
+    fn from(value: libhelio::GpuReflectionCapture) -> Self { bytemuck::cast(value) }
+}
+
+impl From<ReflectionCaptureGpuComponent> for libhelio::GpuReflectionCapture {
+    fn from(value: ReflectionCaptureGpuComponent) -> Self { bytemuck::cast(value) }
+}
+
+#[derive(Clone)]
+pub struct ReflectionCaptureSceneBinding {
+    handle: BufferHandle,
+    _record: PhantomData<ReflectionCaptureGpuComponent>,
+}
+
+impl ReflectionCaptureSceneBinding {
+    pub fn resolve(mirror: &GpuMirrorHandle) -> Option<Self> {
+        mirror.store().resolve_buffer_handle(BufferKey::of("reflection_captures"))
+            .map(|handle| Self { handle, _record: PhantomData })
+    }
+    pub fn buffer(&self) -> &wgpu::Buffer { &self.handle.buffer }
+    pub fn epoch(&self) -> u64 { self.handle.epoch }
+}
 
 /// Influence-volume shape. Mirrors `libhelio::ReflectionCaptureShape`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
@@ -138,7 +183,6 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
         if !component.enabled {
             if let Some(id) = cached_id {
                 let removed = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .remove_reflection_capture(id);
                 if removed {
                     get_subsystem!(context, ReflectionCaptureCache).remove(owner.scene_object_id);
@@ -181,12 +225,10 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
         match cached_id {
             Some(id) => {
                 let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .update_reflection_capture(id, &descriptor);
             }
             None => {
                 let inserted = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .insert_reflection_capture(descriptor);
                 if let Ok(id) = inserted {
                     get_subsystem!(context, ReflectionCaptureCache)

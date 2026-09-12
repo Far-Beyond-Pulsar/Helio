@@ -41,6 +41,16 @@
 
 use std::borrow::Cow;
 
+pub mod directives;
+pub mod reflection;
+pub use directives::{parse as parse_directives, PipelineDirectives};
+pub use reflection::{
+    create_bind_group_layouts, create_pipeline_layout, create_reflected_bind_groups,
+    create_reflected_bind_groups_with_layouts, create_reflected_pipeline, layout_entries,
+    populate_bind_group_entries, reflect, BindingKind, ReflectedBinding, ReflectedLayout,
+    ReflectedPipeline, ReflectedShader, ReflectionError,
+};
+
 /// The canonical camera struct and depth/G-buffer conventions.
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
 

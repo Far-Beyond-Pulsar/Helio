@@ -24,6 +24,7 @@ struct Globals {
 }
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: Globals;
+@group(0) @binding(2) var<storage, read> instances: array<BillboardInstance>;
 
 // Group 1: sprite texture
 @group(1) @binding(0) var sprite_tex:     texture_2d<f32>;
@@ -37,12 +38,9 @@ struct QuadVertex {
 }
 
 struct BillboardInstance {
-    // world position (xyz) + unused pad (w)
-    @location(2) world_pos_pad: vec4<f32>,
-    // scale (xy), screen_scale flag as f32 (z), unused (w)
-    @location(3) scale_flags:   vec4<f32>,
-    // RGBA tint color
-    @location(4) color:         vec4<f32>,
+    world_pos_pad: vec4<f32>,
+    scale_flags:   vec4<f32>,
+    color:         vec4<f32>,
 }
 
 // ── Vertex output ───────────────────────────────────────────────────────────
@@ -56,7 +54,16 @@ struct VertexOut {
 // ── Vertex shader ───────────────────────────────────────────────────────────
 
 @vertex
-fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
+fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VertexOut {
+    let quad_positions = array<vec2<f32>, 6>(
+        vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, -0.5), vec2<f32>(-0.5, 0.5),
+        vec2<f32>(-0.5, 0.5), vec2<f32>(0.5, -0.5), vec2<f32>(0.5, 0.5));
+    let quad_uvs = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0));
+    let quad_position = quad_positions[vertex_index];
+    let quad_uv = quad_uvs[vertex_index];
+    let inst = instances[instance_index];
     let world_pos    = inst.world_pos_pad.xyz;
     let scale        = inst.scale_flags.xy;
     let screen_scale = inst.scale_flags.z > 0.5;
@@ -71,8 +78,8 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     let up       = cross(to_cam, right);
 
     // Offset in world space using the quad's local position
-    var offset = right * quad.position.x * scale.x
-               + up    * quad.position.y * scale.y;
+    var offset = right * quad_position.x * scale.x
+               + up    * quad_position.y * scale.y;
 
     // Optional: constant screen-space scaling.
     // We must scale by VIEW-AXIS depth (dot with forward), NOT Euclidean distance.
@@ -89,7 +96,7 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
 
     var out: VertexOut;
     out.clip_pos = cameras[0].view_proj * vec4<f32>(final_pos, 1.0); // view_proj at offset 128
-    out.uv       = quad.uv;
+    out.uv       = quad_uv;
     out.color    = inst.color;
     return out;
 }

@@ -332,18 +332,11 @@ pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<U
     let mesh_ids = scene
         .meshes
         .iter()
-        .filter_map(|mesh| {
-            let actor_id =
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                        vertices: mesh.vertices.clone(),
-                        indices: mesh.indices.clone(),
-                    }));
-            match actor_id {
-                helio::SceneActorId::Mesh(id) => Some(id),
-                _ => None,
-            }
+        .map(|mesh| {
+            renderer.create_mesh_asset(helio::MeshUpload {
+                vertices: mesh.vertices.clone(),
+                indices: mesh.indices.clone(),
+            })
         })
         .collect::<Vec<_>>();
     Ok(UploadedScene {
@@ -362,8 +355,7 @@ pub fn upload_scene_materials(
         .cloned()
         .map(|texture| {
             renderer
-                .scene_mut()
-                .insert_texture(texture)
+                .create_texture_asset(texture)
                 .map_err(|err: helio::SceneError| AssetError::InvalidData(err.to_string()))
         })
         .collect();
@@ -375,8 +367,7 @@ pub fn upload_scene_materials(
         .map(|material| {
             let asset = scene_converter::material_asset_from_converted(material, &texture_ids);
             renderer
-                .scene_mut()
-                .insert_material_asset(asset)
+                .create_material_asset(asset)
                 .map_err(|err: helio::SceneError| AssetError::InvalidData(err.to_string()))
         })
         .collect()
@@ -405,8 +396,7 @@ pub fn upload_sectioned_scene(
         .cloned()
         .map(|t| {
             renderer
-                .scene_mut()
-                .insert_texture(t)
+                .create_texture_asset(t)
                 .map_err(|e: helio::SceneError| AssetError::InvalidData(e.to_string()))
         })
         .collect();
@@ -418,8 +408,7 @@ pub fn upload_sectioned_scene(
         .map(|mat| {
             let asset = scene_converter::material_asset_from_converted(mat, &texture_ids);
             renderer
-                .scene_mut()
-                .insert_material_asset(asset)
+                .create_material_asset(asset)
                 .map_err(|e: helio::SceneError| AssetError::InvalidData(e.to_string()))
         })
         .collect();
@@ -430,7 +419,7 @@ pub fn upload_sectioned_scene(
         vertices: sm.vertices.clone(),
         sections: sm.sections.iter().map(|s| s.indices.clone()).collect(),
     };
-    let multi_mesh_id = renderer.scene_mut().insert_sectioned_mesh(upload);
+    let multi_mesh_id = renderer.create_sectioned_mesh_asset(upload);
 
     // Resolve per-section material IDs (fall back to a unit material when None).
     let section_material_ids: Vec<MaterialId> = sm
@@ -440,20 +429,20 @@ pub fn upload_sectioned_scene(
             sec.material_index
                 .and_then(|idx| all_material_ids.get(idx).copied())
                 .unwrap_or_else(|| {
-                    renderer.scene_mut().insert_material(helio::GpuMaterial {
-                        base_color: [0.7, 0.65, 0.55, 1.0],
-                        emissive: [0.0, 0.0, 0.0, 0.0],
-                        roughness_metallic: [0.6, 0.0, 1.5, 0.0],
-                        tex_base_color: helio::GpuMaterial::NO_TEXTURE,
-                        tex_normal: helio::GpuMaterial::NO_TEXTURE,
-                        tex_roughness: helio::GpuMaterial::NO_TEXTURE,
-                        tex_emissive: helio::GpuMaterial::NO_TEXTURE,
-                        tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
-                        workflow: 0,
-                        flags: 0,
-                        material_class: 0,
-                        class_params: [0.0; 4],
-                    })
+                    renderer.create_material_projection(helio::GpuMaterial {
+                            base_color: [0.7, 0.65, 0.55, 1.0],
+                            emissive: [0.0, 0.0, 0.0, 0.0],
+                            roughness_metallic: [0.6, 0.0, 1.5, 0.0],
+                            tex_base_color: helio::GpuMaterial::NO_TEXTURE,
+                            tex_normal: helio::GpuMaterial::NO_TEXTURE,
+                            tex_roughness: helio::GpuMaterial::NO_TEXTURE,
+                            tex_emissive: helio::GpuMaterial::NO_TEXTURE,
+                            tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
+                            workflow: 0,
+                            flags: 0,
+                            material_class: 0,
+                            class_params: [0.0; 4],
+                        })
                 })
         })
         .collect();

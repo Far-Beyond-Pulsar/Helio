@@ -555,7 +555,6 @@ impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
         if !component.enabled {
             if let Some(id) = cached_id {
                 let removed = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .remove_post_process_volume(id);
                 if removed.is_ok() {
                     get_subsystem!(context, PostProcessVolumeCache).remove(owner.scene_object_id);
@@ -569,12 +568,10 @@ impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
         match cached_id {
             Some(id) => {
                 let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .update_post_process_volume(id, descriptor);
             }
             None => {
                 let inserted = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .insert_post_process_volume(descriptor);
                 if let Ok(id) = inserted {
                     get_subsystem!(context, PostProcessVolumeCache)

@@ -39,17 +39,17 @@ impl FoliageCache {
 /// (which re-rolls its placement) before its material so the material is not
 /// tombstoned while referenced. Returns `false` when the key was not cached.
 pub fn remove_foliage_handles(
-    scene: &mut helio::Scene,
+    renderer: &mut helio::Renderer,
     cache: &mut FoliageCache,
     key: &str,
 ) -> bool {
     let Some(entry) = cache.map.remove(key) else {
         return false;
     };
-    let _ = scene.remove_foliage_type(entry.type_id);
-    let _ = scene.remove_foliage_layer(entry.layer_id);
-    let _ = scene.remove_foliage_interactor(entry.interactor_id);
-    let _ = scene.remove_material(entry.material_id);
+    let _ = renderer.remove_foliage_type(entry.type_id);
+    let _ = renderer.remove_foliage_layer(entry.layer_id);
+    let _ = renderer.remove_foliage_interactor(entry.interactor_id);
+    let _ = renderer.remove_material_asset(entry.material_id);
     true
 }
 
@@ -238,18 +238,18 @@ pub enum PortalPairAction {
 /// portal, `Some((portal_id, None))` for one just removed, `None` for an
 /// in-place update or no-op.
 ///
-/// Split from `PortalLinkCache` itself (which never touches `helio::Scene`
+/// Split from `PortalLinkCache` itself (which never touches `Renderer`
 /// directly) because a `ComponentRuntimeContext` can only hand out one
 /// mutable subsystem borrow at a time (`Subsystems::get_mut` takes `&mut
 /// self`) — there is no way to hold `&mut Renderer` and `&mut
 /// PortalLinkCache` simultaneously through that interface. Computing the
-/// action from `PortalLinkCache` alone, then applying it here against a
-/// `Renderer`-borrowed scene, then (if needed) feeding the tiny result back
-/// into `PortalLinkCache` as a third, separate borrow, avoids ever needing
-/// two subsystems live at once. `PortalComponent::sync_component` and the
-/// editor's stale-portal sweep both go through this same function.
+/// action from `PortalLinkCache` alone, then applying it here against the
+/// `Renderer`'s narrow portal projection methods, then (if needed) feeding
+/// the tiny result back into `PortalLinkCache` as a third, separate borrow,
+/// avoids ever needing two subsystems live at once. `PortalComponent::sync_component`
+/// and the editor's stale-portal sweep both go through this same function.
 pub fn apply_portal_pair_action(
-    scene: &mut helio::Scene,
+    renderer: &mut helio::Renderer,
     action: PortalPairAction,
 ) -> Option<(i32, Option<helio::PortalId>)> {
     match action {
@@ -259,7 +259,7 @@ pub fn apply_portal_pair_action(
             a,
             b,
             half_extent,
-        } => scene
+        } => renderer
             .add_portal(helio::PortalDescriptor { a, b, half_extent })
             .ok()
             .map(|id| (portal_id, Some(id))),
@@ -269,12 +269,12 @@ pub fn apply_portal_pair_action(
             b,
             half_extent,
         } => {
-            let _ = scene.update_portal_pose(id, a, b);
-            let _ = scene.update_portal_half_extent(id, half_extent);
+            let _ = renderer.update_portal_pose(id, a, b);
+            let _ = renderer.update_portal_half_extent(id, half_extent);
             None
         }
         PortalPairAction::Remove { portal_id, id } => {
-            let _ = scene.remove_portal(id);
+            let _ = renderer.remove_portal(id);
             Some((portal_id, None))
         }
     }

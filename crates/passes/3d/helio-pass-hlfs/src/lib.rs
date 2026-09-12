@@ -514,7 +514,7 @@ impl RenderPass for HlfsPass {
         builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        let camera = *ctx.scene.camera.data();
+        let camera = *ctx.scene.camera_data;
         let light_count = ctx.scene.movable_light_count;
         let continuity = self
             .previous_frame

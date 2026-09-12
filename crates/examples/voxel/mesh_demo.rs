@@ -17,7 +17,7 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneActor, VoxelMode, VoxelTerrain,
+    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity, VoxelMode, VoxelTerrain,
     VoxelVolumeDescriptor, VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
 };
 use helio_pass_fxaa::FxaaPass;
@@ -336,7 +336,7 @@ impl ApplicationHandler for App {
         // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
         // directly (see voxel_raymarch.wgsl), the same infrastructure the default
         // render graphs feed their deferred lighting pass with.
-        scene.insert_actor(SceneActor::light(GpuLight {
+        scene.insert_entity(SceneEntity::light(GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [0.35, -0.8, 0.25, 0.0],
             color_intensity: [1.0, 0.95, 0.85, 3.0],
@@ -346,7 +346,7 @@ impl ApplicationHandler for App {
             _pad: 0,
             ..Default::default()
         }));
-        scene.insert_actor(SceneActor::light(GpuLight {
+        scene.insert_entity(SceneEntity::light(GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [-0.4, -0.2, -0.6, 0.0],
             color_intensity: [0.5, 0.6, 0.8, 0.6],

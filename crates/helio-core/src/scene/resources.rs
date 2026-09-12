@@ -74,7 +74,7 @@
 //! }
 //! ```
 
-use crate::component::ComponentRegistry;
+use libhelio::{GpuCameraUniforms, GpuMaterial};
 
 /// Zero-copy references to GPU scene resources.
 ///
@@ -126,8 +126,12 @@ use crate::component::ComponentRegistry;
 ///     pub camera: &'a GpuCameraBuffer,
 /// }
 /// ```
+#[derive(Clone, Copy)]
 pub struct SceneResources<'a> {
     pub camera: &'a wgpu::Buffer,
+    /// CPU-side frame projection for passes that need scalar camera values
+    /// while retaining the GPU buffer as the binding resource.
+    pub camera_data: &'a GpuCameraUniforms,
     pub instances: &'a wgpu::Buffer,
     pub aabbs: &'a wgpu::Buffer,
     pub draw_calls: &'a wgpu::Buffer,
@@ -143,6 +147,8 @@ pub struct SceneResources<'a> {
     pub decals: &'a wgpu::Buffer,
     pub decal_count: u32,
     pub materials: &'a wgpu::Buffer,
+    /// Read-only material projection for pass-local classification.
+    pub material_data: &'a [GpuMaterial],
     pub shadow_matrices: &'a wgpu::Buffer,
     pub indirect: &'a wgpu::Buffer,
     pub visibility: &'a wgpu::Buffer,
@@ -191,9 +197,6 @@ pub struct SceneResources<'a> {
     /// Copied from GpuScene::per_caster_dirty_gen each frame. ShadowPass compares against
     /// its own last-rendered gen to decide which caster faces need re-rendering.
     pub per_caster_dirty_gen: [u64; 42],
-
-    /// Component registry for type-erased storage access.
-    pub components: &'a ComponentRegistry,
 
     pub voxel_volumes: &'a wgpu::Buffer,
     pub voxel_edit_ring: &'a wgpu::Buffer,

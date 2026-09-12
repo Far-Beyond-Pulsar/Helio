@@ -6,6 +6,11 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
+pub mod components;
+pub use components::{
+    WaterHitboxComponent, WaterHitboxSceneBinding, WaterVolumeComponent, WaterVolumeSceneBinding,
+};
+
 /// Simple fullscreen blit: copies a texture to the render target as-is.
 const BLIT_WGSL: &str = "
 @group(0) @binding(0) var blit_tex:  texture_2d<f32>;

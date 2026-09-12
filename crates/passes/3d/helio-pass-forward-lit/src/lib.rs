@@ -5,6 +5,10 @@ use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+mod components;
+pub use components::{LightComponent, MAX_LIGHTS};
+use pulsar_scenedb::gpu::BufferKey;
+
 const TILE_SIZE: u32 = 16;
 
 #[repr(C)]
@@ -400,10 +404,23 @@ impl RenderPass for ForwardLitPass {
         let num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
         let num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
 
+        // Prefer the generic SceneDB `"scene_lights"` buffer when a
+        // `LightComponent` has registered one (any World light ever
+        // inserted); it's a fixed-capacity buffer (`MAX_LIGHTS`), not a live
+        // per-frame count, so iterating it needs no per-frame CPU query --
+        // see `LightComponent`'s module doc. Falls back to Helio's own
+        // CPU-tracked light count when no SceneDB light has been inserted
+        // yet (e.g. this frame's graph has no lights at all).
+        let light_count = if ctx.scene_buffers.contains(BufferKey::of("scene_lights")) {
+            MAX_LIGHTS
+        } else {
+            ctx.scene.light_count
+        };
+
         let globals = ForwardLitGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             num_tiles_x,
@@ -424,10 +441,21 @@ impl RenderPass for ForwardLitPass {
         }
         let ms = main_scene.read("ForwardLit").unwrap();
 
+        // Same preference as `prepare()`: the generic SceneDB `"scene_lights"`
+        // buffer when a `LightComponent` has registered one, else Helio's own
+        // CPU-tracked light buffer. No renderer method binds this -- it's
+        // resolved fresh, by key, from whatever the current SceneDB mirror
+        // has registered, exactly like every other pass reads `ctx.resources`.
+        let lights_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.scene.lights);
+
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
         let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let lights_ptr = lights_buf as *const _ as usize;
         let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
@@ -498,7 +526,7 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,

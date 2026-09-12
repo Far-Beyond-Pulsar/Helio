@@ -123,8 +123,8 @@ impl ComponentRuntimeBehavior for PortalComponent {
         // Phase 2 — apply the action to the real scene, then (phase 3, if
         // the action created or removed a portal) feed the result back into
         // the cache. Three separate subsystem fetches, none overlapping.
-        let scene = get_subsystem!(context, helio::Renderer).scene_mut();
-        if let Some((portal_id, id)) = apply_portal_pair_action(scene, action) {
+        let renderer = get_subsystem!(context, helio::Renderer);
+        if let Some((portal_id, id)) = apply_portal_pair_action(renderer, action) {
             let cache = get_subsystem!(context, PortalLinkCache);
             match id {
                 Some(id) => cache.set_active(portal_id, id),

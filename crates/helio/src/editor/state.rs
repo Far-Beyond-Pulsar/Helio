@@ -8,7 +8,7 @@ use super::gizmo::{
 use super::{ring_frame, GizmoAxis, GizmoMode};
 use crate::handles::ObjectId;
 use crate::renderer::Renderer;
-use crate::scene::{Scene, SceneActorId};
+use crate::scene::{Scene, SceneEntityId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal drag state
@@ -34,7 +34,7 @@ enum DragState {
 
 /// Per-frame editor state: selection, gizmo mode, hover, and drag.
 pub struct EditorState {
-    selected: Option<SceneActorId>,
+    selected: Option<SceneEntityId>,
     gizmo_mode: GizmoMode,
     /// Set by `update_hover` — the gizmo axis the cursor is currently over.
     hovered_axis: Option<GizmoAxis>,
@@ -61,7 +61,7 @@ impl EditorState {
     // ── Selection ─────────────────────────────────────────────────────────────
 
     /// Explicitly select a scene actor by handle.
-    pub fn select(&mut self, id: SceneActorId) {
+    pub fn select(&mut self, id: SceneEntityId) {
         self.selected = Some(id);
         self.hovered_axis = None;
         self.drag = DragState::Idle;
@@ -75,7 +75,7 @@ impl EditorState {
     }
 
     /// Returns the currently selected scene actor, if any.
-    pub fn selected(&self) -> Option<SceneActorId> {
+    pub fn selected(&self) -> Option<SceneEntityId> {
         self.selected
     }
 
@@ -150,7 +150,7 @@ impl EditorState {
         };
         let scene = renderer.scene();
         match self.selected {
-            Some(SceneActorId::Object(id)) => {
+            Some(SceneEntityId::Object(id)) => {
                 let Some((center, _size, local_axes)) = object_gizmo_info(id, scene) else {
                     self.hovered_axis = None;
                     return false;
@@ -166,7 +166,7 @@ impl EditorState {
                 );
                 self.hovered_axis.is_some()
             }
-            Some(SceneActorId::SectionedObject(id)) => {
+            Some(SceneEntityId::SectionedObject(id)) => {
                 let Some((center, _size, local_axes)) = sectioned_gizmo_info(id, scene) else {
                     self.hovered_axis = None;
                     return false;
@@ -182,7 +182,7 @@ impl EditorState {
                 );
                 self.hovered_axis.is_some()
             }
-            Some(SceneActorId::Light(id)) => {
+            Some(SceneEntityId::Light(id)) => {
                 let Some(light) = scene.get_light(id) else {
                     self.hovered_axis = None;
                     return false;
@@ -223,7 +223,7 @@ impl EditorState {
             None => return false,
         };
         match self.selected {
-            Some(SceneActorId::Object(id)) => {
+            Some(SceneEntityId::Object(id)) => {
                 let Some((center, _, local_axes)) = object_gizmo_info(id, scene) else {
                     return false;
                 };
@@ -259,7 +259,7 @@ impl EditorState {
                 };
                 true
             }
-            Some(SceneActorId::SectionedObject(id)) => {
+            Some(SceneEntityId::SectionedObject(id)) => {
                 let Some((center, _, local_axes)) = sectioned_gizmo_info(id, scene) else {
                     return false;
                 };
@@ -295,7 +295,7 @@ impl EditorState {
                 };
                 true
             }
-            Some(SceneActorId::Light(id)) => {
+            Some(SceneEntityId::Light(id)) => {
                 let Some(light) = scene.get_light(id) else {
                     return false;
                 };
@@ -350,10 +350,10 @@ impl EditorState {
         };
         let world_size = gizmo_world_size(center, camera, viewport_height);
 
-        let scene = renderer.scene_mut();
+        let scene = renderer.transient_scene_mut();
 
         match self.selected {
-            Some(SceneActorId::Object(object_id)) => {
+            Some(SceneEntityId::Object(object_id)) => {
                 let new_transform = match self.gizmo_mode {
                     GizmoMode::Translate => {
                         let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -425,7 +425,7 @@ impl EditorState {
 
                 let _ = scene.update_object_transform(object_id, new_transform);
             }
-            Some(SceneActorId::SectionedObject(inst_id)) => {
+            Some(SceneEntityId::SectionedObject(inst_id)) => {
                 let new_transform = match self.gizmo_mode {
                     GizmoMode::Translate => {
                         let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -497,7 +497,7 @@ impl EditorState {
 
                 let _ = scene.update_sectioned_object_transform(inst_id, new_transform);
             }
-            Some(SceneActorId::Light(light_id)) => {
+            Some(SceneEntityId::Light(light_id)) => {
                 let Some(t_now) = ray_to_axis_t(ray_o, ray_d, center, axis_dir) else {
                     return;
                 };
@@ -528,11 +528,11 @@ impl EditorState {
         self.drag = DragState::Idle;
     }
 
-    pub(crate) fn take_selected(&mut self) -> Option<SceneActorId> {
+    pub(crate) fn take_selected(&mut self) -> Option<SceneEntityId> {
         self.selected.take()
     }
 
-    pub(crate) fn replace_selected(&mut self, id: Option<SceneActorId>) {
+    pub(crate) fn replace_selected(&mut self, id: Option<SceneEntityId>) {
         self.selected = id;
     }
 
@@ -544,7 +544,7 @@ impl EditorState {
     /// Prefer using `ScenePicker::cast_ray` + `select()` for accurate BVH picking.
     pub fn pick(&mut self, scene: &Scene, ray_origin: Vec3, ray_dir: Vec3) {
         let mut best_t = f32::MAX;
-        let mut best_id: Option<SceneActorId> = None;
+        let mut best_id: Option<SceneEntityId> = None;
 
         for (id, _transform, bounds, _tag) in scene.iter_objects_for_editor() {
             let center = Vec3::new(bounds[0], bounds[1], bounds[2]);
@@ -552,7 +552,7 @@ impl EditorState {
             if let Some(t) = ray_sphere_intersect(ray_origin, ray_dir, center, radius) {
                 if t < best_t {
                     best_t = t;
-                    best_id = Some(SceneActorId::Object(id));
+                    best_id = Some(SceneEntityId::Object(id));
                 }
             }
         }
@@ -576,7 +576,7 @@ impl EditorState {
             return;
         };
         match self.selected {
-            Some(SceneActorId::Object(id)) => {
+            Some(SceneEntityId::Object(id)) => {
                 let Some((center, _gizmo_size, local_axes)) =
                     object_gizmo_info(id, renderer.scene())
                 else {
@@ -603,7 +603,7 @@ impl EditorState {
                     }
                 });
             }
-            Some(SceneActorId::SectionedObject(id)) => {
+            Some(SceneEntityId::SectionedObject(id)) => {
                 let Some((center, _gizmo_size, local_axes)) =
                     sectioned_gizmo_info(id, renderer.scene())
                 else {
@@ -629,7 +629,7 @@ impl EditorState {
                     }
                 });
             }
-            Some(SceneActorId::Light(id)) => {
+            Some(SceneEntityId::Light(id)) => {
                 let Some(light) = renderer.scene().get_light(id) else {
                     return;
                 };

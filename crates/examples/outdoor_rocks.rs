@@ -25,13 +25,15 @@ use std::time::Instant;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene, VirtualMeshUpload,
+    LightRenderInput, Renderer, RendererBuilder, RendererConfig, VirtualMeshUpload,
     VirtualObjectDescriptor,
 };
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external_with_context;
+use pulsar_scenedb::SceneDb;
+use pulsar_scenedb::World;
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -76,6 +78,45 @@ const MARKER_COLORS: [[f32; 4]; 6] = [
     [1.0, 1.0, 1.0, 0.85], // white
 ];
 
+/// SceneDB-owned light state used by this example's small projection seam.
+/// Helio receives only the transient `LightRenderInput` list below.
+#[derive(Clone, Copy, Debug)]
+struct SceneLight {
+    light: helio::GpuLight,
+    position: [f32; 3],
+}
+
+fn spawn_scene_light(
+    world: &mut World,
+    light: helio::GpuLight,
+    position: [f32; 3],
+) -> pulsar_scenedb::Entity {
+    let entity = world.spawn();
+    world.insert(entity, SceneLight { light, position });
+    entity
+}
+
+fn scene_light_inputs(world: &World) -> Vec<LightRenderInput> {
+    world
+        .query::<&SceneLight>()
+        .map(|(entity, scene_light)| {
+            let mut light = scene_light.light;
+            light.position_range[0..3].copy_from_slice(&scene_light.position);
+            LightRenderInput {
+                light,
+                user_tag: entity.index() as u64,
+                entity_index: entity.index(),
+            }
+        })
+        .collect()
+}
+
+fn rebuild_scene_lights(renderer: &mut Renderer, scene_db: &SceneDb) {
+    renderer
+        .scene_for_legacy_mut()
+        .rebuild_light_instances(&scene_light_inputs(&scene_db.world));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct App {
@@ -99,7 +140,8 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    sun_light_id: LightId,
+    scene_db: SceneDb,
+    sun_entity: pulsar_scenedb::Entity,
     sun_angle: f32,
 
     // ── VG debug mode ─────────────────────────────────────────────
@@ -226,91 +268,55 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
-        renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]); // overcast sky blue
-        renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
+        let mut scene_db = SceneDb::new();
+        let mut renderer = RendererBuilder::new(config)
+            .with_external_device()
+            .with_clear_color([0.34, 0.48, 0.72, 1.0])
+            .with_ambient([0.38, 0.44, 0.50], 1.3)
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
 
         // ── Sun light ─────────────────────────────────────────────────────
         let sun_angle: f32 = 0.62; // radians above horizon
         let sun_dir = Vec3::new(-sun_angle.cos(), -sun_angle.sin(), -0.6).normalize();
-        let sun_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
-                sun_dir.to_array(),
-                [1.0, 0.93, 0.75],
-                4.2,
-            )))
-            .as_light()
-            .unwrap();
-
-        // Small fill lights to break up flatness
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+        let sun_entity = {
+            let sun_entity = spawn_scene_light(
+                &mut scene_db.world,
+                directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
+                [0.0, 0.0, 0.0],
+            );
+            spawn_scene_light(
+                &mut scene_db.world,
+                point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0),
                 [0.0, 8.0, 0.0],
-                [0.6, 0.7, 1.0],
-                12.0,
-                50.0,
-            )));
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            );
+            spawn_scene_light(
+                &mut scene_db.world,
+                point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0),
                 [60.0, 4.0, -40.0],
-                [1.0, 0.85, 0.5],
-                8.0,
-                30.0,
-            )));
+            );
+            sun_entity
+        };
 
         // ── Ground plane ──────────────────────────────────────────────────
-        let ground_mat = renderer.scene_mut().insert_material(make_material(
-            [0.28, 0.23, 0.18, 1.0],
-            0.92,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let ground_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.28, 0.23, 0.18, 1.0],
+                0.92,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
         let ground_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(v3_demo_common::plane_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(v3_demo_common::plane_mesh(
                 [0.0, 0.0, 0.0],
                 250.0,
             )))
@@ -335,16 +341,18 @@ impl ApplicationHandler for App {
         ];
 
         // Fallback cube material/mesh for any type that failed to load
-        let fallback_mat = renderer.scene_mut().insert_material(make_material(
-            [0.35, 0.30, 0.25, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let fallback_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.35, 0.30, 0.25, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
         let fallback_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
@@ -373,8 +381,8 @@ impl ApplicationHandler for App {
                     .iter()
                     .map(|mesh| {
                         let vm_id = renderer
-                            .scene_mut()
-                            .insert_actor(helio::SceneActor::virtual_mesh(VirtualMeshUpload {
+                            .scene_for_legacy_mut()
+                            .insert_entity(helio::SceneEntity::virtual_mesh(VirtualMeshUpload {
                                 vertices: mesh.vertices.clone(),
                                 indices: mesh.indices.clone(),
                             }))
@@ -396,6 +404,7 @@ impl ApplicationHandler for App {
         // ── Scatter rocks ─────────────────────────────────────────────────
         let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
         let mut _global_rock_idx: usize = 0;
+        let mut billboards = Vec::new();
 
         for rock_type in 0..3usize {
             let vg_entries = rock_vg[rock_type].as_deref();
@@ -425,6 +434,15 @@ impl ApplicationHandler for App {
                 let center = pos + Vec3::Y * scale.y * 0.5;
                 let bounds_radius = base_scale * 1.2;
 
+                if _global_rock_idx % BILLBOARD_EVERY_N == 0 {
+                    billboards.push(helio::BillboardInstance {
+                        world_pos: [pos.x, pos.y + scale.y * 2.0, pos.z, 0.0],
+                        scale_flags: [1.4, 1.4, 0.0, 0.0],
+                        color: MARKER_COLORS
+                            [_global_rock_idx / BILLBOARD_EVERY_N % MARKER_COLORS.len()],
+                    });
+                }
+
                 match vg_entries {
                     None => {
                         let _ = v3_demo_common::insert_object(
@@ -437,8 +455,8 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(vm_id, mat_slot) in entries {
-                            let _ = renderer.scene_mut().insert_actor(
-                                helio::SceneActor::virtual_object(VirtualObjectDescriptor {
+                            let _ = renderer.scene_for_legacy_mut().insert_entity(
+                                helio::SceneEntity::virtual_object(VirtualObjectDescriptor {
                                     virtual_mesh: vm_id,
                                     material_id: mat_slot,
                                     transform,
@@ -455,6 +473,7 @@ impl ApplicationHandler for App {
                 _global_rock_idx += 1;
             }
         }
+        renderer.set_billboard_instances(&billboards);
 
         // ── Ship (parked nearby) ───────────────────────────────────────────
         let ship_pos = Vec3::new(18.0, 0.0, -12.0);
@@ -478,8 +497,8 @@ impl ApplicationHandler for App {
                                 .map(|v| Vec3::from_array(v.position).length())
                                 .fold(0.5_f32, f32::max);
                             let mesh_id = renderer
-                                .scene_mut()
-                                .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                                .scene_for_legacy_mut()
+                                .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
                                     vertices: mesh.vertices.clone(),
                                     indices: mesh.indices.clone(),
                                 }))
@@ -506,17 +525,19 @@ impl ApplicationHandler for App {
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
                 let ship_mesh = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
                     .as_mesh()
                     .unwrap();
-                let ship_mat = renderer.scene_mut().insert_material(make_material(
-                    [0.55, 0.70, 0.90, 1.0],
-                    0.25,
-                    0.75,
-                    [0.0, 0.0, 0.0],
-                    0.0,
-                ));
+                let ship_mat = renderer
+                    .scene_for_legacy_mut()
+                    .insert_material(make_material(
+                        [0.55, 0.70, 0.90, 1.0],
+                        0.25,
+                        0.75,
+                        [0.0, 0.0, 0.0],
+                        0.0,
+                    ));
                 let transform = Mat4::from_translation(ship_pos);
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
@@ -543,7 +564,8 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            sun_light_id,
+            scene_db,
+            sun_entity,
             sun_angle,
             vg_debug: false,
             debug_overlay_enabled: false,
@@ -696,10 +718,15 @@ impl ApplicationHandler for App {
                     -0.6,
                 )
                 .normalize();
-                let _ = state.renderer.scene_mut().update_light(
-                    state.sun_light_id,
-                    directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
-                );
+                {
+                    state
+                        .scene_db
+                        .world
+                        .get_mut::<SceneLight>(state.sun_entity)
+                        .expect("SceneDB sun light disappeared")
+                        .light = directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2);
+                }
+                rebuild_scene_lights(&mut state.renderer, &state.scene_db);
 
                 // ── Camera ────────────────────────────────────────────────
                 let forward = state.update_camera(dt);
@@ -791,6 +818,33 @@ impl ApplicationHandler for App {
         if let Some(state) = &self.state {
             state.window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_db_light_projection_preserves_world_owned_records() {
+        let mut world = World::new();
+        let sun = spawn_scene_light(
+            &mut world,
+            directional_light([0.0, -1.0, 0.0], [1.0, 0.93, 0.75], 4.2),
+            [3.0, 4.0, 5.0],
+        );
+        let fill = spawn_scene_light(
+            &mut world,
+            point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0),
+            [0.0, 8.0, 0.0],
+        );
+
+        let inputs = scene_light_inputs(&world);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].entity_index, sun.index());
+        assert_eq!(inputs[0].light.position_range[..3], [3.0, 4.0, 5.0]);
+        assert_eq!(inputs[1].entity_index, fill.index());
+        assert_eq!(inputs[1].light.position_range[..3], [0.0, 8.0, 0.0]);
     }
 }
 

@@ -35,6 +35,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod components;
+pub use components::{FogComponent, FogSceneBinding};
+
 /// Froxel grid dimensions.
 ///
 /// 160x90 keeps the 16:9 aspect so froxels stay roughly square on screen; 64
@@ -385,7 +388,7 @@ impl RenderPass for VolumetricFogPass {
 
         let globals = FogGlobals {
             csm_splits: libhelio::CSM_SPLITS,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.light_count,
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,

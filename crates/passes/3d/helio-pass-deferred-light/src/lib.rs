@@ -915,7 +915,7 @@ impl RenderPass for DeferredLightPass {
             debug_mode: self.debug_mode,
             has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
-            reflection_capture_count: ctx.scene.reflection_captures.len() as u32,
+            reflection_capture_count: ctx.scene.reflection_capture_count,
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
             _pad: [0; 2],

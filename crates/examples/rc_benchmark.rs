@@ -176,40 +176,48 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
 
         // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.9, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_red = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.1, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.7, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_cube = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.78, 0.72, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat_white = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.9, 0.9, 0.9, 1.0],
+                0.9,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let mat_red = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.8, 0.1, 0.1, 1.0],
+                0.9,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let mat_green = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.1, 0.7, 0.1, 1.0],
+                0.9,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let mat_cube = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.8, 0.78, 0.72, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         // ── Geometry ───────────────────────────────────────────────────────────────
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [hx, hy, hz],
                 )))
@@ -240,8 +248,8 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&(pos, col, int, rng)| {
                 renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::light(point_light(pos, col, int, rng)))
                     .as_light()
                     .unwrap()
             })
@@ -457,7 +465,7 @@ impl AppState {
 
         for (i, &id) in self.light_ids.iter().enumerate() {
             let (pos, col, base_int, range) = LIGHT_BASE[i];
-            let _ = self.renderer.scene_mut().update_light(
+            let _ = self.renderer.scene_for_legacy_mut().update_light(
                 id,
                 point_light(pos, col, base_int * self.light_intensity_multiplier, range),
             );

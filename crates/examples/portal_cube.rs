@@ -28,7 +28,7 @@ mod v3_demo_common;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     DebugDrawState, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId, Renderer,
-    RendererConfig, Scene, SceneActor,
+    RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, point_light};
@@ -211,27 +211,34 @@ impl ApplicationHandler for App {
         );
 
         // ── Materials ───────────────────────────────────────────────────────
-        let wall_mat = renderer.scene_mut().insert_material(make_material(
-            [0.75, 0.75, 0.78, 1.0],
-            0.75,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let frame_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.9, 1.0, 1.0],
-            0.4,
-            0.0,
-            [0.2, 0.85, 1.0],
-            2.5,
-        ));
+        let wall_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.75, 0.75, 0.78, 1.0],
+                0.75,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let frame_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.9, 1.0, 1.0],
+                0.4,
+                0.0,
+                [0.2, 0.85, 1.0],
+                2.5,
+            ));
 
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
         let unit_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+            )))
             .as_mesh()
             .unwrap();
 
@@ -274,7 +281,7 @@ impl ApplicationHandler for App {
             let a = helio::portal_pose_facing(normal * HALF_SIZE, normal, up);
             let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
             let portal = renderer
-                .scene_mut()
+                .scene_for_legacy_mut()
                 .add_portal(PortalDescriptor {
                     a,
                     b,
@@ -289,8 +296,8 @@ impl ApplicationHandler for App {
         let mut light_ids = Vec::new();
         light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::light(point_light(
                     [0.0, HALF_SIZE * 0.85, 0.0],
                     [1.0, 0.98, 0.92],
                     4.0,
@@ -305,8 +312,8 @@ impl ApplicationHandler for App {
         for &pos in &[Vec3::new(3.5, 3.0, 3.5), Vec3::new(-3.5, -3.0, -3.5)] {
             light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(SceneEntity::light(point_light(
                         [pos.x, pos.y, pos.z],
                         [0.85, 0.92, 1.0],
                         2.0,
@@ -625,8 +632,8 @@ fn insert_wall_face(
         // overselecting and blowing straight through the cull pass's
         // per-group capacity.
         let _ = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::object(ObjectDescriptor {
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::object(ObjectDescriptor {
                 mesh: unit_mesh,
                 material,
                 transform,

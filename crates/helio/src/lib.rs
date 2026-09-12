@@ -53,13 +53,14 @@ pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridg
 pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits,
     BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, GiConfig, GraphBuilderFn,
-    GraphRebuilder, PerfOverlayMode, RenderMode, Renderer, RendererBuilder, RendererConfig,
+    GraphRebuilder, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
+    RendererBuilder, RendererConfig, SceneDbHandle,
 };
 pub use scene::{
     portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
     GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
-    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
-    SceneActorId, SceneActorTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
+    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
+    SceneEntityId, SceneEntityTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
     VoxelMode, VoxelVolumeDescriptor, WaterHitboxActor, WaterHitboxDescriptor, WaterVolumeActor,
     WaterVolumeDescriptor,
 };
@@ -72,10 +73,9 @@ pub use helio_bake::{
     LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
 };
 pub use helio_core::{
-    Actor, Component, ComponentRegistry, ComponentSlot, ComponentVec, DebugViewDescriptor,
-    DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
-    RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
+    Actor, DebugViewDescriptor, DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms,
+    GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuScene,
+    GpuTimingAvailability, RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use libhelio::{
     HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,

@@ -5,10 +5,13 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use crate::handles::MaterialId;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
+use libhelio::SkyActor;
 
+use super::builder::SceneDbHandle;
 use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
@@ -48,13 +51,7 @@ pub struct DebugVertex {
     pub color: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct BillboardInstance {
-    pub world_pos: [f32; 4],
-    pub scale_flags: [f32; 4],
-    pub color: [f32; 4],
-}
+pub use helio_pass_billboard::BillboardInstance;
 
 pub(crate) enum CullStatsReadbackState {
     Idle,
@@ -102,16 +99,6 @@ pub struct Renderer {
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
-    pub(crate) billboard_instances: Vec<BillboardInstance>,
-    pub(crate) billboard_scratch: Vec<BillboardInstance>,
-    pub(crate) billboard_dirty: bool,
-    pub(crate) billboard_cached_light_count: usize,
-    pub(crate) billboard_cached_light_gen: u64,
-    pub(crate) billboard_cached_editor_hidden: bool,
-    pub(crate) billboard_cached_corona_gen: u64,
-    pub(crate) billboard_generation: u64,
-    pub(crate) corona_emitters: Vec<libhelio::GpuCoronaEmitter>,
-    pub(crate) corona_emitter_generation: u64,
     pub(crate) water_volumes_buffer: wgpu::Buffer,
     pub(crate) water_hitboxes_buffer: wgpu::Buffer,
     pub(crate) foliage_interactors_buffer: wgpu::Buffer,
@@ -144,11 +131,14 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+    /// Frontend-owned SceneDB GPU projection. The CPU SceneDB remains outside
+    /// Helio and is flushed by its owner at the frame boundary.
+    pub(crate) scene_db: SceneDbHandle,
 
     /// Whether the graph was built with the sky passes present.
     ///
     /// `SkyLutPass`/`SkyPass` are added conditionally on `Scene::sky_context().has_sky` at
-    /// graph *build* time, but the natural call order is `Renderer::new(scene, graph)` and
+    /// graph *build* time, but the natural call order is renderer construction followed by
     /// only then populate the scene — so a scene that gains a sky afterwards has a graph
     /// that will never draw it. Tracking what the graph was built with is what lets
     /// `rebuild_graph_if_sky_changed` notice.
@@ -432,11 +422,13 @@ impl Renderer {
         self.frame_delta_override = seconds;
     }
 
+    /// Set the renderer-wide debug visualization mode.
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
         self.graph.set_debug_mode(mode);
     }
 
+    /// Return owned descriptors for the debug views advertised by the graph.
     pub fn available_debug_views(&self) -> Vec<helio_core::DebugViewDescriptor> {
         self.graph.collect_debug_views()
     }
@@ -465,10 +457,365 @@ impl Renderer {
         &self.scene
     }
 
-    pub fn scene_mut(&mut self) -> &mut Scene {
+    /// Renderer-internal access to frame-derived scene state. This is not
+    /// exported from the crate and must never be used as an application scene
+    /// mutation API; persistent entity data belongs to the frontend SceneDB.
+    pub(crate) fn transient_scene_mut(&mut self) -> &mut Scene {
         &mut self.scene
     }
 
+    /// Consume the owning frontend's transient static-mesh projection.
+    pub fn submit_static_mesh_frame(&mut self, inputs: &[crate::scene::StaticMeshRenderInput]) {
+        self.scene.rebuild_static_mesh_instances(inputs);
+    }
+
+    /// Consume the owning frontend's transient light projection.
+    pub fn submit_light_frame(&mut self, inputs: &[crate::scene::LightRenderInput]) {
+        self.scene.rebuild_light_instances(inputs);
+    }
+
+    /// Advance renderer-owned simulation clocks without exposing the scene
+    /// container to the frontend.
+    pub fn advance_frame_simulation(&mut self, dt: f32) {
+        self.scene.advance_wind(dt);
+    }
+
+    /// Apply the editor visibility mask to the current frame.
+    pub fn hide_render_group(&mut self, group: GroupId) {
+        self.scene.hide_group(group);
+    }
+
+    /// Install the frontend's default environment configuration.
+    pub fn configure_default_sky(&mut self, color: [f32; 3]) {
+        self.scene.insert_entity(crate::scene::SceneEntity::Sky(
+            SkyActor::new().with_sky_color(color),
+        ));
+    }
+
+    /// Supply the environment projection owned by the application SceneDB.
+    pub fn set_sky_context(&mut self, sky_context: libhelio::sky::SkyContext) {
+        self.scene.set_sky_context(sky_context);
+    }
+
+    /// Bind a frontend-owned GPU transform projection for this renderer.
+    pub fn bind_transform_projection(&mut self, buffer: std::sync::Arc<wgpu::Buffer>) {
+        self.scene.rebind_transform_buffer(buffer);
+    }
+
+    /// Bind the frontend-owned static mesh pools used by the current frame.
+    pub fn bind_static_mesh_projection(
+        &mut self,
+        vertices: std::sync::Arc<pulsar_scenedb::gpu::VarLenGpuPool<crate::PackedVertex>>,
+        indices: std::sync::Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>>,
+    ) {
+        self.scene.rebind_static_mesh_pools(vertices, indices);
+    }
+
+    /// Allocate a renderer material slot for a borrowed SceneDB material
+    /// projection. The slot is presentation state, not scene ownership.
+    pub fn create_material_projection(&mut self, material: libhelio::GpuMaterial) -> MaterialId {
+        self.scene.insert_material(material)
+    }
+
+    /// Refresh a previously allocated presentation material slot.
+    pub fn update_material_projection(
+        &mut self,
+        id: MaterialId,
+        material: libhelio::GpuMaterial,
+    ) -> bool {
+        self.scene.update_material(id, material).is_ok()
+    }
+
+    /// Upload raw mesh geometry (vertex/index bytes) into the renderer's GPU
+    /// mesh pool and return an opaque asset handle.
+    ///
+    /// This is a GPU asset-pool operation, not scene authoring: it has no
+    /// world placement, transform, or lifecycle, and it does not create a
+    /// second scene authority. Placement of an instance that *references*
+    /// this asset is the caller's SceneDB's job (a `StaticMeshComponent` or
+    /// equivalent); Helio only stores the vertex/index bytes and hands back
+    /// an id.
+    pub fn create_mesh_asset(&mut self, upload: crate::mesh::MeshUpload) -> crate::handles::MeshId {
+        self.scene.insert_mesh(upload)
+    }
+
+    /// Upload a multi-material (sectioned) mesh asset — shared vertex buffer,
+    /// N per-section index ranges. Same asset-pool classification as
+    /// [`Self::create_mesh_asset`]; see its docs.
+    pub fn create_sectioned_mesh_asset(
+        &mut self,
+        upload: crate::mesh::SectionedMeshUpload,
+    ) -> crate::handles::MultiMeshId {
+        self.scene.insert_sectioned_mesh(upload)
+    }
+
+    /// Upload a texture asset (image bytes + sampler config) into the
+    /// renderer's GPU texture pool. Same asset-pool classification as
+    /// [`Self::create_mesh_asset`]; see its docs.
+    pub fn create_texture_asset(
+        &mut self,
+        texture: crate::material::TextureUpload,
+    ) -> crate::scene::Result<crate::handles::TextureId> {
+        self.scene.insert_texture(texture)
+    }
+
+    /// Upload a material asset (GPU parameters + texture bindings) into the
+    /// renderer's material pool. Same asset-pool classification as
+    /// [`Self::create_mesh_asset`]; see its docs.
+    pub fn create_material_asset(
+        &mut self,
+        material: crate::material::MaterialAsset,
+    ) -> crate::scene::Result<MaterialId> {
+        self.scene.insert_material_asset(material)
+    }
+
+    /// **Temporary, explicitly tracked compatibility path.** Place a
+    /// static-mesh instance (a draw call referencing an already uploaded
+    /// mesh/material asset, at a transform) into the renderer's presentation
+    /// state.
+    ///
+    /// The object's *existence* — the fact that this entity is placed in the
+    /// world at all — belongs in a `helio_pass_gbuffer::StaticObjectComponent`
+    /// SceneDB row, not here (a caller should insert one alongside every
+    /// call to this method; see that component's doc). This method exists
+    /// only because the GPU-driven pipeline that would let `GBufferPass`/
+    /// `IndirectDispatchPass` read `StaticObjectComponent`'s buffer directly
+    /// — sorting/grouping instances by `(material_class, graph_hash, mesh,
+    /// material)` into batched indirect draws, entirely on GPU — is
+    /// specified but not yet implemented (see the Helio issue tracking it).
+    /// Until it lands, something has to feed `ctx.scene.instances`/
+    /// `draw_calls`, and this is that something. Remove this method (and its
+    /// two siblings below) as part of implementing that pipeline, not before.
+    pub fn place_static_object(
+        &mut self,
+        descriptor: crate::scene::ObjectDescriptor,
+    ) -> crate::scene::Result<crate::handles::ObjectId> {
+        self.scene.insert_object(descriptor)
+    }
+
+    /// Update a previously placed static-mesh instance's transform.
+    ///
+    /// **Temporary, explicitly tracked compatibility path** — see
+    /// [`Self::place_static_object`]'s doc; this is one of the "two siblings"
+    /// referenced there. A caller should also update its own
+    /// `StaticObjectComponent` row (`with_transform`) alongside this call.
+    pub fn update_static_object_transform(
+        &mut self,
+        id: crate::handles::ObjectId,
+        transform: glam::Mat4,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_object_transform(id, transform)
+    }
+
+    /// Remove a previously placed static-mesh instance.
+    ///
+    /// **Temporary, explicitly tracked compatibility path** — see
+    /// [`Self::place_static_object`]'s doc; this is the other of the "two
+    /// siblings" referenced there. A caller should also despawn its own
+    /// `StaticObjectComponent` row alongside this call.
+    pub fn remove_static_object(&mut self, id: crate::handles::ObjectId) -> crate::scene::Result<()> {
+        self.scene.remove_object(id)
+    }
+
+    /// Release a previously created material asset/projection slot.
+    pub fn remove_material_asset(&mut self, id: MaterialId) -> crate::scene::Result<()> {
+        self.scene.remove_material(id)
+    }
+
+    // ── Narrow component-runtime projections ────────────────────────────────
+    //
+    // The methods below (foliage, portal, post-process volume, reflection
+    // capture, water volume) replace the removed broad `scene_for_legacy_mut`
+    // accessor for `helio_component`'s per-frame `ComponentRuntimeBehavior`
+    // sync paths. Each SceneDB component in that crate already has a typed
+    // definition; these domains have not yet grown a generated GPU-mirrored
+    // buffer registration the way lights/static meshes/materials have (see
+    // the Helio 3.0 spec §15.2), so their runtime sync still projects into
+    // Helio's own renderer-local pools. Every method here is a single named
+    // operation with no broader scene access — not a hidden second authority
+    // reintroduced under a new name — and is a placeholder for a future
+    // generated-GPU-mirror projection, not a permanent design.
+
+    /// Register a foliage type (species) and return its handle.
+    pub fn add_foliage_type(
+        &mut self,
+        descriptor: crate::scene::FoliageTypeDescriptor,
+    ) -> crate::handles::FoliageTypeId {
+        self.scene.add_foliage_type(descriptor)
+    }
+
+    /// Update an existing foliage type's descriptor.
+    pub fn update_foliage_type(
+        &mut self,
+        id: crate::handles::FoliageTypeId,
+        descriptor: crate::scene::FoliageTypeDescriptor,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_foliage_type(id, descriptor)
+    }
+
+    /// Remove a foliage type.
+    pub fn remove_foliage_type(&mut self, id: crate::handles::FoliageTypeId) -> crate::scene::Result<()> {
+        self.scene.remove_foliage_type(id)
+    }
+
+    /// Register a foliage layer (where a type grows) and return its handle.
+    pub fn add_foliage_layer(
+        &mut self,
+        layer: crate::scene::FoliageLayer,
+    ) -> crate::handles::FoliageLayerId {
+        self.scene.add_foliage_layer(layer)
+    }
+
+    /// Remove a foliage layer.
+    pub fn remove_foliage_layer(&mut self, id: crate::handles::FoliageLayerId) -> crate::scene::Result<()> {
+        self.scene.remove_foliage_layer(id)
+    }
+
+    /// Register a foliage interactor (a body that displaces foliage).
+    pub fn add_foliage_interactor(
+        &mut self,
+        interactor: crate::scene::FoliageInteractor,
+    ) -> crate::handles::FoliageInteractorId {
+        self.scene.add_foliage_interactor(interactor)
+    }
+
+    /// Update a foliage interactor's position/velocity.
+    pub fn update_foliage_interactor(
+        &mut self,
+        id: crate::handles::FoliageInteractorId,
+        position: glam::Vec3,
+        velocity: glam::Vec3,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_foliage_interactor(id, position, velocity)
+    }
+
+    /// Remove a foliage interactor.
+    pub fn remove_foliage_interactor(
+        &mut self,
+        id: crate::handles::FoliageInteractorId,
+    ) -> crate::scene::Result<()> {
+        self.scene.remove_foliage_interactor(id)
+    }
+
+    /// Current global wind state.
+    pub fn wind(&self) -> libhelio::Wind {
+        self.scene.wind()
+    }
+
+    /// Replace the global wind state.
+    pub fn set_wind(&mut self, wind: libhelio::Wind) {
+        self.scene.set_wind(wind)
+    }
+
+    /// Create a portal from a paired descriptor.
+    pub fn add_portal(
+        &mut self,
+        descriptor: crate::scene::PortalDescriptor,
+    ) -> crate::scene::Result<crate::handles::PortalId> {
+        self.scene.add_portal(descriptor)
+    }
+
+    /// Update an existing portal's pose (the two linked transforms).
+    pub fn update_portal_pose(
+        &mut self,
+        id: crate::handles::PortalId,
+        a: helio_portal_core::PortalPose,
+        b: helio_portal_core::PortalPose,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_portal_pose(id, a, b)
+    }
+
+    /// Update an existing portal's half-extent.
+    pub fn update_portal_half_extent(
+        &mut self,
+        id: crate::handles::PortalId,
+        half_extent: glam::Vec2,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_portal_half_extent(id, half_extent)
+    }
+
+    /// Remove a portal.
+    pub fn remove_portal(&mut self, id: crate::handles::PortalId) -> crate::scene::Result<()> {
+        self.scene.remove_portal(id)
+    }
+
+    /// Insert a post-process volume.
+    pub fn insert_post_process_volume(
+        &mut self,
+        descriptor: libhelio::PostProcessVolumeDescriptor,
+    ) -> crate::scene::Result<crate::handles::PostProcessVolumeId> {
+        self.scene.insert_post_process_volume(descriptor)
+    }
+
+    /// Update an existing post-process volume.
+    pub fn update_post_process_volume(
+        &mut self,
+        id: crate::handles::PostProcessVolumeId,
+        descriptor: libhelio::PostProcessVolumeDescriptor,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_post_process_volume(id, descriptor)
+    }
+
+    /// Remove a post-process volume.
+    pub fn remove_post_process_volume(
+        &mut self,
+        id: crate::handles::PostProcessVolumeId,
+    ) -> crate::scene::Result<()> {
+        self.scene.remove_post_process_volume(id)
+    }
+
+    /// Insert a reflection capture.
+    pub fn insert_reflection_capture(
+        &mut self,
+        descriptor: crate::scene::ReflectionCaptureDescriptor,
+    ) -> crate::scene::Result<crate::handles::ReflectionCaptureId> {
+        self.scene.insert_reflection_capture(descriptor)
+    }
+
+    /// Update an existing reflection capture.
+    pub fn update_reflection_capture(
+        &mut self,
+        id: crate::handles::ReflectionCaptureId,
+        descriptor: &crate::scene::ReflectionCaptureDescriptor,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_reflection_capture(id, descriptor)
+    }
+
+    /// Remove a reflection capture. Returns `true` if a capture was removed.
+    pub fn remove_reflection_capture(&mut self, id: crate::handles::ReflectionCaptureId) -> bool {
+        self.scene.remove_reflection_capture(id)
+    }
+
+    /// Insert a water volume.
+    pub fn insert_water_volume(
+        &mut self,
+        descriptor: crate::scene::WaterVolumeDescriptor,
+    ) -> crate::scene::Result<crate::handles::WaterVolumeId> {
+        self.scene.insert_water_volume(descriptor)
+    }
+
+    /// Update an existing water volume.
+    pub fn update_water_volume(
+        &mut self,
+        id: crate::handles::WaterVolumeId,
+        descriptor: crate::scene::WaterVolumeDescriptor,
+    ) -> crate::scene::Result<()> {
+        self.scene.update_water_volume(id, descriptor)
+    }
+
+    /// Remove a water volume.
+    pub fn remove_water_volume(&mut self, id: crate::handles::WaterVolumeId) -> crate::scene::Result<()> {
+        self.scene.remove_water_volume(id)
+    }
+
+    /// Return the frontend-owned SceneDB handle, if one was attached during
+    /// construction. The handle is exposed for pass integration and debug
+    /// tooling; Helio does not take ownership of scene content.
+    pub fn scene_db(&self) -> SceneDbHandle {
+        self.scene_db.clone()
+    }
+
+    /// Return the shared debug-drawing state used by debug passes.
     pub fn debug_state(&self) -> Arc<Mutex<DebugDrawState>> {
         self.debug_state.clone()
     }
@@ -479,10 +826,6 @@ impl Renderer {
 
     pub fn cull_stats_buf(&self) -> &wgpu::Buffer {
         &self.cull_stats_buffer
-    }
-
-    pub fn camera_buffer(&self) -> &wgpu::Buffer {
-        self.scene.gpu_scene().camera.buffer()
     }
 
     /// Latest frame timing state. Reading it performs no GPU polling,
@@ -498,8 +841,29 @@ impl Renderer {
         self.graph.profiler().gpu_frame_ms()
     }
 
+    /// Latest graph topology/resource timeline for editor diagnostics.
+    ///
+    /// This is a host-facing snapshot: it contains no live wgpu handles and
+    /// can safely be copied across the renderer/UI boundary.
+    pub fn graph_timeline(&self) -> helio_core::GraphTimelineData {
+        self.graph.collect_graph_timeline()
+    }
+
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.scene.mesh_buffers()
+    }
+
+    /// Read-only query of a mesh asset's vertex/index range — see
+    /// `Scene::mesh_slice`'s doc for why this is an asset query, not scene
+    /// authoring.
+    pub fn mesh_slice(&self, mesh: crate::handles::MeshId) -> Option<crate::mesh::MeshSlice> {
+        self.scene.mesh_slice(mesh)
+    }
+
+    /// Read-only query of a material asset's `(material_class, graph_hash)`
+    /// pipeline-selection key — see `Scene::material_batch_key`'s doc.
+    pub fn material_batch_key(&self, material: MaterialId) -> Option<(u32, u64)> {
+        self.scene.material_batch_key(material)
     }
 
     pub fn dynamic_mesh_buffers(&self) -> MeshBuffers<'_> {
@@ -655,18 +1019,6 @@ impl Renderer {
             .scene
             .build_static_bake_scene(&self.device, &self.queue);
         self.configure_bake(helio_bake::BakeRequest { scene, config });
-    }
-
-    pub fn set_billboard_instances(&mut self, instances: &[BillboardInstance]) {
-        self.billboard_instances.clear();
-        self.billboard_instances.extend_from_slice(instances);
-        self.billboard_dirty = true;
-    }
-
-    pub fn set_corona_emitters(&mut self, emitters: &[libhelio::GpuCoronaEmitter]) {
-        self.corona_emitters.clear();
-        self.corona_emitters.extend_from_slice(emitters);
-        self.corona_emitter_generation = self.corona_emitter_generation.wrapping_add(1);
     }
 
     pub fn set_gizmo_camera(&mut self, camera: &crate::scene::Camera, viewport_height: f32) {

@@ -2,6 +2,7 @@
 name = "helio"
 version = "0.19.0"
 edition = "2021"
+workspace = "../../"
 authors = ["Helio Contributors"]
 description = "High-level facade over helio-core for stable scene handles and O(1)-style CPU updates"
 license = "MIT OR Apache-2.0"
@@ -17,6 +18,9 @@ helio-foliage-core = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-sky = { workspace = true }
+helio-pass-billboard = { workspace = true }
+helio-pass-corona = { workspace = true }
+helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 
 libhelio = { workspace = true }
 log = { workspace = true }

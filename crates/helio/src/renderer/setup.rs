@@ -7,7 +7,7 @@ use web_time::Instant;
 
 use crate::radiant::RadiantTemplateRegistry;
 use crate::scene::Scene;
-use helio_core::RenderGraph;
+use helio_core::{PipelineFormatSet, RenderGraph};
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -104,7 +104,16 @@ impl Renderer {
         debug_state: Arc<Mutex<DebugDrawState>>,
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
+        scene_db: super::builder::SceneDbHandle,
     ) -> Self {
+        // The renderer is the host of the graph's presentation format. Feed
+        // it back into the graph even when a custom builder locked the graph
+        // before handing it to us; the cache will schedule any new variants
+        // without blocking the frame thread.
+        graph.add_pipeline_format(PipelineFormatSet::new(
+            [surface_format],
+            Some(wgpu::TextureFormat::Depth32Float),
+        ));
         scene.set_shadow_face_capacity(config.shadow_face_capacity);
         scene.set_render_size(width, height);
 
@@ -206,7 +215,7 @@ impl Renderer {
         // Captured before `scene` is moved into `Self`.
         let scene_has_sky = scene.sky_context().has_sky;
 
-        Self {
+        let mut renderer = Self {
             device,
             queue,
             graph,
@@ -236,16 +245,6 @@ impl Renderer {
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
-            billboard_instances: Vec::new(),
-            billboard_scratch: Vec::new(),
-            billboard_dirty: true,
-            billboard_cached_light_count: usize::MAX,
-            billboard_cached_light_gen: u64::MAX,
-            billboard_cached_editor_hidden: false,
-            billboard_cached_corona_gen: u64::MAX,
-            billboard_generation: 0,
-            corona_emitters: Vec::new(),
-            corona_emitter_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
             foliage_interactors_buffer,
@@ -277,6 +276,7 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            scene_db,
             tsr_quality: config.tsr_quality,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 RadiantTemplateRegistry::new(),
@@ -312,79 +312,19 @@ impl Renderer {
             xr_mirror_bind_group: None,
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_format: None,
-        }
-    }
+        };
 
-    /// Create a [`Renderer`] that owns its device and queue.
-    ///
-    /// This is the original full-signature constructor kept for backward
-    /// compatibility.  Prefer [`RendererBuilder`](super::builder::RendererBuilder)
-    /// for new code — it creates the scene, debug state, and internal buffers
-    /// automatically.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
-    pub fn new(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        render_scale: f32,
-        config: RendererConfig,
-        scene: Scene,
-        graph: RenderGraph,
-        debug_state: Arc<Mutex<DebugDrawState>>,
-        debug_camera_buffer: wgpu::Buffer,
-        cull_stats_buffer: wgpu::Buffer,
-    ) -> Self {
-        Self::construct(
-            device,
-            queue,
-            surface_format,
-            width,
-            height,
-            render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        )
-    }
+        // The SceneDB projection is the authoritative source for entity-stable
+        // transforms. Rebind the renderer's draw-time view to the SceneDB
+        // buffer at construction; this keeps the legacy Scene allocation from
+        // becoming a second transform authority when a frontend attaches a
+        // GPU mirror. SceneDB owns the buffer and the clone is only wgpu's
+        // reference-counted handle.
+        renderer.scene.rebind_transform_buffer(std::sync::Arc::new(
+            renderer.scene_db.store().transform_buffer(),
+        ));
 
-    /// Create a [`Renderer`] that shares a device/queue owned externally.
-    ///
-    /// Equivalent to [`new()`] with `owns_device = false`.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
-    pub fn new_with_external_device(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        render_scale: f32,
-        config: RendererConfig,
-        scene: Scene,
-        graph: RenderGraph,
-        debug_state: Arc<Mutex<DebugDrawState>>,
-        debug_camera_buffer: wgpu::Buffer,
-        cull_stats_buffer: wgpu::Buffer,
-    ) -> Self {
-        let mut renderer = Self::construct(
-            device,
-            queue,
-            surface_format,
-            width,
-            height,
-            render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        );
-        renderer.owns_device = false;
         renderer
     }
+
 }

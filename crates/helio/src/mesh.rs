@@ -148,7 +148,7 @@ struct MeshSubPool {
     // none of them took a `queue` parameter before (that's what
     // `Scene::flush(queue)` was for), and threading one through now would
     // ripple into every caller across the whole Helio consumer ecosystem
-    // (`Scene::insert_actor`/`insert_mesh` alone have dozens of call
+    // (`Scene::insert_entity`/`insert_mesh` alone have dozens of call
     // sites). This keeps that ripple to zero.
     queue: Arc<wgpu::Queue>,
     // VarLenGpuPool has no CPU mirror to derive a "how many elements are

@@ -29,32 +29,38 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.8,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let glass = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.35, 0.4, 0.5],
-            0.1,
-            0.9,
-            [0.0; 3],
-            0.0,
-        ));
-        let pole_mat = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.2, 0.22, 1.0],
-            0.3,
-            0.8,
-            [0.0; 3],
-            0.0,
-        ));
+        let concrete = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.7, 0.7, 0.72, 1.0],
+                0.8,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
+        let glass = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.35, 0.4, 0.5],
+                0.1,
+                0.9,
+                [0.0; 3],
+                0.0,
+            ));
+        let pole_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.2, 0.2, 0.22, 1.0],
+                0.3,
+                0.8,
+                [0.0; 3],
+                0.0,
+            ));
 
         // Ground
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 30.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 30.0)));
         let _ = insert_object(renderer, ground, concrete, glam::Mat4::IDENTITY, 30.0);
 
         // Buildings arranged around a central plaza
@@ -67,13 +73,13 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, ext) in bld_data {
             let m = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(pos, ext)));
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, ext)));
             let _ = insert_object(renderer, m, concrete, glam::Mat4::IDENTITY, 10.0);
             // Glass band near top
             let gw = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [pos[0], pos[1] * 2.0 - 1.0, pos[2]],
                     [ext[0], 0.4, ext[2]],
                 )));
@@ -84,16 +90,16 @@ impl HelioWasmApp for Demo {
         let lamp_positions = [[-8.0_f32, -8.0], [8.0, -8.0], [-8.0, 8.0], [8.0, 8.0]];
         for [lx, lz] in lamp_positions {
             let pole = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [lx, 2.5, lz],
                     [0.08, 2.5, 0.08],
                 )));
             let _ = insert_object(renderer, pole, pole_mat, glam::Mat4::IDENTITY, 2.5);
             // Warm streetlight
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [lx, 5.2, lz],
                     [1.0, 0.85, 0.55],
                     6.0,

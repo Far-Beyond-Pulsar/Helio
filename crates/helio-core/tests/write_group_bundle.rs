@@ -23,6 +23,7 @@
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{PassContext, RenderGraph, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
+mod support;
 
 const GROUP_NAMES: [&str; 4] = [
     "gbuffer_albedo",
@@ -86,7 +87,9 @@ impl RenderPass for StandInGBufferPass {
         let views = GROUP_NAMES.map(|n| {
             ctx.resource_pool
                 .get_view(n)
-                .unwrap_or_else(|| panic!("declared write_group member '{n}' must be pool-allocated"))
+                .unwrap_or_else(|| {
+                    panic!("declared write_group member '{n}' must be pool-allocated")
+                })
                 .clone()
         });
         *self.pool_views.lock().unwrap() = Some(views);
@@ -106,7 +109,10 @@ impl RenderPass for StandInGBufferPass {
             return;
         }
         let [albedo, normal, orm, emissive] = *views else {
-            panic!("expected exactly 4 views for the \"gbuffer\" group, got {}", views.len());
+            panic!(
+                "expected exactly 4 views for the \"gbuffer\" group, got {}",
+                views.len()
+            );
         };
         *self.publish_views.lock().unwrap() = Some([
             albedo.clone(),
@@ -204,6 +210,7 @@ fn write_group_delivers_correctly_ordered_views_to_a_downstream_consumer() {
         graph.lock(64, 64);
 
         let scene = helio_core::GpuScene::new(device.clone(), queue.clone());
+        let scene_input = support::SceneInputAdapter(&scene);
         let target_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Write Group Swapchain Stand-in"),
             size: wgpu::Extent3d {
@@ -236,7 +243,7 @@ fn write_group_delivers_correctly_ordered_views_to_a_downstream_consumer() {
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         graph
-            .execute(&scene, &target_view, &depth_view)
+            .execute(&scene_input, &target_view, &depth_view)
             .expect("frame should execute");
 
         let pool = pool_views

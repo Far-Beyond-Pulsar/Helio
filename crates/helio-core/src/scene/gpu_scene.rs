@@ -73,7 +73,6 @@
 //! ```
 
 use crate::acceleration::{BlasManager, TlasManager};
-use crate::component::ComponentRegistry;
 use crate::scene::managers::GrowableBuffer;
 use crate::scene::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
@@ -256,9 +255,6 @@ pub struct GpuScene {
     /// its own per_caster_last_gen[] and only re-renders faces for dirty casters.
     pub per_caster_dirty_gen: [u64; 42],
 
-    /// Type-erased component storage for the new Entity-Component system.
-    pub components: ComponentRegistry,
-
     pub voxel_volumes: GpuVoxelVolumeBuffer,
     pub voxel_edit_ring: GpuVoxelEditRing,
     pub voxel_volume_count: u32,
@@ -437,7 +433,6 @@ impl GpuScene {
             shadow_movable_draw_count: 0,
             movable_light_count: 0,
             per_caster_dirty_gen: [1u64; 42],
-            components: ComponentRegistry::new(),
             voxel_volumes,
             voxel_edit_ring,
             voxel_brick_pool,
@@ -490,6 +485,7 @@ impl GpuScene {
     pub fn resources(&self) -> SceneResources<'_> {
         SceneResources {
             camera: self.camera.buffer(),
+            camera_data: self.camera.data(),
             instances: self.instances.buffer(),
             aabbs: self.aabbs.buffer(),
             draw_calls: self.draw_calls.buffer(),
@@ -499,6 +495,7 @@ impl GpuScene {
             decals: self.decals.buffer(),
             decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),
+            material_data: self.materials.as_slice(),
             shadow_matrices: self.shadow_matrices.buffer(),
             indirect: self.indirect.buffer(),
             visibility: self.visibility.buffer(),
@@ -520,7 +517,6 @@ impl GpuScene {
             movable_light_count: self.movable_light_count,
             static_objects_generation: self.static_objects_generation,
             per_caster_dirty_gen: self.per_caster_dirty_gen,
-            components: &self.components,
             voxel_volumes: self.voxel_volumes.buffer(),
             voxel_edit_ring: self.voxel_edit_ring.buffer(),
             voxel_brick_pool: &self.voxel_brick_pool,
@@ -627,10 +623,6 @@ impl GpuScene {
         // Same reasoning for coordinate spaces: whatever slot(s) moved this
         // frame become "previous" for next frame's velocity computation.
         self.coordinate_spaces.cycle_prev();
-    }
-
-    pub fn components_mut(&mut self) -> &mut ComponentRegistry {
-        &mut self.components
     }
 
     pub fn reflection_captures_buffer(&self) -> &wgpu::Buffer {

@@ -184,8 +184,8 @@ impl ApplicationHandler for App {
 
         let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::Sky(sky));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::Sky(sky));
 
         // Ocean water volume — mid-ocean night, Beaufort 4 (~25 km/h)
         let ocean = helio::WaterVolumeDescriptor {
@@ -236,29 +236,33 @@ impl ApplicationHandler for App {
             ..Default::default()
         };
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::water_volume(ocean));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::water_volume(ocean));
 
-        let mat_platform = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.2, 0.2, 1.0],
-            0.35,
-            1.0,
-            [0.1, 0.1, 0.1],
-            0.3,
-        ));
+        let mat_platform = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.2, 0.2, 0.2, 1.0],
+                0.35,
+                1.0,
+                [0.1, 0.1, 0.1],
+                0.3,
+            ));
 
-        let mat_leg = renderer.scene_mut().insert_material(make_material(
-            [0.25, 0.25, 0.25, 1.0],
-            0.6,
-            1.0,
-            [0.02, 0.02, 0.02],
-            0.15,
-        ));
+        let mat_leg = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.25, 0.25, 0.25, 1.0],
+                0.6,
+                1.0,
+                [0.02, 0.02, 0.02],
+                0.15,
+            ));
 
         // Platform base
         let platform_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [14.0, 0.8, 20.0],
             )))
@@ -281,8 +285,8 @@ impl ApplicationHandler for App {
         ];
         for (x, y, z) in leg_positions {
             let leg_mesh = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.9, 4.2, 0.9],
                 )))
@@ -299,8 +303,8 @@ impl ApplicationHandler for App {
 
         // Central tower
         let tower_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 5.5, 2.5],
             )))
@@ -332,8 +336,8 @@ impl ApplicationHandler for App {
                 };
                 _light_ids.push(
                     renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::light(point_light(
+                        .scene_for_legacy_mut()
+                        .insert_entity(helio::SceneEntity::light(point_light(
                             pos, color, 40.0, 10.5,
                         )))
                         .as_light()
@@ -349,8 +353,8 @@ impl ApplicationHandler for App {
             let z = angle.sin() * 14.5;
             _light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::light(point_light(
                         [x, 6.5, z],
                         [1.0, 0.9, 0.75],
                         25.0,

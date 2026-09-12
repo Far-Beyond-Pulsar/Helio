@@ -944,7 +944,8 @@ impl RenderPass for FoliagePlacePass {
         // 4 billion authoring edits, and a collision only means one tile keeps its blades
         // through an edit it should have re-rolled.
         let generation = foliage.generation as u32;
-        let camera = ctx.scene.camera.position();
+        let position_near = ctx.scene.camera_data.position_near;
+        let camera = [position_near[0], position_near[1], position_near[2]];
         let ring_update = self.ring.update([camera[0], camera[2]], generation);
         if ring_update.evicted > 0 {
             log::debug!(

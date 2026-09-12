@@ -295,7 +295,7 @@ impl ComponentRuntimeBehavior for WaterVolumeComponent {
 
         if !component.enabled {
             if let Some(id) = cached_id {
-                let removed = get_subsystem!(context, Renderer).scene_mut().remove_water_volume(id);
+                let removed = get_subsystem!(context, Renderer).remove_water_volume(id);
                 if removed.is_ok() {
                     get_subsystem!(context, WaterVolumeCache).remove(owner.scene_object_id);
                 }
@@ -308,11 +308,10 @@ impl ComponentRuntimeBehavior for WaterVolumeComponent {
         match cached_id {
             Some(id) => {
                 let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
                     .update_water_volume(id, descriptor);
             }
             None => {
-                let inserted = get_subsystem!(context, Renderer).scene_mut().insert_water_volume(descriptor);
+                let inserted = get_subsystem!(context, Renderer).insert_water_volume(descriptor);
                 if let Ok(id) = inserted {
                     get_subsystem!(context, WaterVolumeCache)
                         .insert(owner.scene_object_id.to_string(), id);

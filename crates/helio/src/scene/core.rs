@@ -24,8 +24,8 @@ use crate::handles::{
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
 use crate::scene::multi_mesh::SectionedInstanceRecord;
-use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
+use libhelio::sky::SkyContext;
 
 use super::errors::{invalid, Result};
 use super::portals::PortalRecord;
@@ -127,8 +127,8 @@ pub struct Scene {
     /// Six consecutive layers are reserved per realtime shadow caster.
     pub(in crate::scene) shadow_face_capacity: u32,
 
-    /// Per-frame custom trait-based scene actors.
-    pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
+    /// Current environment projection supplied by the owning scene database.
+    pub(in crate::scene) sky_context: SkyContext,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
@@ -382,7 +382,7 @@ impl Scene {
             movable_objects_generation: 0,
             movable_lights_generation: 0,
             shadow_face_capacity: 32,
-            custom_actors: Vec::new(),
+            sky_context: SkyContext::default(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
             vg_objects: DenseArena::new(),
@@ -639,5 +639,25 @@ impl Scene {
     /// frame, or fall back), not assume it's always present.
     pub fn transform_buffer(&self) -> Option<&wgpu::Buffer> {
         self.gpu_scene.transform_buffer.as_deref()
+    }
+
+    /// The vertex/index range of a previously created mesh asset. `None` if
+    /// the handle is stale.
+    ///
+    /// This is a read-only query of an already-created asset's static
+    /// metadata, not scene authoring: a SceneDB-authored `StaticObjectComponent`
+    /// row (`helio_pass_gbuffer`) is expected to resolve this ONCE, at spawn
+    /// time, and store the result directly rather than querying every frame.
+    pub fn mesh_slice(&self, mesh: crate::handles::MeshId) -> Option<crate::mesh::MeshSlice> {
+        self.mesh_pool.get(mesh).map(|record| record.slice)
+    }
+
+    /// A previously created material asset's `(material_class, graph_hash)`
+    /// pipeline-selection key. `None` if the handle is stale. Same
+    /// read-only-query classification as [`Self::mesh_slice`].
+    pub fn material_batch_key(&self, material: crate::handles::MaterialId) -> Option<(u32, u64)> {
+        self.materials
+            .get(material)
+            .map(|record| (record.gpu.material_class, record.graph_hash))
     }
 }

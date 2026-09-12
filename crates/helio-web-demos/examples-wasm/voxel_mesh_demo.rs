@@ -19,7 +19,7 @@ use std::sync::Arc;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     Camera, DebugDrawState, GpuLight, LightType, Movability, RenderGraph, Renderer, RendererConfig,
-    Scene, SceneActor, VoxelMode, VoxelTerrain, VoxelVolumeDescriptor, VOXEL_TERRAIN_GRID_DIM,
+    Scene, SceneEntity, VoxelMode, VoxelTerrain, VoxelVolumeDescriptor, VOXEL_TERRAIN_GRID_DIM,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -143,7 +143,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         {
-            let scene = renderer.scene_mut();
+            let scene = renderer.scene_for_legacy_mut();
 
             // Material palette (index 0 is air / unused).
             let _ = scene.insert_voxel_volume(VoxelVolumeDescriptor {
@@ -195,7 +195,7 @@ impl HelioWasmApp for Demo {
             // infrastructure the default deferred lighting pass reads. This
             // custom graph has no ambient fill, so the lights are turned up and
             // a low sky-fill from below keeps shadowed faces readable.
-            scene.insert_actor(SceneActor::light(GpuLight {
+            scene.insert_entity(SceneEntity::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [0.35, -0.8, 0.25, 0.0],
                 color_intensity: [1.0, 0.96, 0.88, 6.0],
@@ -205,7 +205,7 @@ impl HelioWasmApp for Demo {
                 _pad: 0,
                 ..Default::default()
             }));
-            scene.insert_actor(SceneActor::light(GpuLight {
+            scene.insert_entity(SceneEntity::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-0.4, -0.3, -0.6, 0.0],
                 color_intensity: [0.55, 0.65, 0.85, 2.5],
@@ -216,7 +216,7 @@ impl HelioWasmApp for Demo {
                 ..Default::default()
             }));
             // Upward sky-fill so downward-facing faces aren't pitch black.
-            scene.insert_actor(SceneActor::light(GpuLight {
+            scene.insert_entity(SceneEntity::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [0.1, 0.9, 0.2, 0.0],
                 color_intensity: [0.35, 0.4, 0.5, 1.5],

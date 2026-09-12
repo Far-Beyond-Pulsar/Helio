@@ -2,6 +2,7 @@
 name = "helio-asset-compat"
 version = "0.1.0"
 edition = "2021"
+workspace = "../../"
 description = "SolidRS integration layer for Helio renderer - asset loading and conversion"
 
 [dependencies]

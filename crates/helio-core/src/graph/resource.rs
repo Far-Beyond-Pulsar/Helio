@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use super::executor::format_bpp;
+
 // ── Resource Declaration API (used by RenderPass::declare_resources) ──────
 
 /// Texture format specification for transient resources.
@@ -297,6 +299,7 @@ pub struct GraphTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub desc: TextureDescriptor,
+    allocation_id: usize,
 }
 
 /// Pool of graph-owned textures with lifetime-based aliasing.
@@ -307,6 +310,7 @@ pub struct GraphTexturePool {
     textures: Vec<GraphTexture>,
     name_map: HashMap<String, usize>,
     alias_refs: HashMap<String, u32>,
+    physical_allocations: usize,
     xr_active: bool,
 }
 
@@ -316,6 +320,7 @@ impl GraphTexturePool {
             textures: Vec::new(),
             name_map: HashMap::new(),
             alias_refs: HashMap::new(),
+            physical_allocations: 0,
             xr_active: false,
         }
     }
@@ -324,13 +329,59 @@ impl GraphTexturePool {
         self.xr_active = active;
     }
 
-    /// Allocate a texture. If `alias_group` matches a released texture, reuses it.
+    /// Allocate a texture. If `alias_group` matches a released compatible
+    /// texture, reuses the existing underlying GPU allocation.
     pub fn allocate(&mut self, device: &wgpu::Device, desc: TextureDescriptor) -> &GraphTexture {
         let array_layers = if self.xr_active {
             desc.depth_or_array_layers.max(1).max(2)
         } else {
             desc.depth_or_array_layers.max(1)
         };
+
+        if let Some(group) = desc.alias_group.as_deref() {
+            if self.alias_refs.get(group).copied().unwrap_or(0) == 0 {
+                if let Some(source_index) = self.textures.iter().position(|candidate| {
+                    candidate.desc.alias_group.as_deref() == Some(group)
+                        && candidate.desc.format == desc.format
+                        && candidate.desc.width >= desc.width.max(1)
+                        && candidate.desc.height >= desc.height.max(1)
+                        && candidate.desc.depth_or_array_layers.max(if self.xr_active {
+                            2
+                        } else {
+                            1
+                        }) >= array_layers
+                        && candidate.desc.mip_level_count >= desc.mip_level_count.max(1)
+                        && candidate.desc.sample_count == desc.sample_count.max(1)
+                        && candidate.desc.usage.contains(desc.usage)
+                }) {
+                    let source_texture = self.textures[source_index].texture.clone();
+                    let view = if self.xr_active {
+                        source_texture.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some(&desc.name),
+                            dimension: Some(wgpu::TextureViewDimension::D2Array),
+                            array_layer_count: Some(2),
+                            ..Default::default()
+                        })
+                    } else {
+                        source_texture.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some(&desc.name),
+                            ..Default::default()
+                        })
+                    };
+                    let idx = self.textures.len();
+                    self.textures.push(GraphTexture {
+                        texture: source_texture,
+                        view,
+                        desc: desc.clone(),
+                        allocation_id: self.textures[source_index].allocation_id,
+                    });
+                    self.name_map.insert(desc.name.clone(), idx);
+                    *self.alias_refs.entry(group.to_owned()).or_insert(0) += 1;
+                    return &self.textures[idx];
+                }
+            }
+        }
+
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&desc.name),
             size: wgpu::Extent3d {
@@ -360,15 +411,18 @@ impl GraphTexturePool {
         };
 
         let idx = self.textures.len();
+        let allocation_id = self.physical_allocations;
+        self.physical_allocations += 1;
         self.textures.push(GraphTexture {
             texture,
             view,
             desc: desc.clone(),
+            allocation_id,
         });
         self.name_map.insert(desc.name.clone(), idx);
 
         if let Some(group) = &desc.alias_group {
-            self.alias_refs.insert(group.clone(), 1);
+            *self.alias_refs.entry(group.clone()).or_insert(0) += 1;
         }
 
         &self.textures[idx]
@@ -382,6 +436,44 @@ impl GraphTexturePool {
         self.name_map
             .get(name)
             .map(|&idx| &self.textures[idx].texture)
+    }
+
+    /// Number of logical graph resources currently mapped in the pool.
+    pub fn resource_count(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Number of physical `wgpu::Texture` objects created by this pool.
+    /// Aliased logical resources share one physical allocation.
+    pub fn physical_allocation_count(&self) -> usize {
+        self.physical_allocations
+    }
+
+    /// Estimated bytes reserved by physical textures. Aliased logical views
+    /// are counted once, using the largest descriptor that owns an allocation.
+    pub fn physical_vram_bytes(&self) -> u64 {
+        let mut by_allocation = HashMap::<usize, u64>::new();
+        for texture in &self.textures {
+            let bytes = texture.desc.width.max(1) as u64
+                * texture.desc.height.max(1) as u64
+                * texture.desc.depth_or_array_layers.max(1) as u64
+                * texture.desc.sample_count.max(1) as u64
+                * format_bpp(texture.desc.format) as u64
+                / 8;
+            by_allocation
+                .entry(texture.allocation_id)
+                .and_modify(|current| *current = (*current).max(bytes))
+                .or_insert(bytes);
+        }
+        by_allocation.values().sum()
+    }
+
+    /// Returns the physical allocation identity for a logical resource.
+    /// Intended for diagnostics and aliasing contract tests.
+    pub fn allocation_id(&self, name: &str) -> Option<usize> {
+        self.name_map
+            .get(name)
+            .map(|&idx| self.textures[idx].allocation_id)
     }
 
     /// Release a texture in an alias group, decrementing its ref count.
@@ -399,6 +491,7 @@ impl GraphTexturePool {
         self.textures.clear();
         self.name_map.clear();
         self.alias_refs.clear();
+        self.physical_allocations = 0;
     }
 }
 

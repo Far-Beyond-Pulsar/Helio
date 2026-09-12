@@ -34,7 +34,7 @@ mod v3_demo_common;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId,
-    Renderer, RendererConfig, Scene, SceneActor, SublevelDescriptor,
+    Renderer, RendererConfig, Scene, SceneEntity, SublevelDescriptor,
 };
 use helio_default_graphs::build_default_graph;
 use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
@@ -238,72 +238,80 @@ impl ApplicationHandler for App {
         );
 
         // ── Shared geometry & materials for every segment ─────────────────────
-        let wall_mat = renderer.scene_mut().insert_material(make_material(
-            [0.72, 0.72, 0.75, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let strip_mat = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.85, 0.55, 1.0],
-            0.6,
-            0.0,
-            [1.0, 0.7, 0.3],
-            2.5,
-        ));
-        let post_mat = renderer.scene_mut().insert_material(make_material(
-            [0.35, 0.8, 1.0, 1.0],
-            0.5,
-            0.0,
-            [0.2, 0.7, 1.0],
-            1.5,
-        ));
-        let frame_mat = renderer.scene_mut().insert_material(make_material(
-            [0.25, 0.95, 1.0, 1.0],
-            0.4,
-            0.0,
-            [0.2, 0.9, 1.0],
-            3.0,
-        ));
+        let wall_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.72, 0.72, 0.75, 1.0],
+                0.8,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let strip_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.95, 0.85, 0.55, 1.0],
+                0.6,
+                0.0,
+                [1.0, 0.7, 0.3],
+                2.5,
+            ));
+        let post_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.35, 0.8, 1.0, 1.0],
+                0.5,
+                0.0,
+                [0.2, 0.7, 1.0],
+                1.5,
+            ));
+        let frame_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.25, 0.95, 1.0, 1.0],
+                0.4,
+                0.0,
+                [0.2, 0.9, 1.0],
+                3.0,
+            ));
 
         // Meshes are inserted once and shared by every copy's instances (the
         // copies batch into the same draw calls by mesh+material).
         let slab_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [HALF_WIDTH, 0.02, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let side_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, HALF_HEIGHT, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let strip_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.06, 0.02, HALF_LENGTH],
             )))
             .as_mesh()
             .unwrap();
         let post_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 0.8, 0.08],
             )))
             .as_mesh()
             .unwrap();
         let frame_box_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.12, 0.12, 0.12],
             )))
@@ -353,7 +361,7 @@ impl ApplicationHandler for App {
                 );
                 let z = sign * copy as f32 * COPY_STRIDE;
                 renderer
-                    .scene_mut()
+                    .scene_for_legacy_mut()
                     .add_sublevel(SublevelDescriptor {
                         group,
                         placement: glam::Mat4::from_translation(glam::Vec3::new(
@@ -378,8 +386,8 @@ impl ApplicationHandler for App {
         let frame_t = 0.12; // frame half-thickness
         let mut insert_frame = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32| {
             let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::object(ObjectDescriptor {
                     mesh: frame_box_mesh,
                     material: frame_mat,
                     transform: glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
@@ -433,8 +441,8 @@ impl ApplicationHandler for App {
         for &z in &[0.0f32, -16.0, 16.0, -32.0, 32.0, -48.0, 48.0] {
             light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(SceneEntity::light(point_light(
                         [0.0, 2.2, z],
                         [0.9, 0.95, 1.0],
                         3.0,
@@ -485,7 +493,7 @@ impl ApplicationHandler for App {
         // tunnel that continues past the near end; the far (-Z) portal does
         // the same for the -Z direction.
         let portal_near = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .add_portal(PortalDescriptor {
                 a: pose_near,
                 b: pose_near_b,
@@ -493,7 +501,7 @@ impl ApplicationHandler for App {
             })
             .expect("add_portal (near)");
         let portal_far = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .add_portal(PortalDescriptor {
                 a: pose_far,
                 b: pose_far_b,
@@ -685,7 +693,7 @@ impl AppState {
         // uses `pair.a` (the real surface at the corridor end); the remap is
         // the corridor's own symmetry map, (-x, y, -z), which sends the near
         // end to the far end and vice versa. Only one teleport per frame.
-        let scene = self.renderer.scene_mut();
+        let scene = self.renderer.scene_for_legacy_mut();
         let mut teleported = false;
         for portal in [self.portal_near, self.portal_far] {
             if let Some(pair) = scene.portal_pair(portal) {
@@ -891,8 +899,8 @@ fn insert_segment(
     let mut insert =
         |mesh: helio::MeshId, material: helio::MaterialId, transform: glam::Mat4, radius: f32| {
             let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::object(ObjectDescriptor {
                     mesh,
                     material,
                     transform,

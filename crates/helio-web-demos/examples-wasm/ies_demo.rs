@@ -32,16 +32,18 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let floor_mat = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.15, 0.16, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.15, 0.15, 0.16, 1.0],
+                0.8,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
         let _ = insert_object(renderer, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
 
         let light_ids: [helio::LightId; 3] = std::array::from_fn(|i| {
@@ -68,8 +70,8 @@ impl HelioWasmApp for Demo {
                 _ => 0.80,
             };
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(light))
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(light))
                 .as_light()
                 .unwrap()
         });
@@ -242,7 +244,9 @@ impl HelioWasmApp for Demo {
             if self.gobo_enabled {
                 light.light_function_index = 1; // layer 1 = checkerboard gobo
             }
-            let _ = renderer.scene_mut().update_light(self.light_ids[i], light);
+            let _ = renderer
+                .scene_for_legacy_mut()
+                .update_light(self.light_ids[i], light);
         }
 
         let camera = Camera::perspective_look_at(

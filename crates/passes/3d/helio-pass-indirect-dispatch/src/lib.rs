@@ -200,9 +200,9 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_calls.len() as u32;
+        let draw_count = ctx.scene.draw_count;
         self.draw_count = draw_count;
-        let planes = extract_frustum_planes(ctx.scene.camera.data().view_proj);
+        let planes = extract_frustum_planes(ctx.scene.camera_data.view_proj);
 
         let uniforms = CullUniforms {
             frustum_planes: planes,

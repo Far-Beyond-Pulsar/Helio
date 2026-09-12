@@ -654,7 +654,7 @@ impl RenderPass for VoxelMeshPass {
             return Ok(());
         }
         let params = MeshletParams {
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.light_count,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,

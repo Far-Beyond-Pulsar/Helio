@@ -6,7 +6,6 @@ use web_time::Instant;
 use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
 
-use crate::groups::GroupId;
 use crate::scene::Camera;
 
 use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
@@ -166,7 +165,9 @@ impl Renderer {
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
 
-        let frame_idx = self.scene.gpu_scene().frame_count;
+        // Frame sequencing is renderer scheduling state; scene identity comes
+        // from the SceneDB projection below.
+        let frame_idx = self.frame_times_cursor as u64;
         let (jitter_mat, jx, jy) = if self.enable_jitter || self.camera_jitter_override.is_some() {
             // Use R1/R2 plastic-ratio jitter to match TAA and TSR passes.
             let jitter = self
@@ -245,52 +246,6 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth: &wgpu::TextureView = &self.depth_view;
-
-        let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
-        let light_count = self.scene.gpu_scene().lights.len();
-        let light_gen = self.scene.gpu_scene().movable_lights_generation;
-        let corona_gen = self.corona_emitter_generation;
-        if self.billboard_dirty
-            || light_count != self.billboard_cached_light_count
-            || light_gen != self.billboard_cached_light_gen
-            || editor_hidden != self.billboard_cached_editor_hidden
-            || corona_gen != self.billboard_cached_corona_gen
-        {
-            self.billboard_scratch.clear();
-            self.billboard_scratch
-                .extend_from_slice(&self.billboard_instances);
-            if !editor_hidden {
-                for light in self.scene.gpu_scene().lights.as_slice() {
-                    if light.light_type == libhelio::LightType::Point as u32
-                        || light.light_type == libhelio::LightType::Spot as u32
-                    {
-                        let [x, y, z, _] = light.position_range;
-                        let [r, g, b, _] = light.color_intensity;
-                        self.billboard_scratch
-                            .push(super::renderer_impl::BillboardInstance {
-                                world_pos: [x, y, z, 0.0],
-                                scale_flags: [0.25, 0.25, 0.0, 0.0],
-                                color: [r, g, b, 1.0],
-                            });
-                    }
-                }
-                for emitter in &self.corona_emitters {
-                    let [x, y, z, _] = emitter.transform[3];
-                    self.billboard_scratch
-                        .push(super::renderer_impl::BillboardInstance {
-                            world_pos: [x, y, z, 0.0],
-                            scale_flags: [0.25, 0.25, 0.0, 0.0],
-                            color: [0.2, 0.8, 1.0, 1.0],
-                        });
-                }
-            }
-            self.billboard_generation = self.billboard_generation.wrapping_add(1);
-            self.billboard_dirty = false;
-            self.billboard_cached_light_count = light_count;
-            self.billboard_cached_light_gen = light_gen;
-            self.billboard_cached_editor_hidden = editor_hidden;
-            self.billboard_cached_corona_gen = corona_gen;
-        }
 
         let water_volume_count = self.scene.water_volumes_count();
         if water_volume_count > 0 && self.scene.water_volumes_dirty() {
@@ -468,6 +423,10 @@ impl Renderer {
         let baked_pvs = None;
 
         let mut frame_resources = libhelio::FrameResources::empty();
+        // Phase 3 registry. Legacy passes continue to consume
+        // `frame_resources`; new passes receive this open typed registry via
+        // `PassContext::registry` / `PrepareContext::registry`.
+        let mut resource_registry = libhelio::ResourceRegistry::empty();
         frame_resources.main_scene.write(
             libhelio::MainSceneResources {
                 mesh_buffers: libhelio::MeshBuffers {
@@ -503,28 +462,6 @@ impl Renderer {
             },
             "Renderer",
         );
-        if !self.billboard_scratch.is_empty() {
-            frame_resources.billboards.write(
-                libhelio::BillboardFrameData {
-                    instances: bytemuck::cast_slice(&self.billboard_scratch),
-                    count: self.billboard_scratch.len() as u32,
-                    generation: self.billboard_generation,
-                },
-                "Renderer",
-            );
-        }
-
-        if !self.corona_emitters.is_empty() {
-            frame_resources.corona_emitters.write(
-                libhelio::CoronaEmitterFrameData {
-                    emitters: bytemuck::cast_slice(&self.corona_emitters),
-                    count: self.corona_emitters.len() as u32,
-                    generation: self.corona_emitter_generation,
-                    max_particles: libhelio::CORONA_MAX_PARTICLES,
-                },
-                "Renderer",
-            );
-        }
         if water_volume_count > 0 {
             frame_resources
                 .water_volumes
@@ -688,11 +625,15 @@ impl Renderer {
         self.queue.submit(std::iter::once(clear_encoder.finish()));
 
         let _graph_start = Instant::now();
-        self.graph.execute_with_frame_resources(
-            self.scene.gpu_scene(),
+        let scene_input = crate::scene::SceneInputAdapter::from_scene_db(
+            crate::scene::SceneDbProjection::new(&self.scene, &self.scene_db),
+        );
+        self.graph.execute_with_resources(
+            &scene_input,
             target,
             depth,
             &frame_resources,
+            &mut resource_registry,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 

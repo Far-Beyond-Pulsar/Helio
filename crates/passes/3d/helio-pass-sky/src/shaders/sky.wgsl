@@ -52,7 +52,8 @@ struct SkyUniforms {
 // ──────────────────────────────────────────────────────────────────────────────
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
-@group(1) @binding(0) var<uniform> sky:        SkyUniforms;
+@group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
+var<private> sky: SkyUniforms;
 @group(1) @binding(1) var          sky_lut:     texture_2d<f32>;
 @group(1) @binding(2) var          sky_sampler: sampler;
 
@@ -344,6 +345,7 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    sky = sky_rows[0];
     // Reconstruct world-space ray direction from the inverse VP matrix
     let clip      = vec4<f32>(in.ndc_xy, 1.0, 1.0);
     let world     = cameras[0].view_proj_inv * clip;

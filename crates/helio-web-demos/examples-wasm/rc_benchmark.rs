@@ -39,39 +39,29 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat_white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.9, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_red = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.1, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.7, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_cube = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.78, 0.72, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let mat_white = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
+        let mat_red = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material([0.8, 0.1, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
+        let mat_green = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material([0.1, 0.7, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
+        let mat_cube = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.8, 0.78, 0.72, 1.0],
+                0.85,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [cx, cy, cz],
                     [hx, hy, hz],
                 )));
@@ -99,8 +89,8 @@ impl HelioWasmApp for Demo {
             .iter()
             .map(|&(pos, col, int, rng)| {
                 renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
+                    .scene_for_legacy_mut()
+                    .insert_entity(helio::SceneEntity::light(point_light(pos, col, int, rng)))
                     .as_light()
                     .unwrap()
             })
@@ -160,7 +150,7 @@ impl HelioWasmApp for Demo {
 
         for (id, &(pos, col, int, rng)) in self.light_ids.iter().zip(LIGHT_BASE.iter()) {
             let _ = renderer
-                .scene_mut()
+                .scene_for_legacy_mut()
                 .update_light(*id, point_light(pos, col, int * self.intensity, rng));
         }
 

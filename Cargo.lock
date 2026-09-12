@@ -1015,6 +1015,7 @@ dependencies = [
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",
+ "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
@@ -1038,6 +1039,7 @@ dependencies = [
  "log",
  "microfont",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "rapier3d 0.24.0",
  "salva3d",
  "wgpu",
@@ -1437,9 +1439,12 @@ dependencies = [
  "helio-bake",
  "helio-core",
  "helio-foliage-core",
+ "helio-pass-billboard",
+ "helio-pass-corona",
  "helio-pass-postprocess",
  "helio-pass-sky",
  "helio-pass-tsr",
+ "helio-pass-virtual-geometry",
  "helio-portal-core",
  "helio-voxel-core",
  "helio-xr",
@@ -1529,6 +1534,7 @@ dependencies = [
  "libhelio",
  "naga",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "thiserror 2.0.20",
  "wgpu",
 ]
@@ -1598,6 +1604,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1608,6 +1616,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1641,6 +1651,8 @@ dependencies = [
  "log",
  "naga",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1718,6 +1730,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1736,10 +1750,13 @@ name = "helio-pass-gbuffer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio",
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1966,6 +1983,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -2086,6 +2105,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -2133,6 +2154,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 

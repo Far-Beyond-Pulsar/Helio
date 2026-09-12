@@ -68,9 +68,9 @@ fn declare_external_input_is_the_source_of_truth_for_validation() {
         // resource with no known writer being treated as available anyway).
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(OrphanReadPass));
-        let err = graph
-            .validate_dependencies()
-            .expect_err("a read with no writer and no declared external input must fail validation");
+        let err = graph.validate_dependencies().expect_err(
+            "a read with no writer and no declared external input must fail validation",
+        );
         assert!(
             err.contains("orphan_resource"),
             "validation error should name the unresolved resource, got: {err}"

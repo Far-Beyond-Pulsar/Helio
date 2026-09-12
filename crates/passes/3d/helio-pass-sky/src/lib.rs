@@ -18,6 +18,10 @@ use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
+use pulsar_scenedb::gpu::GpuMirrorHandle;
+
+pub mod components;
+pub use components::{AtmosphereComponent, CloudscapeComponent, SkyComponent, SkySceneBinding};
 
 pub const VOLUME_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     width: 96,
@@ -329,6 +333,7 @@ pub struct SkyPass {
     sky_bg1_key: Option<usize>,
     sky_lut_sampler: wgpu::Sampler,
     camera_buf: wgpu::Buffer,
+    scene_binding: Option<SkySceneBinding>,
 }
 
 /// Backwards alias — volumetric pass is now SkyPass.
@@ -388,25 +393,6 @@ impl SkyPass {
         Self::new_with_camera_and_size(device, camera_buf, target_format, 1280, 720)
     }
 
-    /// Legacy volumetric constructor (no external camera buffer) — creates an internal dummy camera.
-    pub fn new_legacy(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let dummy_camera = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Sky Dummy Camera"),
-            size: 80,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self::new(device, &dummy_camera, target_format)
-    }
-
-    /// Backwards compat: CloudVolumePass::new redirected.
-    pub fn new_cloud_volume_compat(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
-        Self::new_legacy(device, target_format)
-    }
-
     pub fn new_with_size(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
@@ -428,6 +414,27 @@ impl SkyPass {
         target_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+    ) -> Self {
+        Self::new_with_camera_and_size_and_scene_db(
+            device,
+            camera_buf,
+            target_format,
+            width,
+            height,
+            None,
+        )
+    }
+
+    /// Construct the pass with the frontend-owned SceneDB GPU projection.
+    /// The handle is cloneable and read-only; no CPU SceneDB value crosses this
+    /// boundary and no lock is taken while rendering.
+    pub fn new_with_camera_and_size_and_scene_db(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        target_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        scene_db: Option<GpuMirrorHandle>,
     ) -> Self {
         let sim_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Cloud Volume Simulation"),
@@ -701,9 +708,12 @@ impl SkyPass {
         let sky_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sky Uniforms (Unifed)"),
             size: std::mem::size_of::<ShaderSkyUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let initial_scene_binding = scene_db.as_ref().and_then(SkySceneBinding::resolve);
         let sky_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Sky LUT Sampler (Unified)"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -742,7 +752,7 @@ impl SkyPass {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -762,7 +772,10 @@ impl SkyPass {
             layout: &sky_lut_bgl1,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: sky_uniform_buf.as_entire_binding(),
+                resource: initial_scene_binding.as_ref().map_or_else(
+                    || sky_uniform_buf.as_entire_binding(),
+                    |b| b.buffer().as_entire_binding(),
+                ),
             }],
         });
         let sky_lut_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -819,7 +832,7 @@ impl SkyPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1413,21 +1426,21 @@ impl SkyPass {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                    // cloud_volume_lowres writes premultiplied radiance
-                    // (rgb already contains the integrated alpha). Do not
-                    // multiply it by alpha a second time during compositing.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
+                        // cloud_volume_lowres writes premultiplied radiance
+                        // (rgb already contains the integrated alpha). Do not
+                        // multiply it by alpha a second time during compositing.
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -1613,6 +1626,7 @@ impl SkyPass {
             sky_bg1_key: None,
             sky_lut_sampler,
             camera_buf: camera_buf.clone(),
+            scene_binding: initial_scene_binding,
         }
     }
 
@@ -2005,7 +2019,10 @@ impl RenderPass for SkyPass {
                                     entries: &[
                                         wgpu::BindGroupEntry {
                                             binding: 0,
-                                            resource: self.sky_uniform_buf.as_entire_binding(),
+                                            resource: self.scene_binding.as_ref().map_or_else(
+                                                || self.sky_uniform_buf.as_entire_binding(),
+                                                |b| b.buffer().as_entire_binding(),
+                                            ),
                                         },
                                         wgpu::BindGroupEntry {
                                             binding: 1,
@@ -2062,7 +2079,10 @@ impl RenderPass for SkyPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.sky_uniform_buf.as_entire_binding(),
+                        resource: self.scene_binding.as_ref().map_or_else(
+                            || self.sky_uniform_buf.as_entire_binding(),
+                            |b| b.buffer().as_entire_binding(),
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2157,8 +2177,8 @@ impl RenderPass for SkyPass {
             };
             let key = cloud_source as *const _ as usize;
             if self.volume_composite_bg_key != Some(key) {
-                self.volume_composite_bg = Some(ctx.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
+                self.volume_composite_bg =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Finite Cloud Volume Composite BG"),
                         layout: &self.volume_composite_bgl,
                         entries: &[
@@ -2173,8 +2193,7 @@ impl RenderPass for SkyPass {
                                 ),
                             },
                         ],
-                    },
-                ));
+                    }));
                 self.volume_composite_bg_key = Some(key);
             }
         }
@@ -2190,7 +2209,10 @@ impl RenderPass for SkyPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: self.sky_uniform_buf.as_entire_binding(),
+                            resource: self.scene_binding.as_ref().map_or_else(
+                                || self.sky_uniform_buf.as_entire_binding(),
+                                |b| b.buffer().as_entire_binding(),
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,

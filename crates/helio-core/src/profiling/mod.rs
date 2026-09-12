@@ -201,7 +201,7 @@ impl Profiler {
     /// } // ScopeGuard drops, timing recorded
     /// # }
     /// ```
-    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
         self.cpu.scope(name)
     }
 
@@ -290,6 +290,33 @@ impl Profiler {
     /// Clear CPU timings for new frame
     pub fn clear_cpu_timings(&mut self) {
         self.cpu.clear();
+    }
+
+    /// Merges a CPU sample recorded by a parallel pass worker.
+    pub(crate) fn record_external_cpu_timing(
+        &mut self,
+        name: &'static str,
+        duration: std::time::Duration,
+    ) {
+        self.cpu.record_external(name, duration);
+    }
+
+    /// Fold GPU samples from a worker-local profiler into this graph profiler.
+    /// The worker query set is intentionally separate because wgpu query sets
+    /// and encoders are not safely shared while recording on scoped threads.
+    pub(crate) fn merge_external_gpu_timings(&mut self, samples: &[GpuTimestamp]) {
+        self.gpu.merge_external_timings(samples);
+    }
+
+    /// True once this profiler has completed at least one asynchronous GPU
+    /// readback. Used by externally-owned devices to retain worker profilers
+    /// until the host's poll cadence has delivered their mappings.
+    pub(crate) fn has_completed_gpu_timings(&self) -> bool {
+        self.gpu.last_completed_frame().is_some()
+    }
+
+    pub(crate) const fn gpu_timing_supported(&self) -> bool {
+        self.gpu.supported()
     }
 
     /// Updates the reusable host-facing snapshot after a frame has submitted.
