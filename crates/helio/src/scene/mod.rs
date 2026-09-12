@@ -68,6 +68,7 @@ mod flush;
 mod foliage;
 mod groups;
 mod helpers;
+mod input;
 mod lifecycle;
 mod multi_mesh;
 mod objects;
@@ -82,14 +83,14 @@ mod voxel;
 mod water;
 
 pub use actor::{
-    DecalActor, PostProcessVolumeActor, ReflectionCaptureActor, ReflectionCaptureDescriptor,
-    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxActor, WaterHitboxDescriptor,
-    WaterVolumeActor, WaterVolumeDescriptor,
+    DecalActor, ReflectionCaptureActor, ReflectionCaptureDescriptor, SceneEntity, SceneEntityId,
+    SceneEntityTrait, WaterHitboxDescriptor, WaterVolumeDescriptor,
 };
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;
 pub use foliage::{FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFoliageInteractor};
+pub use input::{SceneDbProjection, SceneInputAdapter};
 pub use portals::{portal_pose_facing, PortalDescriptor};
 pub use sublevels::SublevelDescriptor;
 pub use types::{

@@ -92,6 +92,7 @@ helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
 helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
 helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
 helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
+helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
 

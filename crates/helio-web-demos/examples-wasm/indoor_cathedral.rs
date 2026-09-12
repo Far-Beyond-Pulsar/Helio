@@ -34,52 +34,62 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let stone = renderer.scene_mut().insert_material(make_material(
-            [0.65, 0.62, 0.58, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let marble = renderer.scene_mut().insert_material(make_material(
-            [0.88, 0.86, 0.82, 1.0],
-            0.4,
-            0.1,
-            [0.0; 3],
-            0.0,
-        ));
-        let candle_mat = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.75, 0.6, 1.0],
-            1.0,
-            0.0,
-            [1.2, 0.9, 0.4],
-            3.5,
-        ));
-        let window_mat = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.1, 0.4, 1.0],
-            0.1,
-            0.0,
-            [0.2, 0.15, 0.6],
-            1.0,
-        ));
-        let dark_stone = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.28, 0.26, 1.0],
-            0.95,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let stone = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.65, 0.62, 0.58, 1.0],
+                0.9,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
+        let marble = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.88, 0.86, 0.82, 1.0],
+                0.4,
+                0.1,
+                [0.0; 3],
+                0.0,
+            ));
+        let candle_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.8, 0.75, 0.6, 1.0],
+                1.0,
+                0.0,
+                [1.2, 0.9, 0.4],
+                3.5,
+            ));
+        let window_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.15, 0.1, 0.4, 1.0],
+                0.1,
+                0.0,
+                [0.2, 0.15, 0.6],
+                1.0,
+            ));
+        let dark_stone = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.28, 0.26, 1.0],
+                0.95,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
 
         // Nave floor
         let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 30.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 30.0)));
         insert_object(renderer, floor, marble, glam::Mat4::IDENTITY, 30.0).unwrap();
 
         // Ceiling slab
         let ceil = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 18.0, 0.0],
                 [14.0, 0.8, 30.0],
             )));
@@ -87,14 +97,14 @@ impl HelioWasmApp for Demo {
 
         // Side walls (left / right)
         let wall_l = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [-14.0, 9.0, 0.0],
                 [0.6, 18.0, 30.0],
             )));
         let wall_r = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [14.0, 9.0, 0.0],
                 [0.6, 18.0, 30.0],
             )));
@@ -104,8 +114,8 @@ impl HelioWasmApp for Demo {
 
         // Back wall
         let back_wall = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 9.0, -30.0],
                 [14.0, 18.0, 0.6],
             )));
@@ -113,8 +123,8 @@ impl HelioWasmApp for Demo {
 
         // Front entrance wall (with gap)
         let entrance_top = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 15.0, 30.0],
                 [14.0, 3.0, 0.6],
             )));
@@ -125,22 +135,22 @@ impl HelioWasmApp for Demo {
             for sx in [-8.0_f32, 8.0] {
                 let col_mesh =
                     renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .scene_for_legacy_mut()
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [sx, 6.0, *z],
                             [0.9, 12.0, 0.9],
                         )));
                 let cap_mesh =
                     renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .scene_for_legacy_mut()
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [sx, 12.3, *z],
                             [1.4, 0.6, 1.4],
                         )));
                 let base_mesh =
                     renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .scene_for_legacy_mut()
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [sx, 0.3, *z],
                             [1.2, 0.6, 1.2],
                         )));
@@ -154,8 +164,8 @@ impl HelioWasmApp for Demo {
         // Rib arches (simplified as thin boxes)
         for z in [-20.0_f32, -10.0, 0.0, 10.0] {
             let span_m = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 13.5, z],
                     [14.0, 0.4, 0.4],
                 )));
@@ -164,14 +174,14 @@ impl HelioWasmApp for Demo {
 
         // Altar platform
         let alt_base = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.2, -24.0],
                 [6.0, 0.2, 4.0],
             )));
         let alt_top = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.5, -24.0],
                 [2.0, 0.4, 1.4],
             )));
@@ -180,8 +190,8 @@ impl HelioWasmApp for Demo {
 
         // Stained glass (back rose window - emissive slabs)
         let rose = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 14.0, -30.4],
                 [6.0, 6.0, 0.2],
             )));
@@ -198,8 +208,8 @@ impl HelioWasmApp for Demo {
         ];
         for pos in &candle_positions {
             let c = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(cube_mesh(*pos, 0.06)));
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(cube_mesh(*pos, 0.06)));
             insert_object(renderer, c, candle_mat, glam::Mat4::IDENTITY, 0.06).unwrap();
         }
 
@@ -231,16 +241,16 @@ impl HelioWasmApp for Demo {
 
         for pos in &torch_positions {
             let t = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(cube_mesh(*pos, 0.08)));
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::mesh(cube_mesh(*pos, 0.08)));
             insert_object(renderer, t, candle_mat, glam::Mat4::IDENTITY, 0.08).unwrap();
         }
 
         let mut candle_ids = Vec::new();
         for pos in &light_positions {
             let id = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     *pos,
                     [1.0, 0.85, 0.5],
                     1.5,
@@ -254,8 +264,8 @@ impl HelioWasmApp for Demo {
         // Dim ambient blue for stained glass atmosphere
         let moon_dir = Vec3::new(0.2, -0.9, 0.4).normalize();
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [moon_dir.x, moon_dir.y, moon_dir.z],
                 [0.4, 0.5, 1.0],
                 0.02,
@@ -296,8 +306,8 @@ impl HelioWasmApp for Demo {
             ..Default::default()
         };
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::water_volume(pool));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::water_volume(pool));
 
         Self {
             candle_ids,
@@ -362,7 +372,7 @@ impl HelioWasmApp for Demo {
                 + (elapsed * 17.1 + phase * 2.0).cos() * 0.06;
             let radius = if i < 6 { 8.0 } else { 14.0 };
             let intensity = if i < 6 { 1.5 } else { 2.5 };
-            let _ = renderer.scene_mut().update_light(
+            let _ = renderer.scene_for_legacy_mut().update_light(
                 *id,
                 point_light(*pos, [1.0, 0.85, 0.5], intensity * f, radius),
             );

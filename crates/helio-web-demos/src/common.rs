@@ -80,7 +80,7 @@ pub fn spot_light(
 
 pub fn insert_object(
     renderer: &mut Renderer,
-    mesh: helio::SceneActorId,
+    mesh: helio::SceneEntityId,
     material: MaterialId,
     transform: Mat4,
     radius: f32,
@@ -90,8 +90,8 @@ pub fn insert_object(
         .ok_or(helio::SceneError::InvalidHandle { resource: "mesh" })?;
     let object_actor_id =
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::object(ObjectDescriptor {
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
                 mesh,
                 material,
                 transform,
@@ -189,8 +189,8 @@ pub fn insert_object_with_movability(
 ) -> helio::SceneResult<helio::ObjectId> {
     let object_actor_id =
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::object(ObjectDescriptor {
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
                 mesh,
                 material,
                 transform,

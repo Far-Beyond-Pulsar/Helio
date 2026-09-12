@@ -1,6 +1,6 @@
 use crate::handles::{
-    DecalId, LightId, MeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
-    SectionedInstanceId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MeshId, ObjectId, ReflectionCaptureId, SectionedInstanceId, VirtualObjectId,
+    WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
@@ -8,13 +8,12 @@ use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 use glam::{Mat4, Vec3};
 use helio_core::{GpuLight, SkyContext};
 use libhelio::{
-    GpuWaterVolume, PostProcessVolumeDescriptor, ReflectionCaptureMobility, ReflectionCaptureShape,
-    SkyActor,
+    GpuWaterVolume, ReflectionCaptureMobility, ReflectionCaptureShape, SkyActor,
 };
 
 /// Result of inserting a typed scene actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SceneActorId {
+pub enum SceneEntityId {
     None,
     Decal(DecalId),
     Mesh(MeshId),
@@ -25,14 +24,11 @@ pub enum SceneActorId {
     Object(ObjectId),
     /// A complete placed sectioned mesh instance (all sections as one unit).
     SectionedObject(SectionedInstanceId),
-    WaterVolume(WaterVolumeId),
-    WaterHitbox(WaterHitboxId),
-    PostProcessVolume(PostProcessVolumeId),
 }
 
-impl SceneActorId {
+impl SceneEntityId {
     pub fn as_decal(self) -> Option<DecalId> {
-        if let SceneActorId::Decal(id) = self {
+        if let SceneEntityId::Decal(id) = self {
             Some(id)
         } else {
             None
@@ -40,7 +36,7 @@ impl SceneActorId {
     }
 
     pub fn as_mesh(self) -> Option<MeshId> {
-        if let SceneActorId::Mesh(id) = self {
+        if let SceneEntityId::Mesh(id) = self {
             Some(id)
         } else {
             None
@@ -48,7 +44,7 @@ impl SceneActorId {
     }
 
     pub fn as_light(self) -> Option<LightId> {
-        if let SceneActorId::Light(id) = self {
+        if let SceneEntityId::Light(id) = self {
             Some(id)
         } else {
             None
@@ -56,7 +52,7 @@ impl SceneActorId {
     }
 
     pub fn as_reflection_capture(self) -> Option<ReflectionCaptureId> {
-        if let SceneActorId::ReflectionCapture(id) = self {
+        if let SceneEntityId::ReflectionCapture(id) = self {
             Some(id)
         } else {
             None
@@ -64,7 +60,7 @@ impl SceneActorId {
     }
 
     pub fn as_virtual_mesh(self) -> Option<VirtualMeshId> {
-        if let SceneActorId::VirtualMesh(id) = self {
+        if let SceneEntityId::VirtualMesh(id) = self {
             Some(id)
         } else {
             None
@@ -72,7 +68,7 @@ impl SceneActorId {
     }
 
     pub fn as_virtual_object(self) -> Option<VirtualObjectId> {
-        if let SceneActorId::VirtualObject(id) = self {
+        if let SceneEntityId::VirtualObject(id) = self {
             Some(id)
         } else {
             None
@@ -80,7 +76,7 @@ impl SceneActorId {
     }
 
     pub fn as_object(self) -> Option<ObjectId> {
-        if let SceneActorId::Object(id) = self {
+        if let SceneEntityId::Object(id) = self {
             Some(id)
         } else {
             None
@@ -88,32 +84,17 @@ impl SceneActorId {
     }
 
     pub fn as_sectioned_object(self) -> Option<SectionedInstanceId> {
-        if let SceneActorId::SectionedObject(id) = self {
+        if let SceneEntityId::SectionedObject(id) = self {
             Some(id)
         } else {
             None
         }
     }
 
-    pub fn as_water_volume(self) -> Option<WaterVolumeId> {
-        if let SceneActorId::WaterVolume(id) = self {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_water_hitbox(self) -> Option<WaterHitboxId> {
-        if let SceneActorId::WaterHitbox(id) = self {
-            Some(id)
-        } else {
-            None
-        }
-    }
 }
 
 /// Common behavior for scene actors (custom and built-in).
-pub trait SceneActorTrait {
+pub trait SceneEntityTrait {
     /// Whether the actor should be ticked each frame.
     fn is_active(&self) -> bool {
         true
@@ -131,8 +112,8 @@ pub trait SceneActorTrait {
     }
 
     /// Actor id generated during insertion (if applicable).
-    fn inserted_id(&self) -> SceneActorId {
-        SceneActorId::None
+    fn inserted_id(&self) -> SceneEntityId {
+        SceneEntityId::None
     }
 }
 
@@ -159,7 +140,7 @@ impl MeshActor {
     }
 }
 
-impl SceneActorTrait for MeshActor {
+impl SceneEntityTrait for MeshActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.mesh_id.is_none() {
             if let Some(upload) = self.upload.take() {
@@ -168,10 +149,10 @@ impl SceneActorTrait for MeshActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.mesh_id
-            .map(SceneActorId::Mesh)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::Mesh)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -218,7 +199,7 @@ impl LightActor {
     }
 }
 
-impl SceneActorTrait for LightActor {
+impl SceneEntityTrait for LightActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.light_id.is_none() {
             self.light_id = Some(scene.insert_light_with_movability(
@@ -229,10 +210,10 @@ impl SceneActorTrait for LightActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.light_id
-            .map(SceneActorId::Light)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::Light)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -256,17 +237,17 @@ impl VirtualMeshActor {
     }
 }
 
-impl SceneActorTrait for VirtualMeshActor {
+impl SceneEntityTrait for VirtualMeshActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.virtual_mesh_id.is_none() {
             self.virtual_mesh_id = Some(scene.insert_virtual_mesh(self.upload.clone()));
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.virtual_mesh_id
-            .map(SceneActorId::VirtualMesh)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::VirtualMesh)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -290,7 +271,7 @@ impl VirtualObjectActor {
     }
 }
 
-impl SceneActorTrait for VirtualObjectActor {
+impl SceneEntityTrait for VirtualObjectActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.object_id.is_none() {
             if let Ok(id) = scene.insert_virtual_object(self.descriptor) {
@@ -299,10 +280,10 @@ impl SceneActorTrait for VirtualObjectActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.object_id
-            .map(SceneActorId::VirtualObject)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::VirtualObject)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -326,7 +307,7 @@ impl ObjectActor {
     }
 }
 
-impl SceneActorTrait for ObjectActor {
+impl SceneEntityTrait for ObjectActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.object_id.is_none() {
             if let Ok(id) = scene.insert_object(self.descriptor) {
@@ -335,10 +316,10 @@ impl SceneActorTrait for ObjectActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.object_id
-            .map(SceneActorId::Object)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::Object)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -632,42 +613,6 @@ impl Default for WaterVolumeDescriptor {
     }
 }
 
-/// A water volume actor (descriptor + optional volume handle).
-#[derive(Debug, Clone, Copy)]
-pub struct WaterVolumeActor {
-    pub descriptor: WaterVolumeDescriptor,
-    pub volume_id: Option<WaterVolumeId>,
-}
-
-impl WaterVolumeActor {
-    pub fn new(descriptor: WaterVolumeDescriptor) -> Self {
-        Self {
-            descriptor,
-            volume_id: None,
-        }
-    }
-
-    pub fn id(&self) -> Option<WaterVolumeId> {
-        self.volume_id
-    }
-}
-
-impl SceneActorTrait for WaterVolumeActor {
-    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
-        if self.volume_id.is_none() {
-            if let Ok(id) = scene.insert_water_volume(self.descriptor) {
-                self.volume_id = Some(id);
-            }
-        }
-    }
-
-    fn inserted_id(&self) -> SceneActorId {
-        self.volume_id
-            .map(SceneActorId::WaterVolume)
-            .unwrap_or(SceneActorId::None)
-    }
-}
-
 // ── Water Hitbox ─────────────────────────────────────────────────────────────
 
 /// Descriptor for a water hitbox — an AABB that displaces the heightfield simulation.
@@ -716,80 +661,6 @@ impl WaterHitboxDescriptor {
     }
 }
 
-/// Water hitbox actor — wraps a [`WaterHitboxDescriptor`] for the scene actor system.
-#[derive(Debug, Clone, Copy)]
-pub struct WaterHitboxActor {
-    pub descriptor: WaterHitboxDescriptor,
-    pub hitbox_id: Option<crate::handles::WaterHitboxId>,
-}
-
-impl WaterHitboxActor {
-    pub fn new(descriptor: WaterHitboxDescriptor) -> Self {
-        Self {
-            descriptor,
-            hitbox_id: None,
-        }
-    }
-
-    pub fn id(&self) -> Option<crate::handles::WaterHitboxId> {
-        self.hitbox_id
-    }
-}
-
-impl SceneActorTrait for WaterHitboxActor {
-    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
-        if self.hitbox_id.is_none() {
-            if let Ok(id) = scene.insert_water_hitbox(self.descriptor) {
-                self.hitbox_id = Some(id);
-            }
-        }
-    }
-
-    fn inserted_id(&self) -> SceneActorId {
-        self.hitbox_id
-            .map(SceneActorId::WaterHitbox)
-            .unwrap_or(SceneActorId::None)
-    }
-}
-
-// ── Post-Process Volume ─────────────────────────────────────────────────────────
-
-/// A post-process volume actor (descriptor + optional volume handle).
-#[derive(Debug, Clone)]
-pub struct PostProcessVolumeActor {
-    pub descriptor: PostProcessVolumeDescriptor,
-    pub volume_id: Option<PostProcessVolumeId>,
-}
-
-impl PostProcessVolumeActor {
-    pub fn new(descriptor: PostProcessVolumeDescriptor) -> Self {
-        Self {
-            descriptor,
-            volume_id: None,
-        }
-    }
-
-    pub fn id(&self) -> Option<PostProcessVolumeId> {
-        self.volume_id
-    }
-}
-
-impl SceneActorTrait for PostProcessVolumeActor {
-    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
-        if self.volume_id.is_none() {
-            if let Ok(id) = scene.insert_post_process_volume(self.descriptor.clone()) {
-                self.volume_id = Some(id);
-            }
-        }
-    }
-
-    fn inserted_id(&self) -> SceneActorId {
-        self.volume_id
-            .map(SceneActorId::PostProcessVolume)
-            .unwrap_or(SceneActorId::None)
-    }
-}
-
 // ── Decal Actor ──────────────────────────────────────────────────────────────────
 
 /// A decal actor (GPU decal descriptor + optional handle).
@@ -830,7 +701,7 @@ impl DecalActor {
     }
 }
 
-impl SceneActorTrait for DecalActor {
+impl SceneEntityTrait for DecalActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.decal_id.is_none() {
             self.decal_id =
@@ -838,10 +709,10 @@ impl SceneActorTrait for DecalActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.decal_id
-            .map(SceneActorId::Decal)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::Decal)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
@@ -934,6 +805,29 @@ impl ReflectionCaptureDescriptor {
     pub fn position(&self) -> [f32; 3] {
         self.transform.w_axis.truncate().to_array()
     }
+
+    /// Converts to GPU representation. `cubemap_index` is `-1` (no cubemap
+    /// resident yet) for a newly-authored capture -- see
+    /// `libhelio::GpuReflectionCapture::disabled`'s doc for why that exact
+    /// sentinel, not a `Default`/`Zeroable` `0`, is what marks a capture as
+    /// not yet contributing.
+    pub fn to_gpu(&self, cubemap_index: i32) -> libhelio::GpuReflectionCapture {
+        let pos = self.position();
+        libhelio::GpuReflectionCapture {
+            position_radius: [pos[0], pos[1], pos[2], self.influence_radius],
+            extents_transition: [
+                self.extents[0],
+                self.extents[1],
+                self.extents[2],
+                self.transition_distance,
+            ],
+            world_to_local: self.transform.inverse().to_cols_array_2d(),
+            cubemap_index,
+            shape: self.shape as u32,
+            mobility: self.mobility as u32,
+            brightness: self.brightness,
+        }
+    }
 }
 
 /// A reflection capture actor (descriptor + optional handle).
@@ -956,7 +850,7 @@ impl ReflectionCaptureActor {
     }
 }
 
-impl SceneActorTrait for ReflectionCaptureActor {
+impl SceneEntityTrait for ReflectionCaptureActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.capture_id.is_none() {
             if let Ok(id) = scene.insert_reflection_capture(self.descriptor.clone()) {
@@ -965,16 +859,16 @@ impl SceneActorTrait for ReflectionCaptureActor {
         }
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         self.capture_id
-            .map(SceneActorId::ReflectionCapture)
-            .unwrap_or(SceneActorId::None)
+            .map(SceneEntityId::ReflectionCapture)
+            .unwrap_or(SceneEntityId::None)
     }
 }
 
 /// Unified scene actor type. Includes shading, geometry, and user custom logic.
 #[derive(Debug, Clone)]
-pub enum SceneActor {
+pub enum SceneEntity {
     Sky(SkyActor),
     Decal(DecalActor),
     Mesh(MeshActor),
@@ -983,18 +877,15 @@ pub enum SceneActor {
     VirtualMesh(VirtualMeshActor),
     VirtualObject(VirtualObjectActor),
     Object(ObjectActor),
-    WaterVolume(WaterVolumeActor),
-    WaterHitbox(WaterHitboxActor),
-    PostProcessVolume(PostProcessVolumeActor),
 }
 
-impl SceneActor {
+impl SceneEntity {
     pub fn sky(sky: SkyActor) -> Self {
-        SceneActor::Sky(sky)
+        SceneEntity::Sky(sky)
     }
 
     pub fn decal(decal: libhelio::GpuDecal) -> Self {
-        SceneActor::Decal(DecalActor::new(decal))
+        SceneEntity::Decal(DecalActor::new(decal))
     }
 
     pub fn decal_with_tag(
@@ -1002,115 +893,94 @@ impl SceneActor {
         user_tag: u64,
         movability: Option<libhelio::Movability>,
     ) -> Self {
-        SceneActor::Decal(DecalActor::new_with_tag(decal, user_tag, movability))
+        SceneEntity::Decal(DecalActor::new_with_tag(decal, user_tag, movability))
     }
 
     pub fn mesh(upload: MeshUpload) -> Self {
-        SceneActor::Mesh(MeshActor::new(upload))
+        SceneEntity::Mesh(MeshActor::new(upload))
     }
 
     pub fn light(light: GpuLight) -> Self {
-        SceneActor::Light(LightActor::new(light))
+        SceneEntity::Light(LightActor::new(light))
     }
 
     pub fn light_with_tag(light: GpuLight, user_tag: u64) -> Self {
-        SceneActor::Light(LightActor::new_with_tag(light, user_tag))
+        SceneEntity::Light(LightActor::new_with_tag(light, user_tag))
     }
 
     pub fn light_with_movability(
         light: GpuLight,
         movability: Option<libhelio::Movability>,
     ) -> Self {
-        SceneActor::Light(LightActor::new_with_movability(light, movability))
+        SceneEntity::Light(LightActor::new_with_movability(light, movability))
     }
 
     pub fn reflection_capture(descriptor: ReflectionCaptureDescriptor) -> Self {
-        SceneActor::ReflectionCapture(ReflectionCaptureActor::new(descriptor))
+        SceneEntity::ReflectionCapture(ReflectionCaptureActor::new(descriptor))
     }
 
     pub fn virtual_mesh(upload: VirtualMeshUpload) -> Self {
-        SceneActor::VirtualMesh(VirtualMeshActor::new(upload))
+        SceneEntity::VirtualMesh(VirtualMeshActor::new(upload))
     }
 
     pub fn virtual_object(desc: VirtualObjectDescriptor) -> Self {
-        SceneActor::VirtualObject(VirtualObjectActor::new(desc))
+        SceneEntity::VirtualObject(VirtualObjectActor::new(desc))
     }
 
     pub fn object(desc: ObjectDescriptor) -> Self {
-        SceneActor::Object(ObjectActor::new(desc))
-    }
-
-    pub fn water_volume(descriptor: WaterVolumeDescriptor) -> Self {
-        SceneActor::WaterVolume(WaterVolumeActor::new(descriptor))
-    }
-
-    pub fn water_hitbox(descriptor: WaterHitboxDescriptor) -> Self {
-        SceneActor::WaterHitbox(WaterHitboxActor::new(descriptor))
-    }
-
-    pub fn post_process_volume(descriptor: PostProcessVolumeDescriptor) -> Self {
-        SceneActor::PostProcessVolume(PostProcessVolumeActor::new(descriptor))
+        SceneEntity::Object(ObjectActor::new(desc))
     }
 }
 
-impl SceneActorTrait for SceneActor {
+impl SceneEntityTrait for SceneEntity {
     fn is_active(&self) -> bool {
         true
     }
 
-    fn inserted_id(&self) -> SceneActorId {
+    fn inserted_id(&self) -> SceneEntityId {
         match self {
-            SceneActor::Sky(_) => SceneActorId::None,
-            SceneActor::Decal(actor) => actor.inserted_id(),
-            SceneActor::Mesh(actor) => actor.inserted_id(),
-            SceneActor::Light(actor) => actor.inserted_id(),
-            SceneActor::ReflectionCapture(actor) => actor.inserted_id(),
-            SceneActor::VirtualMesh(actor) => actor.inserted_id(),
-            SceneActor::VirtualObject(actor) => actor.inserted_id(),
-            SceneActor::Object(actor) => actor.inserted_id(),
-            SceneActor::WaterVolume(actor) => actor.inserted_id(),
-            SceneActor::WaterHitbox(actor) => actor.inserted_id(),
-            SceneActor::PostProcessVolume(actor) => actor.inserted_id(),
+            SceneEntity::Sky(_) => SceneEntityId::None,
+            SceneEntity::Decal(actor) => actor.inserted_id(),
+            SceneEntity::Mesh(actor) => actor.inserted_id(),
+            SceneEntity::Light(actor) => actor.inserted_id(),
+            SceneEntity::ReflectionCapture(actor) => actor.inserted_id(),
+            SceneEntity::VirtualMesh(actor) => actor.inserted_id(),
+            SceneEntity::VirtualObject(actor) => actor.inserted_id(),
+            SceneEntity::Object(actor) => actor.inserted_id(),
         }
     }
 
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         match self {
-            SceneActor::Sky(_) => {
+            SceneEntity::Sky(_) => {
                 // No additional per-frame state. Scene will query context from actors.
             }
-            SceneActor::Decal(actor) => actor.on_attach(scene),
-            SceneActor::Mesh(actor) => actor.on_attach(scene),
-            SceneActor::Light(actor) => actor.on_attach(scene),
-            SceneActor::ReflectionCapture(actor) => actor.on_attach(scene),
-            SceneActor::VirtualMesh(actor) => actor.on_attach(scene),
-            SceneActor::VirtualObject(actor) => actor.on_attach(scene),
-            SceneActor::Object(actor) => actor.on_attach(scene),
-            SceneActor::WaterVolume(actor) => actor.on_attach(scene),
-            SceneActor::WaterHitbox(actor) => actor.on_attach(scene),
-            SceneActor::PostProcessVolume(actor) => actor.on_attach(scene),
+            SceneEntity::Decal(actor) => actor.on_attach(scene),
+            SceneEntity::Mesh(actor) => actor.on_attach(scene),
+            SceneEntity::Light(actor) => actor.on_attach(scene),
+            SceneEntity::ReflectionCapture(actor) => actor.on_attach(scene),
+            SceneEntity::VirtualMesh(actor) => actor.on_attach(scene),
+            SceneEntity::VirtualObject(actor) => actor.on_attach(scene),
+            SceneEntity::Object(actor) => actor.on_attach(scene),
         }
     }
 
     fn on_tick(&mut self, scene: &mut crate::scene::Scene) {
         match self {
-            SceneActor::Decal(actor) => actor.on_tick(scene),
-            SceneActor::Mesh(actor) => actor.on_tick(scene),
-            SceneActor::Light(actor) => actor.on_tick(scene),
-            SceneActor::ReflectionCapture(actor) => actor.on_tick(scene),
-            SceneActor::VirtualMesh(actor) => actor.on_tick(scene),
-            SceneActor::VirtualObject(actor) => actor.on_tick(scene),
-            SceneActor::Object(actor) => actor.on_tick(scene),
-            SceneActor::WaterVolume(actor) => actor.on_tick(scene),
-            SceneActor::WaterHitbox(_) => {}
-            SceneActor::Sky(_) => {}
-            SceneActor::PostProcessVolume(_) => {}
+            SceneEntity::Decal(actor) => actor.on_tick(scene),
+            SceneEntity::Mesh(actor) => actor.on_tick(scene),
+            SceneEntity::Light(actor) => actor.on_tick(scene),
+            SceneEntity::ReflectionCapture(actor) => actor.on_tick(scene),
+            SceneEntity::VirtualMesh(actor) => actor.on_tick(scene),
+            SceneEntity::VirtualObject(actor) => actor.on_tick(scene),
+            SceneEntity::Object(actor) => actor.on_tick(scene),
+            SceneEntity::Sky(_) => {}
         }
     }
 
     fn sky_context(&self) -> Option<SkyContext> {
         match self {
-            SceneActor::Sky(sky) => Some(sky.context()),
+            SceneEntity::Sky(sky) => Some(sky.context()),
             _ => None,
         }
     }

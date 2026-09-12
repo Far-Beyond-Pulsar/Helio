@@ -28,8 +28,8 @@
 //!
 //! // Once per mesh (before creating objects):
 //! let upload = cube_mesh([0.0; 3], 0.5);
-//! let mesh_id = renderer.scene_mut()
-//!     .insert_actor(SceneActor::mesh(upload.clone()))
+//! let mesh_id = renderer.scene()
+//!     .insert_entity(SceneEntity::mesh(upload.clone()))
 //!     .as_mesh().unwrap();
 //! picker.register_mesh(mesh_id, &upload);
 //!
@@ -52,7 +52,7 @@ use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::{LightId, MeshId, ObjectId};
 use crate::mesh::MeshUpload;
-use crate::scene::{Scene, SceneActorId};
+use crate::scene::{Scene, SceneEntityId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tunables
@@ -344,7 +344,7 @@ impl MeshBvh {
 #[derive(Debug, Clone, Copy)]
 pub struct PickHit {
     /// Handle of the hit scene actor.
-    pub actor_id: SceneActorId,
+    pub actor_id: SceneEntityId,
 
     /// Distance along the ray to the hit point (in world units, assuming
     /// `direction` passed to `cast_ray` was unit length).
@@ -368,7 +368,7 @@ pub struct PickHit {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PickInstance {
-    actor_id: SceneActorId,
+    actor_id: SceneEntityId,
     /// Compact key into `ScenePicker::mesh_bvhs`.
     mesh_key: u64,
     /// World transform (used to re-project local hit to world space).
@@ -435,7 +435,7 @@ impl ScenePicker {
     /// Register a mesh's CPU geometry and build its local-space BVH.
     ///
     /// Call this **once per unique mesh**, with the same `MeshUpload` that was
-    /// passed to `scene.insert_actor(SceneActor::mesh(...))`.  Building is
+    /// passed to `scene.insert_entity(SceneEntity::mesh(...))`.  Building is
     /// O(N log N) where N is the triangle count.
     ///
     /// Meshes that are not registered here will be silently skipped during
@@ -474,8 +474,8 @@ impl ScenePicker {
             // instance handle so the editor selects the whole unit at once.
             let actor_id = scene
                 .section_instance_for_object(obj.id)
-                .map(SceneActorId::SectionedObject)
-                .unwrap_or(SceneActorId::Object(obj.id));
+                .map(SceneEntityId::SectionedObject)
+                .unwrap_or(SceneEntityId::Object(obj.id));
 
             self.instances.push(PickInstance {
                 actor_id,
@@ -614,7 +614,7 @@ impl ScenePicker {
             let world_normal = (world_hit - center).normalize_or_zero();
             best_t = t;
             best_hit = Some(PickHit {
-                actor_id: SceneActorId::Light(light_id),
+                actor_id: SceneEntityId::Light(light_id),
                 t,
                 position: world_hit,
                 normal: world_normal,

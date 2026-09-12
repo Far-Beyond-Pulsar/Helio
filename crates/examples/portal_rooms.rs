@@ -30,7 +30,7 @@ mod v3_demo_common;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     DebugDrawState, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId, Renderer,
-    RendererConfig, Scene, SceneActor,
+    RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, point_light, sphere_mesh};
@@ -244,33 +244,40 @@ impl ApplicationHandler for App {
         // transform (see `insert_room_shell`/`furnish_room` below). The hub
         // itself has no geometry — see the module doc.
         let unit_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 1.0],
+            )))
             .as_mesh()
             .unwrap();
         let unit_sphere = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
             .as_mesh()
             .unwrap();
 
         // Shared furniture materials, reused across every room so the six
         // spaces read as built from the same "kit" — only each room's own
         // wall/accent colors (below) tell them apart.
-        let wood_mat = renderer.scene_mut().insert_material(make_material(
-            [0.32, 0.2, 0.11, 1.0],
-            0.75,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let metal_mat = renderer.scene_mut().insert_material(make_material(
-            [0.5, 0.51, 0.54, 1.0],
-            0.4,
-            0.6,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let wood_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.32, 0.2, 0.11, 1.0],
+                0.75,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let metal_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.5, 0.51, 0.54, 1.0],
+                0.4,
+                0.6,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         // ── The hub: one full-face portal per axis direction, no wall, no
         // doorway cutout, no frame. `up_hint` just needs to not be parallel
@@ -363,20 +370,24 @@ impl ApplicationHandler for App {
             // position has nothing to do with `normal` at all; only the
             // *portal* (`a`, below) needs to know which cube face it's on.
             let room_center = Vec3::new(ROOM_LINE_START_X + i as f32 * ROOM_LINE_SPACING, 0.0, 0.0);
-            let room_wall_mat = renderer.scene_mut().insert_material(make_material(
-                theme.wall_color,
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-            let room_accent_mat = renderer.scene_mut().insert_material(make_material(
-                [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
-                0.3,
-                0.0,
-                theme.accent,
-                3.0,
-            ));
+            let room_wall_mat = renderer
+                .scene_for_legacy_mut()
+                .insert_material(make_material(
+                    theme.wall_color,
+                    0.85,
+                    0.0,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
+            let room_accent_mat = renderer
+                .scene_for_legacy_mut()
+                .insert_material(make_material(
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
+                    0.3,
+                    0.0,
+                    theme.accent,
+                    3.0,
+                ));
             // Leave the entrance wall (`-ROOM_FORWARD`) open — that's the
             // room's real entrance, the same real surface the portal's far
             // pose sits at, so there's real geometry (floor, ceiling, far
@@ -414,8 +425,8 @@ impl ApplicationHandler for App {
             );
             light_ids.push(
                 renderer
-                    .scene_mut()
-                    .insert_actor(SceneActor::light(point_light(
+                    .scene_for_legacy_mut()
+                    .insert_entity(SceneEntity::light(point_light(
                         room_center.into(),
                         theme.accent,
                         3.5,
@@ -451,7 +462,7 @@ impl ApplicationHandler for App {
             let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
             let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
             let portal = renderer
-                .scene_mut()
+                .scene_for_legacy_mut()
                 .add_portal(PortalDescriptor {
                     a,
                     b,
@@ -464,8 +475,8 @@ impl ApplicationHandler for App {
         // ── A light near the hub's center so its own walls read clearly.
         light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(SceneEntity::light(point_light(
                     [0.0, HUB_HALF_SIZE * 0.85, 0.0],
                     [1.0, 0.98, 0.92],
                     4.0,
@@ -763,8 +774,8 @@ fn insert_box_panel(
     );
     let radius = half_extent.length();
     let _ = renderer
-        .scene_mut()
-        .insert_actor(SceneActor::object(ObjectDescriptor {
+        .scene_for_legacy_mut()
+        .insert_entity(SceneEntity::object(ObjectDescriptor {
             mesh: unit_mesh,
             material,
             transform,

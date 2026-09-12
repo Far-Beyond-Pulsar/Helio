@@ -11,6 +11,12 @@ use bytemuck::{Pod, Zeroable};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
+
+/// Fixed capacity for the `"scene_lights"` SceneDB buffer, kept equal to
+/// `helio_pass_forward_lit::MAX_LIGHTS`/`helio_pass_light_cull::MAX_LIGHTS`
+/// by construction (all three are literally `DEFAULT_AUTO_REGISTER_CAPACITY`).
+const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -44,8 +50,12 @@ pub struct TransparentPass {
     bind_group: wgpu::BindGroup,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, usize, usize)>,
     globals_buf: wgpu::Buffer,
+    /// Bound in place of `"scene_lights"` when no `LightComponent` has ever
+    /// been inserted -- SceneDB is the only light source this pass reads.
+    /// `light_count` is 0 whenever this is bound, so it's never dereferenced.
+    fallback_lights: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
 }
 
@@ -56,6 +66,12 @@ impl TransparentPass {
         instances_buf: &wgpu::Buffer,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
+        let fallback_lights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Transparent Fallback Lights"),
+            size: std::mem::size_of::<libhelio::GpuLight>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Transparent Globals"),
             size: std::mem::size_of::<TransparentGlobals>() as u64,
@@ -132,6 +148,18 @@ impl TransparentPass {
                     },
                     count: None,
                 },
+                // 3: SceneDB `Transform` storage read -- entity-indexed the same
+                // way `lights` is, see `transparent_base.wgsl`'s binding doc.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -191,6 +219,7 @@ impl TransparentPass {
             bind_group_1: None,
             bind_group_1_key: None,
             globals_buf,
+            fallback_lights,
             surface_format,
         }
     }
@@ -223,7 +252,13 @@ impl RenderPass for TransparentPass {
             bytemuck::bytes_of(&TransparentGlobals {
                 frame: ctx.frame_num as u32,
                 delta_time: 0.0,
-                light_count: ctx.scene.movable_light_count,
+                // SceneDB is the only light source: fixed capacity, not a
+                // live count -- see `MAX_LIGHTS`'s doc.
+                light_count: if ctx.scene_buffers.contains(BufferKey::of("scene_lights")) {
+                    MAX_LIGHTS
+                } else {
+                    0
+                },
                 ambient_intensity: 0.6,
                 ambient_color: [0.3, 0.35, 0.4, 1.0],
                 rc_world_min: [0.0; 4],
@@ -310,27 +345,44 @@ impl RenderPass for TransparentPass {
             helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
         })?;
 
-        // Rebuild bind group 1 (lights + cluster data) when buffer pointers change
+        // Rebuild bind group 1 (lights + transforms + cluster data) when
+        // buffer pointers change. SceneDB is the only light source, resolved
+        // fresh by key every frame -- see `MAX_LIGHTS`'s doc.
         let cluster = ctx.resources.cluster_light_grid.get();
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_lights);
+        let lights_ptr = lights_buf as *const _ as usize;
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
         let tile_counts_ptr = cluster
             .map(|c| c.tile_light_counts as *const _ as usize)
             .unwrap_or(0);
-        let bg1_key = (lights_ptr, tile_lists_ptr, tile_counts_ptr);
+        let transforms_ptr = ctx
+            .scene
+            .transforms
+            .map(|b| b as *const _ as usize)
+            .unwrap_or(0);
+        let bg1_key = (lights_ptr, tile_lists_ptr, tile_counts_ptr, transforms_ptr);
         if self.bind_group_1_key != Some(bg1_key) {
             let fallback = ctx.scene.instances;
             let tile_lists = cluster.map(|c| c.tile_light_lists).unwrap_or(fallback);
             let tile_counts = cluster.map(|c| c.tile_light_counts).unwrap_or(fallback);
+            // `light_count` is 0 whenever no real `Transform` buffer exists
+            // yet, so this fallback is never actually dereferenced at a live
+            // light's index in practice -- same reasoning as
+            // `helio_pass_forward_lit`'s identical fallback.
+            let transforms = ctx.scene.transforms.unwrap_or(fallback);
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -339,6 +391,10 @@ impl RenderPass for TransparentPass {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: tile_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: transforms.as_entire_binding(),
                     },
                 ],
             }));

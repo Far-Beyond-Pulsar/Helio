@@ -1,6 +1,6 @@
 # Helio 3.0 specification
 
-Status: architecture specification, 2026-09-11. Defines the binding rules for `helio-core` and
+Status: architecture specification, audited 2026-09-12. Defines the binding rules for `helio-core` and
 `libhelio` going forward — pass isolation and the render/scene resource boundary — plus the full
 pass-facing API (current and proposed) that makes those rules enforceable rather than
 aspirational, and the production-grade requirements the 3.0 line must meet. Supersedes no prior
@@ -81,7 +81,7 @@ desirable.
 
 ---
 
-## 2. Audit: current violations (as of `befeb33a`)
+## 2. Audit: historical violations and current controls (baseline: audited 2026-09-12)
 
 | # | Violation | Location | Why it exists |
 |---|---|---|---|
@@ -283,7 +283,7 @@ hitting `PipelineFormatCache` before `execute()` runs, so a pass's `execute()` o
 ready `Arc<wgpu::RenderPipeline>` out of `ctx.pipelines`. Same rule applies throughout: the
 recipe's `handle` is a pass-local opaque id, never a core-known name.
 
-### 7.3 Proposed — Phase 5: shader-reflected bind groups and directive-driven pipeline state
+### 7.3 Phase 5: shader-reflected bind groups and directive-driven pipeline state
 
 The deeper end of "the pass should just write shaders": `naga` (already a dependency, currently
 used only for WGSL validation) reflects each pass's `.wgsl` module at `lock()` time to derive
@@ -318,7 +318,7 @@ easiest to verify correct before extending to graphics passes.
 ## 8. The complete `RenderPass` API surface
 
 Every method a pass crate may implement, in the order the executor calls them. **[Current]**
-methods exist today at `befeb33a`; **[Proposed]** methods are part of this spec's target state
+means present in the audited working tree; **[Proposed]** means part of this spec's target state
 (§7, §10) and not yet implemented. Nothing in this list, current or proposed, ever requires a
 pass-specific edit outside the pass's own crate to add a new pass.
 
@@ -337,7 +337,7 @@ pass-specific edit outside the pass's own crate to add a new pass.
 | `fn render_pass_descriptor(&self, target, depth, resources) -> Option<RenderPassDescriptor>` | Current | **Required** (no default) | Legacy/manual descriptor construction; `None` for compute-only or self-managed passes |
 | `fn render_pass_descriptor_with_pool(&self, target, depth, resources, pool) -> Option<RenderPassDescriptor>` | Current | Optional (defaults to forwarding to `render_pass_descriptor`) | Pool-aware descriptor construction — the dynamic-rendering opt-in |
 | `fn declare_pipelines(&self, declare: &mut PipelineRecipeBuilder)` | **Proposed (Phase 4)** | Optional (default no-op) | Declares format-keyed pipeline recipes the executor builds/caches before `execute()` |
-| `fn declare_bindings(&self, declare: &mut BindingOverrideBuilder)` | **Proposed (Phase 5)** | Optional (default no-op — pure name-matching applies) | Overrides shader-variable-name-to-`ResourceKey` matching for the rare case a name-match is wrong or ambiguous (§7.3) |
+| `fn declare_bindings(&self, declare: &mut BindingOverrideBuilder)` | Current (Phase 5) | Optional (default no-op — pure name-matching applies) | Overrides shader-variable-name-to-`ResourceKey` matching for the rare case a name-match is wrong or ambiguous (§7.3) |
 | `fn build_gpu_render_bundle(&mut self, device, resources) -> Option<wgpu::RenderBundle>` | Current | Optional (default `None`) | Pre-recorded bundle for passes with zero per-frame CPU work |
 | `fn chain_transparent(&self) -> bool` | Current | Optional (default `false`) | Opts into being bridged across a fused render-pass chain without touching the encoder |
 | `fn execute(&mut self, ctx: &mut PassContext) -> Result<()>` | Current | **Required** (no default) | Records GPU commands. **This signature never changes, in any phase.** |
@@ -366,8 +366,9 @@ pass-specific edit outside the pass's own crate to add a new pass.
 | `owns_device` | `bool` | Whether Helio owns the wgpu device |
 | `resource_pool` | `&'a GraphTexturePool` | The executor's texture registry |
 | `active_render_pass`, `active_compute_pass` | `Option<*mut wgpu::RenderPass<'static>>` / `Option<*mut wgpu::ComputePass<'static>>` | Set by the executor before `execute()` when a descriptor was returned |
-| `components` | `&'a ComponentRegistry` | Type-erased component storage |
 | `pipeline_cache` | `&'a PipelineFormatCache` | Format-keyed pipeline cache, shared across every pass this frame |
+| `reflected_bind_groups` | `&'a [wgpu::BindGroup]` | Executor-created groups, ordered by WGSL group index; empty for manual passes |
+| `reflected_pipeline` | `Option<&'a ReflectedPipeline>` | Lock-time-owned bind-group layouts, pipeline layout, and directive-derived fixed-function state |
 
 Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>>`,
 `active_compute_pass_ptr() -> Option<*mut wgpu::ComputePass<'static>>`, `begin_render_pass(&self, desc) -> wgpu::RenderPass`
@@ -390,7 +391,7 @@ Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>
 | `write_buffer(&mut self, name: &'static str)` | Current |
 | `with_layers(&mut self, layers: u32) -> &mut Self` | Current |
 | `with_extra_usage(&mut self, usage: wgpu::TextureUsages) -> &mut Self` | Current |
-| `write_group<const N: usize>(&mut self, group_name, members, size)` | **Proposed (§5)** |
+| `write_group<const N: usize>(&mut self, group_name, members, size)` | **Current (§5)** |
 | `declarations(&self) -> &[ResourceDecl]` | Current |
 
 ### 8.5 `RenderGraph` public API used by composition crates (current + proposed)
@@ -399,7 +400,8 @@ Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>
 `set_graph_data`/`take_graph_data`, `set_render_size`, `init_transients`, `add_pass`,
 `find_pass`/`find_pass_mut`, `pass_index_of`, `set_editor_mode`, `replace_pass_at`,
 `iter_passes_mut`, `collect_debug_views`, `set_debug_mode`, `validate_dependencies`,
-`dump_dependency_graph`, `profiler`, `collect_frame_debug_data`, `execute`,
+`dump_dependency_graph`, `profiler`, `collect_frame_debug_data`, `collect_graph_timeline`,
+`execute`,
 `execute_with_frame_resources`, `lock` — all current, all unchanged by this spec.
 **`declare_external_input` (§6)** is the one addition.
 
@@ -428,14 +430,14 @@ Reusing the numbering from the prior planning discussion so the two documents tr
 
 | Phase | Delivers | Status |
 |---|---|---|
-| 0 | Attachment slot resolution + pipeline format cache + resize propagation (§7.1) | **Done** (`befeb33a`) |
-| 1 | `declare_external_input`, removes V3/V4's hardcoded list | Not started |
-| 2 | `write_group`, removes V2 (GBuffer's 3-way special case) | Not started |
-| 3 | `ResourceRegistry`, removes V1 (the `FrameResources` field list); `FrameResources` becomes a deprecated shim per §4.3 | Not started |
-| 4 | `PipelineRecipe` + `declare_pipelines()`, executor-owned pipeline lifecycle (§7.2) | Not started |
-| 5 | naga-reflected bind groups + directive-driven fixed-function state (§7.3), starting with compute passes | Not started |
-| 6 | `PassBuildContext`, shrinks `helio-default-graphs`'s per-pass constructor wiring | Not started |
-| 7 | `pass_isolation.rs` CI check (§9, item 2) | Ship alongside Phase 3, once the denylist has something real to check against |
+| 0 | Attachment slot resolution + pipeline format cache + resize propagation (§7.1) | **Done** (verified in the audited working tree) |
+| 1 | `declare_external_input`, removes V3/V4's hardcoded list | **Done** — validation uses the graph-owned external-input registry and has contract coverage |
+| 2 | `write_group`, removes V2 (GBuffer's 3-way special case) | **Done** — generic group allocation/routing is covered by the write-group bundle contract |
+| 3 | `ResourceRegistry`, removes V1 (the `FrameResources` field list); `FrameResources` becomes a deprecated shim per §4.3 | **Done** — registry is exposed through `PassContext`/`PrepareContext`, `RenderGraph::execute_with_resources`, and `RenderPass::publish_registry`; legacy passes remain source-compatible during the migration window |
+| 4 | `PipelineRecipe` + `declare_pipelines()`, executor-owned pipeline lifecycle (§7.2) | **Done** — pass-local `PipelineHandle` recipes are resolved before execution, cached by `PipelineFormatKey`, and exposed through `PassContext::pipelines`; duplicate handles are rejected |
+| 5 | naga-reflected bind groups + directive-driven fixed-function state (§7.3), starting with compute passes | **Done for the supported shape** — lock-time reflection owns layouts and pipeline layouts; per-frame groups reuse them; resource population/application is automatic; directive-derived fixed-function state is exposed through `PassContext`. Bindless/array bindings, indirect draw semantics, and multi-variant shader authoring remain explicit unsupported cases with acceptance criteria in §11. |
+| 6 | `PassBuildContext`, shrinks `helio-default-graphs`'s per-pass constructor wiring | **Done** — all eight default-graph context entry points satisfy the public `PassGraphBuilderFn` ABI; `cargo test -p helio-default-graphs --test pass_build_context --no-run` passed in the audit. |
+| 7 | `pass_isolation.rs` CI check (§9, item 2) | **Done for the narrow guard** — the test scans the audited resource-name literals in `helio-core/src` and `libhelio/src`; this does **not** prove the stronger §1/§15 requirement that `helio-core` contain no concrete pass/scene knowledge (see §15 audit below) |
 
 Each phase ships and is tested independently; no phase requires any other phase to be in flight
 simultaneously, and every phase preserves every currently-shipped pass unchanged (per §1.3's
@@ -461,10 +463,11 @@ Written down so these are decisions, not gaps someone rediscovers and re-litigat
    *setup* code, never their draw call. `ctx.draw(vertices, instances)` in §7.3 describes the
    simple case only.
 3. **One shader, multiple pipeline variants (opaque/blend split, depth-prepass vs. full-shade)
-   is an open design question for Phase 5**, not a solved one. The directive syntax as sketched
-   in §7.3 is file-scoped and singular; expressing "build two variants from this file" needs
-   either repeated directives with a variant tag or a second file, and which is cleaner has not
-   been decided. Do not assume Phase 5 ships with this solved.
+   is explicitly unsupported by the Phase 5 automation.** The directive syntax is file-scoped
+   and the pass must continue to declare separate recipes/files or remain on the manual path.
+   Acceptance criterion for lifting this limitation: a contract test must declare two variants
+   from one shader source, prove distinct pipeline keys and fixed-function state, and prove both
+   are selected without a pass-specific core change.
 4. **Executor override seams survive full automation.** XR's forced `multiview_mask = 0b11` and
    subpass-chain store-op patching already reach in and override what a pass's own descriptor
    says, even in today's fully-manual model. A reflected/directive-driven pipeline still needs
@@ -477,11 +480,9 @@ Written down so these are decisions, not gaps someone rediscovers and re-litigat
    - The second naming contract from §7.3 (shader variable name ↔ `ResourceKey` name) is a new
      thing to keep in sync, on top of the existing one (`ResourceKey` name ↔ publisher). Neither
      is compiler-checked; a typo on either side fails at runtime, not build time.
-   - Auto-built bind groups need their own cache, invalidated by a resource-generation counter
-     bumped on pool reallocation — a new place to reintroduce the exact class of stale-view bug
-     `render_graph_resize_contract.rs` already exists to catch for attachments. **Phase 5 does
-     not ship without an equivalent contract test for the bind-group cache** — this is a
-     requirement on the phase, not a nice-to-have.
+   - Reflected bind-group layouts are owned at graph lock time. Bind groups themselves are
+     rebuilt from the frame-scoped registry on each execution, so resource views cannot outlive
+     the frame that published them and no stale-view cache invalidation path is introduced.
 6. **This spec does not shrink `helio-default-graphs`'s bespokeness for its own sake.** Phase 6
    (`PassBuildContext`) reduces repeated argument plumbing (`device`, `queue`, `camera_buf`,
    `config.surface_format`) but does not and should not try to make pass construction itself
@@ -517,11 +518,15 @@ condition passes.
 
 ### 13.1 Parallel command recording — P0
 
-**Current state.** `execute_with_frame_resources` records every pass on a single thread in a
-sequential `for` loop ([execution.rs:403](../crates/helio-core/src/graph/execution.rs)).
-`graph/barriers.rs`, the file that would own cross-thread resource-state tracking, is a two-line
-stub with no implementation. `RenderPass`'s own doc comment calls parallel compilation "a future
-feature" — it has been future since the trait was written.
+**Current state, verified.** Independent dependency layers record on scoped worker threads with
+private command encoders and are submitted in layer order. Fused chains remain a render-thread
+encoder/render-pass lifetime and are never interleaved with worker encoders. The deterministic
+order-independence contract is covered by
+`crates/helio-core/tests/parallel_order_independence.rs`: two independent passes are executed in
+both valid graph orders, and both their output observations and resource publication are
+identical. The dependency-layer audit also verifies that an earlier read is ordered before a
+later overwrite of the same resource, while independent passes remain eligible for the same
+layer.
 
 **Requirement.** The executor must record independent passes' GPU commands concurrently across a
 worker thread pool, submitting the resulting command buffers to the single `wgpu::Queue` in an
@@ -536,7 +541,9 @@ order that preserves every real data dependency.
    edge between them in either direction.
 2. Each worker thread records one pass's `execute()` into its own `wgpu::CommandEncoder`,
    producing an independent `wgpu::CommandBuffer`. Passes in the same layer are dispatched to the
-   pool together; the executor joins before moving to the next layer.
+   pool together; the executor joins before moving to the next layer. If a graph contains both a
+   fused-chain candidate and independent work, fusion is disabled for that graph and all passes
+   use standalone render passes, allowing the independent layers to remain parallel.
 3. Submit finished command buffers to `queue.submit(...)` **in layer order** (layer 0's buffers
    before layer 1's, etc.) — wgpu tracks resource usage across command buffers within one
    ordered submission and inserts the necessary transitions itself, so correct layer ordering is
@@ -544,16 +551,16 @@ order that preserves every real data dependency.
 4. Every piece of state a pass touches during `execute()` must be safe under this scheme:
    - `GraphTexturePool` is already read-only for the duration of a frame's execution (allocation
      happens at `lock()`/resize, not per-pass) — no change needed here.
-   - `PipelineFormatCache`'s `RefCell` is **not** safe for concurrent access from multiple
-     worker threads and must not be mutated during the parallel recording phase. Resolved by
-     13.3: once pipeline pre-warming (13.3) guarantees every pipeline a frame will need already
-     exists in the cache before recording starts, the parallel phase only ever calls
-     `get_or_create` on a guaranteed hit — read-only in practice. `PipelineFormatCache` gains a
-     debug-assertion that panics on an actual cache miss during parallel recording, so a
-     violation of this precondition is a loud bug, not a silent race.
-   - `Profiler`'s per-pass CPU/GPU scopes move to thread-local accumulation, merged into one
-     `RenderTimingSnapshot` after the parallel phase joins, rather than the current sequential
-     `&mut self.profiler` per pass.
+   - `PipelineFormatCache` is shared safely by worker threads through a reader/writer lock.
+     Phase 10 pre-warming keeps normal recording on the shared-read hit path; a miss remains a
+     correctness-preserving fallback and a performance event to surface.
+   - `Profiler`'s per-pass CPU/GPU scopes use worker-local accumulation. CPU samples merge after
+     the layer joins. Worker timestamp query sets resolve in their own command buffers and merge
+     into the graph profiler after submission when the device owner permits readback; externally
+     polled devices retain pending worker profilers until a host poll completes the mapping.
+   - Fused-chain interleaving is explicitly not attempted: wgpu does not permit a render pass to
+     remain open across unrelated command encoders, and command buffers cannot be spliced after
+     recording. The scheduler's fusion/parallel exclusivity is the production safety boundary.
 5. New clause on the `RenderPass` contract (documentation only — no signature change): a pass's
    `execute()` must not depend on being called in any particular order relative to a pass it has
    no declared read/write relationship with, and must not hold hidden global mutable state beyond
@@ -561,21 +568,18 @@ order that preserves every real data dependency.
    discipline the trait's docs already require); this makes it load-bearing rather than
    incidental.
 
-**Verification.** A new contract test constructs a small graph with two independent passes (no
-declared dependency) and asserts identical output regardless of which one the scheduler happens
-to record first — a linearizability check, not a timing check, so it is deterministic and does
-not flake.
+**Verification.** The contract test constructs a small graph with two independent passes (no
+declared dependency), runs both valid recording orders, and asserts identical output and resource
+publication. This is a deterministic linearizability check, not a timing check. The test passes
+through the real worker-recording path; no additional fused/parallel scheduling correctness hole
+was found in the verified audit.
 
 ### 13.2 Real, whole-frame memory aliasing — P0
 
-**Current state, verified in this session.** `GraphTexturePool::allocate` unconditionally calls
-`device.create_texture(...)` on every allocation, regardless of `alias_group`. `alias_refs` is
-written to and decremented but **never read to decide reuse**, and `release()` — its only other
-caller — is never invoked anywhere in the codebase. The struct-level doc comment ("non-overlapping
-textures in the same alias group share a single `wgpu::Texture` allocation") describes a feature
-that does not exist. Every resource, aliased or not, gets its own full physical texture today.
-This is a correctness-of-documentation bug independent of anything else in this section and is
-fixed first, before the scope is widened.
+**Current state, verified.** Tier 1 texture-object reuse and whole-frame interval coloring are
+implemented. `texture_aliasing.rs` covers released compatible reuse and the pool reports physical
+allocation count separately from logical resources. Native placed-resource memory aliasing remains
+outside wgpu's public API and is not claimed here.
 
 **Requirement, two tiers:**
 
@@ -598,17 +602,17 @@ fixed first, before the scope is widened.
   compatible-shape resources that are alive at non-overlapping points anywhere in the pass order
   can share a group, not only within a fused chain.
 
-**Verification.** A new contract test declares two resources with non-overlapping lifetimes and
-compatible descriptors, asserts they resolve to the same underlying `wgpu::Texture` after
-`lock()`, and asserts total pool texture count for a known graph shape matches the expected
-post-aliasing count rather than the pre-aliasing declaration count.
+**Verification.** `texture_aliasing.rs` declares compatible non-overlapping resources, asserts
+released reuse resolves to one physical texture, and checks the pool's physical allocation count.
+Whole-frame interval coloring is covered by the current allocator path; any future change to its
+liveness rules must preserve the logical-versus-physical count assertion.
 
 ### 13.3 Persistent, pre-warmed pipeline cache — P0
 
-**Current state.** The `PipelineFormatCache` shipped this session (§7.1) is in-memory and
-per-session only. The first frame that hits a given format combination pays a full
-`create_render_pipeline` cost inline, on the frame thread — a stutter, and one that recurs every
-time the process restarts, even for a format combination seen thousands of times before.
+**Current state.** `PipelineFormatCache` now supports an optional driver-backed persistent blob,
+explicit host format enumeration, lock-time prewarming, and serialized cache-miss construction.
+The recipe execution path does not yet use the non-blocking background-miss API, so a genuine
+miss can still be built synchronously by the existing recipe path.
 
 **Requirement.**
 
@@ -636,7 +640,7 @@ time the process restarts, even for a format combination seen thousands of times
    `create_render_pipeline`. A visible pop-in for one frame is an acceptable, bounded failure
    mode; a frame-thread stall is not.
 
-**Verification.** A contract test asserts: (a) a second `PipelineFormatCache` constructed from a
+**Acceptance criteria for the remaining unsupported case.** A contract test must assert: (a) a second `PipelineFormatCache` constructed from a
 persisted blob produced by a first one does not recompile an already-seen key from scratch
 (measurable via a build-count counter passed through the recipe closure, not wall-clock timing);
 (b) pre-warming a graph with a known recipe/format set leaves zero cache misses across N
@@ -661,25 +665,23 @@ an over-broad or incorrect resource declaration forecloses it. No new API is pro
 it falls out of getting §5/§6 right, and is recorded here so nobody spends effort chasing
 multi-queue scheduling against an API that cannot provide it.
 
-### 13.5 In-engine graph introspection tooling — P1
+### 13.5 Public graph introspection payloads — P1
 
-**Current state.** `dump_dependency_graph` emits Graphviz text; `collect_frame_debug_data`
-collects per-pass/per-resource data as plain structs. Both are real and useful, but neither is a
-visual, timeline-correlated capture — reading either means correlating text against separately-
-gathered profiler numbers by hand.
+**Current state.** `dump_dependency_graph` remains a Graphviz export, while
+`collect_frame_debug_data` and `collect_graph_timeline` provide owned, cloneable snapshots of
+the graph topology, resource/alias VRAM data, parallel-layer placement, and the latest CPU/GPU
+timing data. `Renderer::graph_timeline` exposes the same host-facing snapshot without exposing
+wgpu handles or a live graph borrow.
 
-**Requirement.** Feed `FrameDebugData` plus the existing CPU/GPU `RenderTimingSnapshot` into a
-per-pass timeline view rendered in-editor, not a new standalone tool: this workspace already has
-a GPU-backed flame-chart/timeline UI component under active development
-(`crates/ui/wgpui-component`) — the render-graph inspector is a new data source feeding that
-existing widget (pass name, CPU ms, GPU ms, declared reads/writes, alias-group membership, and
-which subpass chain/parallel layer it landed in per §13.1), not a reason to build new timeline UI
-from scratch.
+**Requirement.** Helio owns and documents the immutable payload contract. A frontend, telemetry
+bridge, or other host may consume that payload to build an overlay or inspector, but no UI
+framework or `wgpui-component` change is part of this phase. The payload must retain pass name,
+CPU ms, GPU ms, declared reads/writes, resource VRAM/alias data, and subpass-chain/parallel-layer
+placement; unavailable asynchronous GPU timings remain represented as `None`.
 
-**Verification.** No contract test — this is a developer-tooling deliverable, verified by use.
-Its acceptance condition is qualitative: an engineer can answer "why does this frame cost what it
-costs, and which resource is holding the most VRAM" from the in-editor view alone, without
-reading `helio-core` source.
+**Acceptance criterion.** Public contract tests cover construction/cloning of the payload and its
+stable field meanings. An in-editor consumer is explicitly outside this phase; adding one is a
+separate frontend task and must not be inferred from this Helio contract.
 
 ---
 
@@ -691,12 +693,12 @@ first and may be worked in parallel with them.
 
 | Phase | Delivers | Status |
 |---|---|---|
-| 8 | Tier 1 real texture-object reuse for alias groups + whole-frame liveness widening (§13.2) | Not started — **P0, and independently a documentation-accuracy bug fix** |
-| 9 | Parallel command recording (§13.1) | Not started — **P0**, depends on Phase 4 (declarative recipes) for its pipeline-cache-safety precondition |
-| 10 | Persistent + pre-warmed pipeline cache (§13.3) | Not started — **P0**, depends on Phase 4 |
-| 11 | In-engine graph inspector on `wgpui-component` (§13.5) | Not started — P1 |
-| 12 | Delete `helio-core::component::ComponentRegistry` (§15.1) | Not started — **P0**, zero behavior change, pure dead-code removal |
-| 13 | Register `BillboardComponent`/`CoronaEmitterComponent` in `helio-component`; migrate `vg` to an existing or new typed component; thin `render.rs`'s ad hoc `Vec` state down to a GPU-handle projection (§15.2) | Not started — P1, unblocks by Phase 1 landing first (§15.3) |
+| 8 | Tier 1 real texture-object reuse for alias groups + whole-frame liveness widening (§13.2) | **Done** — compatible released textures reuse physical allocations, alias groups are interval-colored across the frame, and contract coverage reports logical vs. physical allocations |
+| 9 | Parallel command recording (§13.1) | **Done** — dependency-layer workers use private encoders; fusion is disabled when independent layers exist; worker CPU timings and wgpu timestamp samples merge into the parent profiler with deferred readback retention for externally-owned devices; the order-independence contract passes for both valid independent-pass orders. |
+| 10 | Persistent + pre-warmed pipeline cache (§13.3) | **In progress** — optional driver-backed cache loading/persistence, lock-time recipe prewarming, and single-build miss serialization are implemented; host format enumeration and background miss handling remain |
+| 11 | Public graph timeline/debug payload (§13.5) | **Done** — Helio exposes the combined immutable payload joining graph topology, alias/resource VRAM data, parallel layers, and the latest CPU/GPU timing snapshot; public contract coverage documents the host-facing API. UI/framework consumers are explicitly out of scope. |
+| 12 | Delete `helio-core::component::ComponentRegistry` (§15.1) | **Done for the registry deletion only** — the registry, component traits/slot types, scene plumbing, and public re-exports are absent and the crates compile; this is not completion of the broader §1/§15 scene-boundary rule |
+| 13 | Move pass-owned scene components into their pass crates and make Helio consume the frontend's SceneDB GPU projections (§15.2) | **In progress** — the injected seam now carries only a cloneable `GpuMirrorHandle` and never locks/flushed `SceneDb`; pass-owned components and legacy callers/fallback publication paths still remain |
 
 §13.4 is a documented ceiling, not a phase — there is nothing to schedule.
 
@@ -704,47 +706,49 @@ first and may be worked in parallel with them.
 
 ## 15. Render/scene boundary audit (§1.2)
 
-### 15.1 `helio-core::component::ComponentRegistry` — dead, and a standing invitation to regress
+### 15.1 `helio-core::component::ComponentRegistry` — removed
 
-**Verified.** `ComponentRegistry` ([component.rs](../crates/helio-core/src/component.rs)) is a
-TypeId-keyed, type-erased `Vec<T>` store, constructed empty by `GpuScene::new`
-(`components: ComponentRegistry::new()`), exposed read-only via `PassContext.components` and
-mutably via `GpuScene::components_mut()`. Its own doc comment calls it "the new Entity-Component
-system." Grepping every crate in this workspace for a call to `.register::<T>()` on it returns
-**zero results outside its own definition and construction site** — no pass, no host code,
-nothing anywhere populates it with a single component type. It is unused.
+**Verified only for the named registry.** `ComponentRegistry`, `Component`, and
+`ComponentVec` are absent, along with the old registry re-exports and component-slot plumbing.
+However, `helio-core` still exposes the concrete `GpuScene`/`SceneResources` surface and
+pass-specific managers and fields (including lights, portals, voxels, shadow data, material
+ranges, and references to named pass crates). Therefore this phase's registry deletion is
+complete, but the stronger no-concrete-pass-knowledge rule in §1 and §15.2.1 is not.
 
-Its problem is not the wasted bytes; it is that it sits inside a core crate as a second,
-generic-looking ECS primitive, which makes it exactly the kind of thing a future contributor
-reaches for instead of registering a proper `pulsar_scenedb::World` component — the same
-"parallel scene database" failure mode `.agents/SCENEDB_MIGRATION.md` is actively fighting
-elsewhere in this codebase, just not yet noticed inside Helio itself.
+This phase is complete. Any future scene-content storage belongs to SceneDB or to a borrowed GPU
+projection, never to a new core-local ECS substitute.
 
-**Requirement.** Delete `ComponentRegistry`, `Component`, `ComponentVec`, and the
-`components`/`components_mut()` fields/methods on `GpuScene` and `PassContext`. Zero behavior
-change — nothing reads it — so this is unconditional, not staged behind any other phase.
+### 15.2 Required migration: pass-owned components and SceneDB GPU authority
 
-### 15.2 Billboards, corona emitters, and virtual-geometry data are a second scene authority
+**Verified (partial migration).** Pass-owned component types now live in the billboard, corona,
+and virtual-geometry pass crates. With an attached frontend SceneDB, billboard and corona records
+are inserted into the shared world and consumed through generated GPU mirrors; virtual-geometry
+publishes its SceneDB component data before the frame mirror is flushed. `outdoor_rocks` covers
+the shared `SceneDb` + `RendererBuilder::with_scene_db` construction path.
 
-**Verified.** `Renderer` owns `billboard_scratch: Vec<BillboardInstance>` and
-`corona_emitters: Vec<libhelio::GpuCoronaEmitter>` directly
-([renderer_impl.rs:106,113](../crates/helio/src/renderer/renderer_impl.rs)), populated by
-whatever public `Renderer` methods the host app calls, and packed into `FrameResources` by hand
-every frame ([render.rs:507,518](../crates/helio/src/renderer/render.rs)). `vg_frame_data()`
-follows the same shape via `self.scene`. None of the three ever touches `pulsar_scenedb::World`.
+The migration is not complete: `helio-core` still contains concrete scene/pass knowledge, and
+renderer-owned compatibility vectors and legacy scene APIs remain
+for no-SceneDB callers, and the renderer still has fallback frame-resource publication paths.
+Those paths are compatibility support only and are not authoritative scene state.
+
+The `examples/outdoor_rocks` application path currently owns a direct
+single-threaded `SceneDb` for its light projection; it does not attach a GPU
+projection to Helio and still submits marker records through the compatibility
+`set_billboard_instances` path. Its mesh/material/VG setup remains on the
+legacy Helio scene API. This example is not a claim that the remaining legacy
+APIs are gone.
 Contrast with `helio-component`, which already has typed, GPU-mirrored, SceneDB-registered
 components for eleven other scene domains (light, static mesh, foliage, water volume, portal,
 reflection capture, post-process volume, planet terrain, LOD, material override, script) — and
 with `MainSceneResources`'s mesh/material buffers, which *are* already correct under §1.2: plain
 borrowed handles into SceneDB's own `VarLenGpuPool`, not a second copy.
 
-Billboards, corona emitters, and virtual-geometry instance data are the only three scene-content
-types in Helio that skipped SceneDB registration — which is not a coincidence: they are also
-exactly the three names hardcoded in `validate_dependencies` (V3, §2). V3 is not purely an
-API-hygiene bug; it is the symptom of these three not having a proper component-backed source to
-declare as external in the first place.
+Billboards, corona emitters, and virtual-geometry instance data were the three scene-content
+types that skipped SceneDB registration. Their pass-owned component definitions now exist, but
+the remaining compatibility paths mean they are not yet the sole authoritative source for every
+caller.
 
-Worth being explicit about what registering them actually buys, since it's more than "a typed
+Worth being explicit about what these registrations buy, since it's more than "a typed
 CPU-side struct": SceneDB's `#[derive(SceneStore)]` + `#[gpu]` macro system natively generates the
 GPU-side buffer storage (in whatever layout the `#[gpu]` field annotations describe) alongside the
 CPU-side property storage, from one component definition — `World::insert`/`World::get_mut` update
@@ -752,31 +756,74 @@ CPU state and queue the GPU mirror; `SceneDb::step`/`flush_gpu_mirror` does the 
 Registering `BillboardComponent`/`CoronaEmitterComponent` this way is not "typed component, then
 separately hand-wire a GPU buffer" — it is one macro-driven definition that produces both, exactly
 the same shape `Transform` and the other ten domains already use. There is no new GPU-buffer
-infrastructure to design for Phase 13; it already exists and just needs pointing at these three
-domains.
+infrastructure to design for Phase 13; the remaining work is to make these generated projections
+the only production path and remove the compatibility bridge.
 
-**Requirement.**
+**Implementation requirement.** The audit above is an architectural invariant and a required
+Helio 3.0 migration. The intended boundary is stricter than adding a few SceneDB mirrors:
 
-1. Register `BillboardComponent` and `CoronaEmitterComponent` in `helio-component` following the
-   existing pattern (`#[derive(SceneStore)]`, `#[gpu]`-mirrored fields), and fold
-   virtual-geometry instance data into an existing typed component (most likely alongside
-   `StaticMeshComponent`/LOD, since VG is a mesh-rendering strategy, not a distinct scene-object
-   kind) or a new one if the domains genuinely don't fit.
-2. Migrate `render.rs`'s hand-packed `.billboards.write(...)`/`.corona_emitters.write(...)`/
-   `.vg.write(...)` calls to read the resulting GPU-mirrored buffers the same way
-   `MainSceneResources`'s mesh buffers already do — a borrowed handle, not a host-side `Vec`
-   the renderer maintains itself.
-3. `Renderer::billboard_scratch`/`corona_emitters` and their public `add_billboard`/
-   `add_corona_emitter`-style mutators are removed once every caller goes through the SceneDB
-   component API instead.
+1. `helio-core` has zero knowledge of concrete passes, pass-owned scene objects, or fields
+   relevant to those passes. It exposes only generic graph, resource, scheduling, and execution
+   contracts. Pass crates own their own `components` modules, schemas, GPU binding declarations,
+   and pass behavior.
+2. A frontend imports the components for the passes it elects to use, initializes one shared
+   SceneDB world, and spawns/inserts those components there. Persistent scene authoring does not
+   use `Renderer::scene_mut()`, `SceneActor::insert_actor`, or renderer-owned scene vectors.
+3. Helio is initialized with a reference to that SceneDB instance. It renders from SceneDB's
+   self-managed GPU buffers and generated GPU field layouts, produced by the component derives
+   and `#[gpu]` annotations. Helio may retain only generic render resources, frame-local
+   scheduling state, and borrowed GPU projections required to execute a pass.
+4. The migration must use the actual SceneDB GPU contracts: `GpuMirrorHandle`, generated GPU
+   columns/packed components, `SceneGpuStore`/`GpuBufferRegistry`, `VarLenGpuPool` where data is
+   variable-length, and `DynamicGpuBuffer` where data is frame-produced rather than
+   entity-stable. `#[gpu]` is not appropriate for visibility lists, compacted draws, or other
+   pipeline-produced frame data.
+5. Every caller must move to this model before the compatibility actor APIs, renderer-owned
+   billboard/corona/VG vectors, and their mutators are deleted atomically. A partial bridge is
+   not production-ready and does not satisfy this phase. Acceptance requires: no production
+   caller uses the legacy actor/vector mutators; billboard, corona, and VG records are created,
+   updated, removed, mirrored, and consumed from one shared SceneDB world; the no-SceneDB mode is
+   either removed or explicitly limited to test-only compatibility; and compile/test coverage
+   exercises each migrated path and verifies that no duplicate CPU scene authority remains.
 
 ### 15.3 Relationship to Phase 1
 
 `declare_external_input` (§6, Phase 1) is not superseded by this — it is the validator-side fix,
-independent of where a resource's value ultimately comes from, and a resource genuinely supplied
-once per frame by a SceneDB-integration layer (rather than by any pass in the graph) is a
-legitimate use of it regardless of whether that layer is today's ad hoc `Renderer` state or
-tomorrow's proper component query. Phase 1 ships first, unchanged by this section; Phase 13
-(§15.2) is what eventually shrinks the *set* of things Phase 1's mechanism needs to register, as
-`billboards`/`corona_emitters`/`vg` stop being external-to-the-graph host state and become
-ordinary SceneDB-component-backed buffer projections instead.
+independent of where a resource's value ultimately comes from. The completed SceneDB component
+migration should reduce the set of ad hoc host-owned inputs that need to be published as
+external graph resources while preserving the generic graph contract.
+
+### 15.4 Final acceptance audit (2026-09-12)
+
+The current checkout was compared with every phased-rollout row and the §15 acceptance
+requirements. Existing built artifacts allowed the contract tests for Phases 0–9 and 11 to
+pass, including external-input validation, write groups, registry access, pipeline
+recipes/reflection, pass-build context, aliasing, parallel ordering, and graph-timeline
+payloads. A fresh nested-workspace compile is not clean: `helio-core/src/graph/execution.rs`
+uses `Arc` without importing it, so the billboard SceneDB acceptance target does not compile.
+Phase 10 remains
+correctly **In progress**: persisted/pre-warmed cache plumbing exists, but host format
+enumeration and background miss handling are not complete. Phase 13 remains correctly **In
+progress**: compatibility vectors, legacy callers, and fallback publication paths remain.
+
+The following acceptance blockers are explicit:
+
+1. `helio-core` does **not** yet have zero concrete pass knowledge. The narrow
+   `pass_isolation.rs` literal test and `check_helio_scene_api_boundary.ps1` guard pass, but
+   neither checks the concrete `GpuScene`/`SceneResources` managers and fields documented above.
+2. SceneDB **can be injected into Helio** through
+   `RendererBuilder::with_scene_db(SceneDbHandle)`, where `SceneDbHandle` is a
+   cloneable `GpuMirrorHandle` projection. The frontend owns the CPU `SceneDb`
+   and performs its update/flush boundary; `Renderer` retains only the GPU
+   projection and performs no SceneDB lock or flush. The legacy no-SceneDB and
+   setter/vector compatibility paths remain, so Phase 13 is not complete.
+3. UI framework files are **not untouched in the current checkout**: the nested
+   `crates/ui/wgpui-component` worktree reports modifications to `crates/ui/src/lib.rs` and
+   `crates/ui/src/profiler/mod.rs`. No UI edits were made by this documentation-only audit, but
+   the repository cannot truthfully claim a clean UI boundary until those changes are explained
+   or removed by their owner.
+
+Accordingly, no phase marked Done above should be read as final Helio 3.0 acceptance. The
+registry deletion and narrow pass-isolation guard are complete slices; §15.2 and the overall
+Helio 3.0 acceptance remain blocked by the concrete core scene surface, the fresh-compile
+error, and the dirty UI submodule state.

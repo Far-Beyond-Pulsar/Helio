@@ -458,7 +458,7 @@ fn generate_map() -> BackroomsMap {
 // Since this renderer doesn't expose a "set light intensity" call, a change
 // in brightness is applied by removing the old light and inserting a new one
 // with the updated intensity — using only APIs already used elsewhere in
-// this file (remove_light / insert_actor).
+// this file (remove_light / insert_entity).
 
 #[derive(Clone, Copy, PartialEq)]
 enum FlickerPhase {
@@ -636,7 +636,7 @@ impl FlickerLight {
 
             let _ = scene.remove_light(self.main_id);
             self.main_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
+                .insert_entity(helio::SceneEntity::light_with_movability(
                     point_light(self.pos, self.color, main_intensity, self.radius),
                     Some(Movability::Movable),
                 ))
@@ -645,7 +645,7 @@ impl FlickerLight {
 
             let _ = scene.remove_light(self.fill_id);
             self.fill_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
+                .insert_entity(helio::SceneEntity::light_with_movability(
                     point_light(
                         self.fill_pos,
                         self.fill_color,
@@ -886,7 +886,7 @@ impl App {
         transform: glam::Mat4,
         radius: f32,
     ) {
-        let _ = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
+        let _ = scene.insert_entity(helio::SceneEntity::object(ObjectDescriptor {
             mesh,
             material,
             transform,
@@ -906,7 +906,7 @@ impl App {
     fn regenerate_map(state: &mut AppState) {
         let map = generate_map();
         let mut renderer = state.renderer.lock().unwrap();
-        let scene = renderer.scene_mut();
+        let scene = renderer.scene_for_legacy_mut();
 
         // Remove previous map resources
         if let Some(res) = &state.map_resources {
@@ -987,7 +987,7 @@ impl App {
 
                 // Floor tile
                 let f = scene
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
                         [H_CELL, 0.05, H_CELL],
                     )))
@@ -1004,7 +1004,7 @@ impl App {
 
                 // Ceiling tile — height varies per room (low/normal/tall/atrium)
                 let c = scene
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
                         [H_CELL, 0.03, H_CELL],
                     )))
@@ -1047,7 +1047,7 @@ impl App {
                     // up as an open ceiling ledge rather than a mismatched
                     // wall (there's no wall between two walkable cells).
                     let w = scene
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [0.0, 0.0, 0.0],
                             [0.1, h / 2.0, CELL / 2.0],
                         )))
@@ -1061,7 +1061,7 @@ impl App {
 
                     // Baseboard trim
                     let t2 = scene
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [0.0, 0.0, 0.0],
                             [0.12, 0.05, CELL / 2.0],
                         )))
@@ -1078,7 +1078,7 @@ impl App {
         // Pillars — decorative columns scattered through big/atrium rooms
         for &(px, pz, ph) in &map.pillars {
             let p = scene
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.35, ph / 2.0, 0.35],
                 )))
@@ -1119,14 +1119,14 @@ impl App {
             let is_flicker = rng.chance(0.16);
 
             let main_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
+                .insert_entity(helio::SceneEntity::light_with_movability(
                     point_light(main_pos, color, main_intensity, radius),
                     Some(Movability::Movable),
                 ))
                 .as_light()
                 .unwrap();
             let fill_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
+                .insert_entity(helio::SceneEntity::light_with_movability(
                     point_light(fill_pos, fill_color, fill_intensity, fill_radius),
                     Some(Movability::Movable),
                 ))
@@ -1376,8 +1376,8 @@ impl ApplicationHandler for App {
 
         // ── VHS camcorder post-process volume ─────────────────────────────────
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::post_process_volume(
                 PostProcessVolumeDescriptor {
                     bounds_min: [-1000.0, -1000.0, -1000.0],
                     bounds_max: [1000.0, 1000.0, 1000.0],
@@ -1621,7 +1621,7 @@ impl AppState {
 
         // Advance every flickering light's state machine this frame.
         {
-            let scene = renderer.scene_mut();
+            let scene = renderer.scene_for_legacy_mut();
             for fl in flicker_lights.iter_mut() {
                 fl.update(scene, dt);
             }

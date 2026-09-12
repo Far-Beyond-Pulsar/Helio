@@ -7,20 +7,16 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
+
+pub mod components;
+pub use components::{BillboardComponent, BillboardSceneBinding, SceneGpuBinding, SceneGpuRecord};
 
 const MAX_BILLBOARDS: u32 = 65536;
 
 /// Per-billboard instance data uploaded to the GPU.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct BillboardInstance {
-    /// World-space position (xyz) + unused pad (w).
-    pub world_pos: [f32; 4],
-    /// Scale (xy), screen_scale flag as f32 (z), unused (w).
-    pub scale_flags: [f32; 4],
-    /// RGBA tint color.
-    pub color: [f32; 4],
-}
+/// Compatibility name for the pass's SceneDB-owned instance record.
+pub type BillboardInstance = BillboardComponent;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -40,11 +36,16 @@ pub struct BillboardPass {
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
-    /// Billboard instance data — caller writes via `update_instances()`.
+    /// Billboard instance data — the fallback buffer used only until the
+    /// SceneDB `"billboard_instances"` buffer exists (before any
+    /// `BillboardComponent` has ever been inserted).
     pub instance_buf: wgpu::Buffer,
+    /// Epoch of the last-bound `"billboard_instances"` `BufferHandle` — a
+    /// changed epoch means the SceneDB buffer reallocated (grew) and bind
+    /// group 0 must be rebuilt to point at the new one.
+    scene_binding_epoch: Option<u64>,
     quad_vertex_buf: wgpu::Buffer,
     pub instance_count: u32,
-    uploaded_generation: u64,
     occluded_by_geometry: bool,
     #[allow(dead_code)]
     white_texture: wgpu::Texture,
@@ -59,6 +60,12 @@ impl BillboardPass {
     ///
     /// - `camera_buf`    — camera uniform (must match `Camera` struct in billboard.wgsl)
     /// - `target_format` — colour attachment format (e.g. `Rgba16Float`)
+    ///
+    /// The pass resolves `BillboardComponent`'s generated `"billboard_instances"`
+    /// GPU buffer by key every frame (`ctx.scene_buffers`, see `prepare()`);
+    /// there is no constructor argument or setter for a SceneDB handle — a
+    /// frontend authors billboards purely by inserting `BillboardComponent`
+    /// rows into its `World`.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -96,6 +103,16 @@ impl BillboardPass {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -175,21 +192,6 @@ impl BillboardPass {
             ..Default::default()
         });
 
-        let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Billboard BG0"),
-            layout: &bgl_0,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: globals_buf.as_entire_binding(),
-                },
-            ],
-        });
-
         let bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Billboard BG1"),
             layout: &bgl_1,
@@ -238,8 +240,29 @@ impl BillboardPass {
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Billboard Instances"),
             size: (MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+
+        let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Billboard BG0"),
+            layout: &bgl_0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: globals_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: instance_buf.as_entire_binding(),
+                },
+            ],
         });
 
         // ── Render pipeline ───────────────────────────────────────────────────
@@ -335,9 +358,9 @@ impl BillboardPass {
             bind_group_1,
             globals_buf,
             instance_buf,
+            scene_binding_epoch: None,
             quad_vertex_buf,
             instance_count: 0,
-            uploaded_generation: u64::MAX,
             occluded_by_geometry: true,
             white_texture,
             white_view,
@@ -345,22 +368,8 @@ impl BillboardPass {
         }
     }
 
-    /// Upload billboard instances. Call once per frame (or when the set changes).
     pub fn set_occluded_by_geometry(&mut self, value: bool) {
         self.occluded_by_geometry = value;
-    }
-
-    pub fn update_instances(&mut self, queue: &wgpu::Queue, instances: &[BillboardInstance]) {
-        let count = instances.len().min(MAX_BILLBOARDS as usize);
-        if count > 0 {
-            helio_core::upload::write_buffer(
-                queue,
-                &self.instance_buf,
-                0,
-                bytemuck::cast_slice(&instances[..count]),
-            );
-        }
-        self.instance_count = count as u32;
     }
 
     /// Create the billboard pass with a custom sprite texture decoded from raw RGBA8 bytes.
@@ -468,19 +477,42 @@ impl RenderPass for BillboardPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Upload billboard instances from the high-level renderer's frame data.
-        if let Some(data) = ctx.frame_resources.billboards.get() {
-            if data.generation != self.uploaded_generation {
-                let max_bytes = MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>();
-                let upload_bytes = data.instances.len().min(max_bytes);
-                if upload_bytes > 0 {
-                    ctx.write_buffer(&self.instance_buf, 0, &data.instances[..upload_bytes]);
+        // Resolve `BillboardComponent`'s `"billboard_instances"` buffer by
+        // key, generically, every frame — no renderer method, no stored
+        // SceneDB handle. `None` until the first `BillboardComponent` is
+        // ever inserted anywhere in the frontend's World.
+        match ctx.scene_buffers.get(BufferKey::of("billboard_instances")) {
+            Some(handle) => {
+                // Fixed capacity, not a live count: unused rows are
+                // `Zeroable` (`scale_flags` all zero), a zero-area billboard
+                // that contributes nothing, so iterating the full capacity
+                // every frame needs no per-frame CPU query at all.
+                self.instance_count = MAX_BILLBOARDS;
+                if self.scene_binding_epoch != Some(handle.epoch) {
+                    self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Billboard SceneDB BG0"),
+                        layout: &self.bgl_0,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: ctx.scene.camera.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: self.globals_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: handle.buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    self.scene_binding_epoch = Some(handle.epoch);
                 }
-                self.uploaded_generation = data.generation;
             }
-            self.instance_count = data.count.min(MAX_BILLBOARDS);
-        } else {
-            self.instance_count = 0;
+            None => {
+                self.instance_count = 0;
+            }
         }
         let globals = BillboardGlobals {
             frame: ctx.frame_num as u32,
@@ -551,7 +583,6 @@ impl RenderPass for BillboardPass {
         rp.set_bind_group(0, &self.bind_group_0, &[]);
         rp.set_bind_group(1, &self.bind_group_1, &[]);
         rp.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
-        rp.set_vertex_buffer(1, self.instance_buf.slice(..));
         rp.draw(0..6, 0..self.instance_count);
         Ok(())
     }

@@ -762,7 +762,8 @@ impl RenderPass for SdfPass {
             self.bindings_dirty = false;
         }
 
-        let cam_pos = ctx.scene.camera.position();
+        let position_near = ctx.scene.camera_data.position_near;
+        let cam_pos = [position_near[0], position_near[1], position_near[2]];
         let mut any_level_dirty = false;
         for level in 0..self.level_count as usize {
             let vs = self.voxel_size_for_level(level as u32);

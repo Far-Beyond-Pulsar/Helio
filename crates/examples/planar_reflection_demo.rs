@@ -17,7 +17,7 @@ use std::time::Instant;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, ObjectDescriptor, Renderer, RendererConfig, Scene, SceneActor, SkyActor,
+    DebugDrawState, ObjectDescriptor, Renderer, RendererConfig, Scene, SceneEntity, SkyActor,
     VolumetricClouds,
 };
 use helio_default_graphs::build_default_graph;
@@ -169,24 +169,24 @@ impl ApplicationHandler for App {
 
         // ── Meshes ─────────────────────────────────────────────────────────
         let cube_mesh = scene
-            .insert_actor(SceneActor::mesh(cube_mesh([0.0; 3], 0.5)))
+            .insert_entity(SceneEntity::mesh(cube_mesh([0.0; 3], 0.5)))
             .as_mesh()
             .unwrap();
         let sphere_mesh = scene
-            .insert_actor(SceneActor::mesh(sphere_mesh([0.0; 3], 0.5)))
+            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0; 3], 0.5)))
             .as_mesh()
             .unwrap();
         let floor_mesh = scene
-            .insert_actor(SceneActor::mesh(plane_mesh([0.0; 3], 6.0)))
+            .insert_entity(SceneEntity::mesh(plane_mesh([0.0; 3], 6.0)))
             .as_mesh()
             .unwrap();
         let pillar_mesh = scene
-            .insert_actor(SceneActor::mesh(box_mesh([0.0; 3], [0.15, 1.5, 0.15])))
+            .insert_entity(SceneEntity::mesh(box_mesh([0.0; 3], [0.15, 1.5, 0.15])))
             .as_mesh()
             .unwrap();
 
         // ── Floor (mirror) ─────────────────────────────────────────────────
-        scene.insert_actor(SceneActor::object(ObjectDescriptor {
+        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
             mesh: floor_mesh,
             material: floor_mat,
             transform: Mat4::from_translation(Vec3::new(0.0, -1.5, 0.0)),
@@ -200,7 +200,7 @@ impl ApplicationHandler for App {
         // ── Pillars ────────────────────────────────────────────────────────
         for x in [-2.0_f32, 2.0] {
             for z in [-2.0_f32, 2.0] {
-                scene.insert_actor(SceneActor::object(ObjectDescriptor {
+                scene.insert_entity(SceneEntity::object(ObjectDescriptor {
                     mesh: pillar_mesh,
                     material: white_mat,
                     transform: Mat4::from_translation(Vec3::new(x, -0.75, z)),
@@ -215,7 +215,7 @@ impl ApplicationHandler for App {
 
         // ── Central objects ────────────────────────────────────────────────
         let cube_id = scene
-            .insert_actor(SceneActor::object(ObjectDescriptor {
+            .insert_entity(SceneEntity::object(ObjectDescriptor {
                 mesh: cube_mesh,
                 material: red_mat,
                 transform: Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0)),
@@ -228,7 +228,7 @@ impl ApplicationHandler for App {
             .as_object()
             .unwrap();
 
-        scene.insert_actor(SceneActor::object(ObjectDescriptor {
+        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
             mesh: sphere_mesh,
             material: blue_mat,
             transform: Mat4::from_translation(Vec3::new(1.2, 0.5, -0.8)),
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
             user_tag: 0,
         }));
 
-        scene.insert_actor(SceneActor::object(ObjectDescriptor {
+        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
             mesh: sphere_mesh,
             material: gold_mat,
             transform: Mat4::from_translation(Vec3::new(0.0, 0.5, 1.2)),
@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
         }));
 
         let sphere_id = scene
-            .insert_actor(SceneActor::object(ObjectDescriptor {
+            .insert_entity(SceneEntity::object(ObjectDescriptor {
                 mesh: sphere_mesh,
                 material: green_mat,
                 transform: Mat4::from_translation(Vec3::new(-1.5, 1.8, 1.5)),
@@ -279,7 +279,7 @@ impl ApplicationHandler for App {
             .unwrap();
 
         // ── Sky ────────────────────────────────────────────────────────────
-        scene.insert_actor(SceneActor::sky(
+        scene.insert_entity(SceneEntity::sky(
             SkyActor::new()
                 .with_sky_color([0.6, 0.7, 1.0])
                 .with_ambient_color([0.15, 0.18, 0.25])
@@ -292,17 +292,18 @@ impl ApplicationHandler for App {
                     wind_z: 0.1,
                     speed: 2.0,
                     skylight_intensity: 0.5,
+                    infinite_extent: false,
                 }),
         ));
 
         // ── Lights ─────────────────────────────────────────────────────────
-        scene.insert_actor(SceneActor::light(directional_light(
+        scene.insert_entity(SceneEntity::light(directional_light(
             [-0.5, -1.0, -0.3],
             [1.0, 0.95, 0.9],
             12.0,
         )));
 
-        scene.insert_actor(SceneActor::light(helio::GpuLight {
+        scene.insert_entity(SceneEntity::light(helio::GpuLight {
             position_range: [3.0, 4.0, 2.0, 10.0],
             direction_outer: [0.0; 4],
             color_intensity: [1.0, 0.85, 0.6, 30.0],
@@ -313,7 +314,7 @@ impl ApplicationHandler for App {
             ..Default::default()
         }));
 
-        scene.insert_actor(SceneActor::light(helio::GpuLight {
+        scene.insert_entity(SceneEntity::light(helio::GpuLight {
             position_range: [-3.0, 3.0, -2.0, 10.0],
             direction_outer: [0.0; 4],
             color_intensity: [0.4, 0.6, 1.0, 20.0],
@@ -505,23 +506,31 @@ impl ApplicationHandler for App {
                 state.cam_pos += state.velocity * dt;
 
                 // ---- Animate ----
-                let angle = state.renderer.scene_mut().gpu_scene().frame_count as f32 * 0.02;
+                let angle = state
+                    .renderer
+                    .scene_for_legacy_mut()
+                    .gpu_scene()
+                    .frame_count as f32
+                    * 0.02;
                 let cube_transform = Mat4::from_axis_angle(Vec3::Y, angle)
                     * Mat4::from_axis_angle(Vec3::X, angle * 0.5)
                     * Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0));
                 let _ = state
                     .renderer
-                    .scene_mut()
+                    .scene_for_legacy_mut()
                     .update_object_transform(state.spinning_cube, cube_transform);
 
                 state.sphere_angle += dt * 0.6;
                 let orbit_x = 2.5 * state.sphere_angle.cos();
                 let orbit_z = 2.5 * state.sphere_angle.sin();
                 let sphere_pos = Vec3::new(orbit_x, 1.0 + 0.5 * state.sphere_angle.sin(), orbit_z);
-                let _ = state.renderer.scene_mut().update_object_transform(
-                    state.orbiting_sphere,
-                    Mat4::from_translation(sphere_pos),
-                );
+                let _ = state
+                    .renderer
+                    .scene_for_legacy_mut()
+                    .update_object_transform(
+                        state.orbiting_sphere,
+                        Mat4::from_translation(sphere_pos),
+                    );
 
                 // ---- Camera ----
                 let target = state.cam_pos + forward;

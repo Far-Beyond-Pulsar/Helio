@@ -29,55 +29,59 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer.scene_mut().insert_material(make_material(
-            [0.60, 0.58, 0.55, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let tile_mat = renderer.scene_mut().insert_material(make_material(
-            [0.80, 0.78, 0.75, 1.0],
-            0.6,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let concrete = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.60, 0.58, 0.55, 1.0],
+                0.85,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
+        let tile_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.80, 0.78, 0.75, 1.0],
+                0.6,
+                0.0,
+                [0.0; 3],
+                0.0,
+            ));
 
         // Long corridor: 2.4m wide, 3m tall, 40m long (z: 0..40)
         let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, -0.05, 20.0],
                 [1.2, 0.05, 20.0],
             )));
         let ceiling = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 3.05, 20.0],
                 [1.2, 0.05, 20.0],
             )));
         let wall_l = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [-1.3, 1.5, 20.0],
                 [0.1, 1.5, 20.0],
             )));
         let wall_r = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [1.3, 1.5, 20.0],
                 [0.1, 1.5, 20.0],
             )));
         let back_w = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.5, 40.1],
                 [1.4, 1.5, 0.1],
             )));
         let front_w = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.5, -0.1],
                 [1.4, 1.5, 0.1],
             )));
@@ -97,8 +101,8 @@ impl HelioWasmApp for Demo {
         for i in 0..8 {
             let z = 2.5 + i as f32 * 5.0;
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 2.8, z],
                     [1.0, 0.95, 0.85],
                     3.0,

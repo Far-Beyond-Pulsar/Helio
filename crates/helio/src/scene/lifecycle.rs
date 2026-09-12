@@ -8,7 +8,7 @@ use glam::Mat4;
 use libhelio::sky::SkyContext;
 
 use crate::scene::Scene;
-use crate::scene::SceneActorTrait;
+use crate::scene::SceneEntityTrait;
 
 impl Scene {
     /// Remove every object, light, mesh, material, and texture from the scene.
@@ -34,37 +34,37 @@ impl Scene {
             let _ = self.remove_light(id);
         }
 
-        // Drop all boxed actors.  Each actor holds any state it accumulated
-        // during its lifetime (e.g. the MeshActor's Option<MeshUpload> is
-        // already None after on_attach, but other actor types may hold data).
-        self.custom_actors.clear();
-
         self.flush();
     }
 
     /// Insert a custom trait-based scene actor.
     ///
-    /// This can be e.g. `SceneActor::Sky`, `MeshActor`, `LightActor`, or other custom actors.
-    pub fn insert_actor<A: SceneActorTrait + 'static>(
+    /// This can be e.g. `SceneEntity::Sky`, `MeshActor`, `LightActor`, or other custom actors.
+    pub fn insert_entity<A: SceneEntityTrait + 'static>(
         &mut self,
         mut actor: A,
-    ) -> crate::scene::actor::SceneActorId {
+    ) -> crate::scene::actor::SceneEntityId {
         actor.on_attach(self);
         let id = actor.inserted_id();
-        self.custom_actors.push(Box::new(actor));
+        // First sky wins: a scene has exactly one effective sky, and the
+        // established (pre-existing, `insert_actor`-era) behavior is that a
+        // later sky insert is silently ignored rather than replacing it.
+        if !self.sky_context.has_sky {
+            if let Some(sky) = actor.sky_context() {
+                self.sky_context = sky;
+            }
+        }
         id
     }
 
     /// Returns effective sky context for the current frame.
     pub fn sky_context(&self) -> SkyContext {
-        // First preference: explicit sky actor.
-        for actor in self.custom_actors.iter() {
-            if let Some(sky) = actor.sky_context() {
-                return sky;
-            }
-        }
+        self.sky_context
+    }
 
-        SkyContext::default()
+    /// Replace the generic environment projection for the current frame.
+    pub fn set_sky_context(&mut self, sky_context: SkyContext) {
+        self.sky_context = sky_context;
     }
 
     /// Set the render target size for camera calculations.
@@ -105,14 +105,6 @@ impl Scene {
     /// }
     /// ```
     pub fn advance_frame(&mut self) {
-        // Tick custom trait-based actors.
-        let scene_ptr: *mut Scene = self;
-        for actor in self.custom_actors.iter_mut() {
-            if actor.is_active() {
-                unsafe { actor.on_tick(&mut *scene_ptr) };
-            }
-        }
-
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);
     }
 
@@ -306,7 +298,7 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
-    use crate::SceneActor;
+    use crate::SceneEntity;
 
     use super::*;
     use libhelio::{SkyActor, VolumetricClouds};
@@ -353,7 +345,7 @@ mod tests {
         let mut scene = Scene::new(device, queue);
 
         // Insert sky actor with clouds
-        scene.insert_actor(SceneActor::Sky(
+        scene.insert_entity(SceneEntity::Sky(
             SkyActor::new()
                 .with_sky_color([0.5, 0.7, 1.0])
                 .with_clouds(VolumetricClouds {
@@ -385,12 +377,12 @@ mod tests {
         let mut scene = Scene::new(device, queue);
 
         // Insert first sky actor
-        scene.insert_actor(SceneActor::Sky(
+        scene.insert_entity(SceneEntity::Sky(
             SkyActor::new().with_sky_color([1.0, 0.0, 0.0]),
         ));
 
         // Insert second sky actor (should be ignored)
-        scene.insert_actor(SceneActor::Sky(
+        scene.insert_entity(SceneEntity::Sky(
             SkyActor::new().with_sky_color([0.0, 1.0, 0.0]),
         ));
 

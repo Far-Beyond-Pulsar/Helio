@@ -637,7 +637,7 @@ impl RenderPass for LensFlarePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx.scene.lights.len() as u32;
+        let light_count = ctx.scene.light_count;
         self.active_flare_count = light_count;
 
         let uniforms = FlareUniforms {

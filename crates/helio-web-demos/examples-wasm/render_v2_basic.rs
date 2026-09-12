@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, Renderer, SceneActorId};
+use helio::{Camera, LightId, Renderer, SceneEntityId};
 use helio_wasm::{HelioWasmApp, InputState};
 
 use crate::common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh, point_light};
@@ -12,10 +12,10 @@ const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
 
 pub struct Demo {
-    cube1: SceneActorId,
-    cube2: SceneActorId,
-    cube3: SceneActorId,
-    _ground: SceneActorId,
+    cube1: SceneEntityId,
+    cube2: SceneEntityId,
+    cube3: SceneEntityId,
+    _ground: SceneEntityId,
     light_p0: LightId,
 
     cam_pos: Vec3,
@@ -35,26 +35,28 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.7, 0.7, 0.72, 1.0],
+                0.7,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
         let cube2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
         let cube3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
         let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
@@ -62,26 +64,26 @@ impl HelioWasmApp for Demo {
         let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let light_p0 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 2.2, 0.0],
                 [1.0, 0.55, 0.15],
                 6.0,
                 5.0,
             )))
             .as_light()
-            .expect("insert_actor returned non-Light for light actor");
+            .expect("insert_entity returned non-Light for light actor");
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [-3.5, 2.0, -1.5],
                 [0.25, 0.5, 1.0],
                 5.0,
                 6.0,
             )));
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [3.5, 1.5, 1.5],
                 [1.0, 0.3, 0.5],
                 5.0,
@@ -138,7 +140,7 @@ impl HelioWasmApp for Demo {
         // Animate light p0
         let p0 = [0.0_f32, 2.2 + (elapsed * 0.7).sin() * 0.3, 0.0];
         let _ = renderer
-            .scene_mut()
+            .scene_for_legacy_mut()
             .update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
 
         Camera::perspective_look_at(

@@ -10,7 +10,7 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneActor,
+    DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_forward_opaque_graph;
 use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
@@ -146,7 +146,7 @@ impl ApplicationHandler for App {
         let config = RendererConfig::new(size.width, size.height, surface_format)
             .with_render_mode(RenderMode::ForwardOpaque);
         let mut scene = Scene::new(device.clone(), queue.clone());
-        scene.insert_actor(SceneActor::sky(
+        scene.insert_entity(SceneEntity::sky(
             helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
         ));
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -190,32 +190,34 @@ impl ApplicationHandler for App {
         );
         renderer.set_editor_mode(true);
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.7, 0.7, 0.72, 1.0],
+                0.7,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         let cube2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
             .as_mesh()
             .unwrap();
         let cube3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
             .as_mesh()
             .unwrap();
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
             .as_mesh()
             .unwrap();
 
@@ -247,8 +249,8 @@ impl ApplicationHandler for App {
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
         let light_p0_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 p0_init,
                 [1.0, 0.55, 0.15],
                 6.0,
@@ -257,16 +259,16 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 p1,
                 [0.25, 0.5, 1.0],
                 5.0,
                 6.0,
             )));
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 p2,
                 [1.0, 0.3, 0.5],
                 5.0,
@@ -459,7 +461,7 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.scene_mut().update_light(
+        let _ = self.renderer.scene_for_legacy_mut().update_light(
             self.light_p0_id,
             point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
         );

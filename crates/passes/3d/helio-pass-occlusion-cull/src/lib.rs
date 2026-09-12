@@ -346,7 +346,7 @@ impl RenderPass for OcclusionCullPass {
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
-            draw_count: ctx.scene.draw_calls.len() as u32,
+            draw_count: ctx.scene.draw_count,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
             static_hiz_available: if static_hiz_available { 1 } else { 0 },
             grid_resolution_x: self.static_hiz_grid_resolution[0],

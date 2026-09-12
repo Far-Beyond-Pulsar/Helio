@@ -14,11 +14,32 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
+
+pub mod components;
+pub use components::CoronaEmitterComponent;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_MAX_PARTICLES: u32 = libhelio::CORONA_MAX_PARTICLES;
-const MAX_EMITTERS: u32 = 64;
+// Redesigned (was 64 slots + CPU-side per-frame compaction over live
+// `particle_count`/`emit_rate` values read from a renderer-owned Vec):
+// every emitter now gets a fixed, non-overlapping particle range chosen by
+// its row index — `SLOT_SIZE` each, `MAX_EMITTERS` slots, statically sized so
+// `MAX_EMITTERS * SLOT_SIZE == CORONA_MAX_PARTICLES`. This is what makes the
+// pass able to read `CoronaEmitterComponent`'s SceneDB buffer directly, with
+// zero CPU touch per frame (see `prepare()`): `particle_offset`/
+// `particle_count` never need recomputing from the current live emitter set,
+// so there is nothing left for the CPU to read back. The trade-off is a
+// lower emitter ceiling (4 instead of 64) unless `CORONA_MAX_PARTICLES` is
+// raised to match a higher `MAX_EMITTERS` for a future demo that needs more
+// simultaneous emitters.
+const MAX_EMITTERS: u32 = DEFAULT_MAX_PARTICLES / libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
+const SLOT_SIZE: u32 = libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
+// corona.wgsl hardcodes this as a `const` (WGSL can't `include!` a Rust
+// constant) -- this assertion fails the build loudly if the two ever drift,
+// instead of silently mis-sizing every emitter's particle range.
+const _: () = assert!(SLOT_SIZE == 262144);
 const WG: u32 = 256;
 const ATLAS_SIZE: u32 = 128; // 128×128 atlas, 4×4 cells of 32×32 each
 const ATLAS_CELLS: u32 = 4; // cells per row/column
@@ -76,7 +97,17 @@ pub struct CoronaPass {
     // ── GPU buffers ──────────────────────────────────────────────────────────
     uniform_buf: wgpu::Buffer, // CoronaUniforms (32 bytes, UNIFORM | COPY_DST)
     particle_buf: wgpu::Buffer,
+    /// Fallback buffer, bound only until `"corona_emitters"` exists (before
+    /// any `CoronaEmitterComponent` has ever been inserted) — never written
+    /// to otherwise; SceneDB's own buffer is bound directly once it exists
+    /// (see `execute()`), read_write, so the compute shader's own per-frame
+    /// `spawn_cursor` advance persists in place across frames with no CPU
+    /// involvement at all.
     emitter_buf: wgpu::Buffer,
+    /// Per-emitter-slot spawn cursor — purely transient, pass-owned GPU
+    /// state, deliberately separate from the SceneDB-authored
+    /// `CoronaEmitterComponent` row. See its creation site in `new()` for why.
+    spawn_cursor_buf: wgpu::Buffer,
     compact_buf: wgpu::Buffer,
     emitter_alive_buf: wgpu::Buffer, // non-atomic u32 per emitter
     draw_args_staging: wgpu::Buffer, // STORAGE | COPY_SRC
@@ -99,14 +130,13 @@ pub struct CoronaPass {
     bg_key: Option<(usize, usize)>, // (particle_buf ptr, camera_buf ptr)
 
     // ── State ────────────────────────────────────────────────────────────────
-    uploaded_generation: u64,
     max_particles: u32,
     emitter_count: u32,
     max_sort_steps: u32, // capacity of sort_steps_buf in step count
 
-    // CPU emitter list: preserves spawn_cursor and non-overlapping offsets.
-    cpu_emitters: Vec<libhelio::GpuCoronaEmitter>,
-    // Pre-computed sort steps for the current emitter set.
+    // Pre-computed once, at construction, for the fixed `MAX_EMITTERS` ×
+    // `SLOT_SIZE` slot layout — never recomputed per frame (see `MAX_EMITTERS`'s
+    // doc for why the layout no longer depends on which emitters are live).
     sort_steps: Vec<SortStep>,
     /// Enable per-emitter back-to-front depth sort before rendering.
     /// Costs ~50–200 compute dispatches per frame depending on emitter sizes.
@@ -156,6 +186,28 @@ impl CoronaPass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // Per-emitter-slot spawn cursor: purely transient, pass-owned GPU
+        // state (`cs_emit` reads and advances it in place every frame), kept
+        // OUT of `CoronaEmitterComponent` deliberately -- that struct is
+        // SceneDB-authored (the frontend rewrites its `transform`/color/etc.
+        // fields via `World::get_mut` whenever an emitter moves), and a
+        // `#[gpu(layout = packed)]` write re-uploads the WHOLE row. If
+        // spawn_cursor lived in that same row, every such authored update
+        // would stomp the GPU's own advanced cursor back to a stale
+        // CPU-shadowed value, restarting the emission ring each time.
+        // Zero-initialized once; nothing but `cs_emit` ever touches it again.
+        let spawn_cursor_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Corona Spawn Cursors"),
+            size: MAX_EMITTERS as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &spawn_cursor_buf,
+            0,
+            bytemuck::cast_slice(&vec![0u32; MAX_EMITTERS as usize]),
+        );
 
         let compact_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Compact"),
@@ -370,6 +422,7 @@ impl CoronaPass {
             &sort_key_buf,
             &particle_view,
             &particle_sampler,
+            &spawn_cursor_buf,
         ));
         let render_bg = Some(Self::build_bg(
             device,
@@ -386,7 +439,19 @@ impl CoronaPass {
             &sort_key_buf,
             &particle_view,
             &particle_sampler,
+            &spawn_cursor_buf,
         ));
+
+        // Fixed slot layout, computed once — never revisited per frame (see
+        // `MAX_EMITTERS`'s doc). Every slot gets the same treatment
+        // regardless of whether an emitter currently occupies it.
+        let mut sort_steps = Vec::new();
+        for slot in 0..MAX_EMITTERS {
+            Self::push_sort_steps(slot * SLOT_SIZE, SLOT_SIZE, &mut sort_steps);
+        }
+        let mut sort_steps_buf = sort_steps_buf;
+        let mut max_sort_steps = initial_sort_cap;
+        Self::upload_sort_steps(device, queue, &sort_steps, &mut sort_steps_buf, &mut max_sort_steps);
 
         Self {
             simulate_pipeline,
@@ -404,6 +469,7 @@ impl CoronaPass {
             uniform_buf,
             particle_buf,
             emitter_buf,
+            spawn_cursor_buf,
             compact_buf,
             emitter_alive_buf,
             draw_args_staging,
@@ -418,11 +484,9 @@ impl CoronaPass {
             compute_bg,
             render_bg,
             bg_key: Some((part_ptr, camera_ptr)),
-            uploaded_generation: u64::MAX,
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
-            max_sort_steps: initial_sort_cap,
-            cpu_emitters: Vec::new(),
+            max_sort_steps,
             sort_steps: Vec::new(),
             depth_sort_enabled: false,
         }
@@ -504,6 +568,12 @@ impl CoronaPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Per-emitter-slot spawn cursor: pass-owned, purely transient
+                // GPU state (see `spawn_cursor_buf`'s doc), never mirrored by
+                // SceneDB and never read by the render bind group -- present
+                // here too only so `build_bg` has one uniform entry list for
+                // both layouts.
+                Self::storage_entry(12, SS::COMPUTE, false),
             ],
         })
     }
@@ -526,6 +596,7 @@ impl CoronaPass {
         sort_keys: &wgpu::Buffer,
         tex_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        spawn_cursors: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Corona BG"),
@@ -579,6 +650,10 @@ impl CoronaPass {
                     binding: 11,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: spawn_cursors.as_entire_binding(),
+                },
             ],
         })
     }
@@ -624,19 +699,18 @@ impl CoronaPass {
     }
 
     /// Rebuild sort_steps from the current emitter configuration.
-    fn rebuild_sort_steps(
+    /// Grow `sort_steps_buf` if needed and upload `sort_steps`. The steps
+    /// themselves are computed once, at construction, for the fixed slot
+    /// layout (see `MAX_EMITTERS`'s doc) — this only ever runs again if a
+    /// future caller changes `MAX_EMITTERS`/`SLOT_SIZE` at runtime, which
+    /// nothing in this pass currently does.
+    fn upload_sort_steps(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        cpu_emitters: &[libhelio::GpuCoronaEmitter],
+        sort_steps: &[SortStep],
         sort_steps_buf: &mut wgpu::Buffer,
         max_sort_steps: &mut u32,
-        sort_steps: &mut Vec<SortStep>,
     ) {
-        sort_steps.clear();
-        for em in cpu_emitters {
-            Self::push_sort_steps(em.particle_offset, em.particle_count, sort_steps);
-        }
-
         let needed = sort_steps.len() as u32;
         if needed > *max_sort_steps {
             *max_sort_steps = needed.next_power_of_two().max(256);
@@ -758,62 +832,19 @@ impl RenderPass for CoronaPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        if let Some(data) = ctx.frame_resources.corona_emitters.get() {
-            if data.generation != self.uploaded_generation {
-                let em_size = std::mem::size_of::<libhelio::GpuCoronaEmitter>();
-                let count = (data.count as usize).min(MAX_EMITTERS as usize);
-                let src: &[libhelio::GpuCoronaEmitter] =
-                    bytemuck::cast_slice(&data.emitters[..count * em_size]);
-
-                self.cpu_emitters
-                    .resize(count, libhelio::GpuCoronaEmitter::zeroed());
-
-                let mut upload = self.cpu_emitters[..count].to_vec();
-                let dt = ctx.delta_time;
-                let mut offset = 0u32;
-                for (i, src_em) in src.iter().enumerate() {
-                    let this_cursor = self.cpu_emitters[i].spawn_cursor;
-                    let emit_count = (src_em.emit_params[0] * dt) as u32;
-                    // Align particle_count to WG so block boundaries never cross emitters.
-                    let aligned_count = (src_em.particle_count + WG - 1) / WG * WG;
-                    let range = aligned_count.max(1);
-
-                    upload[i] = *src_em;
-                    upload[i].particle_count = aligned_count;
-                    upload[i].particle_offset = offset;
-                    upload[i].spawn_cursor = this_cursor;
-
-                    self.cpu_emitters[i].spawn_cursor = (this_cursor + emit_count) % range;
-
-                    offset = offset.saturating_add(aligned_count);
-                }
-
-                let bytes: &[u8] = bytemuck::cast_slice(&upload);
-                let cap = (MAX_EMITTERS as usize * em_size).min(bytes.len());
-                ctx.write_buffer(&self.emitter_buf, 0, &bytes[..cap]);
-
-                // Rebuild sort step sequence (also updates self.cpu_emitters offsets).
-                for (i, src_em) in src.iter().enumerate() {
-                    let aligned_count = (src_em.particle_count + WG - 1) / WG * WG;
-                    self.cpu_emitters[i].particle_count = aligned_count;
-                    self.cpu_emitters[i].particle_offset = upload[i].particle_offset;
-                }
-                Self::rebuild_sort_steps(
-                    ctx.device,
-                    ctx.queue,
-                    &self.cpu_emitters[..count],
-                    &mut self.sort_steps_buf,
-                    &mut self.max_sort_steps,
-                    &mut self.sort_steps,
-                );
-
-                self.emitter_count = count as u32;
-                self.uploaded_generation = data.generation;
-                self.max_particles = data.max_particles.clamp(1024, DEFAULT_MAX_PARTICLES);
-            }
+        // Resolve `CoronaEmitterComponent`'s `"corona_emitters"` buffer by
+        // key, generically, every frame — no renderer method, no stored
+        // SceneDB handle, no CPU compaction. `particle_offset`/
+        // `particle_count`/`spawn_cursor` are all either fixed-by-slot
+        // (authored once, see `MAX_EMITTERS`'s doc) or advanced in place by
+        // this pass's own compute shaders directly on the SceneDB buffer, so
+        // there is nothing left for the CPU to read back or recompute here.
+        self.emitter_count = if ctx.scene_buffers.contains(BufferKey::of("corona_emitters")) {
+            MAX_EMITTERS
         } else {
-            self.emitter_count = 0;
-        }
+            0
+        };
+        self.max_particles = DEFAULT_MAX_PARTICLES;
 
         let uniforms = CoronaUniforms {
             delta_time: ctx.delta_time,
@@ -872,7 +903,13 @@ impl RenderPass for CoronaPass {
 
         let part_ptr = &self.particle_buf as *const _ as usize;
         let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let key = (part_ptr, camera_ptr);
+        let emitter_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("corona_emitters"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.emitter_buf);
+        let emitter_ptr = emitter_buf as *const _ as usize;
+        let key = (part_ptr ^ emitter_ptr, camera_ptr);
 
         if self.bg_key != Some(key) {
             self.compute_bg = Some(Self::build_bg(
@@ -880,7 +917,7 @@ impl RenderPass for CoronaPass {
                 &self.compute_bgl,
                 &self.uniform_buf,
                 &self.particle_buf,
-                &self.emitter_buf,
+                emitter_buf,
                 &self.compact_buf,
                 &self.emitter_alive_buf,
                 &self.draw_args_staging,
@@ -890,13 +927,14 @@ impl RenderPass for CoronaPass {
                 &self.sort_key_buf,
                 &self.particle_view,
                 &self.particle_sampler,
+                &self.spawn_cursor_buf,
             ));
             self.render_bg = Some(Self::build_bg(
                 ctx.device,
                 &self.render_bgl,
                 &self.uniform_buf,
                 &self.particle_buf,
-                &self.emitter_buf,
+                emitter_buf,
                 &self.compact_buf,
                 &self.emitter_alive_buf,
                 &self.draw_args_staging,
@@ -906,6 +944,7 @@ impl RenderPass for CoronaPass {
                 &self.sort_key_buf,
                 &self.particle_view,
                 &self.particle_sampler,
+                &self.spawn_cursor_buf,
             ));
             self.bg_key = Some(key);
         }

@@ -1,5 +1,19 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
+
+pub mod components;
+pub use components::DecalComponent;
+
+/// Fixed capacity for the `"decals"` SceneDB buffer, matching
+/// `helio_pass_forward_lit::MAX_LIGHTS`'s reasoning exactly: kept equal to
+/// the packed-layout auto-register capacity so every entity within it is
+/// covered, not just an arbitrary prefix. A row with no live entity behind
+/// it is `Zeroable`-default -- `decal_collect.wgsl`'s `opa <= 0.0` gate
+/// (driven by `color.a == 0`) makes that row a guaranteed no-op even though
+/// its degenerate all-zero `transform` would otherwise mis-classify every
+/// pixel as "inside" the decal box.
+pub const MAX_DECALS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -30,6 +44,13 @@ pub struct DecalPass {
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
     last_w: u32,
     last_h: u32,
+    /// Cached in `prepare()`, read back in `execute()` -- see `prepare()`'s
+    /// doc for why this isn't just `ctx.scene.decal_count`.
+    decal_count: u32,
+    /// Bound in place of `"decals"` when no `DecalComponent` has ever been
+    /// inserted -- SceneDB is the only decal source this pass reads.
+    /// `decal_count` is 0 whenever this is bound, so it's never dereferenced.
+    fallback_decals: wgpu::Buffer,
 }
 
 impl DecalPass {
@@ -52,6 +73,12 @@ impl DecalPass {
         let apply_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Apply"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/decal_apply.wgsl").into()),
+        });
+        let fallback_decals = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Decal Fallback Decals"),
+            size: std::mem::size_of::<libhelio::GpuDecal>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DecalGlobals"),
@@ -176,6 +203,8 @@ impl DecalPass {
             temp_emissive: None,
             last_w: 0,
             last_h: 0,
+            decal_count: 0,
+            fallback_decals,
         }
     }
 
@@ -337,11 +366,20 @@ impl RenderPass for DecalPass {
         None
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // SceneDB is the only decal source: `"decals"` is a fixed-capacity
+        // buffer (`MAX_DECALS`), resolved fresh from the mirror by key every
+        // frame. 0 when no `DecalComponent` has ever been inserted; there is
+        // no Helio-owned decal buffer to fall back to.
+        self.decal_count = if ctx.scene_buffers.contains(BufferKey::of("decals")) {
+            MAX_DECALS
+        } else {
+            0
+        };
         ctx.write_buffer(
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&DecalGlobals {
-                decal_count: ctx.scene.decals.len() as u32,
+                decal_count: self.decal_count,
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -351,7 +389,7 @@ impl RenderPass for DecalPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.decal_count == 0 {
+        if self.decal_count == 0 {
             return Ok(());
         }
         let gb = match ctx.resources.gbuffer.read(self.name()) {
@@ -368,9 +406,14 @@ impl RenderPass for DecalPass {
             Some(m) => m,
             None => return Ok(()),
         };
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let decal_ptr = ctx.scene.decals as *const _ as usize;
         self.ensure_temp(ctx.width, ctx.height, ctx.device);
+        let decals_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("decals"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_decals);
+        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let decal_ptr = decals_buf as *const _ as usize;
         let (_, ta) = self.temp_albedo.as_ref().unwrap();
         let (_, tn) = self.temp_normal.as_ref().unwrap();
         let (_, to) = self.temp_orm.as_ref().unwrap();
@@ -392,7 +435,7 @@ impl RenderPass for DecalPass {
                 entries: &[
                     bind_buf(0, ctx.scene.camera),
                     bind_buf(1, &self.globals_buf),
-                    bind_buf(2, ctx.scene.decals),
+                    bind_buf(2, decals_buf),
                     bind_tex(3, depth_view),
                     bind_tex(4, gb.albedo),
                     bind_tex(5, gb.normal),
@@ -447,7 +490,7 @@ impl RenderPass for DecalPass {
                 entries: &[
                     bind_buf(0, ctx.scene.camera),
                     bind_buf(1, &self.globals_buf),
-                    bind_buf(2, ctx.scene.decals),
+                    bind_buf(2, decals_buf),
                     bind_tex(3, ta),
                     bind_tex(4, tn),
                     bind_tex(5, to),

@@ -12,6 +12,7 @@ pub(crate) struct CachedPass {
 }
 
 /// An action to perform on FrameResources before a pass executes.
+#[derive(Clone)]
 pub(crate) enum PrePassAction {
     Route {
         name: String,
@@ -111,7 +112,62 @@ fn compute_chains(
     chains
 }
 
+/// Computes deterministic topological recording layers for the render DAG.
+/// Passes in one layer have no declared read/write dependency between them and
+/// may therefore be recorded concurrently by the executor.
+pub(crate) fn compute_parallel_layers(
+    writes: &[Vec<&str>],
+    reads: &[Vec<&str>],
+) -> Vec<Vec<usize>> {
+    assert_eq!(writes.len(), reads.len());
+    let mut predecessors = vec![Vec::<usize>::new(); writes.len()];
+    for current in 0..writes.len() {
+        for prior in 0..current {
+            // Preserve declared order for every hazard.  In particular, an
+            // earlier read must finish before a later pass overwrites the
+            // same resource; otherwise both passes would be scheduled in one
+            // parallel layer and the GPU could race the read against the
+            // overwrite.
+            let dependency = writes[prior].iter().any(|resource| {
+                reads[current].contains(resource) || writes[current].contains(resource)
+            }) || reads[prior]
+                .iter()
+                .any(|resource| writes[current].contains(resource));
+            if dependency {
+                predecessors[current].push(prior);
+            }
+        }
+    }
+
+    let mut layers = vec![0usize; writes.len()];
+    for current in 0..writes.len() {
+        layers[current] = predecessors[current]
+            .iter()
+            .map(|&prior| layers[prior] + 1)
+            .max()
+            .unwrap_or(0);
+    }
+    let layer_count = layers.iter().copied().max().map_or(0, |max| max + 1);
+    let mut result = vec![Vec::new(); layer_count];
+    for (index, layer) in layers.into_iter().enumerate() {
+        result[layer].push(index);
+    }
+    result
+}
+
 impl RenderGraph {
+    /// Fused render passes and worker recording are deliberately exclusive
+    /// scheduling modes. A fused chain keeps one encoder/render pass alive;
+    /// trying to interleave an unrelated worker encoder around that lifetime
+    /// is invalid wgpu usage. When the dependency graph has real independent
+    /// work, prefer valid parallel command buffers and record the would-be
+    /// chain members as ordinary standalone passes.
+    pub(crate) fn prefer_parallel_recording_over_fusion(&mut self) {
+        if self.parallel_layers.iter().any(|layer| layer.len() > 1) {
+            self.subpass_chains.clear();
+        }
+    }
+
     /// Detect chains of adjacent passes where each writes a resource the next
     /// reads. These could be fused into a single render pass with `next_subpass()`
     /// to keep inter-pass data in tile memory.
@@ -122,6 +178,7 @@ impl RenderGraph {
         let dummy_signature: Vec<Option<Vec<usize>>> = vec![Some(vec![0]); len];
         self.subpass_chains =
             compute_chains(&writes_set, &reads_set, &no_transparent, &dummy_signature);
+        self.prefer_parallel_recording_over_fusion();
     }
 
     /// Same as `detect_subpass_chains`, but `attachments[i]` gives the exact set
@@ -130,9 +187,10 @@ impl RenderGraph {
     pub(crate) fn detect_subpass_chains_probed(&mut self, attachments: &[Option<Vec<usize>>]) {
         let (writes_set, reads_set, transparent) = self.chain_read_write_sets();
         self.subpass_chains = compute_chains(&writes_set, &reads_set, &transparent, attachments);
+        self.prefer_parallel_recording_over_fusion();
     }
 
-    fn chain_read_write_sets(&self) -> (Vec<Vec<&str>>, Vec<Vec<&str>>, Vec<bool>) {
+    pub(crate) fn chain_read_write_sets(&self) -> (Vec<Vec<&str>>, Vec<Vec<&str>>, Vec<bool>) {
         let mut writes_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
         let mut reads_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
         let mut transparent: Vec<bool> = Vec::with_capacity(self.passes.len());
@@ -165,7 +223,7 @@ impl RenderGraph {
 
 #[cfg(test)]
 mod chain_tests {
-    use super::compute_chains;
+    use super::{compute_chains, compute_parallel_layers};
 
     fn sig(ids: &[usize]) -> Option<Vec<usize>> {
         Some(ids.to_vec())
@@ -266,8 +324,8 @@ mod chain_tests {
 
     #[test]
     fn differing_attachments_block_fusion_even_with_matching_reads_and_writes() {
-        let writes = vec![vec!["gbuffer"], vec![]];
-        let reads = vec![vec![], vec!["gbuffer"]];
+        let writes = vec![vec!["color_output"], vec![]];
+        let reads = vec![vec![], vec!["color_output"]];
         let transparent = vec![false, false];
         let attachments = vec![sig(&[1, 2, 3, 4, 5]), sig(&[99])];
         assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
@@ -275,13 +333,54 @@ mod chain_tests {
 
     #[test]
     fn matching_attachments_and_dependency_still_fuse() {
-        let writes = vec![vec!["gbuffer"], vec![]];
-        let reads = vec![vec![], vec!["gbuffer"]];
+        let writes = vec![vec!["color_output"], vec![]];
+        let reads = vec![vec![], vec!["color_output"]];
         let transparent = vec![false, false];
         let attachments = vec![sig(&[1, 2, 3, 4, 5]), sig(&[1, 2, 3, 4, 5])];
         assert_eq!(
             compute_chains(&writes, &reads, &transparent, &attachments),
             vec![0..2]
         );
+    }
+
+    #[test]
+    fn independent_passes_share_a_parallel_layer() {
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"]];
+        let reads = vec![vec![], vec![], vec!["a"]];
+        assert_eq!(
+            compute_parallel_layers(&writes, &reads),
+            vec![vec![0, 1], vec![2]]
+        );
+    }
+
+    #[test]
+    fn dependency_chain_gets_strictly_ordered_layers() {
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"]];
+        let reads = vec![vec![], vec!["a"], vec!["b"]];
+        assert_eq!(
+            compute_parallel_layers(&writes, &reads),
+            vec![vec![0], vec![1], vec![2]]
+        );
+    }
+
+    #[test]
+    fn read_before_write_gets_strictly_ordered_layers() {
+        let writes = vec![vec![], vec!["history"]];
+        let reads = vec![vec!["history"], vec![]];
+
+        assert_eq!(
+            compute_parallel_layers(&writes, &reads),
+            vec![vec![0], vec![1]],
+            "a later overwrite must not race an earlier read"
+        );
+    }
+
+    #[test]
+    fn independent_work_disables_fusion_to_keep_worker_recording_valid() {
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"]];
+        let reads = vec![vec![], vec!["a"], vec![]];
+        let layers = compute_parallel_layers(&writes, &reads);
+        assert_eq!(layers, vec![vec![0, 2], vec![1]]);
+        assert!(layers.iter().any(|layer| layer.len() > 1));
     }
 }

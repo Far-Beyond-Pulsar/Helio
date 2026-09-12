@@ -3,6 +3,7 @@ use helio_core::{
     GpuScene, PassContext, PrepareContext, RenderGraph, RenderPass, Result as HelioResult,
 };
 use std::sync::{Arc, Mutex};
+mod support;
 
 struct ResizeProbePass {
     observations: Arc<Mutex<Vec<(bool, u32, u32)>>>,
@@ -115,6 +116,7 @@ fn prepare_receives_one_resize_pulse_after_graph_resize() {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let scene = GpuScene::new(Arc::clone(&device), Arc::clone(&queue));
+        let scene_input = support::SceneInputAdapter(&scene);
         let observations = Arc::new(Mutex::new(Vec::new()));
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(ResizeProbePass {
@@ -124,16 +126,16 @@ fn prepare_receives_one_resize_pulse_after_graph_resize() {
 
         let (target, depth) = frame_views(&device, 32, 24);
         graph
-            .execute(&scene, &target, &depth)
+            .execute(&scene_input, &target, &depth)
             .expect("initial graph frame must execute");
 
         graph.set_render_size(64, 48);
         let (target, depth) = frame_views(&device, 64, 48);
         graph
-            .execute(&scene, &target, &depth)
+            .execute(&scene_input, &target, &depth)
             .expect("first resized graph frame must execute");
         graph
-            .execute(&scene, &target, &depth)
+            .execute(&scene_input, &target, &depth)
             .expect("steady graph frame must execute");
 
         assert_eq!(
@@ -170,19 +172,20 @@ fn graph_owned_internal_attachment_matches_depth_after_resize() {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let scene = GpuScene::new(Arc::clone(&device), Arc::clone(&queue));
+        let scene_input = support::SceneInputAdapter(&scene);
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(InternalAttachmentPass));
         graph.lock(32, 24);
 
         let (target, depth) = frame_views(&device, 32, 24);
         graph
-            .execute(&scene, &target, &depth)
+            .execute(&scene_input, &target, &depth)
             .expect("initial graph attachment frame must execute");
 
         graph.set_render_size(64, 48);
         let (target, depth) = frame_views(&device, 64, 48);
         graph
-            .execute(&scene, &target, &depth)
+            .execute(&scene_input, &target, &depth)
             .expect("resized graph attachments must have matching extents");
         device
             .poll(wgpu::PollType::Wait {

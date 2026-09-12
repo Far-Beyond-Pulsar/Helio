@@ -94,6 +94,19 @@ impl CpuProfiler {
         self.timings.clear();
     }
 
+    /// Merges a timing measured by a worker thread into the owner profiler.
+    ///
+    /// Worker recording cannot hold a mutable borrow of the frame profiler,
+    /// so the worker returns completed samples and the render thread merges
+    /// them after joining. Keeping this operation here preserves the same
+    /// feature-gated behavior as RAII scopes.
+    pub(crate) fn record_external(&mut self, name: &'static str, duration: Duration) {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+        self.timings.insert(name, duration);
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
+        let _ = (name, duration);
+    }
+
     /// Creates a CPU profiling scope (RAII guard).
     ///
     /// The returned `ScopeGuard` measures CPU time until it is dropped.
@@ -118,7 +131,7 @@ impl CpuProfiler {
     ///     // ... CPU work ...
     /// } // Timing recorded when guard drops
     /// ```
-    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
         ScopeGuard {
             #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
             start: Instant::now(),

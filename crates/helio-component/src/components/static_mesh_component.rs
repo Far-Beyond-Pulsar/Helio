@@ -404,7 +404,7 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
 /// `sync_component`'s existing "no mesh_asset" tolerance -- the component
 /// still hydrates, just with empty `vertices`/`indices` (a real, if
-/// invisible, entity, same as today's `insert_actor`-based path leaves an
+/// invisible, entity, same as today's `insert_entity`-based path leaves an
 /// object with no mesh assigned).
 fn hydrate_static_mesh_component(
     world: &mut pulsar_scenedb::World,
@@ -470,7 +470,7 @@ impl ComponentRuntimeBehavior for StaticMeshComponent {
     ) {
         // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
         // to load `mesh_asset` itself and call `Renderer::scene_mut()
-        // .insert_actor(SceneActor::mesh(upload))` -- a second, independent
+        // .insert_entity(SceneEntity::mesh(upload))` -- a second, independent
         // copy of the mesh data in Helio's own mesh pool, loaded from disk a
         // second time every dirty pass, on top of what `hydrate_static_mesh_component`
         // already does (loads the file once, populates this component's own

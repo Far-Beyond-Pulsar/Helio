@@ -2,6 +2,7 @@
 name = "helio-default-graphs"
 version = "0.1.0"
 edition = "2021"
+workspace = "../../"
 description = "Default render graph builders for Helio — depends on all pass crates"
 license = "MIT OR Apache-2.0"
 

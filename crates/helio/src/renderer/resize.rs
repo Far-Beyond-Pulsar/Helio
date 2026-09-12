@@ -99,7 +99,6 @@ impl Renderer {
         }
 
         self.graph_has_sky = self.scene.sky_context().has_sky;
-        self.scene.mark_water_volumes_dirty();
 
         log::trace!(
             "apply_resize_now: total resize {}ms",

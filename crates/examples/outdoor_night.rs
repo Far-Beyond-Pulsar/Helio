@@ -177,86 +177,88 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.7, 0.7, 0.72, 1.0],
+                0.8,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
             .as_mesh()
             .unwrap();
         let bld_a = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 7.0, 2.5],
             )))
             .as_mesh()
             .unwrap();
         let bld_b = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.5, 2.0],
             )))
             .as_mesh()
             .unwrap();
         let bld_c = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 3.0, 3.0],
             )))
             .as_mesh()
             .unwrap();
         let bld_d = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.5, 1.5, 2.5],
             )))
             .as_mesh()
             .unwrap();
         let bld_e = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.0, 9.5, 3.0],
             )))
             .as_mesh()
             .unwrap();
         let lamp_pole_a = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
             )))
             .as_mesh()
             .unwrap();
         let lamp_pole_b = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
             )))
             .as_mesh()
             .unwrap();
         let lamp_pole_c = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
             )))
             .as_mesh()
             .unwrap();
         let lamp_pole_d = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
             )))
@@ -332,8 +334,8 @@ impl ApplicationHandler for App {
         let mut _light_ids: Vec<LightId> = Vec::new();
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [-5.0, 5.1, -5.0],
                     [1.0, 0.72, 0.3],
                     6.0,
@@ -344,8 +346,8 @@ impl ApplicationHandler for App {
         );
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [5.0, 5.1, -5.0],
                     [1.0, 0.72, 0.3],
                     6.0,
@@ -356,8 +358,8 @@ impl ApplicationHandler for App {
         );
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [-5.0, 5.1, 5.0],
                     [1.0, 0.72, 0.3],
                     6.0,
@@ -368,8 +370,8 @@ impl ApplicationHandler for App {
         );
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [5.0, 5.1, 5.0],
                     [1.0, 0.72, 0.3],
                     6.0,
@@ -380,8 +382,8 @@ impl ApplicationHandler for App {
         );
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [8.0, 12.0, -5.8],
                     [1.0, 0.05, 0.8],
                     5.0,
@@ -392,8 +394,8 @@ impl ApplicationHandler for App {
         );
         _light_ids.push(
             renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
+                .scene_for_legacy_mut()
+                .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 16.5, -14.0],
                     [0.05, 0.9, 1.0],
                     4.0,

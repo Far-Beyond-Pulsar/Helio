@@ -18,6 +18,7 @@ use helio_core::graph::{
 };
 use helio_core::{PassContext, RenderGraph, RenderPass, Result as HelioResult};
 use std::sync::Arc;
+mod support;
 
 /// A minimal post-process pass: clears a named transient to a solid color.
 /// Stands in for anything that would otherwise bake a target format into a
@@ -25,8 +26,8 @@ use std::sync::Arc;
 /// constructor argument) — here the format is re-resolved every frame and
 /// the pipeline only rebuilds if that format actually changes.
 struct DemoPass {
-    pipeline_layout: wgpu::PipelineLayout,
-    shader: wgpu::ShaderModule,
+    pipeline_layout: Arc<wgpu::PipelineLayout>,
+    shader: Arc<wgpu::ShaderModule>,
 }
 
 const DEMO_COLOR: &str = "demo_dynamic_color";
@@ -57,8 +58,8 @@ impl DemoPass {
             immediate_size: 0,
         });
         Self {
-            pipeline_layout,
-            shader,
+            pipeline_layout: Arc::new(pipeline_layout),
+            shader: Arc::new(shader),
         }
     }
 
@@ -67,25 +68,26 @@ impl DemoPass {
     /// `execute()` and would be used again if the format ever changes.
     fn format_key(&self, pool: &GraphTexturePool) -> Option<PipelineFormatKey> {
         let color_format = attachment_format(AttachmentSlot::Named(DEMO_COLOR), pool)?;
-        Some(PipelineFormatKey::new(
-            "DemoPass",
-            vec![color_format],
-            None,
-        ))
+        Some(PipelineFormatKey::new("DemoPass", vec![color_format], None))
     }
 
-    fn build_pipeline(&self, device: &wgpu::Device, color_format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    fn build_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("DemoPass Pipeline"),
-            layout: Some(&self.pipeline_layout),
+            layout: Some(layout),
             vertex: wgpu::VertexState {
-                module: &self.shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &self.shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
@@ -109,7 +111,11 @@ impl RenderPass for DemoPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color(DEMO_COLOR, ResourceFormat::Rgba8UnormSrgb, ResourceSize::Output);
+        builder.write_color(
+            DEMO_COLOR,
+            ResourceFormat::Rgba8UnormSrgb,
+            ResourceSize::Output,
+        );
     }
 
     // Required by the trait, but this pass only ever resolves attachments
@@ -163,11 +169,15 @@ impl RenderPass for DemoPass {
         let Some(key) = self.format_key(ctx.resource_pool) else {
             return Ok(()); // named transient not allocated this frame — skip
         };
-        let pipeline: Arc<wgpu::RenderPipeline> = ctx.pipeline_cache.get_or_create(key, || {
-            let format = attachment_format(AttachmentSlot::Named(DEMO_COLOR), ctx.resource_pool)
-                .expect("format_key already confirmed this resolves");
-            self.build_pipeline(ctx.device, format)
-        });
+        let layout = Arc::clone(&self.pipeline_layout);
+        let shader = Arc::clone(&self.shader);
+        let device = ctx.device.clone();
+        let build_key = key.clone();
+        let Some(pipeline) = ctx.pipeline_cache.try_get_or_schedule(key, move |_| {
+            DemoPass::build_pipeline(&device, &layout, &shader, build_key.color_formats[0])
+        }) else {
+            return Ok(()); // background miss: preserve the frame, skip this draw
+        };
 
         let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
             return Ok(()); // no open render pass this frame — nothing to draw into
@@ -204,6 +214,7 @@ fn dynamic_attachment_and_pipeline_cache_round_trip() {
         graph.lock(64, 64);
 
         let scene = helio_core::GpuScene::new(device.clone(), queue.clone());
+        let scene_input = support::SceneInputAdapter(&scene);
         let target_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Demo Swapchain Stand-in"),
             size: wgpu::Extent3d {
@@ -237,14 +248,14 @@ fn dynamic_attachment_and_pipeline_cache_round_trip() {
 
         // Frame 1: pipeline cache miss, builds one pipeline for the resolved format.
         graph
-            .execute(&scene, &target_view, &depth_view)
+            .execute(&scene_input, &target_view, &depth_view)
             .expect("frame 1 should execute");
         // Frame 2 at the same resolved format: same cache entry, no rebuild —
         // demonstrates "dynamic resizing/reformatting propagates without
         // pass re-initialization" by *not* needing DemoPass to know anything
         // changed (or didn't) between frames.
         graph
-            .execute(&scene, &target_view, &depth_view)
+            .execute(&scene_input, &target_view, &depth_view)
             .expect("frame 2 should execute");
 
         // Simulate a resize: the pool reallocates `demo_dynamic_color` at
@@ -252,7 +263,7 @@ fn dynamic_attachment_and_pipeline_cache_round_trip() {
         // valid and DemoPass still doesn't need to re-initialize anything.
         graph.set_render_size(128, 128);
         graph
-            .execute(&scene, &target_view, &depth_view)
+            .execute(&scene_input, &target_view, &depth_view)
             .expect("frame after resize should execute");
     });
 }

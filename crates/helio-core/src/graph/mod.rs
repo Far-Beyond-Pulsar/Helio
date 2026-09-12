@@ -11,8 +11,14 @@ pub use attachments::{
     attachment_format, resolve_attachment_view, AttachmentSlot, ColorAttachmentIntent,
     DepthAttachmentIntent,
 };
-pub use executor::{DebugPassInfo, DebugResourceInfo, FrameDebugData, RenderGraph};
-pub use pipeline_cache::{PipelineFormatCache, PipelineFormatKey};
+pub use executor::{
+    DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData, GraphTimelinePass,
+    RenderGraph,
+};
+pub use pipeline_cache::{
+    BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
+    PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
+};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
     ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,

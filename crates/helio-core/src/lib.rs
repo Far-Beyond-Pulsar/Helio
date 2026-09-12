@@ -431,7 +431,6 @@ pub const REFLECTIONS_SUPPORTED: bool = true;
 
 pub mod acceleration;
 pub mod actor;
-pub mod component;
 pub mod context;
 pub mod entity;
 pub mod error;
@@ -445,7 +444,8 @@ pub mod upload;
 // Re-export libhelio types for convenience
 pub use libhelio::{
     DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms, GpuDrawCall,
-    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
+    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix, ResourceKey,
+    ResourceRegistry,
 };
 
 pub use libhelio::sky::{SkyContext, SkyUniforms};
@@ -454,11 +454,15 @@ pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
 pub use crate::scene::managers::*;
 // Re-export core types
 pub use actor::Actor;
-pub use component::{Component, ComponentRegistry, ComponentSlot, ComponentVec};
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
-pub use graph::{DebugPassInfo, DebugResourceInfo, FrameDebugData, RenderGraph};
+pub use graph::{
+    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData,
+    GraphTimelinePass, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,
+    PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
+};
 pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
-pub use scene::{GpuScene, SceneResources};
+pub use scene::{GpuScene, SceneBufferProjection, SceneInput, SceneResources};
+pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

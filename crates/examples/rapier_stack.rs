@@ -188,24 +188,28 @@ impl ApplicationHandler for App {
         );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = renderer.scene_mut().insert_material(make_material(
-            [0.25, 0.25, 0.3, 1.0],
-            0.85,
-            0.03,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let block_mat = renderer.scene_mut().insert_material(make_material(
-            [0.78, 0.72, 0.19, 1.0],
-            0.46,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.25, 0.25, 0.3, 1.0],
+                0.85,
+                0.03,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let block_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.78, 0.72, 0.19, 1.0],
+                0.46,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0)))
             .as_mesh()
             .unwrap();
         let _ = insert_object(
@@ -217,8 +221,8 @@ impl ApplicationHandler for App {
         );
 
         let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [20.0, 24.0, 20.0],
                 [0.9, 0.85, 0.8],
                 14.0,
@@ -227,8 +231,8 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [-20.0, 20.0, -20.0],
                 [0.6, 0.7, 1.0],
                 12.0,
@@ -419,7 +423,7 @@ impl ApplicationHandler for App {
 impl AppState {
     fn clear_stack(&mut self) {
         for item in self.boxes.drain(..) {
-            let _ = self.renderer.scene_mut().remove_object(item.id);
+            let _ = self.renderer.scene_for_legacy_mut().remove_object(item.id);
             self.physics_colliders.remove(
                 item.collider_handle,
                 &mut self.physics_forces,
@@ -453,8 +457,8 @@ impl AppState {
                         * glam::Mat4::from_scale(glam::Vec3::splat(1.0));
                     let box_mesh_id = self
                         .renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        .scene_for_legacy_mut()
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             [0.0, 0.0, 0.0],
                             [0.5, 0.5, 0.5],
                         )))
@@ -546,7 +550,7 @@ impl AppState {
                 let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_quat(rot); // no scale
                 let _ = self
                     .renderer
-                    .scene_mut()
+                    .scene_for_legacy_mut()
                     .update_object_transform(item.id, transform);
             }
         }

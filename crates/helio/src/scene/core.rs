@@ -24,8 +24,8 @@ use crate::handles::{
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
 use crate::scene::multi_mesh::SectionedInstanceRecord;
-use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
+use libhelio::sky::SkyContext;
 
 use super::errors::{invalid, Result};
 use super::portals::PortalRecord;
@@ -127,8 +127,8 @@ pub struct Scene {
     /// Six consecutive layers are reserved per realtime shadow caster.
     pub(in crate::scene) shadow_face_capacity: u32,
 
-    /// Per-frame custom trait-based scene actors.
-    pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
+    /// Current environment projection supplied by the owning scene database.
+    pub(in crate::scene) sky_context: SkyContext,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
@@ -175,26 +175,6 @@ pub struct Scene {
     /// Exact worst-case number of draws after choosing one LOD per object.
     pub(in crate::scene) vg_max_draw_count: u32,
 
-    // ── Water volumes ─────────────────────────────────────────────────────────
-    /// Water volumes (dense array)
-    pub(in crate::scene) water_volumes: DenseArena<WaterVolumeRecord, WaterVolumeId>,
-
-    /// Set when water volumes are added/removed/updated
-    pub(in crate::scene) water_volumes_dirty: bool,
-
-    /// Dirty range of water volumes that need GPU upload.
-    pub(in crate::scene) water_volumes_dirty_range: Option<(usize, usize)>,
-
-    // ── Water hitboxes ────────────────────────────────────────────────────────
-    /// AABB hitboxes that displace the water heightfield simulation
-    pub(in crate::scene) water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
-
-    /// Set when hitboxes are added/removed/updated
-    pub(in crate::scene) water_hitboxes_dirty: bool,
-
-    /// Dirty range of water hitboxes that need GPU upload.
-    pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
-
     // ── Foliage ───────────────────────────────────────────────────────────────
     /// Registered foliage types (grass, bushes, trees).
     pub(in crate::scene) foliage_types:
@@ -233,14 +213,6 @@ pub struct Scene {
 
     /// Global wind state. Advanced once per frame via `Scene::advance_wind`.
     pub(in crate::scene) wind: libhelio::Wind,
-
-    // ── Post-process volumes ─────────────────────────────────────────────────────
-    /// Post-process volumes (dense array)
-    pub(in crate::scene) pp_volumes: DenseArena<PostProcessVolumeRecord, PostProcessVolumeId>,
-
-    pub(in crate::scene) pp_volumes_dirty: bool,
-
-    pub(in crate::scene) pp_volumes_dirty_range: Option<(usize, usize)>,
 
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
@@ -382,7 +354,7 @@ impl Scene {
             movable_objects_generation: 0,
             movable_lights_generation: 0,
             shadow_face_capacity: 32,
-            custom_actors: Vec::new(),
+            sky_context: SkyContext::default(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
             vg_objects: DenseArena::new(),
@@ -397,9 +369,6 @@ impl Scene {
             vg_cpu_work_items: Vec::new(),
             vg_max_draw_count: 0,
             radiant_graphs: RadiantGraphRegistry::new(),
-            water_volumes: DenseArena::new(),
-            water_volumes_dirty: false,
-            water_volumes_dirty_range: None,
             foliage_types: DenseArena::new(),
             foliage_types_dirty: false,
             foliage_cpu_types: Vec::new(),
@@ -412,12 +381,6 @@ impl Scene {
             foliage_interactors_dirty_range: None,
             foliage_cpu_interactors: Vec::new(),
             wind: libhelio::Wind::default(),
-            water_hitboxes: DenseArena::new(),
-            water_hitboxes_dirty: false,
-            water_hitboxes_dirty_range: None,
-            pp_volumes: DenseArena::new(),
-            pp_volumes_dirty: false,
-            pp_volumes_dirty_range: None,
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
@@ -639,5 +602,25 @@ impl Scene {
     /// frame, or fall back), not assume it's always present.
     pub fn transform_buffer(&self) -> Option<&wgpu::Buffer> {
         self.gpu_scene.transform_buffer.as_deref()
+    }
+
+    /// The vertex/index range of a previously created mesh asset. `None` if
+    /// the handle is stale.
+    ///
+    /// This is a read-only query of an already-created asset's static
+    /// metadata, not scene authoring: a SceneDB-authored `StaticObjectComponent`
+    /// row (`helio_pass_gbuffer`) is expected to resolve this ONCE, at spawn
+    /// time, and store the result directly rather than querying every frame.
+    pub fn mesh_slice(&self, mesh: crate::handles::MeshId) -> Option<crate::mesh::MeshSlice> {
+        self.mesh_pool.get(mesh).map(|record| record.slice)
+    }
+
+    /// A previously created material asset's `(material_class, graph_hash)`
+    /// pipeline-selection key. `None` if the handle is stale. Same
+    /// read-only-query classification as [`Self::mesh_slice`].
+    pub fn material_batch_key(&self, material: crate::handles::MaterialId) -> Option<(u32, u64)> {
+        self.materials
+            .get(material)
+            .map(|record| (record.gpu.material_class, record.graph_hash))
     }
 }

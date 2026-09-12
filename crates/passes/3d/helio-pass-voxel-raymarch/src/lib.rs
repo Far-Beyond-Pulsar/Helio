@@ -424,7 +424,7 @@ impl RenderPass for VoxelRayMarchPass {
                 height: self.height as f32,
                 time: ctx.frame_num as f32 * 0.016,
                 volume_count: ctx.scene.voxel_volume_count,
-                light_count: ctx.scene.lights.len() as u32,
+                light_count: ctx.scene.light_count,
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,

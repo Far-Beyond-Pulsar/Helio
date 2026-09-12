@@ -118,6 +118,25 @@ pub struct GpuProfiler {
     timestamp_period: f32, // Nanoseconds per timestamp tick
 }
 
+/// Combines timestamp samples with the same label while preserving the order
+/// in which labels first appeared. A graph may record the same logical pass
+/// more than once (for example, when a pass is split across command streams),
+/// but profiler consumers expect one timing per label.
+fn aggregate_timings(samples: impl IntoIterator<Item = GpuTimestamp>) -> Vec<GpuTimestamp> {
+    let mut aggregated = Vec::new();
+    for sample in samples {
+        if let Some(existing) = aggregated
+            .iter_mut()
+            .find(|timing: &&mut GpuTimestamp| timing.name == sample.name)
+        {
+            existing.duration_ns = existing.duration_ns.saturating_add(sample.duration_ns);
+        } else {
+            aggregated.push(sample);
+        }
+    }
+    aggregated
+}
+
 impl GpuProfiler {
     /// Creates a new GPU profiler.
     ///
@@ -411,19 +430,20 @@ impl GpuProfiler {
                     .get_mapped_range()
                     .expect("completed GPU timestamp mapping must be readable");
                 let timestamps: &[u64] = bytemuck::cast_slice(&data);
-                self.last_timings.clear();
+                let mut samples = Vec::with_capacity(slot.queries.len());
                 for &(name, start_index, end_index) in &slot.queries {
                     if (end_index as usize) < timestamps.len()
                         && (start_index as usize) < timestamps.len()
                     {
                         let duration_ticks = timestamps[end_index as usize]
                             .saturating_sub(timestamps[start_index as usize]);
-                        self.last_timings.push(GpuTimestamp {
+                        samples.push(GpuTimestamp {
                             name,
                             duration_ns: (duration_ticks as f32 * self.timestamp_period) as u64,
                         });
                     }
                 }
+                self.last_timings = aggregate_timings(samples);
                 self.last_completed_frame = Some(frame_index);
                 drop(data);
             } else {
@@ -439,6 +459,18 @@ impl GpuProfiler {
     /// Get last recorded timings (non-blocking)
     pub fn get_last_timings(&self) -> &[GpuTimestamp] {
         &self.last_timings
+    }
+
+    /// Merges samples recorded by another profiler that used the same device
+    /// and queue. Worker command streams have independent query sets, so their
+    /// readback must be folded into the graph-owned profiler after completion.
+    pub(crate) fn merge_external_timings(&mut self, samples: &[GpuTimestamp]) {
+        if samples.is_empty() {
+            return;
+        }
+        let mut merged = self.last_timings.clone();
+        merged.extend_from_slice(samples);
+        self.last_timings = aggregate_timings(merged);
     }
 
     pub const fn supported(&self) -> bool {
@@ -492,4 +524,57 @@ pub struct GpuTimestamp {
     ///
     /// Convert to milliseconds: `duration_ns as f64 / 1_000_000.0`
     pub duration_ns: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{aggregate_timings, GpuTimestamp};
+
+    #[test]
+    fn aggregates_duplicate_labels_in_first_seen_order() {
+        let samples = aggregate_timings([
+            GpuTimestamp {
+                name: "frame",
+                duration_ns: 4,
+            },
+            GpuTimestamp {
+                name: "draw",
+                duration_ns: 3,
+            },
+            GpuTimestamp {
+                name: "frame",
+                duration_ns: 5,
+            },
+        ]);
+
+        assert_eq!(
+            samples,
+            vec![
+                GpuTimestamp {
+                    name: "frame",
+                    duration_ns: 9,
+                },
+                GpuTimestamp {
+                    name: "draw",
+                    duration_ns: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregation_saturates_duration_overflow() {
+        let samples = aggregate_timings([
+            GpuTimestamp {
+                name: "frame",
+                duration_ns: u64::MAX,
+            },
+            GpuTimestamp {
+                name: "frame",
+                duration_ns: 1,
+            },
+        ]);
+
+        assert_eq!(samples[0].duration_ns, u64::MAX);
+    }
 }

@@ -72,9 +72,21 @@ struct GpuLight {
 }
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 
+// SceneDB's `Transform` component, entity-indexed the same way `lights` is
+// (both are `#[gpu(layout = packed)]` SceneDB buffers: row `i` is whichever
+// entity has raw index `i`) -- see `helio_pass_forward_lit`'s own `Transform`
+// binding doc for the exact byte-layout reasoning and why `light.position_
+// range.xyz` itself is a stale/zeroed placeholder, not real position data.
+struct Transform {
+    position: array<f32, 3>,
+    rotation: array<f32, 3>,
+    scale:    array<f32, 3>,
+}
+@group(0) @binding(3) var<storage, read> transforms: array<Transform>;
+
 // Output: flat arrays, one slot per tile
-@group(0) @binding(3) var<storage, read_write> tile_light_lists:  array<u32>;
-@group(0) @binding(4) var<storage, read_write> tile_light_counts: array<u32>;
+@group(0) @binding(4) var<storage, read_write> tile_light_lists:  array<u32>;
+@group(0) @binding(5) var<storage, read_write> tile_light_counts: array<u32>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -164,8 +176,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        // Transform light position to view space.
-        let pos_vs = (cameras[0].view * vec4<f32>(light.position_range.xyz, 1.0)).xyz;
+        // Transform light position to view space. Position comes from
+        // SceneDB's own `Transform` row for this same entity index, not
+        // from `light.position_range.xyz` -- see the `transforms` binding's
+        // doc above.
+        let t = transforms[i];
+        let world_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
+        let pos_vs = (cameras[0].view * vec4<f32>(world_pos, 1.0)).xyz;
         let range  = light.position_range.w;
 
         if sphere_inside_tile_frustum(pos_vs, range, planes) {

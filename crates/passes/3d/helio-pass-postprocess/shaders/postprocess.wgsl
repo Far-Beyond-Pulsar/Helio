@@ -40,7 +40,11 @@ const PI: f32 = 3.14159265359;
 const WG_BLOOM: u32 = 8u;
 const WG_EXPOSURE_X: u32 = 16u;
 const WG_EXPOSURE_Y: u32 = 16u;
-const MAX_PP_VOLUMES: u32 = 256u;
+// Kept equal to `PostProcessVolumeComponent`'s SceneDB packed-layout
+// auto-register capacity (`pulsar_scenedb::gpu::world_mirror::
+// DEFAULT_AUTO_REGISTER_CAPACITY`) -- see helio-pass-postprocess's own
+// `MAX_PP_VOLUMES` doc for why the two must never drift apart.
+const MAX_PP_VOLUMES: u32 = 64u;
 
 // ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
 // Matches CPU-side layout in libhelio/src/postprocess.rs

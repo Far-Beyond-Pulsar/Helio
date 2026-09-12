@@ -36,55 +36,65 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.92, 1.0],
-            0.6,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let emissive_red = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.1, 0.1, 1.0],
-            0.3,
-            0.0,
-            [10.0, 0.5, 0.5],
-            10.0,
-        ));
-        let emissive_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 1.0, 0.1, 1.0],
-            0.3,
-            0.0,
-            [0.5, 10.0, 0.5],
-            10.0,
-        ));
-        let emissive_blue = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.1, 1.0, 1.0],
-            0.3,
-            0.0,
-            [0.5, 0.5, 10.0],
-            10.0,
-        ));
-        let metal = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.93, 0.88, 1.0],
-            0.1,
-            1.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let white = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.9, 0.9, 0.92, 1.0],
+                0.6,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let emissive_red = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [1.0, 0.1, 0.1, 1.0],
+                0.3,
+                0.0,
+                [10.0, 0.5, 0.5],
+                10.0,
+            ));
+        let emissive_green = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.1, 1.0, 0.1, 1.0],
+                0.3,
+                0.0,
+                [0.5, 10.0, 0.5],
+                10.0,
+            ));
+        let emissive_blue = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.1, 0.1, 1.0, 1.0],
+                0.3,
+                0.0,
+                [0.5, 0.5, 10.0],
+                10.0,
+            ));
+        let metal = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.95, 0.93, 0.88, 1.0],
+                0.1,
+                1.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
 
         let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 8.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 8.0)));
         let _ = insert_object(renderer, ground, white, glam::Mat4::IDENTITY, 8.0);
 
         let red_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([-1.5, 0.5, -1.0], 0.5)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-1.5, 0.5, -1.0], 0.5)));
         let _ = insert_object(renderer, red_cube, emissive_red, glam::Mat4::IDENTITY, 0.5);
 
         let green_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([1.5, 0.5, -1.0], 0.5)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([1.5, 0.5, -1.0], 0.5)));
         let _ = insert_object(
             renderer,
             green_cube,
@@ -94,8 +104,8 @@ impl HelioWasmApp for Demo {
         );
 
         let blue_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 1.5], 0.5)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 1.5], 0.5)));
         let _ = insert_object(
             renderer,
             blue_cube,
@@ -105,13 +115,13 @@ impl HelioWasmApp for Demo {
         );
 
         let metal_cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([-1.5, 0.5, 2.5], 0.5)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-1.5, 0.5, 2.5], 0.5)));
         let _ = insert_object(renderer, metal_cube, metal, glam::Mat4::IDENTITY, 0.5);
 
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [3.0, 4.0, -3.0],
                 [1.0, 0.9, 0.7],
                 20.0,

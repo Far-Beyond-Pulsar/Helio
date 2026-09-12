@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    Camera, DebugDrawState, MaterialId, RenderGraph, Renderer, RendererConfig, Scene, SceneActor,
+    Camera, DebugDrawState, MaterialId, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
@@ -69,8 +69,8 @@ fn add_box(renderer: &mut Renderer, center: [f32; 3], half: [f32; 3], material: 
     // every box's bounding sphere at the world origin — making them all frustum-
     // cull together instead of each on its own geometry.
     let mesh = renderer
-        .scene_mut()
-        .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], half)));
+        .scene_for_legacy_mut()
+        .insert_entity(SceneEntity::mesh(box_mesh([0.0, 0.0, 0.0], half)));
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
     let _ = insert_object(
         renderer,
@@ -86,10 +86,10 @@ impl Demo {
     /// materials, lay out the maze, and re-add the scene-wide VHS post-process
     /// volume (which `clear` also removes).
     fn build_scene(&self, renderer: &mut Renderer) {
-        renderer.scene_mut().clear();
+        renderer.scene_for_legacy_mut().clear();
 
         let (wall, floor, ceiling, pillar, fixture) = {
-            let scene = renderer.scene_mut();
+            let scene = renderer.scene_for_legacy_mut();
             (
                 // Classic mono-yellow damp wallpaper.
                 scene.insert_material(make_material(
@@ -205,8 +205,8 @@ impl Demo {
                         fixture,
                     );
                     renderer
-                        .scene_mut()
-                        .insert_actor(SceneActor::light(point_light(
+                        .scene_for_legacy_mut()
+                        .insert_entity(SceneEntity::light(point_light(
                             [cx, WALL_H - 0.3, cz],
                             [1.0, 0.96, 0.85],
                             6.0,
@@ -219,8 +219,8 @@ impl Demo {
         // Scene-wide post-process volume. All effects come from the injected VHS
         // snippet, so the built-in chain stays at its no-op defaults.
         renderer
-            .scene_mut()
-            .insert_actor(SceneActor::post_process_volume(
+            .scene_for_legacy_mut()
+            .insert_entity(SceneEntity::post_process_volume(
                 PostProcessVolumeDescriptor {
                     bounds_min: [-1000.0, -1000.0, -1000.0],
                     bounds_max: [1000.0, 1000.0, 1000.0],

@@ -50,10 +50,11 @@
 //! ```
 
 mod gpu_scene;
+mod input;
 pub mod managers;
 mod resources;
 
-pub use crate::component::ComponentRegistry;
 pub use gpu_scene::GpuScene;
+pub use input::{SceneBufferProjection, SceneInput};
 pub use managers::*;
 pub use resources::SceneResources;

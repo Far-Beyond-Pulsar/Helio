@@ -5,6 +5,10 @@ use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+mod components;
+pub use components::{LightComponent, MAX_LIGHTS};
+use pulsar_scenedb::gpu::BufferKey;
+
 const TILE_SIZE: u32 = 16;
 
 #[repr(C)]
@@ -36,10 +40,15 @@ pub struct ForwardLitPass {
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
     globals_buf: wgpu::Buffer,
+    /// Bound in place of `"scene_lights"` when no `LightComponent` has ever
+    /// been inserted -- SceneDB is the only light source this pass reads;
+    /// there is no Helio-owned light buffer to fall back to. `light_count`
+    /// is 0 whenever this is bound, so it is never actually dereferenced.
+    fallback_lights: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     /// When true, renders from `material_class_ranges` (all opaque draws)
     /// instead of `forward_material_class_ranges` (only FLAG_FORWARD_SHADING).
@@ -53,6 +62,12 @@ impl ForwardLitPass {
             label: Some("ForwardLitGlobals"),
             size: std::mem::size_of::<ForwardLitGlobals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fallback_lights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ForwardLit Fallback Lights"),
+            size: std::mem::size_of::<libhelio::GpuLight>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -140,16 +155,6 @@ impl ForwardLitPass {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 8,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
                 ],
             });
 
@@ -199,6 +204,7 @@ impl ForwardLitPass {
             bind_group_1: None,
             bind_group_1_version: None,
             globals_buf,
+            fallback_lights,
             surface_format,
             render_all_opaque: false,
         }
@@ -400,10 +406,21 @@ impl RenderPass for ForwardLitPass {
         let num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
         let num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
 
+        // SceneDB is the only light source: `"scene_lights"` is a
+        // fixed-capacity buffer (`MAX_LIGHTS`), not a live per-frame count,
+        // so iterating it needs no per-frame CPU query -- see
+        // `LightComponent`'s module doc. 0 when no `LightComponent` has ever
+        // been inserted; there is no Helio-owned light count to fall back to.
+        let light_count = if ctx.scene_buffers.contains(BufferKey::of("scene_lights")) {
+            MAX_LIGHTS
+        } else {
+            0
+        };
+
         let globals = ForwardLitGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             num_tiles_x,
@@ -424,11 +441,22 @@ impl RenderPass for ForwardLitPass {
         }
         let ms = main_scene.read("ForwardLit").unwrap();
 
+        // SceneDB is the only light source, resolved fresh by key every
+        // frame from whatever the current mirror has registered -- no
+        // Renderer method binds this, no Helio-owned light buffer exists to
+        // fall back to. `self.fallback_lights` is bound in its place when
+        // nothing has been inserted yet; `light_count` is 0 in that case, so
+        // it's never actually read.
+        let lights_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_lights);
+
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
         let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
-        let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
+        let lights_ptr = lights_buf as *const _ as usize;
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
@@ -454,7 +482,6 @@ impl RenderPass for ForwardLitPass {
             lights_ptr,
             tile_lists_ptr,
             tile_counts_ptr,
-            light_entity_indices_ptr,
             transforms_ptr,
         );
         if self.bind_group_0_key != Some(bg0_key) {
@@ -469,10 +496,9 @@ impl RenderPass for ForwardLitPass {
             // Same fallback idea as `tile_lists`/`tile_counts` above: before
             // `Scene::rebind_transform_buffer` has ever been called (e.g.
             // the very first frame), bind *some* valid buffer so bind-group
-            // creation can't fail -- the shader only reads it through
-            // `light_entity_indices`, which is empty until real lights with
-            // real transforms exist, so this fallback is never actually
-            // dereferenced at a live light's index in practice.
+            // creation can't fail -- `light_count` is 0 whenever no real
+            // `Transform` buffer exists yet, so this fallback is never
+            // actually dereferenced at a live light's index in practice.
             let transforms = ctx.scene.transforms.unwrap_or(fallback_buf);
 
             log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
@@ -498,7 +524,7 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -510,10 +536,6 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.light_entity_indices.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
                         resource: transforms.as_entire_binding(),
                     },
                 ],

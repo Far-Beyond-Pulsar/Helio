@@ -66,7 +66,10 @@ pub fn resolve_attachment_view<'a>(
 /// pool-owned, so its format isn't tracked here — pass it in directly from
 /// wherever the host renderer keeps its surface configuration (it's usually
 /// static per-surface, unlike a resizable/aliased named transient).
-pub fn attachment_format(slot: AttachmentSlot, pool: &GraphTexturePool) -> Option<wgpu::TextureFormat> {
+pub fn attachment_format(
+    slot: AttachmentSlot,
+    pool: &GraphTexturePool,
+) -> Option<wgpu::TextureFormat> {
     match slot {
         AttachmentSlot::Target => None,
         AttachmentSlot::Depth => pool.get_texture("depth").map(|t| t.format()),
@@ -84,7 +87,11 @@ pub struct ColorAttachmentIntent {
 }
 
 impl ColorAttachmentIntent {
-    pub fn new(slot: AttachmentSlot, load: wgpu::LoadOp<wgpu::Color>, store: wgpu::StoreOp) -> Self {
+    pub fn new(
+        slot: AttachmentSlot,
+        load: wgpu::LoadOp<wgpu::Color>,
+        store: wgpu::StoreOp,
+    ) -> Self {
         Self { slot, load, store }
     }
 
@@ -119,7 +126,11 @@ pub struct DepthAttachmentIntent {
 }
 
 impl DepthAttachmentIntent {
-    pub fn new(slot: AttachmentSlot, depth_load: wgpu::LoadOp<f32>, depth_store: wgpu::StoreOp) -> Self {
+    pub fn new(
+        slot: AttachmentSlot,
+        depth_load: wgpu::LoadOp<f32>,
+        depth_store: wgpu::StoreOp,
+    ) -> Self {
         Self {
             slot,
             depth_load,

@@ -28,6 +28,12 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
+
+pub mod components;
+pub use components::{
+    RenderGroupComponent, RenderGroupSceneBinding, SectionedObjectComponent,
+    SectionedObjectSceneBinding, StaticObjectComponent, SublevelComponent, SublevelSceneBinding,
+};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
@@ -442,7 +448,7 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.light_count,
             ambient_intensity,
             ambient_color,
             rc_world_min,

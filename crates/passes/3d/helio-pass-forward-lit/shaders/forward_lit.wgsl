@@ -128,17 +128,17 @@ struct Transform {
 @group(0) @binding(4) var<storage, read>    lights:            array<GpuLight>;
 @group(0) @binding(5) var<storage, read>    tile_light_lists:  array<u32>;
 @group(0) @binding(6) var<storage, read>    tile_light_counts: array<u32>;
-// Parallel to `lights` -- entry `i` is the SceneDB entity index `lights[i]`
-// was built from this frame (`helio_core::GpuLightEntityIndexBuffer`).
-@group(0) @binding(7) var<storage, read>    light_entity_indices: array<u32>;
-// SceneDB's live `Transform` buffer, entity-indexed via
-// `light_entity_indices` above. This is the ONLY source of light world
-// position/direction now -- `GpuLight.position_range`/`direction_outer`
-// carry a stale/zeroed placeholder for these fields (see
+// SceneDB's live `Transform` buffer. `lights` is itself a SceneDB
+// `#[gpu(layout = packed)]` buffer, entity-indexed (row `i` is whichever
+// entity has raw index `i`) -- exactly the same indexing `transforms` uses,
+// so `light_idx` (a raw index into `lights`) is already the correct index
+// here with no indirection needed. This is the ONLY source of light world
+// position/direction -- `GpuLight.position_range`/`direction_outer` carry a
+// stale/zeroed placeholder for these fields (see
 // `LightComponentGpuMirror::to_helio_gpu_light`'s doc, helio-component);
 // `.range`/`.outer_angle` (the `.w` components) are real light properties,
 // not positional data, and still come from `lights` as before.
-@group(0) @binding(8) var<storage, read>    transforms: array<Transform>;
+@group(0) @binding(7) var<storage, read>    transforms: array<Transform>;
 
 @group(1) @binding(0) var<storage, read>    materials:         array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures: array<MaterialTextureData>;
@@ -470,10 +470,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
         let light = lights[light_idx];
         // World position/direction come from SceneDB's own Transform buffer,
-        // indexed through `light_entity_indices` -- not from `light`'s own
-        // (stale/zeroed) `position_range`/`direction_outer` xyz. See the
-        // `transforms` binding's own doc above for why.
-        let transform  = transforms[light_entity_indices[light_idx]];
+        // at the SAME raw index -- not from `light`'s own (stale/zeroed)
+        // `position_range`/`direction_outer` xyz. See the `transforms`
+        // binding's own doc above for why.
+        let transform  = transforms[light_idx];
         let light_pos  = vec3<f32>(transform.position[0], transform.position[1], transform.position[2]);
         let light_dir  = light_direction_from_rotation(transform.rotation);
         if light.light_type != 0u {

@@ -38,29 +38,31 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         // Single white cube at origin
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.95, 0.95, 1.0],
-            0.5,
-            0.05,
-            [0.0; 3],
-            0.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.95, 0.95, 0.95, 1.0],
+                0.5,
+                0.05,
+                [0.0; 3],
+                0.0,
+            ));
         let mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 1.0)));
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.0)));
         let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 1.0);
 
         // Simple lighting
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.4, -0.8, 0.5],
                 [1.0, 1.0, 1.0],
                 1.2,
             )));
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [3.0, 2.0, 2.0],
                 [0.5, 0.7, 1.0],
                 6.0,

@@ -289,7 +289,7 @@ impl RenderPass for ShadowDirtyPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let movable_draw_count = ctx.scene.shadow_movable_draw_count;
-        let face_count = (ctx.scene.shadow_matrices.len() as u32).min(MAX_SHADOW_FACES as u32);
+        let face_count = ctx.scene.shadow_count.min(MAX_SHADOW_FACES as u32);
 
         // Detect topology changes (objects added/removed from movable set).
         let force_dirty_all = if movable_draw_count != self.last_movable_draw_count {

@@ -6,6 +6,7 @@
 
 use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
+use std::collections::HashMap;
 
 /// Per-frame billboard instance data, provided by the high-level `Renderer`.
 ///
@@ -180,6 +181,273 @@ impl<T> Tracked<T> {
     }
 }
 
+/// A typed handle to an open per-frame resource slot.
+///
+/// Resource keys are declared by the crate that owns the resource.  The
+/// registry only uses the key's name to find a slot; the type marker keeps
+/// reads and writes statically typed at the call site.
+#[derive(Clone, Copy)]
+pub struct ResourceKey<T> {
+    name: &'static str,
+    type_tag: fn() -> &'static str,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> ResourceKey<T> {
+    /// Creates a key for a named resource slot.
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            type_tag: resource_type_tag::<T>,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns the stable declaration name used by the registry.
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+}
+
+fn resource_type_tag<T>() -> &'static str {
+    std::any::type_name::<T>()
+}
+
+trait ErasedResourceSlot: Send + Sync {
+    fn type_tag(&self) -> &'static str;
+    fn self_ptr(&self) -> *const ();
+    fn self_mut_ptr(&mut self) -> *mut ();
+    fn has_value(&self) -> bool;
+    fn reset_tracking(&mut self, writer: &'static str);
+}
+
+struct TypedResourceSlot<T> {
+    value: Option<T>,
+    #[cfg(debug_assertions)]
+    written_by: Option<&'static str>,
+}
+
+impl<T> TypedResourceSlot<T> {
+    fn empty() -> Self {
+        Self {
+            value: None,
+            #[cfg(debug_assertions)]
+            written_by: None,
+        }
+    }
+}
+
+impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
+    fn type_tag(&self) -> &'static str {
+        resource_type_tag::<T>()
+    }
+
+    fn self_ptr(&self) -> *const () {
+        self as *const Self as *const ()
+    }
+
+    fn self_mut_ptr(&mut self) -> *mut () {
+        self as *mut Self as *mut ()
+    }
+
+    fn has_value(&self) -> bool {
+        self.value.is_some()
+    }
+
+    fn reset_tracking(&mut self, writer: &'static str) {
+        #[cfg(debug_assertions)]
+        {
+            self.written_by = self.value.as_ref().map(|_| writer);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = writer;
+    }
+}
+
+/// Open, typed per-frame resource storage.
+///
+/// Unlike [`FrameResources`], this registry has no closed list of resource
+/// fields.  Pass crates can declare new [`ResourceKey`] values without
+/// editing `libhelio` or `helio-core`.
+pub struct ResourceRegistry<'a> {
+    slots: HashMap<&'static str, Box<dyn ErasedResourceSlot + 'a>>,
+    bindings: HashMap<String, wgpu::BindingResource<'a>>,
+}
+
+impl<'a> ResourceRegistry<'a> {
+    /// Creates an empty registry for a frame.
+    pub fn empty() -> Self {
+        Self {
+            slots: HashMap::new(),
+            bindings: HashMap::new(),
+        }
+    }
+
+    /// Publishes a GPU resource for the generic reflected-binding contract.
+    pub fn write_binding(
+        &mut self,
+        name: impl Into<String>,
+        resource: wgpu::BindingResource<'a>,
+        _writer: &'static str,
+    ) {
+        self.bindings.insert(name.into(), resource);
+    }
+
+    /// Returns a reflected-binding resource by its shader/resource name.
+    pub fn binding(&self, name: &str) -> Option<wgpu::BindingResource<'a>> {
+        self.bindings.get(name).cloned()
+    }
+
+    /// Writes a value and records its writer in debug builds.
+    pub fn write<T: Copy + Send + Sync + 'a>(
+        &mut self,
+        key: ResourceKey<T>,
+        value: T,
+        writer: &'static str,
+    ) {
+        let slot = self
+            .slots
+            .entry(key.name)
+            .or_insert_with(|| Box::new(TypedResourceSlot::<T>::empty()));
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+
+        // The type tag check above establishes that this is the matching
+        // TypedResourceSlot<T>. The registry owns the erased value, so the
+        // cast is local and does not expose an untyped API to callers.
+        let typed = unsafe { &mut *(slot.self_mut_ptr() as *mut TypedResourceSlot<T>) };
+        typed.value = Some(value);
+        #[cfg(debug_assertions)]
+        {
+            typed.written_by = Some(writer);
+        }
+    }
+
+    /// Reads a value, panicking in debug builds if it was never written.
+    pub fn read<T: Copy + Send + Sync + 'a>(
+        &self,
+        key: ResourceKey<T>,
+        reader: &'static str,
+    ) -> Option<T> {
+        let Some(slot) = self.slots.get(key.name) else {
+            #[cfg(debug_assertions)]
+            panic!(
+                "[RenderGraph] pass '{}' read resource '{}' that was never written this frame",
+                reader, key.name
+            );
+            #[cfg(not(debug_assertions))]
+            return None;
+        };
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+        #[cfg(debug_assertions)]
+        if !typed.has_value() {
+            panic!(
+                "[RenderGraph] pass '{}' read resource '{}' that was never written this frame",
+                reader, key.name
+            );
+        }
+        typed.value
+    }
+
+    /// Reads a value without debug tracking for legitimately optional slots.
+    pub fn get<T: Copy + Send + Sync + 'a>(&self, key: ResourceKey<T>) -> Option<T> {
+        let slot = self.slots.get(key.name)?;
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+        typed.value
+    }
+
+    /// Returns whether a slot was written during this frame.
+    pub fn was_written<T: Send + Sync>(&self, key: ResourceKey<T>) -> bool {
+        let Some(slot) = self.slots.get(key.name) else {
+            return false;
+        };
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        #[cfg(debug_assertions)]
+        {
+            let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+            return typed.written_by.is_some();
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            slot.has_value()
+        }
+    }
+
+    /// Re-seeds tracking for values carried into the next frame.
+    pub fn reset_tracking(&mut self, writer: &'static str) {
+        for slot in self.slots.values_mut() {
+            slot.reset_tracking(writer);
+        }
+    }
+}
+
+impl<'a> Default for ResourceRegistry<'a> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[cfg(test)]
+mod resource_registry_tests {
+    use super::{ResourceKey, ResourceRegistry};
+
+    const VALUE: ResourceKey<u32> = ResourceKey::new("test_value");
+    const OPTIONAL: ResourceKey<u64> = ResourceKey::new("optional_value");
+
+    #[test]
+    fn slots_are_created_on_first_write() {
+        let mut registry = ResourceRegistry::empty();
+
+        assert_eq!(registry.get(OPTIONAL), None);
+        assert!(!registry.was_written(VALUE));
+
+        registry.write(VALUE, 42, "test_writer");
+
+        assert_eq!(registry.get(VALUE), Some(42));
+        assert_eq!(registry.read(VALUE, "test_reader"), Some(42));
+        assert!(registry.was_written(VALUE));
+    }
+
+    #[test]
+    fn reset_tracking_keeps_values_available() {
+        let mut registry = ResourceRegistry::empty();
+        registry.write(VALUE, 7, "test_writer");
+        registry.reset_tracking("Renderer");
+
+        assert_eq!(registry.get(VALUE), Some(7));
+        assert!(registry.was_written(VALUE));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "never written this frame")]
+    fn required_reads_fail_for_missing_slots() {
+        let registry = ResourceRegistry::empty();
+        let _ = registry.read(VALUE, "test_reader");
+    }
+}
+
 /// All transient per-frame texture references.
 ///
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
@@ -252,18 +520,6 @@ pub struct FrameResources<'a> {
     /// Water caustics texture (populated by WaterCausticsPass)
     pub water_caustics: Tracked<&'a wgpu::TextureView>,
 
-    /// Water volumes buffer (populated by Scene)
-    pub water_volumes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of water volumes in the buffer
-    pub water_volume_count: u32,
-
-    /// Post-process volumes storage buffer (populated by Renderer)
-    pub pp_volumes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of post-process volumes in the buffer
-    pub pp_volume_count: u32,
-
     /// Water heightfield simulation texture (Rgba16Float 256×256, ping-pong current)
     /// R=height, G=velocity, B=normal.x, A=normal.z
     /// Populated by `WaterSimPass::publish()`.
@@ -271,12 +527,6 @@ pub struct FrameResources<'a> {
 
     /// Linear clamp sampler for water_sim_texture (set by WaterSimPass)
     pub water_sim_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Water hitboxes storage buffer (populated by Renderer each frame)
-    pub water_hitboxes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of hitboxes in water_hitboxes
-    pub water_hitbox_count: u32,
 
     // ── Foliage ──────────────────────────────────────────────────────────────
     /// Foliage type/layer tables plus the global wind uniform for this frame.
@@ -531,14 +781,8 @@ impl<'a> FrameResources<'a> {
             billboards: Tracked::empty(),
             vg: Tracked::empty(),
             water_caustics: Tracked::empty(),
-            water_volumes: Tracked::empty(),
-            water_volume_count: 0,
-            pp_volumes: Tracked::empty(),
-            pp_volume_count: 0,
             water_sim_texture: Tracked::empty(),
             water_sim_sampler: Tracked::empty(),
-            water_hitboxes: Tracked::empty(),
-            water_hitbox_count: 0,
             foliage: Tracked::empty(),
             foliage_terrain: Tracked::empty(),
             foliage_interaction: Tracked::empty(),
@@ -571,6 +815,53 @@ impl<'a> FrameResources<'a> {
             pre_dof: Tracked::empty(),
             post_dof: Tracked::empty(),
         }
+    }
+
+    /// Routes a graph-owned texture into the legacy compatibility view.
+    ///
+    /// This compatibility-only adapter derives names from the legacy field
+    /// identifiers so the graph executor has no pass/resource-name table of
+    /// its own. New code should publish through [`ResourceRegistry`].
+    pub fn route_named_texture(
+        &mut self,
+        name: &str,
+        view: &'a wgpu::TextureView,
+        writer: &'static str,
+    ) -> bool {
+        macro_rules! route_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if name == stringify!($field) {
+                        self.$field.write(view, writer);
+                        return true;
+                    }
+                )+
+            };
+        }
+
+        route_fields!(
+            pre_aa,
+            ssao,
+            fog_accum,
+            hiz,
+            sky_lut,
+            gbuffer_lightmap_uv,
+            gbuffer_sss,
+            gbuffer_extra,
+            gbuffer_velocity,
+            water_sim_texture,
+            water_caustics,
+            shadow_atlas,
+            static_shadow_atlas,
+            ssr_trace,
+            planar_reflection,
+            ies_textures,
+        );
+        if name == stringify!(rc_cascades) {
+            self.rc_view.write(view, writer);
+            return true;
+        }
+        false
     }
 
     /// Resets debug tracking markers so that fields written in a previous
@@ -614,13 +905,10 @@ impl<'a> FrameResources<'a> {
             reset_field!(billboards);
             reset_field!(vg);
             reset_field!(water_caustics);
-            reset_field!(water_volumes);
-            reset_field!(pp_volumes);
             reset_field!(water_sim_texture);
             reset_field!(water_sim_sampler);
-            reset_field!(water_hitboxes);
             // `foliage_interactor_count` is a plain u32, not a `Tracked` slot, so it gets
-            // no line here — same as `water_hitbox_count` directly above.
+            // no line here.
             reset_field!(foliage);
             reset_field!(foliage_terrain);
             reset_field!(foliage_interaction);
@@ -655,6 +943,11 @@ impl<'a> FrameResources<'a> {
 /// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
 /// first frame and whenever `buffer_version` advances. Transform-only changes
 /// advance `instance_version` and upload only `instance_dirty_start..+count`.
+///
+/// `instances` is the renderer's single CPU publication of the VG instance
+/// records. Consumers may derive pass-local data from it, but must not publish
+/// those records into a second SceneDB component set merely to support a
+/// pass-specific CPU operation.
 #[derive(Clone, Copy)]
 pub struct VgFrameData<'a> {
     /// Raw bytes of a `GpuMeshletEntry` array.

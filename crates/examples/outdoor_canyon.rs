@@ -184,141 +184,145 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.72, 0.58, 0.42, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let fire_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.1, 0.05, 1.0],
-            0.9,
-            0.0,
-            [1.0, 0.4, 0.05],
-            4.0,
-        ));
+        let mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.72, 0.58, 0.42, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+        let fire_mat = renderer
+            .scene_for_legacy_mut()
+            .insert_material(make_material(
+                [0.3, 0.1, 0.05, 1.0],
+                0.9,
+                0.0,
+                [1.0, 0.4, 0.05],
+                4.0,
+            ));
 
         let valley_floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 35.0)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 35.0)))
             .as_mesh()
             .unwrap();
         let wall_l1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.0, 30.0],
             )))
             .as_mesh()
             .unwrap();
         let wall_l2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 8.0, 25.0],
             )))
             .as_mesh()
             .unwrap();
         let wall_l3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 14.0, 20.0],
             )))
             .as_mesh()
             .unwrap();
         let wall_r1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.0, 30.0],
             )))
             .as_mesh()
             .unwrap();
         let wall_r2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 8.0, 25.0],
             )))
             .as_mesh()
             .unwrap();
         let wall_r3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 14.0, 20.0],
             )))
             .as_mesh()
             .unwrap();
         let terrace_l1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 12.0],
             )))
             .as_mesh()
             .unwrap();
         let terrace_l2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 8.0],
             )))
             .as_mesh()
             .unwrap();
         let terrace_r1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 12.0],
             )))
             .as_mesh()
             .unwrap();
         let terrace_r2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 8.0],
             )))
             .as_mesh()
             .unwrap();
         let mesa = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [10.0, 12.0, 8.0],
             )))
             .as_mesh()
             .unwrap();
         let tent_a = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.8, 0.6, 1.2],
             )))
             .as_mesh()
             .unwrap();
         let tent_b = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.9, 0.7, 1.3],
             )))
             .as_mesh()
             .unwrap();
         let tent_c = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.7, 0.55, 1.1],
             )))
             .as_mesh()
             .unwrap();
         let firepit = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.2)))
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.2)))
             .as_mesh()
             .unwrap();
 
@@ -438,8 +442,8 @@ impl ApplicationHandler for App {
         let fire_pos = [0.0f32, 0.5, 9.5];
         let moon_dir = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
         let sun_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [-0.0, -1.0, -0.5],
                 [1.0, 0.9, 0.7],
                 0.005,
@@ -447,8 +451,8 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let fire_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 fire_pos,
                 [1.0, 0.45, 0.1],
                 5.0,
@@ -457,8 +461,8 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let ember_a_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [-0.4, 0.4, 9.2],
                 [1.0, 0.35, 0.05],
                 1.5,
@@ -467,8 +471,8 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let ember_b_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.4, 0.4, 9.8],
                 [1.0, 0.35, 0.05],
                 1.5,
@@ -477,8 +481,8 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let moon_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene_for_legacy_mut()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [moon_dir.x, moon_dir.y, moon_dir.z],
                 [0.5, 0.65, 1.0],
                 0.05,
@@ -682,11 +686,11 @@ impl AppState {
         let flicker = 1.0 + (time * 13.1).sin() * 0.08 + (time * 7.3).cos() * 0.05;
         let fire_pos = [0.0f32, 0.5, 9.5];
 
-        let _ = self.renderer.scene_mut().update_light(
+        let _ = self.renderer.scene_for_legacy_mut().update_light(
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.4).max(0.005)),
         );
-        let _ = self.renderer.scene_mut().update_light(
+        let _ = self.renderer.scene_for_legacy_mut().update_light(
             self.fire_light_id,
             point_light(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0),
         );

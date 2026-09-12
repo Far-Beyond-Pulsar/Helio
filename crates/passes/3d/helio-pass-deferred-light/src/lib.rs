@@ -3,7 +3,11 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
+use pulsar_scenedb::gpu::BufferKey;
 use std::borrow::Cow;
+
+mod components;
+pub use components::{ReflectionCaptureComponent, MAX_REFLECTION_CAPTURES};
 
 /// Maximum sampled textures visible to either deferred-light fragment entry point.
 ///
@@ -88,6 +92,11 @@ pub struct DeferredLightPass {
     fallback_caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
+    /// Bound in place of `"reflection_captures"` when no
+    /// `ReflectionCaptureComponent` has ever been inserted -- SceneDB is the
+    /// only source this pass reads. `reflection_capture_count` is 0
+    /// whenever this is bound, so it's never dereferenced.
+    fallback_reflection_captures: wgpu::Buffer,
     /// 1×1 white R8Unorm fallback used when neither SSAO nor baked AO is available.
     fallback_ao_view: wgpu::TextureView,
     fallback_ao_sampler: wgpu::Sampler,
@@ -660,6 +669,12 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let fallback_reflection_captures = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fallback Reflection Captures"),
+            size: std::mem::size_of::<libhelio::GpuReflectionCapture>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         // Fallback 1×1 white R8Unorm AO texture.
         // Used when neither SSAO nor pre-baked AO is available so the shader sees
@@ -800,6 +815,7 @@ impl DeferredLightPass {
             fallback_caustics_view,
             caustics_sampler,
             fallback_water_volumes,
+            fallback_reflection_captures,
             fallback_ao_view,
             fallback_ao_sampler,
             fallback_lightmap_view,
@@ -856,7 +872,6 @@ impl RenderPass for DeferredLightPass {
             "tile_light_counts",
             "main_scene",
             "water_caustics",
-            "water_volumes",
             "pre_aa",
             "rc_view",
             "baked_lightmap",
@@ -915,7 +930,16 @@ impl RenderPass for DeferredLightPass {
             debug_mode: self.debug_mode,
             has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
-            reflection_capture_count: ctx.scene.reflection_captures.len() as u32,
+            // SceneDB is the only reflection-capture source: fixed capacity,
+            // not a live count -- see `MAX_REFLECTION_CAPTURES`'s doc.
+            reflection_capture_count: if ctx
+                .scene_buffers
+                .contains(BufferKey::of("reflection_captures"))
+            {
+                MAX_REFLECTION_CAPTURES
+            } else {
+                0
+            },
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
             _pad: [0; 2],
@@ -1111,11 +1135,21 @@ impl RenderPass for DeferredLightPass {
             .water_caustics
             .get()
             .unwrap_or(&self.fallback_caustics_view);
+        // `"water_volumes"` is resolved fresh from the SceneDB mirror by key,
+        // exactly like `"scene_lights"` in `ForwardLitPass` -- no Renderer
+        // method writes this pass's water-volume input.
         let water_volumes = ctx
-            .resources
-            .water_volumes
-            .get()
+            .scene_buffers
+            .get(BufferKey::of("water_volumes"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_water_volumes);
+        // SceneDB is the only reflection-capture source, resolved fresh by
+        // key every frame -- see `ReflectionCaptureComponent`'s doc.
+        let reflection_captures_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("reflection_captures"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_reflection_captures);
         let ies_view = ctx
             .resources
             .ies_textures
@@ -1218,7 +1252,7 @@ impl RenderPass for DeferredLightPass {
             rc_view as *const _ as usize,
             env_sampler as *const _ as usize,
             ssr_view as *const _ as usize,
-            ctx.scene.reflection_captures as *const _ as usize,
+            reflection_captures_buf as *const _ as usize,
             planar_view as *const _ as usize,
         );
         if self.reflection_bind_group_2_key != Some(reflection_scene_key) {
@@ -1236,7 +1270,7 @@ impl RenderPass for DeferredLightPass {
                         texture_view_entry(14, ssr_view),
                         wgpu::BindGroupEntry {
                             binding: 15,
-                            resource: ctx.scene.reflection_captures.as_entire_binding(),
+                            resource: reflection_captures_buf.as_entire_binding(),
                         },
                         texture_view_entry(16, planar_view),
                     ],

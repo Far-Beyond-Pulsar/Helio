@@ -80,6 +80,22 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 @group(1) @binding(1) var<storage, read> tile_light_lists:  array<u32>;
 @group(1) @binding(2) var<storage, read> tile_light_counts: array<u32>;
 
+// SceneDB's `Transform` component. `lights` is itself a SceneDB
+// `#[gpu(layout = packed)]` buffer, entity-indexed (row `i` is whichever
+// entity has raw index `i`) -- the same indexing `transforms` uses, so
+// `light_idx` (a raw index into `lights`) is already the correct index
+// here with no indirection needed. This is the ONLY source of light world
+// position -- `GpuLight.position_range.xyz` carries a stale/zeroed
+// placeholder for it (see `helio_pass_forward_lit`'s identical binding
+// doc); `.position_range.w` (range) is a real light property and still
+// comes from `lights` as before.
+struct Transform {
+    position: array<f32, 3>,
+    rotation: array<f32, 3>,
+    scale:    array<f32, 3>,
+}
+@group(1) @binding(3) var<storage, read> transforms: array<Transform>;
+
 struct Vertex {
     @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
@@ -120,6 +136,7 @@ fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
 
 fn pbr_direct_light(
     light:     GpuLight,
+    light_pos: vec3<f32>,
     world_pos: vec3<f32>,
     N:         vec3<f32>,
     V:         vec3<f32>,
@@ -135,7 +152,7 @@ fn pbr_direct_light(
         L = normalize(-light.direction_outer.xyz);
         radiance = light.color_intensity.xyz * light.color_intensity.w;
     } else {
-        let to_light = light.position_range.xyz - world_pos;
+        let to_light = light_pos - world_pos;
         let dist = length(to_light);
         if dist > light.position_range.w { return vec3<f32>(0.0); }
         L = to_light / dist;
@@ -205,12 +222,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < tile_light_count; i++) {
         let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
         let light = lights[light_idx];
+        let t = transforms[light_idx];
+        let light_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
         if light.light_type != 0u {
-            let dist = length(light.position_range.xyz - input.world_position);
+            let dist = length(light_pos - input.world_position);
             if dist > light.position_range.w { continue; }
         }
         Lo += pbr_direct_light(
-            light, input.world_position, N, V, F0, albedo,
+            light, light_pos, input.world_position, N, V, F0, albedo,
             roughness, metallic,
         );
     }

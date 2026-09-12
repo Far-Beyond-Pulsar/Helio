@@ -207,37 +207,16 @@ impl super::Scene {
             }
         }
 
-        // Post-process volumes — bounds, plus the blend shell they fade across.
-        for (_, rec) in self.pp_volumes.iter_with_handles() {
-            let g = &rec.gpu;
-            if g.unbound != 0 {
-                continue; // applies everywhere; no bounds exist to draw
-            }
-            let min = v3(&g.bounds_min);
-            let max = v3(&g.bounds_max);
-            sink.aabb(min, max, COLOR_POST_PROCESS);
-            if g.blend_radius > 0.0 {
-                let b = Vec3::splat(g.blend_radius);
-                sink.aabb(min - b, max + b, COLOR_POST_PROCESS_BLEND);
-            }
-        }
+        // Post-process volumes no longer have a Renderer-owned CPU record to
+        // draw from -- they're authored as SceneDB `PostProcessVolumeComponent`
+        // rows now (see that component's doc). Editor debug visualization for
+        // them would need to query `World` directly, which `Scene` has no
+        // handle to; not yet built.
 
-        for (_, rec) in self.water_volumes.iter_with_handles() {
-            sink.aabb(
-                v3(&rec.gpu.bounds_min),
-                v3(&rec.gpu.bounds_max),
-                COLOR_WATER,
-            );
-        }
-
-        // Hitboxes move every frame; the new bounds are the live ones.
-        for (_, rec) in self.water_hitboxes.iter_with_handles() {
-            sink.aabb(
-                v3(&rec.gpu.new_min),
-                v3(&rec.gpu.new_max),
-                COLOR_WATER_HITBOX,
-            );
-        }
+        // Water volumes/hitboxes: same gap as post-process volumes above --
+        // authored as SceneDB `helio_pass_water_sim::WaterVolumeComponent`/
+        // `WaterHitboxComponent` rows now, no Renderer-owned CPU record for
+        // `Scene` to draw from here.
 
         // Foliage layers — the world-space AABB the placement pass samples.
         // Interactors are invisible spheres, so outline them too; the editor
