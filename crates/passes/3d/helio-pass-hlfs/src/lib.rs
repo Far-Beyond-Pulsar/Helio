@@ -177,6 +177,8 @@ struct Globals {
     csm_splits: [f32; 4],
     previous_view: [f32; 16],
     ray_settings: [f32; 4],
+    inverse_view: [f32; 16],
+    inverse_projection: [f32; 16],
 }
 
 pub struct HlfsPass {
@@ -638,6 +640,16 @@ impl RenderPass for HlfsPass {
             csm_splits: libhelio::CSM_SPLITS,
             previous_view: self.previous_camera.map_or(camera.view, |c| c.view),
             ray_settings: [self.config.ray_trace_distance, 0.0, 0.0, 0.0],
+            inverse_view: glam::Mat4::from_cols_array(&camera.view)
+                .as_dmat4()
+                .inverse()
+                .as_mat4()
+                .to_cols_array(),
+            inverse_projection: glam::Mat4::from_cols_array(&camera.proj)
+                .as_dmat4()
+                .inverse()
+                .as_mat4()
+                .to_cols_array(),
         };
         ctx.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         self.previous_camera = Some(camera);

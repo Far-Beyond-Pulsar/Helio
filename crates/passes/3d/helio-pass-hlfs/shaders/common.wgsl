@@ -20,6 +20,8 @@ struct Globals {
     ambient: vec4<f32>, csm_splits: vec4<f32>,
     previous_view: mat4x4<f32>,
     ray_settings: vec4<f32>,
+    inverse_view: mat4x4<f32>,
+    inverse_projection: mat4x4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var<storage, read> cameras: array<Camera, 2>;
@@ -82,9 +84,24 @@ fn sample_position_from_uv(uv: vec2<f32>) -> vec2<f32> {
     return uv*vec2<f32>(globals.screen_size)/f32(globals.sample_scale);
 }
 fn world_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
-    let uv = pixel / vec2<f32>(globals.screen_size);
-    let h = cameras[0].view_proj_inv * vec4<f32>(uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0), depth, 1.0);
-    return h.xyz / h.w;
+    let ndc=pixel/vec2<f32>(globals.screen_size)*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0);
+    let p=cameras[0].proj;
+    var view_position: vec3<f32>;
+    // For a standard perspective matrix, solve depth before applying the view
+    // transform. Subtracting depth from its projection coefficient avoids the
+    // cancellation in inverse_projection * clip (two large reciprocal terms).
+    // Jitter/off-centre perspective is supported through p[2].xy.
+    if abs(p[2].w)==1.0 && p[3].w==0.0 && p[0].y==0.0 && p[1].x==0.0
+        && p[0].z==0.0 && p[1].z==0.0 && p[0].w==0.0 && p[1].w==0.0
+        && p[3].x==0.0 && p[3].y==0.0 {
+        let z=p[3].z/(p[2].w*depth-p[2].z);
+        view_position=vec3<f32>((p[2].w*ndc-p[2].xy)*z/vec2<f32>(p[0].x,p[1].y),z);
+    } else {
+        let h=globals.inverse_projection*vec4<f32>(ndc,depth,1.0);
+        view_position=h.xyz/h.w;
+    }
+    let world=globals.inverse_view*vec4<f32>(view_position,1.0);
+    return world.xyz/world.w;
 }
 fn previous_uv(pixel: vec2<u32>, position: vec3<f32>) -> vec2<f32> {
     if globals.has_velocity != 0u {
