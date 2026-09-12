@@ -54,6 +54,11 @@ pub struct RenderGraph {
 }
 
 impl RenderGraph {
+    /// True when a registered pass requires scene ray-query geometry.
+    pub fn requires_ray_tracing(&self) -> bool {
+        self.passes.iter().any(|pass| pass.requires_ray_tracing())
+    }
+
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
         Self {
             passes: Vec::new(),

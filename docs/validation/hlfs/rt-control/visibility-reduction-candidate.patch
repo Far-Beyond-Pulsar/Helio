@@ -1,0 +1,214 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+index c55e0858..16a46e53 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+@@ -182,11 +182,8 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+     let output_tile=group.y*div_ceil(globals.sample_size,TILE_SIZE).x+group.x;
+     // Parallel deduplication keeps one explicit ID in each of 64 scratch slots.
+     // Visibility is binary: penumbra hits rank by unoccluded importance too.
+-    var best=INVALID_LIGHT; var weight=0.0;
+-    for(var i=0u;i<256u;i++) {
+-        let id=seen_ids[i]; let w=seen_weights[i];
+-        if id!=INVALID_LIGHT && (hash_u32(id)&63u)==lane && (w>weight || (w==weight && id<best)) { best=id; weight=w; }
+-    }
++    let bucket=reduce_visibility_bucket(lane);
++    var best=bucket.id; let weight=bucket.weight;
+     slot_ids[lane]=best; slot_weights[lane]=weight;
+     if lane<VISIBLE_CAPACITY { sorted_ids[lane]=INVALID_LIGHT; }
+     workgroupBarrier();
+diff --git a/crates/passes/3d/helio-pass-hlfs/src/pipelines.rs b/crates/passes/3d/helio-pass-hlfs/src/pipelines.rs
+index c64a586c..203a3b55 100644
+--- a/crates/passes/3d/helio-pass-hlfs/src/pipelines.rs
++++ b/crates/passes/3d/helio-pass-hlfs/src/pipelines.rs
+@@ -12,6 +12,7 @@ pub(crate) fn shader_source(stage: &str) -> String {
+             LIGHTING,
+             SHADOWS,
+             include_str!("../shaders/sample.wgsl"),
++            include_str!("../shaders/visibility_reduce.wgsl"),
+         ]
+         .concat(),
+         "spatial" => [COMMON, LIGHTING, include_str!("../shaders/spatial.wgsl")].concat(),
+@@ -29,7 +30,11 @@ pub(crate) fn shader_source(stage: &str) -> String {
+             LIGHTING,
+             include_str!("../shaders/ray_shadow.wgsl"),
+             if stage == "ray_traced" {
+-                include_str!("../shaders/sample.wgsl")
++                concat!(
++                    include_str!("../shaders/sample.wgsl"),
++                    "\n",
++                    include_str!("../shaders/visibility_reduce.wgsl")
++                )
+             } else {
+                 include_str!("../shaders/composite.wgsl")
+             },
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/visibility_reduce.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/visibility_reduce.wgsl
+new file mode 100644
+--- /dev/null
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/visibility_reduce.wgsl
+@@ -0,0 +1,29 @@
++// Exact bucket winner: greatest nonnegative importance, then smallest light ID.
++// Each of 64 lanes contributes its four records instead of every lane scanning
++// all 256 records. Positive float bits preserve numerical ordering.
++var<workgroup> bucket_weights: array<atomic<u32>,64>;
++var<workgroup> bucket_ids: array<atomic<u32>,64>;
++struct VisibilityBucket { id: u32, weight: f32, }
++fn reduce_visibility_bucket(lane: u32) -> VisibilityBucket {
++    atomicStore(&bucket_weights[lane],0u);
++    atomicStore(&bucket_ids[lane],0xffffffffu);
++    workgroupBarrier();
++    for(var i=0u;i<4u;i++) {
++        let id=seen_ids[lane*4u+i]; let w=seen_weights[lane*4u+i];
++        if id!=0xffffffffu && w>=0.0 {
++            let bits=select(bitcast<u32>(w),0u,w==0.0);
++            atomicMax(&bucket_weights[hash_u32(id)&63u],bits);
++        }
++    }
++    workgroupBarrier();
++    for(var i=0u;i<4u;i++) {
++        let id=seen_ids[lane*4u+i]; let w=seen_weights[lane*4u+i];
++        if id!=0xffffffffu && w>=0.0 {
++            let bucket=hash_u32(id)&63u;
++            let bits=select(bitcast<u32>(w),0u,w==0.0);
++            if bits==atomicLoad(&bucket_weights[bucket]) { atomicMin(&bucket_ids[bucket],id); }
++        }
++    }
++    workgroupBarrier();
++    return VisibilityBucket(atomicLoad(&bucket_ids[lane]),bitcast<f32>(atomicLoad(&bucket_weights[lane])));
++}
+diff --git a/crates/passes/3d/helio-pass-hlfs/tests/gpu_visibility_reduce.rs b/crates/passes/3d/helio-pass-hlfs/tests/gpu_visibility_reduce.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/passes/3d/helio-pass-hlfs/tests/gpu_visibility_reduce.rs
+@@ -0,0 +1,132 @@
++//! Verify the production parallel reduction against the original serial rule.
++#![allow(dead_code)]
++mod support;
++use wgpu::util::DeviceExt;
++
++#[test]
++#[ignore = "requires a GPU; run explicitly with --ignored"]
++fn parallel_visibility_winners_match_serial_selection() {
++    pollster::block_on(async {
++        let f = support::Fixture::new(8, 8).await;
++        let hash = |mut x: u32| {
++            x = (x ^ (x >> 16)).wrapping_mul(0x7feb352d);
++            x = (x ^ (x >> 15)).wrapping_mul(0x846ca68b);
++            x ^ (x >> 16)
++        };
++        let mut inputs = Vec::new();
++        let mut expected = Vec::new();
++        for group in 0..32u32 {
++            let mut winners = [[u32::MAX, 0u32]; 64];
++            for i in 0..256u32 {
++                let seed = hash(group * 256 + i);
++                let id = match group {
++                    0 => u32::MAX,
++                    1 => 3,
++                    _ => seed % 257,
++                };
++                let weight = match group {
++                    0 | 2 => 0.0,
++                    1 => 1.0,
++                    3 if i % 2 == 0 => -0.0,
++                    4 if i % 3 == 0 => -1.0,
++                    _ => (seed % 17) as f32 * 0.125,
++                };
++                inputs.push([id, weight.to_bits()]);
++                let bucket = (hash(id) & 63) as usize;
++                let best = f32::from_bits(winners[bucket][1]);
++                if id != u32::MAX && (weight > best || (weight == best && id < winners[bucket][0]))
++                {
++                    winners[bucket] = [id, if weight == 0.0 { 0 } else { weight.to_bits() }];
++                }
++            }
++            expected.extend_from_slice(&winners);
++        }
++        let input = f
++            .device
++            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
++                label: Some("reduction records"),
++                contents: bytemuck::cast_slice(&inputs),
++                usage: wgpu::BufferUsages::STORAGE,
++            });
++        let size = (expected.len() * 8) as u64;
++        let output = f.device.create_buffer(&wgpu::BufferDescriptor {
++            label: None,
++            size,
++            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
++            mapped_at_creation: false,
++        });
++        let read = f.device.create_buffer(&wgpu::BufferDescriptor {
++            label: None,
++            size,
++            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
++            mapped_at_creation: false,
++        });
++        let common = include_str!("../shaders/common.wgsl");
++        let hash_source =
++            &common[common.find("fn hash_u32").unwrap()..common.find("fn random").unwrap()];
++        let source=[r#"
++            @group(0) @binding(0) var<storage,read> input_records:array<vec2<u32>>;
++            @group(0) @binding(1) var<storage,read_write> output_records:array<vec2<u32>>;
++            var<workgroup> seen_ids:array<u32,256>;
++            var<workgroup> seen_weights:array<f32,256>;
++            @compute @workgroup_size(64)
++            fn main(@builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) group:vec3<u32>) {
++                for(var i=0u;i<4u;i++) {
++                    let record=input_records[group.x*256u+lane*4u+i];
++                    seen_ids[lane*4u+i]=record.x;seen_weights[lane*4u+i]=bitcast<f32>(record.y);
++                }
++                let winner=reduce_visibility_bucket(lane);
++                output_records[group.x*64u+lane]=vec2<u32>(winner.id,bitcast<u32>(winner.weight));
++            }
++        "#,hash_source,include_str!("../shaders/visibility_reduce.wgsl")].concat();
++        let shader = f.device.create_shader_module(wgpu::ShaderModuleDescriptor {
++            label: Some("production reduction equivalence"),
++            source: wgpu::ShaderSource::Wgsl(source.into()),
++        });
++        let pipeline = f
++            .device
++            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
++                label: None,
++                layout: None,
++                module: &shader,
++                entry_point: Some("main"),
++                compilation_options: Default::default(),
++                cache: None,
++            });
++        let bind = f.device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: None,
++            layout: &pipeline.get_bind_group_layout(0),
++            entries: &[
++                wgpu::BindGroupEntry {
++                    binding: 0,
++                    resource: input.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 1,
++                    resource: output.as_entire_binding(),
++                },
++            ],
++        });
++        let mut encoder = f.device.create_command_encoder(&Default::default());
++        {
++            let mut pass = encoder.begin_compute_pass(&Default::default());
++            pass.set_pipeline(&pipeline);
++            pass.set_bind_group(0, &bind, &[]);
++            pass.dispatch_workgroups(32, 1, 1);
++        }
++        encoder.copy_buffer_to_buffer(&output, 0, &read, 0, size);
++        f.queue.submit([encoder.finish()]);
++        let (tx, rx) = std::sync::mpsc::channel();
++        read.slice(..)
++            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
++        f.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
++        rx.recv().unwrap().unwrap();
++        let bytes = read.slice(..).get_mapped_range().unwrap();
++        let actual: &[[u32; 2]] = bytemuck::cast_slice(&bytes);
++        assert_eq!(
++            actual,
++            expected.as_slice(),
++            "bucket ID and weight must match serial max-weight/min-ID selection"
++        );
++    });
++}

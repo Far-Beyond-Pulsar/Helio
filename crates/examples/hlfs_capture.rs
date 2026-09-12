@@ -3,6 +3,18 @@ use helio::{Camera, LightId, Renderer, RendererBuilder, RendererConfig};
 use std::sync::Arc;
 
 pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<LightId>)) {
+    let capture_frames = std::env::var("HLFS_CAPTURE_FRAMES")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .expect("HLFS_CAPTURE_FRAMES must be an integer")
+        })
+        .unwrap_or(100);
+    assert!(
+        capture_frames > 16,
+        "capture needs more than 16 warmup frames"
+    );
+    let ray_traced = std::env::var_os("HLFS_RT").is_some();
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
     let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
     let sample_count = std::env::var("HLFS_SAMPLE_COUNT").ok().map(|value| {
@@ -30,7 +42,12 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
             .unwrap();
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let (width, height) = (640, 360);
+        let (width, height) = match std::env::var("HLFS_RESOLUTION").as_deref() {
+            Ok("1440p") => (2560, 1440),
+            Ok("4k") => (3840, 2160),
+            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1440p or 4k"),
+            Err(_) => (640, 360),
+        };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let config = RendererConfig::new(width, height, format)
             .with_shadow_quality(helio::ShadowQuality::High);
@@ -45,6 +62,20 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
             }))
             .build(device.clone(), queue.clone(), width, height, format);
         let _ = populate(&mut renderer);
+        // Diagnostic control: preserve light energy and geometry while bypassing
+        // visibility, to distinguish scene lighting from occlusion errors.
+        if std::env::var_os("HLFS_UNSHADOWED").is_some() {
+            let lights: Vec<_> = renderer
+                .scene()
+                .iter_lights()
+                .map(|(id, light, _)| (id, *light))
+                .collect();
+            for (id, mut light) in lights {
+                light.shadow_index = u32::MAX;
+                light.set_ray_traced_shadows(false);
+                renderer.scene_mut().update_light(id, light).unwrap();
+            }
+        }
         renderer.set_editor_mode(false);
         // Populate before rebuilding so passes see the actual scene resources.
         let build_graph = if fxaa {
@@ -80,14 +111,19 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         let view = texture.create_view(&Default::default());
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
-        for frame in 0..100 {
-            if reference || performance || sample_count.is_some() {
+        for frame in 0..capture_frames {
+            if ray_traced || reference || performance || sample_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
                 pass.set_config(
                     &device,
                     helio_pass_hlfs::HlfsConfig {
+                        mode: if ray_traced {
+                            helio_pass_hlfs::HlfsMode::RayTraced
+                        } else {
+                            helio_pass_hlfs::HlfsMode::ScreenSpace
+                        },
                         debug_mode: if reference {
                             helio_pass_hlfs::HlfsDebugMode::Reference
                         } else {

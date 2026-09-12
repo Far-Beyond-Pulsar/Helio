@@ -170,12 +170,34 @@ impl GBufferKey {
 }
 #[derive(Default)]
 pub(crate) struct ExternalBindings {
+    pub ray: Option<wgpu::BindGroup>,
+    ray_key: Option<wgpu::Tlas>,
     pub common: Option<wgpu::BindGroup>,
     pub gbuffer: Option<wgpu::BindGroup>,
     common_key: Option<CommonKey>,
     gbuffer_key: Option<GBufferKey>,
 }
 impl ExternalBindings {
+    pub fn clear_ray_binding(&mut self) {
+        self.ray = None;
+        self.ray_key = None;
+    }
+    pub fn update_ray(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        tlas: &wgpu::Tlas,
+    ) {
+        if self.ray_key.as_ref() != Some(tlas) {
+            self.ray = Some(bind_group(
+                device,
+                "HLFS scene TLAS",
+                layout,
+                &[tlas.as_binding()],
+            ));
+            self.ray_key = Some(tlas.clone());
+        }
+    }
     pub fn update(
         &mut self,
         device: &wgpu::Device,

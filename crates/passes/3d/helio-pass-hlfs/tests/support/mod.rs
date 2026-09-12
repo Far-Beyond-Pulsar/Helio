@@ -19,8 +19,17 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new(width: u32, height: u32) -> Self {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        Self::new_with_ray_queries(width, height, false).await
+    }
+    pub async fn new_rt(width: u32, height: u32) -> Self {
+        Self::new_with_ray_queries(width, height, true).await
+    }
+    async fn new_with_ray_queries(width: u32, height: u32, rt: bool) -> Self {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        if rt {
+            descriptor.backends = wgpu::Backends::VULKAN;
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -37,7 +46,18 @@ impl Fixture {
                 } else {
                     wgpu::Features::empty()
                 } | (adapter.features()
-                    & wgpu::Features::RG11B10UFLOAT_RENDERABLE),
+                    & wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+                    | if rt {
+                        wgpu::Features::EXPERIMENTAL_RAY_QUERY
+                    } else {
+                        wgpu::Features::empty()
+                    },
+                experimental_features: if rt {
+                    // Explicit GPU tests acknowledge the experimental ray API.
+                    unsafe { wgpu::ExperimentalFeatures::enabled() }
+                } else {
+                    wgpu::ExperimentalFeatures::disabled()
+                },
                 ..Default::default()
             })
             .await
@@ -186,6 +206,9 @@ impl Fixture {
         self.scene.lights.set_data(lights);
     }
     pub fn frame(&mut self) {
+        self.try_frame().unwrap();
+    }
+    pub fn try_frame(&mut self) -> helio_core::Result<()> {
         self.scene.flush();
         let mut resources = libhelio::FrameResources::empty();
         resources.gbuffer.write(
@@ -201,10 +224,14 @@ impl Fixture {
         if let Some(shadow) = &self.shadow {
             resources.shadow_atlas.write(shadow, "Fixture");
         }
-        self.graph
-            .execute_with_frame_resources(&self.scene, &self.target, &self.depth, &resources)
-            .unwrap();
+        self.graph.execute_with_frame_resources(
+            &self.scene,
+            &self.target,
+            &self.depth,
+            &resources,
+        )?;
         self.scene.frame_count += 1;
+        Ok(())
     }
     pub fn compact_output(&mut self) {
         let mut pass = HlfsPass::new(
