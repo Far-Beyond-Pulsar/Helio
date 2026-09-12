@@ -26,6 +26,8 @@ The integrated cathedral capture exposed an allocation bug not represented by ti
 
 The light-layout/intent unit test and both HLFS configuration/WGSL validation tests also passed.
 
+All 14 existing ScreenSpace GPU regressions passed after the implementation (`cargo test -p helio-pass-hlfs --test gpu_hlfs -- --ignored --skip benchmark --nocapture --test-threads=1`). The two benchmark cases were deliberately excluded from that correctness run. `cargo check -p helio -p helio-pass-hlfs` passed as well; existing unrelated compiler warnings remain.
+
 The integrated 100-frame 1440p sampled and all-light RT runs completed without GPU validation errors. Visual inspection is **not a pass**: both are dark and the all-light image has visible surface speckling, requiring investigation of bias, reconstruction and scene light placement before acceptance. The all-light run shares geometry and reconstruction code and is not an independent ground-truth renderer.
 
 ![1440p sampled RT, frame 31](rt-control/1440p-sampled.png)
