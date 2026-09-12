@@ -17,7 +17,7 @@ Executed on NVIDIA RTX 3060, Vulkan, driver 616.64. Hardware tests are explicitl
 
 ```powershell
 cargo test -p helio-core --test ray_acceleration -- --ignored --nocapture --test-threads=1
-cargo test -p helio-pass-hlfs --test gpu_hlfs_rt -- --ignored --nocapture --test-threads=1
+cargo test -p helio-pass-hlfs --test gpu_hlfs_rt -- --ignored --skip benchmark --nocapture --test-threads=1
 ```
 
 All four acceleration tests and all four HLFS RT tests passed. Coverage includes actual hit/miss changes after mesh edits and buffer replacement, indexed suballocations, COPY_SRC pool inputs with 40-byte vertex strides, TLAS growth/removal/empty scenes, invalid replacements, off-screen blockers, blockers beyond the light, explicit disabled shadows, thin-surface reconstruction across sampling phases, missing TLAS and unsupported mode changes.
@@ -37,6 +37,45 @@ The integrated 100-frame 1440p sampled and all-light RT runs completed without G
 Observed serialized whole-frame median/p95 latencies were 80.669/141.905 ms (sampled) and 63.895/98.695 ms (all-light). These development-build smoke runs ran while CPU compilation was active, use only 17 lights, and do not follow the frozen benchmark protocol. They establish neither comparative speed nor the direct-lighting budget.
 
 A 100-frame 3840x2160 sampled smoke run also completed without GPU validation errors (whole-frame median/p95 79.192/107.039 ms). Its [frame 31 capture](rt-control/4k-sampled.png) was inspected and retains the dark appearance. This is resolution/dispatch coverage only, not the 1,024-light 4K stress acceptance gate.
+
+## Perspective-depth correction and cleared-machine retest
+
+The continuation fixes the self-shadowing exposed by the cathedral control. HLFS now reconstructs perspective depth in view space before applying the inverse view transform, avoiding cancellation in the combined inverse view-projection calculation. Standard off-centre/jittered perspective matrices use the depth equation directly; other projections use the separate inverse projection. The ray origin offset includes one depth ULP projected along the surface normal. Ray minimum distance and the local-light endpoint tolerance remain separate from that offset so nearby blockers are retained.
+
+The new hardware regression compares an empty TLAS with a receiver at six distances from 10 to 150 metres under two camera transforms. It checks every RGB pixel, with matching frame indices to control stochastic HDR rounding, and separately checks a blocker 2 cm above each receiver. The five RT correctness tests, all 14 ScreenSpace GPU regressions, and both configuration/WGSL tests pass after the correction. A mismatched-frame version of the stricter test initially failed on stochastic rounding; matching the frame removes that confound without relaxing its 1% pixel tolerance.
+
+The corrected 1440p all-light capture removes the prominent broad surface speckling visible in the earlier image. It remains a diagnostic image, not a visual acceptance pass or independent ground truth.
+
+![1440p all-light after perspective-depth correction, frame 31](rt-control/1440p-depth-fixed-all-light.png)
+
+A matched frame-31 diagnostic with all light shadow intent disabled is still dark at unchanged exposure and light energy. This shows that visibility alone does not explain the appearance; it does not validate the scene lighting or rule out all shader errors. Fine edge speckling remains visible in the shadowed image near the altar and needs further investigation. Both captures use 17 lights.
+
+![1440p all-light with shadows disabled, frame 31](rt-control/1440p-unshadowed-control.png)
+
+The diagnostic used `HLFS_RT=1`, `HLFS_REFERENCE=1`, `HLFS_RESOLUTION=1440p`, `HLFS_CAPTURE_FRAMES=32` and `HLFS_UNSHADOWED=1` with the cathedral capture command below. Omit `HLFS_UNSHADOWED` for the shadowed control.
+
+After the user cleared other work from the PC, a synthetic 1,024-moving-light / 256-moving-triangle-instance probe ran in A-B-B-A order. A is the production serial visibility-bucket selection; B is an exact atomic reduction candidate. Each run used 120 warmup and 600 measured frames at 2560x1440 output, half width/height sampling, 2 samples and 8 candidates per sample.
+
+| Run | Implementation | GPU median (ms) | GPU p95 (ms) |
+| --- | --- | ---: | ---: |
+| A1 | Serial | 12.6403 | 14.2674 |
+| B1 | Atomic reduction | 13.3796 | 16.1423 |
+| B2 | Atomic reduction | 11.9808 | 13.4625 |
+| A2 | Serial | 14.1844 | 15.2136 |
+
+Pooled baseline/candidate medians are 13.3663/12.4365 ms, but pooled p95 is 14.9248/15.3610 ms and run-to-run ranges overlap. This single block is inconclusive evidence of a repeatable improvement. The serial production path is retained. The candidate passed exact winner/weight equivalence on 8,192 contributions and is preserved as an [experimental patch](rt-control/visibility-reduction-candidate.patch), not active production code.
+
+[Raw per-frame CSVs and metadata](rt-control/cleared-machine/summary.json) preserve all four runs. Timings sum six HLFS GPU stages plus the per-frame TLAS rebuild. They exclude initial BLAS construction, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. The harness serializes readback and changes light generation every frame, invalidating history. It is a synthetic work-accounting probe, not the frozen scene/quality acceptance protocol. Earlier short probes ran under less controlled conditions and are not comparative performance evidence.
+
+**The 3-4 ms goal is not met**, even with reduced-resolution sampling. The clean retest does not justify blaming the entire gap on the other application. The sampled lighting stage remains the main measured cost. A larger reduction in candidate evaluation and visibility work needs to preserve lighting quality before adoption.
+
+Reproduce the focused baseline (the relative output path is resolved from the test crate directory):
+
+```powershell
+$env:HLFS_RT_PROBE_FOCUS = '1'
+$env:HLFS_RT_PROBE_OUTPUT = 'target/rt-probe'
+cargo test -p helio-pass-hlfs --test gpu_hlfs_rt benchmark_rt_resolution_and_acceleration -- --ignored --nocapture --test-threads=1
+```
 
 ## Run the integrated capture
 

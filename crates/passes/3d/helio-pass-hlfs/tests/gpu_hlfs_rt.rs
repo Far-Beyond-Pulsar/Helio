@@ -286,11 +286,25 @@ fn perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers
                 }
                 f.depth_values(&depths);
                 empty_scene(&mut f);
+                // Match stochastic HDR rounding as well as geometry between
+                // the empty-TLAS control and receiver measurement.
+                f.scene.frame_count = 0;
                 f.frame();
-                let lit = mean(&f.read());
+                let lit_pixels = f.read();
+                let lit = mean(&lit_pixels);
                 receiver_plane(&mut f, z);
+                f.scene.frame_count = 0;
                 f.frame();
-                let receiver = mean(&f.read());
+                let receiver_pixels = f.read();
+                let receiver = mean(&receiver_pixels);
+                for (index, (expected, actual)) in
+                    lit_pixels.iter().zip(&receiver_pixels).enumerate()
+                {
+                    for channel in 0..3 {
+                        assert!((expected[channel]-actual[channel]).abs()<=expected[channel]*0.01+0.0001,
+                            "self-shadowed pixel {index} channel {channel}, distance {distance}, camera {camera:?}: {actual:?}/{expected:?}");
+                    }
+                }
                 eprintln!("camera={camera:?} distance={distance} lit={lit} receiver={receiver}");
                 assert!(
                     (receiver - lit).abs() < lit * 0.01,
@@ -314,6 +328,9 @@ fn perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers
 #[ignore = "explicit RT GPU benchmark; run alone with --ignored --nocapture"]
 fn benchmark_rt_resolution_and_acceleration() {
     pollster::block_on(async {
+        let focus = std::env::var_os("HLFS_RT_PROBE_FOCUS").is_some();
+        let warmup = if focus { 120 } else { 16 };
+        let measured = if focus { 600 } else { 40 };
         for (width, height, scale, candidates) in [
             (2560, 1440, 1, 8),
             (2560, 1440, 2, 8),
@@ -322,6 +339,9 @@ fn benchmark_rt_resolution_and_acceleration() {
             (3840, 2160, 2, 8),
             (3840, 2160, 2, 2),
         ] {
+            if focus && (width != 2560 || scale != 2 || candidates != 8) {
+                continue;
+            }
             let mut f = Fixture::new_rt(width, height).await;
             f.compact_output();
             f.config(HlfsConfig {
@@ -382,7 +402,7 @@ fn benchmark_rt_resolution_and_acceleration() {
                 mapped_at_creation: false,
             });
             let mut rows = Vec::new();
-            for frame in 0..56 {
+            for frame in 0..warmup + measured {
                 let cpu = std::time::Instant::now();
                 let shift = (frame as f32 * 0.1).sin() * 0.05;
                 f.lights(
@@ -452,9 +472,35 @@ fn benchmark_rt_resolution_and_acceleration() {
                 let tlas_ms = (end - start) as f64 * f.queue.get_timestamp_period() as f64 / 1e6;
                 drop(bytes);
                 read.unmap();
-                if frame >= 16 {
+                if frame >= warmup {
                     rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, cpu_ms, stages));
                 }
+            }
+            if let Ok(directory) = std::env::var("HLFS_RT_PROBE_OUTPUT") {
+                std::fs::create_dir_all(&directory).unwrap();
+                let mut csv=String::from("gpu_sum_ms,tlas_ms,hlfs_ms,cpu_submit_ms,coarse_ms,fine_ms,sample_ms,temporal_ms,spatial_ms,composite_ms\n");
+                for row in &rows {
+                    csv.push_str(&format!(
+                        "{},{},{},{},{},{},{},{},{},{}\n",
+                        row.0,
+                        row.1,
+                        row.2,
+                        row.3,
+                        row.4[0],
+                        row.4[1],
+                        row.4[2],
+                        row.4[3],
+                        row.4[4],
+                        row.4[5]
+                    ));
+                }
+                std::fs::write(
+                    std::path::Path::new(&directory).join(format!(
+                        "{width}x{height}-scale{scale}-candidates{candidates}.csv"
+                    )),
+                    csv,
+                )
+                .unwrap();
             }
             let median = |mut values: Vec<f64>| {
                 values.sort_by(f64::total_cmp);
@@ -464,7 +510,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             totals.sort_by(f64::total_cmp);
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
-            eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp=2 candidates={candidates} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[20],totals[38],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+            eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp=2 candidates={candidates} warmup={warmup} measured={measured} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
         }
     });
 }

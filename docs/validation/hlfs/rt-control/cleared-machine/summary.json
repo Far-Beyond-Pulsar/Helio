@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-12",
+  "gpu": "RTX 3060",
+  "backend": "Vulkan",
+  "driver": "616.64",
+  "base_commit": "9f0e63a3",
+  "order": [
+    "a1",
+    "b1",
+    "b2",
+    "a2"
+  ],
+  "output": [
+    2560,
+    1440
+  ],
+  "sample_scale": 2,
+  "spp": 2,
+  "candidates": 8,
+  "moving_lights": 1024,
+  "moving_triangle_instances": 256,
+  "warmup_per_run": 120,
+  "measured_per_run": 600,
+  "cost_scope": "Sum of six HLFS GPU stages plus TLAS rebuild; excludes first BLAS build, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. Serialized synthetic harness; light generation changes every frame invalidate history.",
+  "results": {
+    "a1": {
+      "implementation": "serial",
+      "frames": 600,
+      "median_gpu_ms": 12.640255999999999,
+      "p95_gpu_ms": 14.267392
+    },
+    "b1": {
+      "implementation": "atomic candidate",
+      "frames": 600,
+      "median_gpu_ms": 13.379584000000001,
+      "p95_gpu_ms": 16.142335999999997
+    },
+    "b2": {
+      "implementation": "atomic candidate",
+      "frames": 600,
+      "median_gpu_ms": 11.980800000000002,
+      "p95_gpu_ms": 13.462528
+    },
+    "a2": {
+      "implementation": "serial",
+      "frames": 600,
+      "median_gpu_ms": 14.184448,
+      "p95_gpu_ms": 15.213567999999999
+    },
+    "baseline": {
+      "frames": 1200,
+      "pooled_median_gpu_ms": 13.366271999999999,
+      "pooled_p95_gpu_ms": 14.9248
+    },
+    "candidate": {
+      "frames": 1200,
+      "pooled_median_gpu_ms": 12.436480000000001,
+      "pooled_p95_gpu_ms": 15.361023999999999
+    }
+  },
+  "decision": "Inconclusive improvement because run-to-run ranges overlap; retain serial production path. Neither implementation meets target."
+}
