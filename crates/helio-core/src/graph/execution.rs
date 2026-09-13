@@ -613,33 +613,20 @@ impl RenderGraph {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
     ) -> Result<wgpu::SubmissionIndex> {
-        let frame_resources = libhelio::FrameResources::empty();
         let mut registry = libhelio::ResourceRegistry::empty();
-        self.execute_with_resources(scene, target, depth, &frame_resources, &mut registry)
-    }
-
-    pub fn execute_with_frame_resources(
-        &mut self,
-        scene: &dyn SceneInput,
-        target: &wgpu::TextureView,
-        depth: &wgpu::TextureView,
-        frame_resources: &libhelio::FrameResources<'_>,
-    ) -> Result<wgpu::SubmissionIndex> {
-        let mut registry = libhelio::ResourceRegistry::empty();
-        self.execute_with_resources(scene, target, depth, frame_resources, &mut registry)
+        self.execute_with_resources(scene, target, depth, &mut registry)
     }
 
     /// Records graphs with no fused render chains in dependency-layer order.
     /// Each pass receives private encoders and a private profiler, while
     /// publication back into the frame contract remains deterministic and
     /// occurs on the caller thread after the layer joins.
-    fn execute_parallel_layers<'a, 'b>(
+    fn execute_parallel_layers<'a>(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        visible: &mut libhelio::FrameResources<'a>,
-        registry: &mut libhelio::ResourceRegistry<'b>,
+        visible: &mut libhelio::ResourceRegistry<'a>,
         reflected_groups: &[Vec<wgpu::BindGroup>],
         resized_this_frame: bool,
     ) -> Result<(
@@ -672,11 +659,17 @@ impl RenderGraph {
                     for action in unsafe { &*actions_ptr } {
                         match action {
                             PrePassAction::Route { name, view } => {
-                                visible.route_named_texture(name, view, "Graph");
+                                visible.write_texture_binding(name, view, "Graph");
                             }
                             PrePassAction::Group { name, members } => {
-                                let views: Vec<&wgpu::TextureView> =
-                                    members.iter().map(|(_, view)| view).collect();
+                                let views: Vec<&'a wgpu::TextureView> = unsafe {
+                                    std::mem::transmute::<
+                                        Vec<&wgpu::TextureView>,
+                                        Vec<&'a wgpu::TextureView>,
+                                    >(
+                                        members.iter().map(|(_, view)| view).collect()
+                                    )
+                                };
                                 (&*passes[pass_index]).publish_group(*name, &views, visible);
                             }
                         }
@@ -691,8 +684,7 @@ impl RenderGraph {
                         camera_data: scene.camera_data(),
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
-                        frame_resources: visible,
-                        registry: &*registry,
+                        registry: &*visible,
                         resize: resized_this_frame,
                         width: internal_w,
                         height: internal_h,
@@ -702,8 +694,8 @@ impl RenderGraph {
                 }
             }
 
-            let visible_ref: &libhelio::FrameResources<'_> = &*visible;
-            let registry_ref: &libhelio::ResourceRegistry<'_> = &*registry;
+            let visible_ref: &libhelio::ResourceRegistry<'_> = &*visible;
+            let registry_ref: &libhelio::ResourceRegistry<'_> = &*visible;
             let device = scene.device().clone();
             let queue = scene.queue().clone();
             let camera = scene.camera();
@@ -770,7 +762,6 @@ impl RenderGraph {
                                 width,
                                 height,
                                 device: &worker_device,
-                                resources: visible_ref,
                                 registry: registry_ref,
                                 owns_device,
                                 resource_pool: pool,
@@ -802,7 +793,6 @@ impl RenderGraph {
                                 width,
                                 height,
                                 device: &worker_device,
-                                resources: visible_ref,
                                 registry: registry_ref,
                                 owns_device,
                                 resource_pool: pool,
@@ -854,35 +844,30 @@ impl RenderGraph {
                 cpu_timings.push(cpu_timing);
                 worker_profilers.push(worker_profiler);
                 let pass_ptr = &passes[pass_index] as *const Box<dyn RenderPass>;
-                let frame_ptr: *mut libhelio::FrameResources<'a> =
-                    unsafe { std::mem::transmute(visible as *mut libhelio::FrameResources<'_>) };
                 unsafe {
-                    (&*pass_ptr).publish(&mut *frame_ptr);
-                    (&*pass_ptr).publish_registry(registry);
+                    (&*pass_ptr).publish(visible);
                 }
             }
         }
         Ok((command_buffers, cpu_timings, worker_profilers))
     }
 
-    /// Executes the graph with both the legacy frame-resource shim and the
-    /// phase 3 open resource registry.
+    /// Executes the graph with the open resource registry.
     ///
     /// `registry` is supplied by the host so external inputs can be written
     /// with typed [`libhelio::ResourceKey`] values before execution. Existing
-    /// passes continue to see `frame_resources` unchanged.
-    pub fn execute_with_resources(
+    pub fn execute_with_resources<'a>(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        frame_resources: &libhelio::FrameResources<'_>,
-        registry: &mut libhelio::ResourceRegistry<'_>,
+        registry: &mut libhelio::ResourceRegistry<'a>,
     ) -> Result<wgpu::SubmissionIndex> {
         assert!(
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
         );
+        registry.clear_graph_bindings();
 
         // External device owners drive wgpu polling. Consume callbacks from
         // that host cadence before reserving a bounded readback slot for this
@@ -928,7 +913,6 @@ impl RenderGraph {
         // buffers; per-pass markers on compute alone omit all graphics work.
         self.profiler
             .begin_gpu_pass(&mut compute_encoder, "__graph_frame");
-        let mut visible_frame_resources = *frame_resources;
         registry.reset_tracking("RenderGraph");
         let reflected_groups: Vec<Vec<wgpu::BindGroup>> = self
             .passes
@@ -947,7 +931,6 @@ impl RenderGraph {
                     scene,
                     target,
                     depth,
-                    &mut visible_frame_resources,
                     registry,
                     &reflected_groups,
                     resized_this_frame,
@@ -969,12 +952,9 @@ impl RenderGraph {
                     self.profiler
                         .begin_gpu_pass(&mut compute_encoder, pass_name);
 
-                    if let Some(desc) = pass.render_pass_descriptor_with_pool(
-                        target,
-                        depth,
-                        &visible_frame_resources,
-                        &self.pool,
-                    ) {
+                    if let Some(desc) =
+                        pass.render_pass_descriptor_with_pool(target, depth, registry, &self.pool)
+                    {
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
                         pass_encoder.execute_bundles(std::iter::once(bundle));
                     } else {
@@ -992,7 +972,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &visible_frame_resources,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1012,8 +991,7 @@ impl RenderGraph {
                     }
 
                     self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
-                    pass.publish(&mut visible_frame_resources);
-                    pass.publish_registry(registry);
+                    pass.publish(registry);
                     continue;
                 }
 
@@ -1028,7 +1006,6 @@ impl RenderGraph {
                         camera_data: scene.camera_data(),
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
-                        frame_resources: &visible_frame_resources,
                         registry: &*registry,
                         resize: resized_this_frame,
                         width: self.internal_w,
@@ -1038,12 +1015,12 @@ impl RenderGraph {
                     pass.prepare(&prepare_ctx)?;
                 }
 
-                // Populate graph-owned output textures into FrameResources BEFORE execute().
+                // Populate graph-owned output resources BEFORE execute().
                 if let Some(actions) = self.pre_pass_actions.get(pass_index) {
                     for action in actions {
                         match action {
                             PrePassAction::Route { name, view } => {
-                                visible_frame_resources.route_named_texture(name, view, "Graph");
+                                registry.write_texture_binding(name, view, "Graph");
                             }
                             PrePassAction::Group { name, members } => {
                                 // Generic: the core resolves a `write_group`'s
@@ -1052,10 +1029,15 @@ impl RenderGraph {
                                 // pass, since `Group` actions are always stored
                                 // at their group's first-write pass index) knows
                                 // how to publish them into its own bespoke
-                                // `FrameResources` field (e.g. `.gbuffer`).
-                                let views: Vec<&wgpu::TextureView> =
-                                    members.iter().map(|(_, v)| v).collect();
-                                pass.publish_group(*name, &views, &mut visible_frame_resources);
+                                let views: Vec<&'a wgpu::TextureView> = unsafe {
+                                    std::mem::transmute::<
+                                        Vec<&wgpu::TextureView>,
+                                        Vec<&'a wgpu::TextureView>,
+                                    >(
+                                        members.iter().map(|(_, v)| v).collect()
+                                    )
+                                };
+                                pass.publish_group(*name, &views, registry);
                             }
                         }
                     }
@@ -1067,12 +1049,9 @@ impl RenderGraph {
                     .begin_gpu_pass(&mut compute_encoder, pass_name);
 
                 // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
-                if let Some(desc) = pass.render_pass_descriptor_with_pool(
-                    target,
-                    depth,
-                    &visible_frame_resources,
-                    &self.pool,
-                ) {
+                if let Some(desc) =
+                    pass.render_pass_descriptor_with_pool(target, depth, registry, &self.pool)
+                {
                     let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
                     let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
 
@@ -1129,7 +1108,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &visible_frame_resources,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1211,7 +1189,6 @@ impl RenderGraph {
                                 width: self.internal_w,
                                 height: self.internal_h,
                                 device: scene.device(),
-                                resources: &visible_frame_resources,
                                 registry: &*registry,
                                 owns_device: self.owns_device,
                                 resource_pool: &self.pool,
@@ -1259,7 +1236,6 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         device: scene.device(),
-                        resources: &visible_frame_resources,
                         registry: &*registry,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
@@ -1280,8 +1256,7 @@ impl RenderGraph {
 
                 self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
 
-                pass.publish(&mut visible_frame_resources);
-                pass.publish_registry(registry);
+                pass.publish(registry);
             }
         }
 
@@ -1322,6 +1297,7 @@ impl RenderGraph {
 
         self.frame_count += 1;
         self.resize_pending = false;
+        registry.clear_graph_bindings();
 
         Ok(submission_index)
     }
@@ -1399,13 +1375,13 @@ impl RenderGraph {
 
         self.prepare_pipeline_registries();
 
-        // Build a "canon" `FrameResources` for the attachment probe below by
+        // Build a canonical transient registry for the attachment probe below by
         // replaying the exact same pre-pass routing the real per-frame loop
-        // performs (see `execute_with_frame_resources`), generically: plain
-        // named routes via `route_named_texture`, and any `write_group`
-        // bundle via the owning pass's `publish_group` — core never
+        // performs during execution, generically: plain named routes via the
+        // registry's binding projection, and any `write_group` bundle via the
+        // owning pass's `publish_group` — core never
         // special-cases a specific group's name here.
-        let mut canon = libhelio::FrameResources::empty();
+        let mut canon = libhelio::ResourceRegistry::empty();
         for (pi, actions) in self.pre_pass_actions.iter().enumerate() {
             let Some(pass) = self.passes.get(pi) else {
                 continue;
@@ -1413,7 +1389,7 @@ impl RenderGraph {
             for action in actions {
                 match action {
                     PrePassAction::Route { name, view } => {
-                        canon.route_named_texture(name, view, "Graph");
+                        canon.write_texture_binding(name, view, "Graph");
                     }
                     PrePassAction::Group { name, members } => {
                         let views: Vec<&wgpu::TextureView> =
@@ -1492,6 +1468,7 @@ impl RenderGraph {
             .iter()
             .map(|p| p.as_ref().map(|(_, sig)| sig.clone()))
             .collect();
+        drop(canon);
 
         // Phase 2: detect chains and compute chain_local BEFORE final allocation.
         // Save previous membership so incremental bundle rebuild can find
@@ -1658,7 +1635,7 @@ impl RenderGraph {
     /// Rebuild all GPU render bundles from scratch.
     fn rebuild_gpu_render_bundles(&mut self) {
         self.gpu_render_bundles.clear();
-        let mut base = libhelio::FrameResources::empty();
+        let mut base = libhelio::ResourceRegistry::empty();
         for pass in &mut self.passes {
             let bundle = pass.build_gpu_render_bundle(&self.device, &base);
             self.gpu_render_bundles.push(bundle);
@@ -1708,7 +1685,7 @@ impl RenderGraph {
         // Rebuild from `start` to end.  Passes before `start` keep
         // their existing bundles.  Rebuild the cumulative base from
         // the surviving prefix.
-        let mut base = libhelio::FrameResources::empty();
+        let mut base = libhelio::ResourceRegistry::empty();
         let (prefix, suffix) = self.passes.split_at_mut(start);
         for pass in prefix.iter_mut() {
             pass.publish(&mut base);
