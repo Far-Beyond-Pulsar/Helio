@@ -26,10 +26,11 @@ impl RenderPass for InternalAttachmentPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        registry: &'a libhelio::ResourceRegistry<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa = registry
-            .texture_binding("pre_aa")
+        let pre_aa = resources
+            .pre_aa
+            .read(self.name())
             .expect("graph must route its resized internal color attachment");
         let color_attachments = Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
             view: pre_aa,
@@ -71,7 +72,7 @@ impl RenderPass for ResizeProbePass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _registry: &'a libhelio::ResourceRegistry<'a>,
+        _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

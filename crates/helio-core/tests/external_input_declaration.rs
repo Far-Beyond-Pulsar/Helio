@@ -32,7 +32,7 @@ impl RenderPass for OrphanReadPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _registry: &'a libhelio::ResourceRegistry<'a>,
+        _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

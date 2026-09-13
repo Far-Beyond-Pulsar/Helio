@@ -42,7 +42,7 @@ impl RenderPass for IndependentProbe {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _registry: &'a libhelio::ResourceRegistry<'a>,
+        _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -53,14 +53,11 @@ impl RenderPass for IndependentProbe {
         // uses an empty projection, proving that test fixtures do not reopen
         // an Option-based legacy scene-input path.
         let _ = ctx.scene_buffers;
-        self.observation
-            .lock()
-            .unwrap()
-            .received_scene_db_projection[self.slot] = true;
+        self.observation.lock().unwrap().received_scene_db_projection[self.slot] = true;
         Ok(())
     }
 
-    fn publish(&self, _registry: &mut libhelio::ResourceRegistry<'_>) {
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
         self.observation.lock().unwrap().published[self.slot] = true;
     }
 }
@@ -88,9 +85,9 @@ fn independent_passes_are_order_independent_for_output_and_publication() {
         let forward = run_order(&device, &queue, [0, 1]);
         let reverse = run_order(&device, &queue, [1, 0]);
         assert_eq!(forward, reverse);
-        assert_eq!(forward.output, [true, true]);
-        assert_eq!(forward.published, [true, true]);
-        assert_eq!(forward.received_scene_db_projection, [true, true]);
+    assert_eq!(forward.output, [true, true]);
+    assert_eq!(forward.published, [true, true]);
+    assert_eq!(forward.received_scene_db_projection, [true, true]);
     });
 }
 

@@ -11,7 +11,7 @@ pub(crate) struct CachedPass {
     pub(crate) chain_range: std::ops::Range<usize>,
 }
 
-/// An action to perform on the transient resource registry before a pass executes.
+/// An action to perform on FrameResources before a pass executes.
 #[derive(Clone)]
 pub(crate) enum PrePassAction {
     Route {

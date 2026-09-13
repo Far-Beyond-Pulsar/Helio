@@ -1,14 +1,13 @@
-//! Per-frame resource data shapes.
+//! Per-frame transient resource views.
 //!
-//! `ResourceRegistry` is the open transient-resource contract threaded through
-//! `helio-core` pass contexts. `FrameResources` remains as a data-shape bundle
-//! for crates that have not yet completed the SceneDB migration; it is not
-//! consumed by the production graph executor.
+//! `FrameResources` holds borrowed references to the transient textures that the
+//! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
+//! passes can read outputs of earlier passes without any allocation or locking.
 
 use crate::material::GpuMaterial;
 use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Per-frame billboard instance data, provided by the high-level `Renderer`.
 ///
@@ -274,7 +273,6 @@ impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
 pub struct ResourceRegistry<'a> {
     slots: HashMap<&'static str, Box<dyn ErasedResourceSlot + 'a>>,
     bindings: HashMap<String, wgpu::BindingResource<'a>>,
-    graph_bindings: HashSet<String>,
 }
 
 impl<'a> ResourceRegistry<'a> {
@@ -283,7 +281,6 @@ impl<'a> ResourceRegistry<'a> {
         Self {
             slots: HashMap::new(),
             bindings: HashMap::new(),
-            graph_bindings: HashSet::new(),
         }
     }
 
@@ -297,51 +294,9 @@ impl<'a> ResourceRegistry<'a> {
         self.bindings.insert(name.into(), resource);
     }
 
-    /// Publishes a graph-owned texture view into the reflected-binding
-    /// projection.
-    ///
-    /// The graph stores these views in its `PrePassAction`s for at least the
-    /// duration of the execution call. The lifetime extension is therefore
-    /// confined to the frame registry's binding map; callers must not retain
-    /// a graph-generated binding after the graph has been rebuilt or dropped.
-    pub fn write_texture_binding(
-        &mut self,
-        name: impl Into<String>,
-        view: &wgpu::TextureView,
-        writer: &'static str,
-    ) {
-        let resource = wgpu::BindingResource::TextureView(view);
-        // SAFETY: graph-owned views are held by the graph's pre-pass action
-        // list for the entire execution call. The binding is consumed during
-        // that call by reflected bind-group creation.
-        let name = name.into();
-        let resource = unsafe {
-            std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(resource)
-        };
-        self.write_binding(name.clone(), resource, writer);
-        self.graph_bindings.insert(name);
-    }
-
     /// Returns a reflected-binding resource by its shader/resource name.
     pub fn binding(&self, name: &str) -> Option<wgpu::BindingResource<'a>> {
         self.bindings.get(name).cloned()
-    }
-
-    /// Returns a graph-routed texture view by name.
-    pub fn texture_binding(&self, name: &str) -> Option<&'a wgpu::TextureView> {
-        match self.bindings.get(name)? {
-            wgpu::BindingResource::TextureView(view) => Some(*view),
-            _ => None,
-        }
-    }
-
-    /// Removes graph-generated binding views before the next frame or graph
-    /// execution. Host-owned bindings written with [`Self::write_binding`]
-    /// are preserved.
-    pub fn clear_graph_bindings(&mut self) {
-        for name in self.graph_bindings.drain() {
-            self.bindings.remove(&name);
-        }
     }
 
     /// Writes a value and records its writer in debug builds.
@@ -1111,6 +1066,135 @@ impl<'a> FrameResources<'a> {
             hlfs_globals: None,
             pre_dof: Tracked::empty(),
             post_dof: Tracked::empty(),
+        }
+    }
+
+    /// Routes a graph-owned texture into the legacy compatibility view.
+    ///
+    /// This compatibility-only adapter derives names from the legacy field
+    /// identifiers so the graph executor has no pass/resource-name table of
+    /// its own. New code should publish through [`ResourceRegistry`].
+    pub fn route_named_texture(
+        &mut self,
+        name: &str,
+        view: &'a wgpu::TextureView,
+        writer: &'static str,
+    ) -> bool {
+        macro_rules! route_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if name == stringify!($field) {
+                        self.$field.write(view, writer);
+                        return true;
+                    }
+                )+
+            };
+        }
+
+        route_fields!(
+            pre_aa,
+            ssao,
+            fog_accum,
+            hiz,
+            sky_lut,
+            gbuffer_lightmap_uv,
+            gbuffer_sss,
+            gbuffer_extra,
+            gbuffer_velocity,
+            water_sim_texture,
+            water_caustics,
+            shadow_atlas,
+            static_shadow_atlas,
+            ssr_trace,
+            planar_reflection,
+            ies_textures,
+        );
+        if name == stringify!(rc_cascades) {
+            self.rc_view.write(view, writer);
+            return true;
+        }
+        false
+    }
+
+    /// Resets debug tracking markers so that fields written in a previous
+    /// frame don't satisfy the "was written this frame" check.
+    ///
+    /// Fields that have a value are re-marked with the given `_writer` name
+    /// (e.g. `"Renderer"`).  In release builds this is a no-op.
+    pub fn reset_tracking(&mut self, _writer: &'static str) {
+        #[cfg(debug_assertions)]
+        {
+            macro_rules! reset_field {
+                ($field:ident) => {
+                    if self.$field.value.is_some() {
+                        self.$field.written_by = Some(_writer);
+                    } else {
+                        self.$field.written_by = None;
+                    }
+                };
+            }
+            reset_field!(gbuffer);
+            reset_field!(gbuffer_lightmap_uv);
+            reset_field!(gbuffer_sss);
+            reset_field!(gbuffer_extra);
+            reset_field!(gbuffer_velocity);
+            reset_field!(shadow_atlas);
+            reset_field!(static_shadow_atlas);
+            reset_field!(shadow_sampler);
+            reset_field!(hiz);
+            reset_field!(hiz_sampler);
+            reset_field!(static_hiz);
+            reset_field!(static_hiz_sampler);
+            reset_field!(sky_lut);
+            reset_field!(sky_lut_sampler);
+            reset_field!(ssao);
+            reset_field!(pre_aa);
+            reset_field!(tile_light_lists);
+            reset_field!(tile_light_counts);
+            reset_field!(full_res_depth);
+            reset_field!(full_res_depth_texture);
+            reset_field!(main_scene);
+            reset_field!(billboards);
+            reset_field!(vg);
+            reset_field!(water_caustics);
+            reset_field!(water_sim_texture);
+            reset_field!(water_sim_sampler);
+            // `foliage_interactor_count` is a plain u32, not a `Tracked` slot, so it gets
+            // no line here.
+            reset_field!(foliage);
+            reset_field!(foliage_terrain);
+            reset_field!(foliage_interaction);
+            reset_field!(foliage_interaction_sampler);
+            reset_field!(foliage_interactors);
+            reset_field!(depth_texture);
+            reset_field!(depth_sampler_view);
+            reset_field!(rc_view);
+            reset_field!(baked_ao);
+            reset_field!(baked_ao_sampler);
+            reset_field!(baked_lightmap);
+            reset_field!(baked_lightmap_sampler);
+            reset_field!(baked_reflection);
+            reset_field!(baked_reflection_sampler);
+            reset_field!(baked_irradiance_sh);
+            reset_field!(baked_pvs);
+            reset_field!(cluster_light_grid);
+            reset_field!(object_batch);
+            reset_field!(lights);
+            reset_field!(materials);
+            reset_field!(shadow_matrices);
+            reset_field!(coordinate_spaces);
+            reset_field!(portals);
+            reset_field!(voxels);
+            reset_field!(indirect_dispatch);
+            reset_field!(culled_batch);
+            reset_field!(corona_emitters);
+            reset_field!(postprocess_uniforms);
+            reset_field!(color_grading_lut);
+            reset_field!(ies_textures);
+            reset_field!(reflection_captures);
+            reset_field!(ssr_trace);
+            reset_field!(planar_reflection);
+            reset_field!(planar_reflection_sampler);
         }
     }
 }

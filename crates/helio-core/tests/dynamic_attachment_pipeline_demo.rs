@@ -120,12 +120,12 @@ impl RenderPass for DemoPass {
 
     // Required by the trait, but this pass only ever resolves attachments
     // through the pool-aware path below — so the legacy 3-arg path (which
-    // can't see named transients outside the registry) has nothing to do.
+    // can't see named transients outside `FrameResources`) has nothing to do.
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _registry: &'a libhelio::ResourceRegistry<'a>,
+        _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -137,7 +137,7 @@ impl RenderPass for DemoPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _registry: &'a libhelio::ResourceRegistry<'a>,
+        _resources: &'a libhelio::FrameResources<'a>,
         pool: &'a GraphTexturePool,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let intent = ColorAttachmentIntent::new(

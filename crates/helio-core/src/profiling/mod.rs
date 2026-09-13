@@ -51,7 +51,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::ResourceRegistry<'a>,
+//!         _: &'a helio_core::FrameResources<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
