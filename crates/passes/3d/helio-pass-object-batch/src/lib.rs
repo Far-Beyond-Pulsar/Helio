@@ -1087,7 +1087,7 @@ impl RenderPass for ObjectBatchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None // Compute-only pass -- no render pass.
     }
@@ -1100,7 +1100,7 @@ impl RenderPass for ObjectBatchPass {
         builder.write_buffer("object_batch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         let (draw_count, shadow_static_draw_count, shadow_movable_draw_count) = self.counts();
         frame.object_batch.write(
             libhelio::ObjectBatchFrameData {
@@ -1147,7 +1147,7 @@ impl RenderPass for ObjectBatchPass {
             .map(|h| h.buffer.clone())
             .unwrap_or_else(|| self.fallback_buf.clone());
         let materials_buf = ctx
-            .frame_resources
+            .pass_resources
             .materials
             .get()
             .map(|m| m.materials)

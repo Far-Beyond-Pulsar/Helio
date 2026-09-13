@@ -86,7 +86,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             device: &device,
             queue: &queue,
             scene: scene_resources,
-            frame_resources: &libhelio::FrameResources::empty(),
+            pass_resources: &libhelio::PassResources::empty(),
             width: size[0],
             height: size[1],
             frame_num: frame,

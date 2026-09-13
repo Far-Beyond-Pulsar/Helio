@@ -456,7 +456,7 @@ impl Renderer {
     /// Renderer-internal access to frame-derived scene state. This is not
     /// exported from the crate and must never be used as an application scene
     /// mutation API; persistent entity data belongs to the frontend SceneDB.
-    pub(crate) fn transient_scene_mut(&mut self) -> &mut Scene {
+    pub(crate) fn scene_mut(&mut self) -> &mut Scene {
         &mut self.scene
     }
 
@@ -563,57 +563,6 @@ impl Renderer {
         material: crate::material::MaterialAsset,
     ) -> crate::scene::Result<MaterialId> {
         self.scene.insert_material_asset(material)
-    }
-
-    /// **Temporary, explicitly tracked compatibility path.** Place a
-    /// static-mesh instance (a draw call referencing an already uploaded
-    /// mesh/material asset, at a transform) into the renderer's presentation
-    /// state.
-    ///
-    /// The object's *existence* — the fact that this entity is placed in the
-    /// world at all — belongs in a `helio_pass_gbuffer::StaticObjectComponent`
-    /// SceneDB row, not here (a caller should insert one alongside every
-    /// call to this method; see that component's doc). This method exists
-    /// only because the GPU-driven pipeline that would let `GBufferPass`/
-    /// `IndirectDispatchPass` read `StaticObjectComponent`'s buffer directly
-    /// — sorting/grouping instances by `(material_class, graph_hash, mesh,
-    /// material)` into batched indirect draws, entirely on GPU — is
-    /// specified but not yet implemented (see the Helio issue tracking it).
-    /// Until it lands, something has to feed `ctx.scene.instances`/
-    /// `draw_calls`, and this is that something. Remove this method (and its
-    /// two siblings below) as part of implementing that pipeline, not before.
-    pub fn place_static_object(
-        &mut self,
-        descriptor: crate::scene::ObjectDescriptor,
-    ) -> crate::scene::Result<crate::handles::ObjectId> {
-        self.scene.insert_object(descriptor)
-    }
-
-    /// Update a previously placed static-mesh instance's transform.
-    ///
-    /// **Temporary, explicitly tracked compatibility path** — see
-    /// [`Self::place_static_object`]'s doc; this is one of the "two siblings"
-    /// referenced there. A caller should also update its own
-    /// `StaticObjectComponent` row (`with_transform`) alongside this call.
-    pub fn update_static_object_transform(
-        &mut self,
-        id: crate::handles::ObjectId,
-        transform: glam::Mat4,
-    ) -> crate::scene::Result<()> {
-        self.scene.update_object_transform(id, transform)
-    }
-
-    /// Remove a previously placed static-mesh instance.
-    ///
-    /// **Temporary, explicitly tracked compatibility path** — see
-    /// [`Self::place_static_object`]'s doc; this is the other of the "two
-    /// siblings" referenced there. A caller should also despawn its own
-    /// `StaticObjectComponent` row alongside this call.
-    pub fn remove_static_object(
-        &mut self,
-        id: crate::handles::ObjectId,
-    ) -> crate::scene::Result<()> {
-        self.scene.remove_object(id)
     }
 
     /// Release a previously created material asset/projection slot.

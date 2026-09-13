@@ -35,7 +35,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let basalt_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.08, 0.07, 0.07, 1.0],
                 0.95,
@@ -44,7 +44,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let rock_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.14, 0.10, 0.09, 1.0],
                 0.9,
@@ -53,7 +53,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let lava_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.2, 0.05, 0.01, 1.0],
                 1.0,
@@ -62,7 +62,7 @@ impl HelioWasmApp for Demo {
                 12.0,
             ));
         let lava_hot_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.3, 0.1, 0.02, 1.0],
                 1.0,
@@ -71,7 +71,7 @@ impl HelioWasmApp for Demo {
                 20.0,
             ));
         let ash_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.22, 0.20, 0.18, 1.0],
                 0.99,
@@ -82,7 +82,7 @@ impl HelioWasmApp for Demo {
 
         // Lava plain (ground)
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 80.0)));
         insert_object(renderer, ground, basalt_m, glam::Mat4::IDENTITY, 80.0).unwrap();
 
@@ -99,14 +99,14 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, size) in rim_segs {
             let m = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(*pos, *size)));
             insert_object(renderer, m, rock_m, glam::Mat4::IDENTITY, size[1]).unwrap();
         }
 
         // Lava lake (inside crater)
         let lava_lake = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.3, 0.0],
                 [14.0, 0.3, 14.0],
@@ -126,7 +126,7 @@ impl HelioWasmApp for Demo {
         ];
         for &pos in vent_positions {
             let v = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, [1.5, 0.15, 1.5])));
             insert_object(renderer, v, lava_hot_m, glam::Mat4::IDENTITY, 1.5).unwrap();
         }
@@ -140,7 +140,7 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, size) in flow_data {
             let f = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(*pos, *size)));
             insert_object(
                 renderer,
@@ -161,7 +161,7 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, size) in ash_dunes {
             let d = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(*pos, *size)));
             insert_object(
                 renderer,
@@ -177,7 +177,7 @@ impl HelioWasmApp for Demo {
         let mut lava_lights = Vec::new();
         for &pos in vent_positions {
             let id = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [pos[0], pos[1] + 0.5, pos[2]],
                     [1.0, 0.3, 0.02],
@@ -190,7 +190,7 @@ impl HelioWasmApp for Demo {
         }
         // Central lava lake glow
         let central = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 2.0, 0.0],
                 [1.0, 0.2, 0.0],
@@ -203,7 +203,7 @@ impl HelioWasmApp for Demo {
         // Flow lights
         for (pos, _) in flow_data {
             let id = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     *pos,
                     [1.0, 0.25, 0.01],
@@ -218,7 +218,7 @@ impl HelioWasmApp for Demo {
         // Night sky with red-orange glow from below
         let moon = Vec3::new(0.3, -0.9, 0.4).normalize();
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [moon.x, moon.y, moon.z],
                 [0.25, 0.3, 0.5],
@@ -282,7 +282,7 @@ impl HelioWasmApp for Demo {
         ];
         for (i, (id, &pos)) in self.lava_lights[..8].iter().zip(vent_positions).enumerate() {
             let f = 1.0 + (elapsed * (3.0 + i as f32 * 0.4) + i as f32).sin() * 0.2;
-            let _ = renderer.scene_for_legacy_mut().update_light(
+            let _ = renderer.scene().update_light(
                 *id,
                 point_light(
                     [pos[0], pos[1] + 0.5, pos[2]],
@@ -294,7 +294,7 @@ impl HelioWasmApp for Demo {
         }
         // Central glow pulse
         let f_c = 1.0 + (elapsed * 0.8).sin() * 0.1;
-        let _ = renderer.scene_for_legacy_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.lava_lights[8],
             point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0 * f_c, 40.0),
         );

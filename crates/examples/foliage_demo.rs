@@ -491,7 +491,7 @@ impl ApplicationHandler for App {
         // colour target each frame, so its absence is what made geometry smear over itself.
         // See `Renderer::rebuild_graph_if_sky_changed`.
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::sky(
                 helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
             ));
@@ -502,7 +502,7 @@ impl ApplicationHandler for App {
         // back to a plane at y=0. This mesh is what that fallback is pretending to be, so
         // the two agree and the grass sits on the ground rather than floating.
         let ground_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.16, 0.22, 0.10, 1.0],
                 0.95,
@@ -511,7 +511,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let ground_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh(
                 [0.0, 0.0, 0.0],
                 FIELD_HALF_EXTENT,
@@ -527,7 +527,7 @@ impl ApplicationHandler for App {
         // One object always being submitted costs a single draw; the alternative is a
         // whole-screen artefact.
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
                 mesh: ground_mesh,
                 material: ground_mat,
@@ -542,7 +542,7 @@ impl ApplicationHandler for App {
         // A visible marker for the roaming interactor, so the grass displacement has
         // something obviously attached to it.
         let marker_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.8, 0.2, 0.15, 1.0],
                 0.4,
@@ -551,7 +551,7 @@ impl ApplicationHandler for App {
                 2.0,
             ));
         let marker_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.6)))
             .as_mesh()
             .unwrap();
@@ -566,7 +566,7 @@ impl ApplicationHandler for App {
 
         // ── Foliage ──────────────────────────────────────────────────────────
         let grass_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.28, 0.46, 0.14, 1.0],
                 0.85,
@@ -576,7 +576,7 @@ impl ApplicationHandler for App {
             ));
 
         let grass = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .add_foliage_type(FoliageTypeDescriptor {
                 density: blades_per_m2,
                 height_range: [0.18, 0.5],
@@ -596,7 +596,7 @@ impl ApplicationHandler for App {
             });
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .add_foliage_layer(FoliageLayer {
                 types: vec![grass],
                 bounds: [
@@ -608,7 +608,7 @@ impl ApplicationHandler for App {
             });
 
         let wind_speed = 2.0;
-        renderer.scene_for_legacy_mut().set_wind(Wind {
+        renderer.scene().set_wind(Wind {
             direction: glam::Vec3::new(1.0, 0.0, 0.35).normalize(),
             speed: wind_speed,
             gust_amplitude: 0.6,
@@ -619,7 +619,7 @@ impl ApplicationHandler for App {
 
         let interactor_id =
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .add_foliage_interactor(FoliageInteractor {
                     position: glam::Vec3::ZERO,
                     radius: 1.2,
@@ -628,14 +628,14 @@ impl ApplicationHandler for App {
 
         // ── Lighting ─────────────────────────────────────────────────────────
         let sun_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_light(directional_light(
                 [-0.35, -0.8, -0.5],
                 [1.0, 0.96, 0.88],
                 3.0,
             ));
 
-        renderer.scene_for_legacy_mut().flush();
+        renderer.scene().flush();
 
         let state = AppState {
             window,
@@ -825,7 +825,7 @@ impl AppState {
         // ── Drive the foliage frame state ────────────────────────────────────
         // Three O(1) calls. Nothing here scales with the number of blades on screen —
         // that is the whole claim the design makes, and this loop is what it looks like.
-        let scene = self.renderer.scene_for_legacy_mut();
+        let scene = self.renderer.scene();
 
         let mut wind = scene.wind();
         wind.speed = self.wind_speed;

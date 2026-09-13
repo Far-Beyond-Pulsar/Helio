@@ -187,7 +187,7 @@ impl Fixture {
     }
     pub fn frame(&mut self) {
         self.scene.flush();
-        let mut resources = libhelio::FrameResources::empty();
+        let mut resources = libhelio::PassResources::empty();
         resources.gbuffer.write(
             libhelio::GBufferViews {
                 albedo: &self.views[0],
@@ -202,7 +202,7 @@ impl Fixture {
             resources.shadow_atlas.write(shadow, "Fixture");
         }
         self.graph
-            .execute_with_frame_resources(&self.scene, &self.target, &self.depth, &resources)
+            .execute_with_pass_resources(&self.scene, &self.target, &self.depth, &resources)
             .unwrap();
         self.scene.frame_count += 1;
     }
@@ -530,7 +530,7 @@ impl helio_core::RenderPass for Timestamp {
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::FrameResources<'a>,
+        _: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

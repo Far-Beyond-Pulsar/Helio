@@ -893,10 +893,10 @@ impl RenderPass for DeferredLightPass {
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let main_scene_opt = ctx.frame_resources.main_scene.get();
+        let main_scene_opt = ctx.pass_resources.main_scene.get();
         let main_scene = main_scene_opt.as_ref();
         let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
             (main_scene.ambient_color, main_scene.ambient_intensity)
@@ -913,13 +913,13 @@ impl RenderPass for DeferredLightPass {
         // (set unconditionally by the renderer's GiConfig default), regardless
         // of whether this pipeline actually runs HLFS. Only the presence of a
         // real rc_view texture tells us whether there's anything to sample.
-        let has_rc_gi = ctx.frame_resources.rc_view.get().is_some();
+        let has_rc_gi = ctx.pass_resources.rc_view.get().is_some();
 
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
             light_count: ctx
-                .frame_resources
+                .pass_resources
                 .lights
                 .get()
                 .map(|l| l.movable_light_count)
@@ -957,7 +957,7 @@ impl RenderPass for DeferredLightPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("DeferredLight")?;
         let load_op = if resources.sky_lut.is_some() {

@@ -36,7 +36,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.7,
@@ -46,16 +46,16 @@ impl HelioWasmApp for Demo {
             ));
 
         let cube1 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
         let cube2 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
         let cube3 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
@@ -64,7 +64,7 @@ impl HelioWasmApp for Demo {
         let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let light_p0 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 2.2, 0.0],
                 [1.0, 0.55, 0.15],
@@ -74,7 +74,7 @@ impl HelioWasmApp for Demo {
             .as_light()
             .expect("insert_entity returned non-Light for light actor");
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-3.5, 2.0, -1.5],
                 [0.25, 0.5, 1.0],
@@ -82,7 +82,7 @@ impl HelioWasmApp for Demo {
                 6.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [3.5, 1.5, 1.5],
                 [1.0, 0.3, 0.5],
@@ -140,7 +140,7 @@ impl HelioWasmApp for Demo {
         // Animate light p0
         let p0 = [0.0_f32, 2.2 + (elapsed * 0.7).sin() * 0.3, 0.0];
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
 
         Camera::perspective_look_at(

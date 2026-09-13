@@ -13,7 +13,9 @@ pub struct SceneBufferProjection {
 }
 
 impl SceneBufferProjection {
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     pub fn from_store(store: &SceneGpuStore, keys: impl IntoIterator<Item = BufferKey>) -> Self {
         let entries = keys
@@ -30,10 +32,15 @@ impl SceneBufferProjection {
     }
 
     pub fn get(&self, key: BufferKey) -> Option<&BufferHandle> {
-        self.entries.iter().find(|(candidate, _)| *candidate == key).map(|(_, buffer)| buffer)
+        self.entries
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, buffer)| buffer)
     }
 
-    pub fn contains(&self, key: BufferKey) -> bool { self.get(key).is_some() }
+    pub fn contains(&self, key: BufferKey) -> bool {
+        self.get(key).is_some()
+    }
 }
 
 /// Borrowed GPU scene input consumed by [`crate::RenderGraph`].

@@ -165,7 +165,7 @@ impl RenderPass for PortalEditorOverlayPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always structurally participates in the pre_aa fusion chain,
         // regardless of `editor_mode` — that flag is runtime, mutable state,
@@ -204,7 +204,7 @@ impl RenderPass for PortalEditorOverlayPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.portal_count = ctx
-            .frame_resources
+            .pass_resources
             .portals
             .get()
             .map(|p| p.portal_view_count)

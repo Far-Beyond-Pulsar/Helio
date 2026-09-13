@@ -177,7 +177,7 @@ impl ApplicationHandler for App {
         );
 
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.72, 0.72, 0.75, 1.0],
                 0.8,
@@ -188,7 +188,7 @@ impl ApplicationHandler for App {
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 0.02, 18.0],
@@ -196,7 +196,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 0.02, 18.0],
@@ -204,7 +204,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_l = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, 1.5, 18.0],
@@ -212,7 +212,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_r = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.02, 1.5, 18.0],
@@ -220,7 +220,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_far = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 1.5, 0.02],
@@ -228,7 +228,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_near = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 1.5, 0.02],
@@ -236,7 +236,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let sconce_l = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.12, 0.08, 0.25],
@@ -244,7 +244,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let sconce_r = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.12, 0.08, 0.25],
@@ -308,7 +308,7 @@ impl ApplicationHandler for App {
         for &z in &[-14.0f32, -7.0, 0.0, 7.0, 14.0] {
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         [0.0, 2.88, z],
                         [0.0, -1.0, 0.0],
@@ -324,7 +324,7 @@ impl ApplicationHandler for App {
         }
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 2.4, 17.5],
                     [1.0, 0.08, 0.08],
@@ -336,7 +336,7 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 2.4, -17.5],
                     [1.0, 0.08, 0.08],
@@ -348,7 +348,7 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [-1.7, 1.85, 0.0],
                     [1.0, 0.65, 0.3],
@@ -360,7 +360,7 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [1.7, 1.85, 0.0],
                     [1.0, 0.65, 0.3],

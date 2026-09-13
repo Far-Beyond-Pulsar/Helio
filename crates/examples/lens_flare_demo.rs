@@ -178,7 +178,7 @@ impl ApplicationHandler for App {
 
         // ── Scene objects ──────────────────────────────────────────────────────
         let mat_wall = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.6, 0.58, 0.55, 1.0],
                 0.7,
@@ -187,7 +187,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.3, 0.28, 0.25, 1.0],
                 0.4,
@@ -197,7 +197,7 @@ impl ApplicationHandler for App {
             ));
         // Ground plane
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, -0.5, 0.0], 6.0)))
             .as_mesh()
             .unwrap();
@@ -211,7 +211,7 @@ impl ApplicationHandler for App {
 
         // Back wall — catches the light
         let back_wall = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.5, -5.0],
                 [6.0, 3.0, 0.1],
@@ -229,7 +229,7 @@ impl ApplicationHandler for App {
         // Some pillars / columns to create depth
         for (x, z) in &[(-2.5, -2.0), (2.5, -2.0), (-2.5, 2.0), (2.5, 2.0)] {
             let pillar = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [*x, 0.5, *z],
                     [0.3, 1.5, 0.3],
@@ -249,7 +249,7 @@ impl ApplicationHandler for App {
         // Bright directional light shining toward the scene from above-right-front
         let sun_dir = glam::Vec3::new(-0.4, -0.6, 0.7).normalize();
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
@@ -279,7 +279,7 @@ impl ApplicationHandler for App {
         // A few fill point lights
         // Bright point light with lens flare — placed off-centre so the ghosts spread diagonally
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(GpuLight {
                 position_range: [-1.5, 2.0, -1.0, 8.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],
@@ -307,7 +307,7 @@ impl ApplicationHandler for App {
             }));
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(GpuLight {
                 position_range: [-3.0, 1.0, -3.0, 5.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],
@@ -319,7 +319,7 @@ impl ApplicationHandler for App {
                 ..Default::default()
             }));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(GpuLight {
                 position_range: [3.0, 1.0, 2.0, 4.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],

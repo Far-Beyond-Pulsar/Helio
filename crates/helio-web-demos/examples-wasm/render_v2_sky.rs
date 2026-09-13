@@ -42,7 +42,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.7,
@@ -52,27 +52,27 @@ impl HelioWasmApp for Demo {
             ));
 
         let cube1 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         let cube2 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)))
             .as_mesh()
             .unwrap();
         let cube3 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)))
             .as_mesh()
             .unwrap();
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
             .as_mesh()
             .unwrap();
         let roof = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.2, 0.0],
                 [2.5, 0.1, 2.5],
@@ -117,7 +117,7 @@ impl HelioWasmApp for Demo {
         );
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-3.5, 2.0, -1.5],
                 [0.25, 0.5, 1.0],
@@ -125,7 +125,7 @@ impl HelioWasmApp for Demo {
                 6.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [3.5, 1.5, 1.5],
                 [1.0, 0.3, 0.5],
@@ -134,7 +134,7 @@ impl HelioWasmApp for Demo {
             )));
 
         let sun_light = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [-0.5, -0.8, -0.3],
                 [1.0, 0.9, 0.7],
@@ -217,7 +217,7 @@ impl HelioWasmApp for Demo {
             [0.2 + sun_elev * 0.1, 0.25 + sun_elev * 0.05, 0.35],
             0.1 + sun_elev * 0.1,
         );
-        let _ = renderer.scene_for_legacy_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.sun_light,
             directional_light([sun_dir.x, sun_dir.y, sun_dir.z], sun_color, sun_intensity),
         );

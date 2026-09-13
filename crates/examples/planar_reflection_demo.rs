@@ -508,7 +508,7 @@ impl ApplicationHandler for App {
                 // ---- Animate ----
                 let angle = state
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .gpu_scene()
                     .frame_count as f32
                     * 0.02;
@@ -517,7 +517,7 @@ impl ApplicationHandler for App {
                     * Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0));
                 let _ = state
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(state.spinning_cube, cube_transform);
 
                 state.sphere_angle += dt * 0.6;
@@ -526,7 +526,7 @@ impl ApplicationHandler for App {
                 let sphere_pos = Vec3::new(orbit_x, 1.0 + 0.5 * state.sphere_angle.sin(), orbit_z);
                 let _ = state
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(
                         state.orbiting_sphere,
                         Mat4::from_translation(sphere_pos),

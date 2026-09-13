@@ -224,7 +224,7 @@ impl ApplicationHandler for App {
 
         // Materials
         let mat_floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.55, 0.52, 0.45, 1.0],
                 0.85,
@@ -233,7 +233,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_pillar = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.60, 0.60, 0.62, 1.0],
                 0.50,
@@ -242,7 +242,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_crate = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.50, 0.38, 0.25, 1.0],
                 0.70,
@@ -253,7 +253,7 @@ impl ApplicationHandler for App {
 
         let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = r
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [hx, hy, hz],
@@ -312,7 +312,7 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&(pos, col, intensity, range)| {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         pos, col, intensity, range,
                     )))
@@ -601,7 +601,7 @@ impl AppState {
             let (pos, col, intensity, range) = self.base_lights[i];
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(id, point_light(pos, col, intensity * multiplier, range));
         }
 

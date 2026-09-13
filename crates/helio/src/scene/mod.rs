@@ -63,10 +63,10 @@ mod actor;
 mod camera;
 mod core;
 mod editor_debug;
-pub mod gpu_storage;
 mod errors;
 mod flush;
 mod foliage;
+pub mod gpu_storage;
 mod groups;
 mod helpers;
 mod input;
@@ -93,6 +93,4 @@ pub use foliage::{FoliageInteractor, FoliageLayer, FoliageTypeDescriptor, GpuFol
 pub use input::{SceneDbProjection, SceneInputAdapter};
 pub use portals::{portal_pose_facing, PortalDescriptor};
 pub use sublevels::SublevelDescriptor;
-pub use types::{
-    LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput,
-};
+pub use types::{LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput};

@@ -246,7 +246,7 @@ impl ApplicationHandler for App {
         );
 
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.75, 0.75, 0.75, 1.0],
                 0.8,
@@ -256,7 +256,7 @@ impl ApplicationHandler for App {
             ));
 
         let _ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
             .as_mesh()
             .unwrap();
@@ -264,7 +264,7 @@ impl ApplicationHandler for App {
             v3_demo_common::insert_object(&mut renderer, _ground, mat, glam::Mat4::IDENTITY, 40.0);
 
         let _road_center = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.0, 0.01, 32.0],
@@ -281,7 +281,7 @@ impl ApplicationHandler for App {
 
         let _sidewalks: Vec<MeshId> = vec![
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.35, 0.04, 32.0],
@@ -289,7 +289,7 @@ impl ApplicationHandler for App {
                 .as_mesh()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.35, 0.04, 32.0],
@@ -297,7 +297,7 @@ impl ApplicationHandler for App {
                 .as_mesh()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [32.0, 0.04, 0.35],
@@ -305,7 +305,7 @@ impl ApplicationHandler for App {
                 .as_mesh()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [32.0, 0.04, 0.35],
@@ -329,7 +329,7 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&(_, _, hw, hd, hh)| {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
                         [hw, hh, hd],
@@ -352,7 +352,7 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&(_x, _z)| {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.08, 2.75, 0.08],
@@ -372,7 +372,7 @@ impl ApplicationHandler for App {
         }
 
         let sun_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [-0.35, -0.38, -0.45],
                 [1.0, 0.9, 0.7],
@@ -385,7 +385,7 @@ impl ApplicationHandler for App {
             let p = [x, 5.55, z];
             lamp_light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         p,
                         [0.0, -1.0, 0.0],
@@ -404,7 +404,7 @@ impl ApplicationHandler for App {
             let p = [x, y, z];
             neon_light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         p,
                         [r, g, b],
@@ -618,7 +618,7 @@ impl AppState {
 
         let lamp_on = (1.0 - sun_lux).clamp(0.0, 1.0);
 
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.45).max(0.005)),
         );
@@ -626,7 +626,7 @@ impl AppState {
         for (i, &id) in self.lamp_light_ids.iter().enumerate() {
             let (x, z) = LAMPS[i];
             let p = [x, 5.55, z];
-            let _ = self.renderer.scene_for_legacy_mut().update_light(
+            let _ = self.renderer.scene().update_light(
                 id,
                 spot_light(
                     p,
@@ -646,7 +646,7 @@ impl AppState {
             let p = [x, y, z];
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(id, point_light(p, [r, g, b], 5.0 * neon_boost, 12.0));
         }
 

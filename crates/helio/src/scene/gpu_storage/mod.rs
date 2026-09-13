@@ -7,7 +7,7 @@
 //! pass-agnostic render-graph core. Passes no longer receive any of this
 //! through `PassContext`/`PrepareContext` (that per-frame contract is now
 //! `scene_buffers: &SceneBufferProjection` -- type-erased, `BufferKey`-keyed
-//! SceneDB columns -- plus whichever `libhelio::FrameResources` slots the
+//! SceneDB columns -- plus whichever `libhelio::PassResources` slots the
 //! owning pass publishes). `GpuScene`/`SceneResources` still exist here only
 //! because several subsystems (camera, materials, shadow matrices,
 //! coordinate spaces, and portals) have not yet been individually

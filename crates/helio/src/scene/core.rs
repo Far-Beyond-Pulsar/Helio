@@ -14,9 +14,8 @@ use wgpu::util::DeviceExt;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId,
-    ReflectionCaptureId, SectionedInstanceId, SublevelId, TextureId, VirtualObjectId,
-    WaterHitboxId, WaterVolumeId,
+    LightId, MaterialId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, SublevelId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;

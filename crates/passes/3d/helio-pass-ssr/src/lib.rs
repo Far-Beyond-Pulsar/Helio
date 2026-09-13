@@ -208,7 +208,7 @@ impl RenderPass for SsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -343,7 +343,7 @@ impl RenderPass for SsrPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 }
 
 fn buffer_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

@@ -350,7 +350,7 @@ impl EditorState {
         };
         let world_size = gizmo_world_size(center, camera, viewport_height);
 
-        let scene = renderer.transient_scene_mut();
+        let scene = renderer.scene_mut();
 
         match self.selected {
             Some(SceneEntityId::Object(object_id)) => {

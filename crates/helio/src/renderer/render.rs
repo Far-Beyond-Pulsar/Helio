@@ -213,7 +213,7 @@ impl Renderer {
 
     /// Upload every per-frame scene buffer (billboards, water, post-process
     /// volumes, material bindings, baked resources), assemble
-    /// [`libhelio::FrameResources`], clear `target`, execute the graph and kick
+    /// [`libhelio::PassResources`], clear `target`, execute the graph and kick
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
     /// `camera` supplies the post-process settings and the camera position used
@@ -378,13 +378,13 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs = None;
 
-        let mut frame_resources = libhelio::FrameResources::empty();
+        let mut pass_resources = libhelio::PassResources::empty();
         // Phase 3 registry. Legacy passes continue to consume
-        // `frame_resources`; new passes receive this open typed registry via
+        // `pass_resources`; new passes receive this open typed registry via
         // `PassContext::registry` / `PrepareContext::registry`.
         let mut resource_registry = libhelio::ResourceRegistry::empty();
-        frame_resources.main_scene.write(
-            libhelio::MainSceneResources {
+        pass_resources.main_scene.write(
+            libhelio::SceneGpuView {
                 mesh_buffers: libhelio::MeshBuffers {
                     // `mesh_buffers`/`dynamic_mesh_buffers` (locals a few
                     // lines up, from `self.scene.mesh_buffers()`/
@@ -396,7 +396,7 @@ impl Renderer {
                     // is unchanged, still plain `&'a wgpu::Buffer` fields.
                     // The guards stay alive in their owning locals for the
                     // rest of this function (never dropped early), so this
-                    // borrow is valid for exactly as long as `frame_resources`
+                    // borrow is valid for exactly as long as `pass_resources`
                     // needs it.
                     vertices: &*mesh_buffers.vertices,
                     indices: &*mesh_buffers.indices,
@@ -422,11 +422,11 @@ impl Renderer {
         // way `object_batch`/etc. are -- see `libhelio::LightsFrameData`/
         // `MaterialsFrameData`'s own docs for why the `Renderer` seeds these
         // directly from `self.scene.gpu_scene()` (still-central storage)
-        // instead. `helio-core`/passes see only the generic `FrameResources`
+        // instead. `helio-core`/passes see only the generic `PassResources`
         // slot, never a named `GpuScene` field.
         {
             let gpu_scene = self.scene.gpu_scene();
-            frame_resources.lights.write(
+            pass_resources.lights.write(
                 libhelio::LightsFrameData {
                     lights: gpu_scene.lights.buffer(),
                     light_count: gpu_scene.lights.len() as u32,
@@ -437,7 +437,7 @@ impl Renderer {
                 },
                 "Renderer",
             );
-            frame_resources.materials.write(
+            pass_resources.materials.write(
                 libhelio::MaterialsFrameData {
                     materials: gpu_scene.materials.buffer(),
                     material_data: gpu_scene.materials.as_slice(),
@@ -447,7 +447,7 @@ impl Renderer {
                 },
                 "Renderer",
             );
-            frame_resources.shadow_matrices.write(
+            pass_resources.shadow_matrices.write(
                 libhelio::ShadowMatricesFrameData {
                     shadow_matrices: gpu_scene.shadow_matrices.buffer(),
                     shadow_count: gpu_scene.shadow_matrices.len() as u32,
@@ -456,14 +456,14 @@ impl Renderer {
                 },
                 "Renderer",
             );
-            frame_resources.coordinate_spaces.write(
+            pass_resources.coordinate_spaces.write(
                 libhelio::CoordinateSpacesFrameData {
                     coordinate_spaces: gpu_scene.coordinate_spaces.buffer(),
                     coordinate_spaces_prev: gpu_scene.coordinate_spaces.prev_buffer(),
                 },
                 "Renderer",
             );
-            frame_resources.portals.write(
+            pass_resources.portals.write(
                 libhelio::PortalsFrameData {
                     portal_views: gpu_scene.portal_views.buffer(),
                     portal_view_count: gpu_scene.portal_views.len() as u32,
@@ -473,14 +473,14 @@ impl Renderer {
                 "Renderer",
             );
         }
-        frame_resources
+        pass_resources
             .postprocess_uniforms
             .write(&self.postprocess_buffer, "Renderer");
         if let Some(ref lut) = self.color_grading_lut_view {
-            frame_resources.color_grading_lut.write(lut, "Renderer");
+            pass_resources.color_grading_lut.write(lut, "Renderer");
         }
         if let Some(ref ies) = self.ies_texture_view {
-            frame_resources.ies_textures.write(ies, "Renderer");
+            pass_resources.ies_textures.write(ies, "Renderer");
         }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
@@ -495,7 +495,7 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
-        frame_resources
+        pass_resources
             .depth_texture
             .write(depth_texture, "Renderer");
         #[cfg(not(target_arch = "wasm32"))]
@@ -509,7 +509,7 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
-        frame_resources
+        pass_resources
             .depth_sampler_view
             .write(depth_sampler_view, "Renderer");
         if let Some(v) = self
@@ -517,52 +517,52 @@ impl Renderer {
             .as_ref()
             .map(|v| v as &wgpu::TextureView)
         {
-            frame_resources.full_res_depth.write(v, "Renderer");
+            pass_resources.full_res_depth.write(v, "Renderer");
         }
         if let Some(t) = self
             .full_res_depth_texture
             .as_ref()
             .map(|t| t as &wgpu::Texture)
         {
-            frame_resources.full_res_depth_texture.write(t, "Renderer");
+            pass_resources.full_res_depth_texture.write(t, "Renderer");
         }
         if let Some(vg_data) = self.scene.vg_frame_data() {
-            frame_resources.vg.write(vg_data, "Renderer");
+            pass_resources.vg.write(vg_data, "Renderer");
         }
-        frame_resources.sky = self.scene.sky_context();
+        pass_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
-            frame_resources.baked_ao.write(ao, "Renderer");
+            pass_resources.baked_ao.write(ao, "Renderer");
         }
         if let Some(ao_sampler) = baked_ao_sampler {
-            frame_resources
+            pass_resources
                 .baked_ao_sampler
                 .write(ao_sampler, "Renderer");
         }
         if let Some(lightmap) = baked_lightmap {
-            frame_resources.baked_lightmap.write(lightmap, "Renderer");
+            pass_resources.baked_lightmap.write(lightmap, "Renderer");
         }
         if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            frame_resources
+            pass_resources
                 .baked_lightmap_sampler
                 .write(lightmap_sampler, "Renderer");
         }
         if let Some(reflection) = baked_reflection {
-            frame_resources
+            pass_resources
                 .baked_reflection
                 .write(reflection, "Renderer");
         }
         if let Some(reflection_sampler) = baked_reflection_sampler {
-            frame_resources
+            pass_resources
                 .baked_reflection_sampler
                 .write(reflection_sampler, "Renderer");
         }
         if let Some(irradiance_sh) = baked_irradiance_sh {
-            frame_resources
+            pass_resources
                 .baked_irradiance_sh
                 .write(irradiance_sh, "Renderer");
         }
         if let Some(pvs) = baked_pvs {
-            frame_resources.baked_pvs.write(pvs, "Renderer");
+            pass_resources.baked_pvs.write(pvs, "Renderer");
         }
 
         // Target clear + cull-stats clear are batched into a single command
@@ -613,7 +613,7 @@ impl Renderer {
             &scene_input,
             target,
             depth,
-            &frame_resources,
+            &pass_resources,
             &mut resource_registry,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
@@ -654,9 +654,9 @@ impl Renderer {
         // VarLenGpuPool`), not plain `&wgpu::Buffer`s -- since the guard type
         // has a non-trivial `Drop` (unlocking the `RwLock`), the borrow checker
         // keeps `self.scene`'s immutable borrow alive until they're actually
-        // dropped, not just until their last read. `frame_resources` (which
+        // dropped, not just until their last read. `pass_resources` (which
         // borrows through them via `libhelio::MeshBuffers`) is done being read
-        // by `execute_with_frame_resources` above, so this is the right place.
+        // by `execute_with_pass_resources` above, so this is the right place.
         drop(texture_views);
         drop(samplers);
         drop(mesh_buffers);

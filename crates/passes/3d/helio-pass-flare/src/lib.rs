@@ -638,7 +638,7 @@ impl RenderPass for LensFlarePass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let light_count = ctx
-            .frame_resources
+            .pass_resources
             .lights
             .get()
             .map(|l| l.light_count)
@@ -663,7 +663,7 @@ impl RenderPass for LensFlarePass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if self.active_flare_count == 0 {
             return None;

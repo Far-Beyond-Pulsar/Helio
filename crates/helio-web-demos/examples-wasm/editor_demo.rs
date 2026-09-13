@@ -82,7 +82,7 @@ impl HelioWasmApp for Demo {
 
         // ── Materials ─────────────────────────────────────────────────────────
         let mat_floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.55, 0.55, 0.55, 1.0],
                 0.8,
@@ -91,7 +91,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let mat_red = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.9, 0.15, 0.15, 1.0],
                 0.5,
@@ -100,7 +100,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let mat_green = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.85, 0.25, 1.0],
                 0.5,
@@ -109,7 +109,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let mat_blue = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.35, 0.95, 1.0],
                 0.5,
@@ -118,7 +118,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let mat_gold = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [1.0, 0.76, 0.1, 1.0],
                 0.3,
@@ -127,7 +127,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let mat_sphere = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.8, 0.5, 0.9, 1.0],
                 0.35,
@@ -140,7 +140,7 @@ impl HelioWasmApp for Demo {
 
         let floor_upload = plane_mesh([0.0; 3], 8.0);
         let floor_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(floor_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -148,7 +148,7 @@ impl HelioWasmApp for Demo {
 
         let box_a_upload = box_mesh([0.0; 3], [0.55, 0.55, 0.55]);
         let box_a = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_a_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -156,7 +156,7 @@ impl HelioWasmApp for Demo {
 
         let box_b_upload = box_mesh([0.0; 3], [0.4, 0.75, 0.4]);
         let box_b = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_b_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -164,7 +164,7 @@ impl HelioWasmApp for Demo {
 
         let box_c_upload = box_mesh([0.0; 3], [0.6, 0.35, 0.6]);
         let box_c = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_c_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -172,7 +172,7 @@ impl HelioWasmApp for Demo {
 
         let cube_gold_upload = cube_mesh([0.0; 3], 0.45);
         let cube_gold = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(cube_gold_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -180,7 +180,7 @@ impl HelioWasmApp for Demo {
 
         let sphere_a_upload = sphere_mesh([0.0; 3], 0.65);
         let sphere_a = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(sphere_a_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -254,7 +254,7 @@ impl HelioWasmApp for Demo {
         // ── Lights ────────────────────────────────────────────────────────────
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [0.0, 4.5, 2.0],
                 [1.0, 0.85, 0.7],
@@ -262,7 +262,7 @@ impl HelioWasmApp for Demo {
                 12.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [-4.0, 3.0, -3.0],
                 [0.4, 0.55, 1.0],
@@ -270,7 +270,7 @@ impl HelioWasmApp for Demo {
                 9.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [4.0, 2.5, -2.0],
                 [1.0, 0.4, 0.3],
@@ -407,7 +407,7 @@ impl HelioWasmApp for Demo {
                 self.editor.set_gizmo_mode(GizmoMode::Scale);
             }
             if just_pressed.contains(&KeyCode::Delete) {
-                if self.editor.delete_selected(renderer.scene_for_legacy_mut()) {
+                if self.editor.delete_selected(renderer.scene()) {
                     self.picker.rebuild_instances(renderer.scene());
                 }
             }

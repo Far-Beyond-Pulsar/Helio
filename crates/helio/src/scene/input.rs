@@ -34,7 +34,9 @@ impl<'a> SceneDbProjection<'a> {
         }
     }
 
-    fn device(&self) -> Arc<wgpu::Device> { self.mirror.store().device_arc() }
+    fn device(&self) -> Arc<wgpu::Device> {
+        self.mirror.store().device_arc()
+    }
 }
 
 /// Graph input backed by the SceneDB projection.
@@ -56,15 +58,28 @@ impl<'a> SceneInputAdapter<'a> {
             buffers: projection.buffers,
         }
     }
-
 }
 
 impl SceneInput for SceneInputAdapter<'_> {
-    fn device(&self) -> &Arc<wgpu::Device> { &self.device }
-    fn queue(&self) -> &Arc<wgpu::Queue> { self.queue }
-    fn frame_count(&self) -> u64 { self.frame_count }
-    fn camera(&self) -> &wgpu::Buffer { self.projection.camera }
-    fn camera_data(&self) -> &GpuCameraUniforms { self.projection.camera_data }
-    fn camera_generation(&self) -> u64 { self.projection.camera_generation }
-    fn scene_buffers(&self) -> &SceneBufferProjection { &self.buffers }
+    fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+    fn queue(&self) -> &Arc<wgpu::Queue> {
+        self.queue
+    }
+    fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+    fn camera(&self) -> &wgpu::Buffer {
+        self.projection.camera
+    }
+    fn camera_data(&self) -> &GpuCameraUniforms {
+        self.projection.camera_data
+    }
+    fn camera_generation(&self) -> u64 {
+        self.projection.camera_generation
+    }
+    fn scene_buffers(&self) -> &SceneBufferProjection {
+        &self.buffers
+    }
 }

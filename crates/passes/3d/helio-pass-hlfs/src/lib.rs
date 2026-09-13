@@ -499,14 +499,14 @@ impl RenderPass for HlfsPass {
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         frame.pre_aa.write(&self.targets.output.view, "HLFS");
     }
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -516,7 +516,7 @@ impl RenderPass for HlfsPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         let camera = *ctx.camera_data;
         let light_count = ctx
-            .frame_resources
+            .pass_resources
             .lights
             .get()
             .map(|l| l.movable_light_count)
@@ -538,7 +538,7 @@ impl RenderPass for HlfsPass {
             && self.previous_light_count == Some(light_count)
             && !ctx.resize;
         let mut ambient = [0.03, 0.03, 0.03, self.config.screen_trace_distance];
-        if let Some(scene) = ctx.frame_resources.main_scene.get() {
+        if let Some(scene) = ctx.pass_resources.main_scene.get() {
             for (i, v) in ambient[..3].iter_mut().enumerate() {
                 *v = scene.ambient_color[i] * scene.ambient_intensity;
             }
@@ -552,14 +552,14 @@ impl RenderPass for HlfsPass {
             sample_size: [self.targets.sample_width, self.targets.sample_height],
             sample_scale: self.config.sample_scale,
             candidate_count: self.config.candidates_per_sample,
-            has_velocity: ctx.frame_resources.gbuffer_velocity.get().is_some() as u32,
-            surface_flags: (ctx.frame_resources.baked_lightmap.get().is_some()
-                && ctx.frame_resources.gbuffer_lightmap_uv.get().is_some())
+            has_velocity: ctx.pass_resources.gbuffer_velocity.get().is_some() as u32,
+            surface_flags: (ctx.pass_resources.baked_lightmap.get().is_some()
+                && ctx.pass_resources.gbuffer_lightmap_uv.get().is_some())
                 as u32
                 | (u32::from(
                     self.previous_light_generation
                         == ctx
-                            .frame_resources
+                            .pass_resources
                             .lights
                             .get()
                             .map(|l| l.movable_lights_generation),
@@ -577,7 +577,7 @@ impl RenderPass for HlfsPass {
         self.previous_frame = Some(ctx.frame_num);
         self.previous_light_count = Some(light_count);
         self.previous_light_generation = ctx
-            .frame_resources
+            .pass_resources
             .lights
             .get()
             .map(|l| l.movable_lights_generation);

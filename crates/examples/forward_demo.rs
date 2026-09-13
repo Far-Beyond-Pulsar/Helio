@@ -191,7 +191,7 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.7,
@@ -201,22 +201,22 @@ impl ApplicationHandler for App {
             ));
 
         let cube1 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         let cube2 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
             .as_mesh()
             .unwrap();
         let cube3 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
             .as_mesh()
             .unwrap();
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
             .as_mesh()
             .unwrap();
@@ -249,7 +249,7 @@ impl ApplicationHandler for App {
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
         let light_p0_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 p0_init,
                 [1.0, 0.55, 0.15],
@@ -259,7 +259,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 p1,
                 [0.25, 0.5, 1.0],
@@ -267,7 +267,7 @@ impl ApplicationHandler for App {
                 6.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 p2,
                 [1.0, 0.3, 0.5],
@@ -461,7 +461,7 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.light_p0_id,
             point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
         );

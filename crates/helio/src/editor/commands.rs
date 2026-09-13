@@ -27,7 +27,7 @@ impl EditorState {
             SceneEntityId::Object(id) => {
                 let desc = renderer.scene().get_object_descriptor(id).ok()?;
                 let new_actor = renderer
-                    .transient_scene_mut()
+                    .scene_mut()
                     .insert_entity(crate::scene::SceneEntity::object(desc));
                 let new_id = new_actor.as_object()?;
                 self.replace_selected(Some(SceneEntityId::Object(new_id)));
@@ -35,10 +35,7 @@ impl EditorState {
                 Some(SceneEntityId::Object(new_id))
             }
             SceneEntityId::SectionedObject(id) => {
-                let new_id = renderer
-                    .transient_scene_mut()
-                    .duplicate_sectioned_object(id)
-                    .ok()?;
+                let new_id = renderer.scene_mut().duplicate_sectioned_object(id).ok()?;
                 self.replace_selected(Some(SceneEntityId::SectionedObject(new_id)));
                 self.clear_interaction_state();
                 Some(SceneEntityId::SectionedObject(new_id))

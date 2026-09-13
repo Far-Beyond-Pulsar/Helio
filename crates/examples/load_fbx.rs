@@ -215,7 +215,7 @@ impl ApplicationHandler for App {
                         .map(|v| Vec3::from_array(v.position).length())
                         .fold(0.5, f32::max);
                     let mesh_id = renderer
-                        .scene_for_legacy_mut()
+                        .scene()
                         .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
                             vertices: mesh.vertices,
                             indices: mesh.indices,
@@ -226,7 +226,7 @@ impl ApplicationHandler for App {
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer.scene_for_legacy_mut().insert_material(
+                            renderer.scene().insert_material(
                                 v3_demo_common::make_material(
                                     [0.7, 0.7, 0.75, 1.0],
                                     0.6,
@@ -252,13 +252,13 @@ impl ApplicationHandler for App {
                     error
                 );
                 let mesh = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
                     .as_mesh()
                     .unwrap();
                 let material =
                     renderer
-                        .scene_for_legacy_mut()
+                        .scene()
                         .insert_material(v3_demo_common::make_material(
                             [0.55, 0.68, 0.9, 1.0],
                             0.35,
@@ -278,7 +278,7 @@ impl ApplicationHandler for App {
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
         let point_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light_with_movability(
                 point_light(point_light_pos.to_array(), [1.0, 0.95, 0.8], 12.0, 18.0),
                 Some(helio::Movability::Movable),

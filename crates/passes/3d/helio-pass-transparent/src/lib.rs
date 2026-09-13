@@ -251,7 +251,7 @@ impl RenderPass for TransparentPass {
         let light_count = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.frame_resources
+            ctx.pass_resources
                 .lights
                 .get()
                 .map(|l| l.movable_light_count)
@@ -286,7 +286,7 @@ impl RenderPass for TransparentPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {

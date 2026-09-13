@@ -230,7 +230,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
 
         let mat_floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.25, 0.25, 0.30, 1.0],
                 0.85,
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_red = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.85, 0.12, 0.12, 1.0],
                 0.65,
@@ -248,7 +248,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_green = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.17, 0.82, 0.28, 1.0],
                 0.60,
@@ -257,7 +257,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_blue = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.16, 0.40, 0.90, 1.0],
                 0.70,
@@ -266,7 +266,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_steel = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.75, 1.0],
                 0.15,
@@ -276,7 +276,7 @@ impl ApplicationHandler for App {
             ));
 
         let floor_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
             .as_mesh()
             .unwrap();
@@ -291,14 +291,14 @@ impl ApplicationHandler for App {
         let mut mesh_list = Vec::new();
         mesh_list.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.35)))
                 .as_mesh()
                 .unwrap(),
         );
         mesh_list.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.15, 0.65, 0.15],
@@ -308,7 +308,7 @@ impl ApplicationHandler for App {
         );
         mesh_list.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [0.60, 0.20, 0.20],
@@ -319,7 +319,7 @@ impl ApplicationHandler for App {
 
         let offset = 20.0;
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-offset, 5.0, -offset],
                 [0.8, 0.7, 0.55],
@@ -329,7 +329,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [offset, 5.0, offset],
                 [0.5, 0.7, 1.0],
@@ -609,7 +609,7 @@ impl AppState {
 
             if self.dynamic_objects.len() > max_count {
                 if let Some(dead) = self.dynamic_objects.first() {
-                    let _ = self.renderer.scene_for_legacy_mut().remove_object(dead.id);
+                    let _ = self.renderer.scene().remove_object(dead.id);
                     self.physics_colliders.remove(
                         dead.collider_handle,
                         &mut self.physics_forces,
@@ -645,7 +645,7 @@ impl AppState {
                 * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_object_transform(variant.id, transform);
 
             if let Some(body) = self.physics_bodies.get_mut(variant.body_handle) {
@@ -701,7 +701,7 @@ impl AppState {
                     * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(variant.id, transform);
             }
         }

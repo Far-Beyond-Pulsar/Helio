@@ -194,7 +194,7 @@ impl ApplicationHandler for App {
         );
 
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.7,
@@ -204,27 +204,27 @@ impl ApplicationHandler for App {
             ));
 
         let cube1 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         let cube2 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
             .as_mesh()
             .unwrap();
         let cube3 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
             .as_mesh()
             .unwrap();
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
             .as_mesh()
             .unwrap();
         let roof = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.5, 0.15, 4.5],
@@ -269,7 +269,7 @@ impl ApplicationHandler for App {
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
         let sun_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 init_light_dir,
                 [1.0, 0.85, 0.7],
@@ -278,7 +278,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 2.5, 0.0],
                 [1.0, 0.85, 0.6],
@@ -286,7 +286,7 @@ impl ApplicationHandler for App {
                 8.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-2.5, 2.0, -1.5],
                 [0.4, 0.6, 1.0],
@@ -294,7 +294,7 @@ impl ApplicationHandler for App {
                 7.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [2.5, 1.8, 1.5],
                 [1.0, 0.3, 0.3],
@@ -304,7 +304,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::Sky(helio::SkyActor::new().with_clouds(
                 helio::VolumetricClouds {
                     coverage: 0.7,
@@ -525,7 +525,7 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update dynamic sun light
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );

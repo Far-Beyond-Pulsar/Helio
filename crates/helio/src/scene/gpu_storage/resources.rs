@@ -46,7 +46,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::PassResources<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -135,7 +135,7 @@ pub struct SceneResources<'a> {
     // `instances`/`aabbs`/`draw_calls` — removed. These were per-object-type
     // (static mesh) data; central crates must not know about any particular
     // scene-object type. Owning passes now get this from
-    // `libhelio::FrameResources::object_batch`, published by
+    // `libhelio::PassResources::object_batch`, published by
     // `helio-pass-object-batch` from SceneDB's `StaticObjectComponent` rows
     // -- see `ObjectBatchFrameData`.
     pub lights: &'a wgpu::Buffer,
@@ -154,7 +154,7 @@ pub struct SceneResources<'a> {
     // `indirect`/`visibility`/`compacted_indices`/`compacted_indices_2` —
     // removed for the same reason as `instances`/`aabbs`/`draw_calls` above.
     // Owning passes now read `IndirectDispatchFrameData`/`CulledBatchFrameData`
-    // from `libhelio::FrameResources` (published by `helio-pass-indirect-
+    // from `libhelio::PassResources` (published by `helio-pass-indirect-
     // dispatch`/`helio-pass-occlusion-cull`, each of which now owns its
     // output buffers directly instead of writing into central storage).
     /// Coordinate-space transforms (current frame). Slot 0 = identity. Shaders
@@ -184,7 +184,6 @@ pub struct SceneResources<'a> {
     /// Copied from GpuScene::per_caster_dirty_gen each frame. ShadowPass compares against
     /// its own last-rendered gen to decide which caster faces need re-rendering.
     pub per_caster_dirty_gen: [u64; 42],
-
 
     // `material_class_ranges`/`transparent_material_class_ranges`/
     // `forward_material_class_ranges` — removed; see `ObjectBatchFrameData`'s

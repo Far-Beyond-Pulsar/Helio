@@ -36,7 +36,7 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         // Materials
         let floor_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.18, 0.18, 0.20, 1.0],
                 0.6,
@@ -45,7 +45,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let ceil_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.22, 0.22, 0.24, 1.0],
                 0.7,
@@ -54,7 +54,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let wall_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.25, 0.25, 0.27, 1.0],
                 0.8,
@@ -63,7 +63,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let rack_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.08, 0.08, 0.10, 1.0],
                 0.5,
@@ -72,7 +72,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let blade_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.12, 0.13, 0.15, 1.0],
                 0.3,
@@ -81,7 +81,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let led_green = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.0, 0.15, 0.0, 1.0],
                 1.0,
@@ -90,7 +90,7 @@ impl HelioWasmApp for Demo {
                 3.5,
             ));
         let led_red = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.0, 0.0, 1.0],
                 1.0,
@@ -99,7 +99,7 @@ impl HelioWasmApp for Demo {
                 3.5,
             ));
         let led_amber = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.08, 0.0, 1.0],
                 1.0,
@@ -108,7 +108,7 @@ impl HelioWasmApp for Demo {
                 3.5,
             ));
         let led_blue = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.0, 0.0, 0.15, 1.0],
                 1.0,
@@ -117,7 +117,7 @@ impl HelioWasmApp for Demo {
                 3.5,
             ));
         let cable_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.05, 0.05, 0.06, 1.0],
                 0.9,
@@ -126,7 +126,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let strip_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.8, 0.85, 0.9, 1.0],
                 0.3,
@@ -137,11 +137,11 @@ impl HelioWasmApp for Demo {
 
         // Room shell
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)));
         insert_object(renderer, floor, floor_m, glam::Mat4::IDENTITY, 12.0).unwrap();
         let ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 3.0, 0.0],
                 [12.0, 0.1, 12.0],
@@ -154,7 +154,7 @@ impl HelioWasmApp for Demo {
             ([0.0, 1.5, 12.0], [12.0, 3.0, 0.1], 12.0),
         ] {
             let wm = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, size)));
             insert_object(renderer, wm, wall_m, glam::Mat4::IDENTITY, rad).unwrap();
         }
@@ -174,7 +174,7 @@ impl HelioWasmApp for Demo {
         ];
         for &pos in rack_positions {
             let rack = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, [0.5, 2.0, 0.9])));
             insert_object(renderer, rack, rack_m, glam::Mat4::IDENTITY, 2.0).unwrap();
             // Server blades (6 per rack)
@@ -182,7 +182,7 @@ impl HelioWasmApp for Demo {
                 let blade_pos = [pos[0] + 0.26, pos[1] - 0.85 + blade_y as f32 * 0.3, pos[2]];
                 let blade =
                     renderer
-                        .scene_for_legacy_mut()
+                        .scene()
                         .insert_entity(helio::SceneEntity::mesh(box_mesh(
                             blade_pos,
                             [0.04, 0.12, 0.85],
@@ -202,7 +202,7 @@ impl HelioWasmApp for Demo {
                     let _ = k;
                     let led =
                         renderer
-                            .scene_for_legacy_mut()
+                            .scene()
                             .insert_entity(helio::SceneEntity::mesh(cube_mesh(
                                 [led_x, blade_pos[1], pos[2] + dz],
                                 0.018,
@@ -212,7 +212,7 @@ impl HelioWasmApp for Demo {
             }
             // Cable bundles at rear
             let cable = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [pos[0] - 0.55, pos[1] + 0.4, pos[2]],
                     [0.12, 0.4, 0.8],
@@ -225,11 +225,11 @@ impl HelioWasmApp for Demo {
         let mut indicator_ids = Vec::new();
         for &pos in strip_positions {
             let strip = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, [0.1, 0.05, 10.0])));
             insert_object(renderer, strip, strip_m, glam::Mat4::IDENTITY, 10.0).unwrap();
             let id = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     pos,
                     [0.65, 0.75, 0.95],
@@ -244,7 +244,7 @@ impl HelioWasmApp for Demo {
         // Indicator accent lights per rack row
         for &pos in rack_positions.iter().step_by(2) {
             let id = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [pos[0], 0.8, pos[2]],
                     [0.0, 0.9, 0.3],
@@ -305,7 +305,7 @@ impl HelioWasmApp for Demo {
         {
             let f = 1.0 + (elapsed * 120.0 + i as f32 * 2.1).sin() * 0.005;
             let _ = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(*id, point_light(pos, [0.65, 0.75, 0.95], 80.0 * f, 12.0));
         }
 
@@ -325,7 +325,7 @@ impl HelioWasmApp for Demo {
         {
             let blink =
                 ((elapsed * (0.9 + i as f32 * 0.15) + i as f32 * 0.7).sin() > 0.0) as u8 as f32;
-            let _ = renderer.scene_for_legacy_mut().update_light(
+            let _ = renderer.scene().update_light(
                 *id,
                 point_light([pos[0], 0.8, pos[2]], [0.0, 0.9, 0.3], 3.0 * blink, 4.0),
             );

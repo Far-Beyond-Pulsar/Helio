@@ -77,11 +77,11 @@ pub use helio_core::{
 // `GpuScene`/`SceneResources` no longer live in `helio-core` (that crate has
 // zero knowledge of any specific scene-object type now) -- relocated here,
 // into `helio`, as a frontend-owned concern. See `scene::gpu_storage`'s doc.
-pub use scene::gpu_storage::{GpuScene, SceneResources};
 pub use libhelio::{
     HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,
     VolumetricClouds,
 };
+pub use scene::gpu_storage::{GpuScene, SceneResources};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].

@@ -194,7 +194,7 @@ impl ApplicationHandler for App {
 
         // ── Materials ─────────────────────────────────────────────────────────────
         let mat_floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.18, 0.20, 0.18, 1.0],
                 0.90,
@@ -203,7 +203,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.85, 0.90, 0.95, 1.0],
                 0.80,
@@ -212,7 +212,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_wall = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.82, 0.86, 0.90, 1.0],
                 0.85,
@@ -221,7 +221,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_rack = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.10, 0.10, 0.12, 1.0],
                 0.40,
@@ -230,7 +230,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_panel = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.88, 0.93, 1.00, 1.0],
                 0.90,
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
                 3.0,
             ));
         let mat_cooling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.40, 0.50, 0.60, 1.0],
                 0.50,
@@ -248,7 +248,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_door = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.40, 0.45, 0.50, 1.0],
                 0.60,
@@ -257,7 +257,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let mat_tray = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.30, 0.30, 0.35, 1.0],
                 0.40,
@@ -269,7 +269,7 @@ impl ApplicationHandler for App {
         // ── Geometry ───────────────────────────────────────────────────────────────
         let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = r
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [0.0, 0.0, 0.0],
                     [hx, hy, hz],
@@ -346,7 +346,7 @@ impl ApplicationHandler for App {
         for &(px, pz) in CEILING_PANEL_XZ {
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         [px, 3.78, pz],
                         [0.0, -1.0, 0.0],
@@ -366,7 +366,7 @@ impl ApplicationHandler for App {
             let col = row_color(tag);
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         [rx, 2.1, 0.0],
                         col,
@@ -378,7 +378,7 @@ impl ApplicationHandler for App {
             );
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         [rx, 2.1, -4.5],
                         col,
@@ -390,7 +390,7 @@ impl ApplicationHandler for App {
             );
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         [rx, 2.1, 4.5],
                         col,
@@ -411,7 +411,7 @@ impl ApplicationHandler for App {
             };
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         [cx, 2.8, -5.6],
                         col,
@@ -474,17 +474,17 @@ impl ApplicationHandler for App {
                 if ks == ElementState::Pressed && key == KeyCode::KeyE {
                     if state
                         .renderer
-                        .scene_for_legacy_mut()
+                        .scene()
                         .is_group_hidden(GroupId::EDITOR)
                     {
                         state
                             .renderer
-                            .scene_for_legacy_mut()
+                            .scene()
                             .show_group(GroupId::EDITOR);
                     } else {
                         state
                             .renderer
-                            .scene_for_legacy_mut()
+                            .scene()
                             .hide_group(GroupId::EDITOR);
                     }
                 }

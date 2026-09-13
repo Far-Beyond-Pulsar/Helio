@@ -193,7 +193,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.25, 0.25, 0.3, 1.0],
                 0.85,
@@ -202,7 +202,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let sphere_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.2, 0.5, 0.8, 1.0],
                 0.45,
@@ -212,7 +212,7 @@ impl ApplicationHandler for App {
             ));
 
         let floor_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0)))
             .as_mesh()
             .unwrap();
@@ -225,7 +225,7 @@ impl ApplicationHandler for App {
         );
 
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [20.0, 24.0, 20.0],
                 [0.9, 0.85, 0.8],
@@ -235,7 +235,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-20.0, 20.0, -20.0],
                 [0.6, 0.7, 1.0],
@@ -427,7 +427,7 @@ impl ApplicationHandler for App {
 impl AppState {
     fn clear_chain(&mut self) {
         for seg in self.segments.drain(..) {
-            let _ = self.renderer.scene_for_legacy_mut().remove_object(seg.id);
+            let _ = self.renderer.scene().remove_object(seg.id);
             self.physics_colliders.remove(
                 seg.collider_handle,
                 &mut self.physics_forces,
@@ -475,7 +475,7 @@ impl AppState {
 
                 let sphere_mesh_id = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.4, 0.4, 0.4],
@@ -583,7 +583,7 @@ impl AppState {
                     * glam::Mat4::from_scale(glam::Vec3::splat(0.8));
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(seg.id, transform);
             }
         }

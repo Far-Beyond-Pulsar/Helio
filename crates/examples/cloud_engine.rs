@@ -1062,7 +1062,7 @@ impl App {
         scene_renderer.set_clear_color([0.0, 0.0, 0.0, 0.0]);
         eprintln!("[CE] scene renderer configured");
         let cube_material = scene_renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.74, 0.80, 0.92, 1.0],
                 0.58,
@@ -1071,7 +1071,7 @@ impl App {
                 0.0,
             ));
         let cube_mesh = scene_renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh(
                 [0.0, 0.0, 0.0],
                 CUBE_HALF_EXTENT,
@@ -1101,7 +1101,7 @@ impl App {
         // Luna is a real directional scene light, independent of the cloud
         // shader's decorative moon, so it will also light later voxel content.
         scene_renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.32, -0.76, 0.57],
                 [0.67, 0.76, 1.0],

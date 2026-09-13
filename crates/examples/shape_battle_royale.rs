@@ -215,7 +215,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
         let flooring = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.15, 0.18, 1.0],
                 0.86,
@@ -224,7 +224,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let red = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.84, 0.14, 0.14, 1.0],
                 0.45,
@@ -233,7 +233,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let green = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.18, 0.85, 0.25, 1.0],
                 0.45,
@@ -242,7 +242,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let blue = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.2, 0.38, 0.90, 1.0],
                 0.45,
@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let yellow = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.95, 0.85, 0.17, 1.0],
                 0.45,
@@ -261,7 +261,7 @@ impl ApplicationHandler for App {
             ));
 
         let floor_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh(
                 [0.0, 0.0, 0.0],
                 ARENA_RADIUS,
@@ -278,7 +278,7 @@ impl ApplicationHandler for App {
 
         // add lights to avoid TileLightLists COPY_DST validation failure
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [7.0, 6.0, 6.0],
                 [0.9, 0.8, 0.7],
@@ -288,7 +288,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-7.0, 6.0, -6.0],
                 [0.7, 0.9, 1.0],
@@ -299,7 +299,7 @@ impl ApplicationHandler for App {
             .unwrap();
 
         let sphere_mesh_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.4, 0.4, 0.4],
@@ -307,7 +307,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let cuboid_mesh_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.35, 0.55, 0.25],
@@ -315,7 +315,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let capsule_mesh_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.35, 0.55, 0.35],
@@ -323,7 +323,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let cylinder_mesh_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.3, 0.6, 0.3],
@@ -525,7 +525,7 @@ impl AppState {
         // Wall mesh is reused for visual objects; physics walls are separate colliders.
         let wall_mesh_x = self
             .renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS],
@@ -534,7 +534,7 @@ impl AppState {
             .unwrap();
         let wall_mesh_z = self
             .renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0],
@@ -611,7 +611,7 @@ impl AppState {
         for shape in self.battle_shapes.drain(..) {
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .remove_object(shape.object_id);
             self.physics_colliders.remove(
                 shape.collider_handle,
@@ -631,7 +631,7 @@ impl AppState {
         for part in self.explosion_particles.drain(..) {
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .remove_object(part.object_id);
         }
         self.round_active = true;
@@ -710,7 +710,7 @@ impl AppState {
             let pos = position + offset;
             let mesh = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.12)))
                 .as_mesh()
                 .unwrap();
@@ -771,7 +771,7 @@ impl AppState {
                 let trans = glam::Mat4::from_cols_array(&mat);
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(shape.object_id, trans);
 
                 let pos = body.position().translation.vector;
@@ -799,7 +799,7 @@ impl AppState {
             self.create_explosion(explosion_pos);
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .remove_object(object_id);
             self.physics_colliders.remove(
                 collider_handle,
@@ -841,12 +841,12 @@ impl AppState {
                 let new_transform = glam::Mat4::from_translation(p.position);
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(p.object_id, new_transform);
             } else {
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .remove_object(p.object_id);
             }
             alive

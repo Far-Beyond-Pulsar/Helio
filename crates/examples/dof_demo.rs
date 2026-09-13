@@ -204,7 +204,7 @@ impl ApplicationHandler for App {
         // ── Materials ───────────────────────────────────────────────────
 
         let red_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.9, 0.15, 0.15, 1.0],
                 0.4,
@@ -213,7 +213,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let green_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.9, 0.15, 1.0],
                 0.4,
@@ -222,7 +222,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let blue_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.3, 0.9, 1.0],
                 0.4,
@@ -231,7 +231,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let yellow_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.9, 0.85, 0.15, 1.0],
                 0.4,
@@ -240,7 +240,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let white_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.85, 0.85, 0.9, 1.0],
                 0.7,
@@ -249,7 +249,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.25, 0.25, 0.27, 1.0],
                 0.9,
@@ -260,7 +260,7 @@ impl ApplicationHandler for App {
 
         // ── Floor ───────────────────────────────────────────────────────
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh(
                 [0.0, 0.0, 0.0],
                 SCENE_HALF_Z,
@@ -277,7 +277,7 @@ impl ApplicationHandler for App {
 
         // ── Tabletop ────────────────────────────────────────────────────
         let table = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [8.0, 0.15, SCENE_HALF_Z - 2.0],
@@ -294,12 +294,12 @@ impl ApplicationHandler for App {
 
         // ── Objects at varying depths ───────────────────────────────────
         let sphere_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0; 3], 0.6)))
             .as_mesh()
             .unwrap();
         let box_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0; 3], 0.6)))
             .as_mesh()
             .unwrap();
@@ -324,7 +324,7 @@ impl ApplicationHandler for App {
         // ── Light ───────────────────────────────────────────────────────
         let sun = directional_light([0.5, -1.0, -0.3], [1.0, 0.95, 0.9], 3.0);
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(sun));
         renderer.set_ambient([0.12, 0.12, 0.15], 0.1);
 

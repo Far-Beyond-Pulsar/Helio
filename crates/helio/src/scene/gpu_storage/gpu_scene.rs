@@ -72,7 +72,6 @@
 //! # }
 //! ```
 
-use helio_core::acceleration::{BlasManager, TlasManager};
 use super::managers::GrowableBuffer;
 use super::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
@@ -81,6 +80,7 @@ use super::managers::{
     GpuVisibilityBuffer,
 };
 use super::resources::SceneResources;
+use helio_core::acceleration::{BlasManager, TlasManager};
 use std::sync::Arc;
 
 /// GPU-native scene container with dirty-tracked state.

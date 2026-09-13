@@ -901,7 +901,7 @@ impl RenderPass for FoliageGBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Returns `Some` whenever the G-buffer exists, regardless of whether there is
         // any foliage this frame. A pass that returns `None` on per-frame state can
@@ -1037,8 +1037,8 @@ impl RenderPass for FoliageGBufferPass {
         // forget: a published view with no published origin would bend every blade in
         // the world against a 64 m field sitting at the world origin, which looks like a
         // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.frame_resources.foliage_interaction.is_some()
-            && ctx.frame_resources.foliage_interaction_sampler.is_some()
+        let interaction_valid = ctx.pass_resources.foliage_interaction.is_some()
+            && ctx.pass_resources.foliage_interaction_sampler.is_some()
             && self.interaction_field_published;
         let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {

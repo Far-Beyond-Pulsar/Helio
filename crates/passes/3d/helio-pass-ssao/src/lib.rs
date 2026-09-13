@@ -403,7 +403,7 @@ impl RenderPass for SsaoPass {
         self.resize(device, width, height);
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         // The graph already populated frame.ssao with the graph-owned texture.
         // Only override if a pre-baked AO texture is in use.
         if let Some(ref baked) = self.baked_ao_override {
@@ -415,7 +415,7 @@ impl RenderPass for SsaoPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let ssao_view = resources.ssao.read("SSAO")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =

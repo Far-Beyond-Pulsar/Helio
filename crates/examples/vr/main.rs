@@ -281,7 +281,7 @@ impl AppState {
                 let transform = world * Mat4::from_translation(HAND_OFFSET);
                 let _ = self
                     .renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .update_object_transform(self.animated.hand_cubes[i], transform);
             }
         }

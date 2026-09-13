@@ -257,7 +257,7 @@ impl RenderPass for IndirectDispatchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -275,7 +275,7 @@ impl RenderPass for IndirectDispatchPass {
         builder.write_buffer("indirect_dispatch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         frame.indirect_dispatch.write(
             libhelio::IndirectDispatchFrameData {
                 indirect: &self.indirect_buf,
@@ -286,7 +286,7 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let Some(batch) = ctx.frame_resources.object_batch.get() else {
+        let Some(batch) = ctx.pass_resources.object_batch.get() else {
             self.draw_count = 0;
             return Ok(());
         };

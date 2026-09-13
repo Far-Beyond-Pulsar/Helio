@@ -89,7 +89,7 @@ impl HelioWasmApp for Demo {
                 // Stage + lighting
                 let floor_y = min.y - radius * 0.08;
                 let floor_m = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_material(make_material(
                         [0.07, 0.08, 0.10, 1.0],
                         0.16,
@@ -99,7 +99,7 @@ impl HelioWasmApp for Demo {
                     ));
                 let floor =
                     renderer
-                        .scene_for_legacy_mut()
+                        .scene()
                         .insert_entity(helio::SceneEntity::mesh(plane_mesh(
                             [center.x, floor_y, center.z],
                             radius * 1.55,
@@ -114,7 +114,7 @@ impl HelioWasmApp for Demo {
                 .unwrap();
 
                 let ped_m = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_material(make_material(
                         [0.11, 0.12, 0.15, 1.0],
                         0.28,
@@ -123,7 +123,7 @@ impl HelioWasmApp for Demo {
                         0.0,
                     ));
                 let ped = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [center.x, floor_y + radius * 0.05, center.z],
                         [radius * 0.62, radius * 0.05, radius * 0.62],
@@ -131,7 +131,7 @@ impl HelioWasmApp for Demo {
                 insert_object(renderer, ped, ped_m, glam::Mat4::IDENTITY, radius).unwrap();
 
                 let back_m = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_material(make_material(
                         [0.04, 0.05, 0.08, 1.0],
                         0.82,
@@ -140,7 +140,7 @@ impl HelioWasmApp for Demo {
                         0.03,
                     ));
                 let back = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [center.x, floor_y + radius * 0.62, center.z - radius * 1.35],
                         [radius * 1.35, radius * 0.62, radius * 0.05],
@@ -153,7 +153,7 @@ impl HelioWasmApp for Demo {
                 let fill = focus + Vec3::new(-r * 0.26, r * 0.14, r * 0.28);
                 let rim = focus + Vec3::new(-r * 0.30, r * 0.22, -r * 0.32);
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         key.to_array(),
                         (focus - key).normalize().to_array(),
@@ -164,7 +164,7 @@ impl HelioWasmApp for Demo {
                         0.38,
                     )));
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         fill.to_array(),
                         (focus - fill).normalize().to_array(),
@@ -175,7 +175,7 @@ impl HelioWasmApp for Demo {
                         0.46,
                     )));
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(spot_light(
                         rim.to_array(),
                         (focus - rim).normalize().to_array(),
@@ -186,7 +186,7 @@ impl HelioWasmApp for Demo {
                         0.40,
                     )));
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(directional_light(
                         [0.15, -1.0, 0.1],
                         [0.07, 0.09, 0.14],
@@ -202,7 +202,7 @@ impl HelioWasmApp for Demo {
             Err(e) => {
                 log::warn!("Failed to load embedded FBX: {e:?}. Showing empty scene.");
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(directional_light(
                         [0.2, -1.0, 0.4],
                         [1.0, 0.95, 0.85],

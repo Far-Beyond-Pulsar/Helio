@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.7,
@@ -260,12 +260,12 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let cube1 = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
             .as_mesh()
             .unwrap();
@@ -283,7 +283,7 @@ impl ApplicationHandler for App {
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
         let sun_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 init_light_dir,
                 [1.0, 0.85, 0.7],
@@ -306,7 +306,7 @@ impl ApplicationHandler for App {
             infinite_extent: true,
         };
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::Sky(
                 helio::SkyActor::new().with_clouds(volumetric),
             ));
@@ -528,7 +528,7 @@ impl AppState {
         };
         // Re-insert sky actor — SkyActor is the single source of truth for sky+clouds
         self.renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::Sky(
                 helio::SkyActor::new().with_clouds(clouds),
             ));
@@ -548,7 +548,7 @@ impl AppState {
         self.coverage = p.coverage;
         self.density = p.density;
         self.renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::Sky(
                 helio::SkyActor::new().with_clouds(clouds),
             ));
@@ -617,7 +617,7 @@ impl AppState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );

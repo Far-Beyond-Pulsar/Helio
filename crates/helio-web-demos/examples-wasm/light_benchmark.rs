@@ -38,7 +38,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let ground_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.4, 0.4, 0.4, 1.0],
                 0.8,
@@ -47,7 +47,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let box_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.55, 0.52, 0.48, 1.0],
                 0.7,
@@ -56,7 +56,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let light_m = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [1.0, 1.0, 1.0, 1.0],
                 0.0,
@@ -67,7 +67,7 @@ impl HelioWasmApp for Demo {
 
         // Ground plane
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 64.0)));
         insert_object(renderer, ground, ground_m, glam::Mat4::IDENTITY, 64.0).unwrap();
 
@@ -79,7 +79,7 @@ impl HelioWasmApp for Demo {
                 let z = -28.0 + iz as f32 * 8.0;
                 let h = 0.5 + (ix * n + iz) as f32 % 3.0;
                 let bm = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
                         [x, h / 2.0, z],
                         [0.8, h, 0.8],
@@ -98,11 +98,11 @@ impl HelioWasmApp for Demo {
             let hue = i as f32 / LIGHT_COUNT as f32;
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let bulb = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(cube_mesh([x, 1.8, z], 0.07)));
             insert_object(renderer, bulb, light_m, glam::Mat4::IDENTITY, 0.07).unwrap();
             let id = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [x, 2.0, z],
                     [r, g, b],
@@ -116,7 +116,7 @@ impl HelioWasmApp for Demo {
 
         // Faint directional ambient
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.2, -0.9, 0.4],
                 [0.8, 0.85, 1.0],
@@ -178,7 +178,7 @@ impl HelioWasmApp for Demo {
             let hue = (i as f32 / LIGHT_COUNT as f32 + elapsed * 0.05).fract();
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let _ = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(*id, point_light([x, y, z], [r, g, b], 10.0, 8.0));
         }
 
