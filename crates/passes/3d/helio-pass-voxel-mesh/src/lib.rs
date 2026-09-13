@@ -5,14 +5,14 @@
 //! dirty-brick list each frame.
 
 mod marching_cubes;
+mod terrain;
+
+pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
-};
-use helio_voxel_core::{
-    GpuBrickMeshlet, GpuBrickMeta, MAX_SURFACE_INDICES_PER_BRICK, MAX_SURFACE_VERTS_PER_BRICK,
 };
 use libhelio::DrawIndexedIndirectArgs;
 
@@ -32,6 +32,29 @@ pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
 // the boundary between two bricks and the surface has a visible seam/gap at
 // every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
 pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
+pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 2048;
+pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 2048;
+
+/// Mesh-pass-owned metadata consumed by the extraction and meshlet shaders.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuBrickMeta {
+    pub data_offset: u32,
+    pub occupancy: u32,
+}
+
+/// Mesh-pass-owned indirect meshlet descriptor.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuBrickMeshlet {
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+    pub brick_index: u32,
+    pub volume_id: u32,
+    pub _pad: [u32; 2],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttachmentMode {

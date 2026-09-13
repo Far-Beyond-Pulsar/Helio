@@ -9,17 +9,14 @@ use std::sync::Arc;
 
 use crate::scene::gpu_storage::GpuScene;
 use crate::scene::gpu_storage::GrowableBuffer;
-use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
 
-use super::types::VoxelVolumeDescriptor;
-use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
     LightId, MaterialId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId,
     ReflectionCaptureId, SectionedInstanceId, SublevelId, TextureId, VirtualObjectId,
-    VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
@@ -222,10 +219,6 @@ pub struct Scene {
     /// Populated by `insert_sectioned_object` and cleaned up by `remove_sectioned_object`.
     pub(in crate::scene) section_to_instance: HashMap<ObjectId, SectionedInstanceId>,
 
-    // ── Voxel volumes ──────────────────────────────────────────────────────────
-    /// Voxel volumes (dense array)
-    pub(in crate::scene) voxel_volumes: DenseArena<VoxelVolumeRecord, VoxelVolumeId>,
-
     // ── Reflection captures ─────────────────────────────────────────────────────
     pub(in crate::scene) reflection_captures:
         DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
@@ -375,7 +368,6 @@ impl Scene {
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
-            voxel_volumes: DenseArena::new(),
             reflection_captures: DenseArena::new(),
             coordinate_space_free: Vec::new(),
             coordinate_space_next: 1, // slot 0 reserved for world-space identity
@@ -410,29 +402,6 @@ impl Scene {
             .coordinate_spaces
             .update_slot(slot, glam::Mat4::IDENTITY.to_cols_array());
         self.coordinate_space_free.push(slot);
-    }
-
-    pub fn insert_voxel_volume(
-        &mut self,
-        descriptor: VoxelVolumeDescriptor,
-    ) -> Result<VoxelVolumeId> {
-        let gpu_slot = self.voxel_volumes.len() as u32;
-        let id = self
-            .voxel_volumes
-            .insert_with(|id| VoxelVolumeRecord::new(id, gpu_slot, &descriptor));
-
-        if let Some(record) = self.voxel_volumes.get(id) {
-            record.upload_to_gpu(&mut self.gpu_scene, gpu_slot);
-        }
-
-        self.gpu_scene.voxel_volume_count = self.voxel_volumes.len() as u32;
-        Ok(id)
-    }
-
-    pub fn remove_voxel_volume(&mut self, id: VoxelVolumeId) -> Result<()> {
-        self.voxel_volumes.remove(id);
-        self.gpu_scene.voxel_volume_count = self.voxel_volumes.len() as u32;
-        Ok(())
     }
 
     /// Set the material class and graph hash for an existing material.
@@ -472,20 +441,6 @@ impl Scene {
         record.gpu.class_params = params;
         self.gpu_scene.materials.update(slot, record.gpu);
         Ok(())
-    }
-
-    pub fn edit_voxel_volume(&mut self, id: VoxelVolumeId, edit: VoxelEdit) -> Result<()> {
-        if let Some(record) = self.voxel_volumes.get_mut(id) {
-            record.edit(&edit);
-            record.push_edits_to_gpu(&mut self.gpu_scene, &[edit]);
-            Ok(())
-        } else {
-            Err(invalid("voxel volume"))
-        }
-    }
-
-    pub fn voxel_volume(&self, id: VoxelVolumeId) -> Option<&VoxelVolumeRecord> {
-        self.voxel_volumes.get(id)
     }
 
     /// Returns a reference to the TLAS (Top-Level Acceleration Structure) for

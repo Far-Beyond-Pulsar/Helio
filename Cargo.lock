@@ -1031,8 +1031,6 @@ dependencies = [
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-pass-water-sim",
- "helio-planet-voxel-core",
- "helio-voxel-core",
  "helio-xr",
  "image",
  "libhelio",
@@ -1446,7 +1444,6 @@ dependencies = [
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-portal-core",
- "helio-voxel-core",
  "helio-xr",
  "image",
  "libhelio",
@@ -1530,7 +1527,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
- "helio-voxel-core",
  "libhelio",
  "naga",
  "pollster 0.4.0",
@@ -1864,7 +1860,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-planet-voxel-core",
  "libhelio",
  "log",
  "pollster 0.4.0",
@@ -2138,7 +2133,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-voxel-core",
  "libhelio",
  "log",
  "pollster 0.4.0",
@@ -2152,7 +2146,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-voxel-core",
  "libhelio",
  "log",
  "wgpu",
@@ -2194,16 +2187,6 @@ name = "helio-passes"
 version = "0.0.0"
 
 [[package]]
-name = "helio-planet-voxel-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "pollster 0.4.0",
- "thiserror 2.0.20",
- "wgpu",
-]
-
-[[package]]
 name = "helio-portal-core"
 version = "0.1.0"
 dependencies = [
@@ -2227,14 +2210,6 @@ dependencies = [
  "pollster 0.4.0",
  "thiserror 2.0.20",
  "wgpu",
-]
-
-[[package]]
-name = "helio-voxel-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
 ]
 
 [[package]]
@@ -2273,7 +2248,6 @@ dependencies = [
  "helio-pass-postprocess",
  "helio-pass-sdf",
  "helio-pass-voxel-mesh",
- "helio-voxel-core",
  "helio-wasm",
  "libhelio",
  "log",

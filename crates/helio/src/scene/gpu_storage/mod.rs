@@ -10,7 +10,7 @@
 //! SceneDB columns -- plus whichever `libhelio::FrameResources` slots the
 //! owning pass publishes). `GpuScene`/`SceneResources` still exist here only
 //! because several subsystems (camera, materials, shadow matrices,
-//! coordinate spaces, voxels, portals) have not yet been individually
+//! coordinate spaces, and portals) have not yet been individually
 //! migrated to a SceneDB-native buffer or pass-owned storage the way static
 //! objects (`helio-pass-object-batch`), lights (`"scene_lights"` SceneDB
 //! buffer), and reflection captures (`"reflection_captures"` SceneDB buffer)

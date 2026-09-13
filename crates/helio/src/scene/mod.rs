@@ -80,7 +80,6 @@ mod stats;
 mod sublevels;
 mod types;
 mod virtual_geometry;
-mod voxel;
 mod water;
 
 pub use actor::{
@@ -96,6 +95,4 @@ pub use portals::{portal_pose_facing, PortalDescriptor};
 pub use sublevels::SublevelDescriptor;
 pub use types::{
     LightRenderInput, ObjectDescriptor, PickableObject, StaticMeshRenderInput,
-    VoxelVolumeDescriptor,
 };
-pub use voxel::VoxelMode;

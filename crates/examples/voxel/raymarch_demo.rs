@@ -1,8 +1,8 @@
 //! Voxel Demo — procedurally generated voxel world, per-frame raymarched.
 //!
 //! Same world/controls as `voxel_demo` (mesh_demo.rs), but rendered through
-//! `VoxelRayMarchPass` (`VoxelMode::Dynamic`) instead of `VoxelMeshPass`: a
-//! fullscreen compute shader DDA-marches the brick grid every frame instead
+//! `VoxelRayMarchPass` instead of `VoxelMeshPass`: a fullscreen compute shader
+//! DDA-marches the brick grid every frame instead
 //! of extracting real triangles. Useful for comparing the two rendering
 //! paths, or for volumes under heavy per-frame editing where re-meshing on
 //! every edit would be too expensive.
@@ -24,12 +24,11 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, RenderGraph, RenderPass, Renderer, RendererConfig, Scene, SceneEntity, VoxelMode,
-    VoxelTerrain, VoxelVolumeDescriptor, VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
+    LightType, RenderGraph, RenderPass, Renderer, RendererConfig, Scene, SceneEntity,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_raymarch::VoxelRayMarchPass;
-use helio_voxel_core::GpuVoxelMaterial;
+use helio_pass_voxel_mesh::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+use helio_pass_voxel_raymarch::{GpuVoxelVolume, VoxelRayMarchPass};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -46,7 +45,6 @@ const DRAG: f32 = 6.0;
 // The GPU-side voxel volume is always a dense 64^3 grid (fixed by the engine's
 // BRICK_SIZE constant); `VOXEL_SIZE` just scales that grid into world units.
 const VOXEL_SIZE: f32 = 0.75;
-const ROOT_EXTENT: f32 = (VOXEL_TERRAIN_GRID_DIM as f32) * VOXEL_SIZE;
 
 // ── app ───────────────────────────────────────────────────────────────────────
 
@@ -71,7 +69,6 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
     current_material: u8,
-    vol_id: VoxelVolumeId,
     world: VoxelTerrain,
     world_seed: u32,
 }
@@ -282,58 +279,6 @@ impl ApplicationHandler for App {
         });
         let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
 
-        // Create a voxel volume with some initial structure
-        let voxel_desc = VoxelVolumeDescriptor {
-            voxel_size: VOXEL_SIZE,
-            root_extent: ROOT_EXTENT,
-            local_to_world: glam::Mat4::IDENTITY,
-            movability: Some(libhelio::Movability::Stationary),
-            // Dynamic (raymarch) mode: re-traced from scratch every frame, no
-            // meshing cost on edit. Auto (VoxelMeshPass) is the mesh_demo.rs
-            // sibling of this file.
-            mode: Some(VoxelMode::Dynamic),
-            material_palette: vec![
-                GpuVoxelMaterial {
-                    color: [0.0, 0.0, 0.0],
-                    roughness: 1.0,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // air (unused)
-                GpuVoxelMaterial {
-                    color: [0.3, 0.7, 0.25],
-                    roughness: 0.8,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // grass
-                GpuVoxelMaterial {
-                    color: [0.45, 0.3, 0.15],
-                    roughness: 0.9,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // dirt
-                GpuVoxelMaterial {
-                    color: [0.5, 0.5, 0.52],
-                    roughness: 0.85,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // stone
-                GpuVoxelMaterial {
-                    color: [0.9, 0.75, 0.2],
-                    roughness: 0.4,
-                    metalness: 0.8,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // ore
-            ],
-        };
-        let vol_id = scene
-            .insert_voxel_volume(voxel_desc)
-            .expect("Failed to create voxel volume");
-
         // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
         // directly (see voxel_raymarch.wgsl), the same infrastructure the default
         // render graphs feed their deferred lighting pass with.
@@ -358,17 +303,11 @@ impl ApplicationHandler for App {
             ..Default::default()
         }));
 
-        // Procedurally generate the world on the CPU and bake it straight to the
-        // shared GPU voxel pools. This bypasses Scene::edit_voxel_volume because
-        // the edit ring does not currently have a GPU consumer.
+        // Procedurally generate the authored input, then publish it through the
+        // raymarch pass's explicit delta/upload boundary.
         let world_seed = 1;
         let mut world = VoxelTerrain::empty();
         world.generate(world_seed);
-        world.upload_all_raymarch(
-            &queue,
-            &scene.gpu_scene().voxel_brick_pool,
-            &scene.gpu_scene().voxel_data_pool,
-        );
 
         // Build a custom graph: VoxelRayMarchPass (writes "pre_aa") then
         // FxaaPass (reads "pre_aa", writes directly to the swapchain target —
@@ -377,6 +316,25 @@ impl ApplicationHandler for App {
         // "pre_aa" and discard FXAA's result if chained after it).
         let mut graph = RenderGraph::new(&device, &queue);
         let mut voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
+        voxel_rm_pass.upload_volume(
+            &queue,
+            0,
+            &GpuVoxelVolume {
+                local_to_world: glam::Mat4::IDENTITY.to_cols_array(),
+                world_to_local: glam::Mat4::IDENTITY.to_cols_array(),
+                dimensions: [VOXEL_TERRAIN_GRID_DIM; 3],
+                brick_grid_dim: 8,
+                voxel_size: VOXEL_SIZE,
+                palette_offset: 0,
+                volume_id: 0,
+                _pad: [0; 2],
+            },
+        );
+        world.upload_all_raymarch(
+            &queue,
+            voxel_rm_pass.voxel_brick_pool(),
+            voxel_rm_pass.voxel_data_pool(),
+        );
         // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
         // only resizes them in on_resize(), which the engine normally calls from a
         // window-resize event. Since RenderGraph::lock() never calls it, we have to
@@ -428,7 +386,6 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             current_material: 1,
-            vol_id,
             world,
             world_seed,
         });
@@ -487,11 +444,14 @@ impl ApplicationHandler for App {
                             .wrapping_mul(2654435761)
                             .wrapping_add(1);
                         state.world.generate(state.world_seed);
-                        let scene = state.renderer.scene();
+                        let pass = state
+                            .renderer
+                            .find_pass::<VoxelRayMarchPass>()
+                            .expect("VoxelRayMarchPass missing from graph");
                         state.world.upload_all_raymarch(
                             &state.queue,
-                            &scene.gpu_scene().voxel_brick_pool,
-                            &scene.gpu_scene().voxel_data_pool,
+                            pass.voxel_brick_pool(),
+                            pass.voxel_data_pool(),
                         );
                     }
                     _ => {}
@@ -535,10 +495,13 @@ impl ApplicationHandler for App {
                 let pos = state.cam_pos;
                 let yaw = state.yaw;
                 let pitch = state.pitch;
-                let scene = state.renderer.scene();
+                let pass = state
+                    .renderer
+                    .find_pass::<VoxelRayMarchPass>()
+                    .expect("VoxelRayMarchPass missing from graph");
                 let (brick_pool, data_pool) = (
-                    scene.gpu_scene().voxel_brick_pool.clone(),
-                    scene.gpu_scene().voxel_data_pool.clone(),
+                    pass.voxel_brick_pool().clone(),
+                    pass.voxel_data_pool().clone(),
                 );
                 AppState::place_edit(
                     true,
@@ -562,10 +525,13 @@ impl ApplicationHandler for App {
                 let pos = state.cam_pos;
                 let yaw = state.yaw;
                 let pitch = state.pitch;
-                let scene = state.renderer.scene();
+                let pass = state
+                    .renderer
+                    .find_pass::<VoxelRayMarchPass>()
+                    .expect("VoxelRayMarchPass missing from graph");
                 let (brick_pool, data_pool) = (
-                    scene.gpu_scene().voxel_brick_pool.clone(),
-                    scene.gpu_scene().voxel_data_pool.clone(),
+                    pass.voxel_brick_pool().clone(),
+                    pass.voxel_data_pool().clone(),
                 );
                 AppState::place_edit(
                     false,

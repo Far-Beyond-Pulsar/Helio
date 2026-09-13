@@ -2,7 +2,7 @@ use crate::{
     GpuAllocationPlan, GpuConfigError, GpuLookupKey, GpuPageTableEntry, GpuResidencyCounters,
     GpuResidencyUniform, PageTable, PageTableError, PlanetaryVoxelGpuConfig,
 };
-use helio_planet_voxel_core::{
+use crate::{
     AddressError, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError, PageEvict,
     PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, ResidentPageCache, SourceGeneration,
     UploadOutcome, VisibilityOutcome, VisiblePageSet, PAGE_CELL_BYTES,
@@ -528,13 +528,13 @@ impl PlanetaryVoxelResidency {
                 bytemuck::cast_slice(page_cells),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some((helio_planet_voxel_core::PAGE_EDGE * 4) as u32),
-                    rows_per_image: Some(helio_planet_voxel_core::PAGE_EDGE as u32),
+                    bytes_per_row: Some((crate::PAGE_EDGE * 4) as u32),
+                    rows_per_image: Some(crate::PAGE_EDGE as u32),
                 },
                 wgpu::Extent3d {
-                    width: helio_planet_voxel_core::PAGE_EDGE as u32,
-                    height: helio_planet_voxel_core::PAGE_EDGE as u32,
-                    depth_or_array_layers: helio_planet_voxel_core::PAGE_EDGE as u32,
+                    width: crate::PAGE_EDGE as u32,
+                    height: crate::PAGE_EDGE as u32,
+                    depth_or_array_layers: crate::PAGE_EDGE as u32,
                 },
             );
             self.cell_bytes_uploaded = self
@@ -790,12 +790,12 @@ mod tests {
     #[test]
     fn upload_outcome_keeps_core_backpressure_reason_typed() {
         let outcome = GpuUploadOutcome::Residency(UploadOutcome::Backpressure(
-            helio_planet_voxel_core::BackpressureReason::AllEvictionCandidatesVisible,
+            crate::BackpressureReason::AllEvictionCandidatesVisible,
         ));
         assert!(matches!(
             outcome,
             GpuUploadOutcome::Residency(UploadOutcome::Backpressure(
-                helio_planet_voxel_core::BackpressureReason::AllEvictionCandidatesVisible
+                crate::BackpressureReason::AllEvictionCandidatesVisible
             ))
         ));
     }

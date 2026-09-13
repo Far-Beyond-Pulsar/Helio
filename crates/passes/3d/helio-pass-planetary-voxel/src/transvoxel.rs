@@ -414,7 +414,7 @@ fn fnv_u64(mut fingerprint: u64, value: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::{ExtractionFixture, ExtractionFixtureKind};
-    use helio_planet_voxel_core::{PageKey, PAGE_EDGE};
+    use crate::{PageKey, PAGE_EDGE};
 
     #[test]
     fn every_official_case_is_index_safe_and_deterministic() {

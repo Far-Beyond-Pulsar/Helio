@@ -489,17 +489,6 @@ impl Renderer {
                 },
                 "Renderer",
             );
-            frame_resources.voxels.write(
-                libhelio::VoxelsFrameData {
-                    voxel_volumes: gpu_scene.voxel_volumes.buffer(),
-                    voxel_edit_ring: gpu_scene.voxel_edit_ring.buffer(),
-                    voxel_brick_pool: &gpu_scene.voxel_brick_pool,
-                    voxel_data_pool: &gpu_scene.voxel_data_pool,
-                    voxel_volume_count: gpu_scene.voxel_volume_count,
-                    voxel_volumes_generation: gpu_scene.voxel_volumes_generation,
-                },
-                "Renderer",
-            );
         }
         frame_resources
             .postprocess_uniforms

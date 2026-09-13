@@ -33,13 +33,11 @@
 
 use glam::{Mat4, Quat, Vec3};
 use helio::{
-    GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer, VoxelMode,
-    VoxelTerrain, VoxelVolumeDescriptor, VOXEL_TERRAIN_GRID_DIM,
+    GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer,
 };
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
-use helio_pass_voxel_mesh::VoxelMeshPass;
+use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_pass_water_sim::WaterSimPass;
-use helio_voxel_core::GpuVoxelMaterial;
 use libhelio::{CoronaEmitterDescriptor, PostProcessSettings, PostProcessVolumeDescriptor};
 
 use crate::v3_demo_common::{
@@ -641,46 +639,6 @@ fn bay_emissive_colour(
 /// Bay 7 — a voxel sculpture rendered as real triangles through `VoxelMeshPass`.
 fn bay_voxel(renderer: &mut Renderer, z: f32) {
     const VOXEL_SIZE: f32 = 0.22;
-
-    let _ = renderer
-        .scene_for_legacy_mut()
-        .insert_voxel_volume(VoxelVolumeDescriptor {
-            voxel_size: VOXEL_SIZE,
-            root_extent: VOXEL_TERRAIN_GRID_DIM as f32 * VOXEL_SIZE,
-            local_to_world: Mat4::from_translation(Vec3::new(0.0, 0.0, z)),
-            movability: Some(helio::Movability::Stationary),
-            mode: Some(VoxelMode::Auto),
-            material_palette: vec![
-                GpuVoxelMaterial {
-                    color: [0.0, 0.0, 0.0],
-                    roughness: 1.0,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                },
-                GpuVoxelMaterial {
-                    color: [0.85, 0.7, 0.25],
-                    roughness: 0.5,
-                    metalness: 0.6,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                },
-                GpuVoxelMaterial {
-                    color: [0.25, 0.55, 0.85],
-                    roughness: 0.7,
-                    metalness: 0.2,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                },
-                GpuVoxelMaterial {
-                    color: [0.85, 0.3, 0.3],
-                    roughness: 0.6,
-                    metalness: 0.1,
-                    emissive: 0.2,
-                    _pad: [0; 2],
-                },
-            ],
-        });
 
     // Sculpt an abstract piece around the volume's local origin. Grid coordinates:
     // local = (grid - GRID_DIM/2) * voxel_size, so the origin sits at grid centre and

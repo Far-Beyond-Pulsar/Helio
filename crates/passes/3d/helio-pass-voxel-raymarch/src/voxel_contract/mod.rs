@@ -1,7 +1,7 @@
-pub mod constants;
-pub mod edit;
-pub mod gpu_types;
-pub mod octree;
+mod constants;
+mod edit;
+mod gpu_types;
+mod octree;
 
 pub use constants::*;
 pub use edit::*;

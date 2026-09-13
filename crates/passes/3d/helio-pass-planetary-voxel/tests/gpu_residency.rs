@@ -4,7 +4,7 @@ use helio_pass_planetary_voxel::{
     GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
     RESIDENCY_WGSL,
 };
-use helio_planet_voxel_core::{
+use helio_pass_planetary_voxel::{
     CellWord, EvictOutcome, GpuPageMeta, PageEvict, PageKey, PageUpload, PlanetFrameUniform,
     PlanetId, PlanetPageKey, PlanetPosition, SourceGeneration, UploadOutcome, VisiblePage,
     VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,

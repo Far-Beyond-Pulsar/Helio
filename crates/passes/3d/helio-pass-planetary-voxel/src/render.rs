@@ -13,7 +13,7 @@ use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
-use helio_planet_voxel_core::{
+use crate::{
     ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
     PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
 };
@@ -2342,9 +2342,9 @@ pub enum PlanetaryRenderError {
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error(transparent)]
-    Address(#[from] helio_planet_voxel_core::AddressError),
+    Address(#[from] crate::AddressError),
     #[error(transparent)]
-    Metadata(#[from] helio_planet_voxel_core::GpuPageMetaError),
+    Metadata(#[from] crate::GpuPageMetaError),
     #[error(transparent)]
     RegularExtraction(#[from] TransvoxelGpuError),
     #[error(transparent)]
@@ -2482,9 +2482,9 @@ mod tests {
         let planet = PlanetId([9; 16]);
         let generation = SourceGeneration::new(3, 7);
         let first =
-            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [-1, 0, 0]));
+            PlanetPageKey::new(planet, crate::PageKey::new(0, [-1, 0, 0]));
         let second =
-            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [0, 0, 0]));
+            PlanetPageKey::new(planet, crate::PageKey::new(0, [0, 0, 0]));
         let request = |key| PlanetarySurfaceRequest {
             key,
             generation,
@@ -2513,7 +2513,7 @@ mod tests {
     fn invalidation_does_not_duplicate_or_revive_stale_surface_requests() {
         let planet = PlanetId([4; 16]);
         let generation = SourceGeneration::new(1, 2);
-        let key = PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(1, [-2, 3, 5]));
+        let key = PlanetPageKey::new(planet, crate::PageKey::new(1, [-2, 3, 5]));
         let request = PlanetarySurfaceRequest {
             key,
             generation,

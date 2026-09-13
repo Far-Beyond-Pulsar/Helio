@@ -54,7 +54,6 @@ define_handle!(WaterVolumeId);
 define_handle!(WaterHitboxId);
 define_handle!(PostProcessVolumeId);
 define_handle!(ReflectionCaptureId);
-define_handle!(VoxelVolumeId);
 define_handle!(FoliageTypeId);
 define_handle!(FoliageLayerId);
 define_handle!(FoliageInteractorId);

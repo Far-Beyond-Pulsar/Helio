@@ -78,7 +78,7 @@ use super::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
     GpuCompactedIndicesBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
     GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
-    GpuVisibilityBuffer, GpuVoxelEditRing, GpuVoxelVolumeBuffer,
+    GpuVisibilityBuffer,
 };
 use super::resources::SceneResources;
 use std::sync::Arc;
@@ -243,22 +243,11 @@ pub struct GpuScene {
     /// Static/stationary lights are baked and excluded from real-time lighting calculations.
     pub movable_light_count: u32,
 
-    /// Shared voxel brick meta pool (brick_pool in shaders).
-    pub voxel_brick_pool: wgpu::Buffer,
-    /// Shared voxel data pool (voxel_data in shaders).
-    pub voxel_data_pool: wgpu::Buffer,
-
     /// Per-caster shadow dirty generation counters. Each slot corresponds to one shadow caster
     /// (6 atlas faces). Incremented by Scene::flush() when that caster's content hash changes
     /// (light moved or a movable object within its range moved). ShadowPass compares against
     /// its own per_caster_last_gen[] and only re-renders faces for dirty casters.
     pub per_caster_dirty_gen: [u64; 42],
-
-    pub voxel_volumes: GpuVoxelVolumeBuffer,
-    pub voxel_edit_ring: GpuVoxelEditRing,
-    pub voxel_volume_count: u32,
-    pub voxel_volumes_generation: u64,
-    pub voxel_ring_write_index: u32,
 
     /// Material class ranges for the GBuffer pass: [(class, graph_hash, start, count), ...]
     /// Each range is uniform in both material_class and graph_hash so a single
@@ -357,27 +346,6 @@ impl GpuScene {
         let coordinate_spaces = CoordinateSpaceBuffer::new(&device);
         let shadow_static_indirect = GpuIndirectBuffer::new(device.clone());
         let shadow_movable_indirect = GpuIndirectBuffer::new(device.clone());
-        let voxel_volumes = GpuVoxelVolumeBuffer::new(device.clone());
-        let voxel_edit_ring = GpuVoxelEditRing::new(device.clone());
-
-        // Shared voxel data pools (for ray march pass and future shared usage)
-        // Sized to match VOXEL_MESH_MAX_BRICKS in helio-pass-voxel-mesh.
-        let max_bricks_pool: u64 = 8192;
-        let brick_meta_size = std::mem::size_of::<helio_voxel_core::GpuBrickMeta>() as u64;
-        let voxel_data_words: u64 = max_bricks_pool * 128; // 512 bytes per brick / 4
-        let voxel_brick_pool = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VoxelBrickPool"),
-            size: max_bricks_pool * brick_meta_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let voxel_data_pool = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VoxelDataPool"),
-            size: voxel_data_words * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let reflection_captures = GrowableBuffer::new(
             device.clone(),
             64,
@@ -430,13 +398,6 @@ impl GpuScene {
             shadow_movable_draw_count: 0,
             movable_light_count: 0,
             per_caster_dirty_gen: [1u64; 42],
-            voxel_volumes,
-            voxel_edit_ring,
-            voxel_brick_pool,
-            voxel_data_pool,
-            voxel_volume_count: 0,
-            voxel_volumes_generation: 0,
-            voxel_ring_write_index: 0,
             material_class_ranges: Vec::new(),
             transparent_material_class_ranges: Vec::new(),
             forward_material_class_ranges: Vec::new(),
@@ -498,12 +459,6 @@ impl GpuScene {
             camera_generation: self.camera_generation,
             movable_light_count: self.movable_light_count,
             per_caster_dirty_gen: self.per_caster_dirty_gen,
-            voxel_volumes: self.voxel_volumes.buffer(),
-            voxel_edit_ring: self.voxel_edit_ring.buffer(),
-            voxel_brick_pool: &self.voxel_brick_pool,
-            voxel_data_pool: &self.voxel_data_pool,
-            voxel_volume_count: self.voxel_volume_count,
-            voxel_volumes_generation: self.voxel_volumes_generation,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
             template_registry: &self.template_registry,
@@ -588,8 +543,6 @@ impl GpuScene {
         self.coordinate_spaces.flush(queue);
         self.shadow_static_indirect.flush(queue);
         self.shadow_movable_indirect.flush(queue);
-        self.voxel_volumes.flush(queue);
-        self.voxel_edit_ring.flush(queue);
         self.reflection_captures.flush(queue);
         self.portal_views.flush(queue);
         self.portal_chains.flush(queue);

@@ -17,12 +17,10 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity, VoxelMode, VoxelTerrain,
-    VoxelVolumeDescriptor, VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
+    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_mesh::VoxelMeshPass;
-use helio_voxel_core::GpuVoxelMaterial;
+use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -39,7 +37,6 @@ const DRAG: f32 = 6.0;
 // The GPU-side voxel volume is always a dense 64^3 grid (fixed by the engine's
 // BRICK_SIZE constant); `VOXEL_SIZE` just scales that grid into world units.
 const VOXEL_SIZE: f32 = 0.75;
-const ROOT_EXTENT: f32 = (VOXEL_TERRAIN_GRID_DIM as f32) * VOXEL_SIZE;
 
 // ── app ───────────────────────────────────────────────────────────────────────
 
@@ -64,7 +61,6 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
     current_material: u8,
-    vol_id: VoxelVolumeId,
     world: VoxelTerrain,
     world_seed: u32,
 }
@@ -281,58 +277,6 @@ impl ApplicationHandler for App {
         });
         let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
 
-        // Create a voxel volume with some initial structure
-        let voxel_desc = VoxelVolumeDescriptor {
-            voxel_size: VOXEL_SIZE,
-            root_extent: ROOT_EXTENT,
-            local_to_world: glam::Mat4::IDENTITY,
-            movability: Some(libhelio::Movability::Stationary),
-            // Auto (mesh) mode: real triangles through the normal rasterization
-            // pipeline. Dynamic (VoxelRayMarchPass) is meant for volumes under
-            // heavy per-frame editing — not the case here.
-            mode: Some(VoxelMode::Auto),
-            material_palette: vec![
-                GpuVoxelMaterial {
-                    color: [0.0, 0.0, 0.0],
-                    roughness: 1.0,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // air (unused)
-                GpuVoxelMaterial {
-                    color: [0.3, 0.7, 0.25],
-                    roughness: 0.8,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // grass
-                GpuVoxelMaterial {
-                    color: [0.45, 0.3, 0.15],
-                    roughness: 0.9,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // dirt
-                GpuVoxelMaterial {
-                    color: [0.5, 0.5, 0.52],
-                    roughness: 0.85,
-                    metalness: 0.0,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // stone
-                GpuVoxelMaterial {
-                    color: [0.9, 0.75, 0.2],
-                    roughness: 0.4,
-                    metalness: 0.8,
-                    emissive: 0.0,
-                    _pad: [0; 2],
-                }, // ore
-            ],
-        };
-        let vol_id = scene
-            .insert_voxel_volume(voxel_desc)
-            .expect("Failed to create voxel volume");
-
         // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
         // directly (see voxel_raymarch.wgsl), the same infrastructure the default
         // render graphs feed their deferred lighting pass with.
@@ -430,7 +374,6 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             current_material: 1,
-            vol_id,
             world,
             world_seed,
         });
