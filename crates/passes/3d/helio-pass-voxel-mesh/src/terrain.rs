@@ -7,11 +7,9 @@
 //!   marching-cubes extract pass can read one voxel of +X/+Y/+Z halo and
 //!   close the seam between adjacent bricks (see `voxel_surface_extract.wgsl`
 //!   /`CELLS_PER_DIM`). It re-extracts real triangles on `mark_dirty()`.
-//! - `VoxelRayMarchPass` reads the *shared* `GpuScene::voxel_brick_pool`/
-//!   `voxel_data_pool` directly (`upload_*_raymarch`), storing each brick as
-//!   the raw **8x8x8** the DDA marcher indexes every frame — nothing in the
-//!   engine bakes edits into that pool on its own, so this component owns that
-//!   data on the CPU and uploads it directly via `queue.write_buffer`.
+//! - `VoxelRayMarchPass` exposes its own bounded brick/data buffers and accepts
+//!   explicit uploads (`upload_*_raymarch`), storing each brick as the raw
+//!   **8x8x8** the DDA marcher indexes every frame.
 //!
 //! The grid is always a dense 64^3 voxel volume (8 bricks per axis of 8
 //! voxels each — fixed GPU-side by the engine's `BRICK_SIZE` constant).
@@ -374,7 +372,7 @@ impl VoxelTerrain {
     }
 
     /// Re-bakes and uploads the bricks touched by a `BrickRange` into the
-    /// scene's shared `voxel_brick_pool`/`voxel_data_pool` (VoxelRayMarchPass).
+    /// explicitly supplied `VoxelRayMarchPass` buffers.
     /// GpuBrickMeta here is a single packed word: occupancy in the top byte,
     /// data_offset in the low 24 bits — see voxel_raymarch.wgsl's meta mask.
     pub fn upload_range_raymarch(
@@ -414,7 +412,8 @@ impl VoxelTerrain {
         }
     }
 
-    /// Uploads a full bake to the shared GPU voxel pools. See `upload_range_raymarch`.
+    /// Uploads a full bake to explicitly supplied raymarch GPU pools. See
+    /// `upload_range_raymarch`.
     pub fn upload_all_raymarch(
         &self,
         queue: &wgpu::Queue,

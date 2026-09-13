@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{
+use helio_pass_planetary_voxel::{
     GpuPageMeta, PageKey, PlanetFrameUniform, PlanetId, PlanetPosition, PlanetRenderFrame,
     LOD0_CELL_SIZE_METERS, MILLIMETER_INTERACTION_RADIUS_METERS, PLANET_VOXEL_LAYOUT_WGSL,
 };

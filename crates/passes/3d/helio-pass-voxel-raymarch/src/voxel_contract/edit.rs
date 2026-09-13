@@ -1,4 +1,4 @@
-use crate::gpu_types::GpuVoxelEdit;
+use super::gpu_types::GpuVoxelEdit;
 use glam::Vec3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

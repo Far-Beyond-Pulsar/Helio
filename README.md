@@ -143,7 +143,7 @@ let object   = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
 let light    = scene.insert_actor(helio::SceneActor::light(GpuLight { /* ... */ }));
 ```
 
-There is more under the surface when you need it. Every object carries a sixty-four-bit group mask, so you can hide, show, or transform whole groups of objects in one call. Meshes can be split into sections, one vertex buffer with several index ranges, which is the Unreal-style way of putting several materials on one model. Voxel volumes go in through `insert_voxel_volume` and are shared by both the meshing and ray-marching voxel passes. Whole-scene knobs like ambient light, the clear color, editor mode, and temporal jitter live on the renderer as `set_ambient`, `set_clear_color`, `set_editor_mode`, and `set_jitter_enabled`, and `scene.clear()` wipes the slate.
+There is more under the surface when you need it. Every object carries a sixty-four-bit group mask, so you can hide, show, or transform whole groups of objects in one call. Meshes can be split into sections, one vertex buffer with several index ranges, which is the Unreal-style way of putting several materials on one model. Voxel volumes are authored by the owning voxel pass through explicit bounded volume, brick, and edit uploads; meshing and ray-marching no longer share a renderer Scene/GpuScene voxel authority. Whole-scene knobs like ambient light, the clear color, editor mode, and temporal jitter live on the renderer as `set_ambient`, `set_clear_color`, `set_editor_mode`, and `set_jitter_enabled`, and `scene.clear()` wipes the slate.
 
 ## Writing your own material shaders
 

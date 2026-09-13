@@ -1,7 +1,6 @@
 //! Foliage GPU types, packing helpers and CPU mirrors of the foliage shader math.
 //!
-//! This is the `*-core` crate for the foliage stack, following the same rule as
-//! `helio-voxel-core` and `helio-planet-voxel-core`: shared POD types live in a crate
+//! This is the `*-core` crate for the foliage stack: shared POD types live in a crate
 //! with no `wgpu` dependency, so the passes that produce foliage data and the passes
 //! that consume it agree on layout without depending on each other, and so the layout
 //! and the maths can be tested on a machine with no GPU at all.

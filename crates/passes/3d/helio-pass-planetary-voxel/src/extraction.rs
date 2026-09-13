@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{PlanetPageKey, TRANSITION_FACE_MASK};
+use crate::{PlanetPageKey, TRANSITION_FACE_MASK};
 use std::collections::BTreeMap;
 
 pub const TERRAIN_MESHLET_MAX_VERTICES: u32 = 64;
@@ -707,7 +707,7 @@ fn bytes_for<T>(count: u32) -> Result<u64, ExtractionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helio_planet_voxel_core::{PageKey, PlanetId};
+    use crate::{PageKey, PlanetId};
 
     fn key(index: i64) -> PlanetPageKey {
         PlanetPageKey::new(PlanetId([1; 16]), PageKey::new(0, [index, 0, 0]))

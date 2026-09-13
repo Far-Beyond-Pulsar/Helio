@@ -474,6 +474,15 @@ impl Renderer {
                 },
                 "Renderer",
             );
+            frame_resources.portals.write(
+                libhelio::PortalsFrameData {
+                    portal_views: gpu_scene.portal_views.buffer(),
+                    portal_view_count: gpu_scene.portal_views.len() as u32,
+                    portal_chains: gpu_scene.portal_chains.buffer(),
+                    portal_chain_count: gpu_scene.portal_chains.len() as u32,
+                },
+                "Renderer",
+            );
         }
         frame_resources
             .postprocess_uniforms

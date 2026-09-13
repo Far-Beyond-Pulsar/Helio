@@ -2,7 +2,7 @@ use crate::{
     transvoxel::generated, EXTRACTION_SAMPLE_COUNT, REGULAR_CASE_COUNT, TRANSVOXEL_CLASSIFY_WGSL,
 };
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{CellWord, PAGE_CELL_COUNT};
+use crate::{CellWord, PAGE_CELL_COUNT};
 use wgpu::util::DeviceExt;
 
 pub const TRANSVOXEL_CLASSIFY_WORKGROUP_SIZE: u32 = 64;

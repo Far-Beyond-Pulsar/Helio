@@ -3,7 +3,7 @@ use crate::{
     TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
 };
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{
+use crate::{
     AddressError, GpuPageMeta, PageKey, PlanetId, PlanetPageKey, SourceGeneration, TransitionFace,
     PAGE_EDGE, TRANSITION_FACE_MASK,
 };
@@ -466,7 +466,7 @@ pub enum SurfaceSamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helio_planet_voxel_core::{
+    use crate::{
         CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
     };
     use std::sync::mpsc;

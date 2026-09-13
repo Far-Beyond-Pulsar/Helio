@@ -13,7 +13,6 @@ use crate::renderer::DebugVertex;
 const COLOR_LIGHT: [f32; 4] = [1.0, 0.85, 0.2, 1.0]; // amber
 const COLOR_LIGHT_INNER: [f32; 4] = [1.0, 0.55, 0.1, 1.0]; // deeper amber
 const COLOR_REFLECTION: [f32; 4] = [0.3, 0.8, 1.0, 1.0]; // cyan
-const COLOR_VOXEL: [f32; 4] = [0.6, 1.0, 0.3, 1.0]; // lime
 const COLOR_POST_PROCESS: [f32; 4] = [0.75, 0.4, 1.0, 1.0]; // violet
 const COLOR_POST_PROCESS_BLEND: [f32; 4] = [0.45, 0.25, 0.6, 1.0]; // dim violet
 const COLOR_WATER: [f32; 4] = [0.2, 0.55, 1.0, 1.0]; // blue
@@ -233,21 +232,6 @@ impl super::Scene {
 
         // Decals are SceneDB-only now (see `helio_pass_decal`); no central
         // record to draw a gizmo from here.
-
-        // Voxel volumes — the octree root's extent, placed by the volume's
-        // transform, so a rotated volume outlines correctly.
-        for (_, rec) in self.voxel_volumes.iter_with_handles() {
-            let root = &rec.octree.root;
-            let min = Vec3::from(root.aabb_min);
-            let max = Vec3::from(root.aabb_max);
-            let center = (min + max) * 0.5;
-            let half = (max - min) * 0.5;
-            sink.wire_box(
-                rec.local_to_world * Mat4::from_translation(center),
-                half,
-                COLOR_VOXEL,
-            );
-        }
 
         sink.verts
     }

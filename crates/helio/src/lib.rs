@@ -20,7 +20,6 @@ mod quark_commands;
 pub mod radiant;
 mod renderer;
 mod scene;
-mod terrain;
 mod vg;
 
 #[cfg(target_arch = "wasm32")]
@@ -31,7 +30,7 @@ pub use groups::{GroupId, GroupMask};
 pub use handles::{
     FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId, MultiMeshId,
     ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId, SublevelId,
-    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
@@ -61,9 +60,8 @@ pub use scene::{
     GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
     ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
     SceneEntityId, SceneEntityTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
-    VoxelMode, VoxelVolumeDescriptor, WaterHitboxDescriptor, WaterVolumeDescriptor,
+    WaterHitboxDescriptor, WaterVolumeDescriptor,
 };
-pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 #[cfg(feature = "bake")]

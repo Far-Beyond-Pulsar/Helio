@@ -185,12 +185,6 @@ pub struct SceneResources<'a> {
     /// its own last-rendered gen to decide which caster faces need re-rendering.
     pub per_caster_dirty_gen: [u64; 42],
 
-    pub voxel_volumes: &'a wgpu::Buffer,
-    pub voxel_edit_ring: &'a wgpu::Buffer,
-    pub voxel_brick_pool: &'a wgpu::Buffer,
-    pub voxel_data_pool: &'a wgpu::Buffer,
-    pub voxel_volume_count: u32,
-    pub voxel_volumes_generation: u64,
 
     // `material_class_ranges`/`transparent_material_class_ranges`/
     // `forward_material_class_ranges` — removed; see `ObjectBatchFrameData`'s

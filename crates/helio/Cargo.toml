@@ -28,7 +28,6 @@ thiserror = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 quark.workspace = true
-helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"

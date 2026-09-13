@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine_subsystems::{Subsystem, SubsystemContext, SubsystemError};
 use helio_pass_planetary_voxel::PlanetaryVoxelRenderConfig;
-use helio_planet_voxel_core::VisibilityOutcome;
+use helio_pass_planetary_voxel::VisibilityOutcome;
 use pulsar_reflection::LiveKeySet;
 use pulsar_terrain::{
     CELL_COUNT, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,

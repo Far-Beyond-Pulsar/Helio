@@ -10,17 +10,6 @@ use crate::handles::{MaterialId, MeshId, ObjectId};
 use crate::material::MaterialTextures;
 use crate::vg::VirtualMeshId;
 
-/// Descriptor for creating a voxel volume in the scene
-#[derive(Debug, Clone)]
-pub struct VoxelVolumeDescriptor {
-    pub voxel_size: f32,
-    pub root_extent: f32,
-    pub local_to_world: glam::Mat4,
-    pub movability: Option<libhelio::Movability>,
-    pub mode: Option<super::voxel::VoxelMode>,
-    pub material_palette: Vec<helio_voxel_core::GpuVoxelMaterial>,
-}
-
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Public Types
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -66,8 +66,7 @@ glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
 libhelio.workspace = true
 helio-asset-compat = { workspace = true }
-helio-planet-voxel-core = { workspace = true }
-helio-pass-planetary-voxel = { workspace = true }
+helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
 helio-pass-postprocess = { workspace = true }
 helio-pass-water-sim = { workspace = true }
 helio-pass-foliage-place = { workspace = true }

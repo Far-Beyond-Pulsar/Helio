@@ -1,4 +1,4 @@
-use crate::constants::*;
+use super::constants::*;
 use std::fmt;
 
 /// Six complete octree subdivisions produce 8^6 = 262,144 terminal bricks,

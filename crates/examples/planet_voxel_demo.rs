@@ -23,7 +23,7 @@ use helio_pass_planetary_voxel::{
     PlanetaryRenderDiagnostics, PlanetarySurfaceRequest, PlanetaryVoxelRenderConfig,
     PlanetaryVoxelRenderPass, TerrainLodTopology,
 };
-use helio_planet_voxel_core::{
+use helio_pass_planetary_voxel::{
     EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey,
     PlanetPosition, SourceGeneration, VisibilityOutcome, VisiblePage, VisiblePageSet,
     LOD0_CELL_SIZE_METERS, PAGE_CELL_BYTES, PAGE_EDGE, PAGE_EDGE_CELLS,
@@ -570,8 +570,8 @@ impl HorizonStreamingState {
             if !matches!(
                 outcomes.as_slice(),
                 [helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
-                    helio_planet_voxel_core::UploadOutcome::Inserted { .. }
-                        | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                    helio_pass_planetary_voxel::UploadOutcome::Inserted { .. }
+                        | helio_pass_planetary_voxel::UploadOutcome::Duplicate { .. }
                 )]
             ) {
                 return Err(format!(
@@ -714,8 +714,8 @@ impl HorizonStreamingState {
                 !matches!(
                     outcome,
                     helio_pass_planetary_voxel::GpuUploadOutcome::Residency(
-                        helio_planet_voxel_core::UploadOutcome::Inserted { .. }
-                            | helio_planet_voxel_core::UploadOutcome::Duplicate { .. }
+                        helio_pass_planetary_voxel::UploadOutcome::Inserted { .. }
+                            | helio_pass_planetary_voxel::UploadOutcome::Duplicate { .. }
                     )
                 )
             }) {

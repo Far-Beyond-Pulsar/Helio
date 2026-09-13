@@ -4,7 +4,7 @@ use crate::{
     TRANSVOXEL_SCAN_BLOCKS, TRANSVOXEL_SCAN_WORKGROUP_SIZE,
 };
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{CellWord, PAGE_CELL_COUNT};
+use crate::{CellWord, PAGE_CELL_COUNT};
 use wgpu::util::DeviceExt;
 
 const REGULAR_VERTEX_TABLE_VALUES: usize = 256 * 12;

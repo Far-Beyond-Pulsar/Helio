@@ -5,7 +5,7 @@ use helio_pass_planetary_voxel::{
     TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TRANSVOXEL_REGULAR_CORNERS,
     TRANSVOXEL_SCAN_WORKGROUP_SIZE,
 };
-use helio_planet_voxel_core::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
+use helio_pass_planetary_voxel::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
 use std::sync::mpsc;
 
 #[test]

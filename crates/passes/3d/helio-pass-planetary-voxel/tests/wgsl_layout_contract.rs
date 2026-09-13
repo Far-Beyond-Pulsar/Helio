@@ -1,4 +1,4 @@
-use helio_planet_voxel_core::{
+use helio_pass_planetary_voxel::{
     GpuPageMeta, GpuVoxelMaterial, PlanetFrameUniform, PLANET_VOXEL_LAYOUT_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
