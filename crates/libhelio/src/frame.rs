@@ -655,9 +655,6 @@ pub struct FrameResources<'a> {
     /// Active portals, written by the `Renderer` each frame -- see
     /// [`PortalsFrameData`]'s own doc.
     pub portals: Tracked<PortalsFrameData<'a>>,
-    /// Voxel terrain storage, written by the `Renderer` each frame -- see
-    /// [`VoxelsFrameData`]'s own doc.
-    pub voxels: Tracked<VoxelsFrameData<'a>>,
 
     /// Frustum-culled draw args (populated by `IndirectDispatchPass`) --
     /// see [`IndirectDispatchFrameData`]'s own doc.
@@ -964,21 +961,6 @@ pub struct PortalsFrameData<'a> {
     pub portal_chain_count: u32,
 }
 
-/// Voxel terrain storage for this frame -- written directly by the
-/// `Renderer`. Deliberately NOT relocated to a pass this session (real
-/// stateful editing logic -- brick pool allocation, edit-ring management --
-/// needs the same GPU-correctness-tested treatment `ObjectBatchPass` got,
-/// not a rushed move); tracked as its own dedicated follow-up.
-#[derive(Clone, Copy)]
-pub struct VoxelsFrameData<'a> {
-    pub voxel_volumes: &'a wgpu::Buffer,
-    pub voxel_edit_ring: &'a wgpu::Buffer,
-    pub voxel_brick_pool: &'a wgpu::Buffer,
-    pub voxel_data_pool: &'a wgpu::Buffer,
-    pub voxel_volume_count: u32,
-    pub voxel_volumes_generation: u64,
-}
-
 // ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
 
 /// Owned CPU-side PVS data stored in [`BakedData`].
@@ -1050,7 +1032,6 @@ impl<'a> FrameResources<'a> {
             shadow_matrices: Tracked::empty(),
             coordinate_spaces: Tracked::empty(),
             portals: Tracked::empty(),
-            voxels: Tracked::empty(),
             indirect_dispatch: Tracked::empty(),
             culled_batch: Tracked::empty(),
             corona_emitters: Tracked::empty(),
@@ -1184,7 +1165,6 @@ impl<'a> FrameResources<'a> {
             reset_field!(shadow_matrices);
             reset_field!(coordinate_spaces);
             reset_field!(portals);
-            reset_field!(voxels);
             reset_field!(indirect_dispatch);
             reset_field!(culled_batch);
             reset_field!(corona_emitters);
