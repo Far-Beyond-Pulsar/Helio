@@ -9,12 +9,15 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightRenderInput, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_with_context;
 use pulsar_scenedb::{SceneDb, World};
-use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
+use v3_demo_common::{
+    cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -27,46 +30,6 @@ use winit::{
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Authored light state belongs to SceneDB. Helio receives only this
-/// per-frame projection, keeping its light list transient like the parent
-/// engine_backend bridge.
-#[derive(Clone, Copy, Debug)]
-struct SceneLight {
-    light: helio::GpuLight,
-    position: [f32; 3],
-}
-
-fn spawn_scene_light(
-    world: &mut World,
-    light: helio::GpuLight,
-    position: [f32; 3],
-) -> pulsar_scenedb::Entity {
-    let entity = world.spawn();
-    world.insert(entity, SceneLight { light, position });
-    entity
-}
-
-fn scene_light_inputs(world: &World) -> Vec<LightRenderInput> {
-    world
-        .query::<&SceneLight>()
-        .map(|(entity, scene_light)| {
-            let mut light = scene_light.light;
-            light.position_range[0..3].copy_from_slice(&scene_light.position);
-            LightRenderInput {
-                light,
-                user_tag: entity.index() as u64,
-                entity_index: entity.index(),
-            }
-        })
-        .collect()
-}
-
-fn rebuild_scene_lights(renderer: &mut Renderer, scene_db: &SceneDb) {
-    renderer
-        .scene_for_legacy_mut()
-        .rebuild_light_instances(&scene_light_inputs(&scene_db.world));
-}
-
 #[cfg(test)]
 mod scene_light_tests {
     use super::*;
@@ -74,16 +37,14 @@ mod scene_light_tests {
     #[test]
     fn projection_reads_current_scene_db_positions() {
         let mut world = World::new();
-        let entity = spawn_scene_light(
+        let entity = spawn_light(
             &mut world,
-            point_light([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], 4.0, 5.0),
-            [7.0, 8.0, 9.0],
+            point_light([7.0, 8.0, 9.0], [1.0, 1.0, 1.0], 4.0, 5.0),
         );
-
-        let inputs = scene_light_inputs(&world);
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].entity_index, entity.index());
-        assert_eq!(&inputs[0].light.position_range[..3], &[7.0, 8.0, 9.0]);
+        let light = world
+            .get::<helio_pass_forward_lit::LightComponent>(entity)
+            .expect("SceneDB light missing");
+        assert_eq!(&light.position_range[..3], &[7.0, 8.0, 9.0]);
     }
 }
 
@@ -205,130 +166,85 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        // Features — data-free: all content comes from the Scene
+        // SceneDB owns authored entities; Helio receives only its GPU mirror.
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
-        renderer.set_editor_mode(true);
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_editor_mode(true)
+            .with_pass_build_context(Box::new(build_default_graph_with_context))
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
 
-        let mut scene_db = SceneDb::new();
+        let mat = renderer.create_material_projection(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let mat = renderer
-            .scene_for_legacy_mut()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let cube1 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = renderer.create_mesh_asset(plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let cube1 = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
-            .as_mesh()
-            .unwrap();
-
-        let _ = v3_demo_common::insert_object(
+        let _ = spawn_object(
+            &mut scene_db.world,
             &mut renderer,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
             0.5,
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = spawn_object(
+            &mut scene_db.world,
             &mut renderer,
             cube2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
             0.4,
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = spawn_object(
+            &mut scene_db.world,
             &mut renderer,
             cube3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            &mut renderer,
+            ground,
+            mat,
+            glam::Mat4::IDENTITY,
+            5.0,
+        );
 
         // p0 bobs up/down (animated), p1 and p2 are static
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
         let light_p0_entity = {
-            let p0 = spawn_scene_light(
+            let p0 = spawn_light(
                 &mut scene_db.world,
                 point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0),
-                p0_init,
             );
-            spawn_scene_light(
+            spawn_light(
                 &mut scene_db.world,
                 point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0),
-                p1,
             );
-            spawn_scene_light(
+            spawn_light(
                 &mut scene_db.world,
                 point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0),
-                p2,
             );
             p0
         };
-        rebuild_scene_lights(&mut renderer, &scene_db);
         self.state = Some(AppState {
             window,
             surface,
@@ -531,12 +447,15 @@ impl AppState {
         {
             self.scene_db
                 .world
-                .get_mut::<SceneLight>(self.light_p0_entity)
+                .get_mut::<helio_pass_forward_lit::LightComponent>(self.light_p0_entity)
                 .expect("SceneDB animated light disappeared")
-                .light = point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0);
+                .clone_from(&helio_pass_forward_lit::LightComponent::from(point_light(
+                    p0,
+                    [1.0, 0.55, 0.15],
+                    6.0,
+                    5.0,
+                )));
         }
-        rebuild_scene_lights(&mut self.renderer, &self.scene_db);
-
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

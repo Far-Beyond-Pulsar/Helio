@@ -12,13 +12,15 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, LightId,
-    Movability, ObjectId, RendererBuilder, RendererConfig, SceneEntity,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    Movability, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
-    sphere_mesh, update_point_light,
+    box_mesh, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_object_with_movability, sphere_mesh,
+    update_object_transform, update_point_light,
 };
 
 use winit::{
@@ -62,8 +64,10 @@ struct State {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    orbit_lights: [LightId; 4],
-    spin_crystal: ObjectId,
+    scene_db: SceneDb,
+
+    orbit_lights: [Entity; 4],
+    spin_crystal: Entity,
 }
 
 impl App {
@@ -143,7 +147,8 @@ impl ApplicationHandler for App {
 
         // ── Build renderer with the new builder ─────────────────────────────
         let config = RendererConfig::new(w, h, surface_format);
-        let mut renderer = RendererBuilder::new(config)
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_editor_mode(true)
             .with_graph(Box::new(|d, q, s, c, ds, cb, csb| {
                 build_default_graph_external(d, q, s, c, ds, cb, csb, None)
@@ -151,57 +156,43 @@ impl ApplicationHandler for App {
             .build(device.clone(), queue.clone(), w, h, surface_format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let gold = renderer
-            .scene_for_legacy_mut()
-            .insert_material(make_material(
-                [0.95, 0.75, 0.25, 1.0],
-                0.25,
-                0.85,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let marble = renderer
-            .scene_for_legacy_mut()
-            .insert_material(make_material(
-                [0.85, 0.83, 0.80, 1.0],
-                0.55,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let crystal = renderer
-            .scene_for_legacy_mut()
-            .insert_material(make_material(
-                [0.3, 0.6, 1.0, 1.0],
-                0.05,
-                0.1,
-                [0.2, 0.4, 1.0],
-                2.0,
-            ));
-        let floor = renderer
-            .scene_for_legacy_mut()
-            .insert_material(make_material(
-                [0.22, 0.22, 0.25, 1.0],
-                0.7,
-                0.05,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let gold = renderer.create_material_projection(make_material(
+            [0.95, 0.75, 0.25, 1.0],
+            0.25,
+            0.85,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let marble = renderer.create_material_projection(make_material(
+            [0.85, 0.83, 0.80, 1.0],
+            0.55,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let crystal = renderer.create_material_projection(make_material(
+            [0.3, 0.6, 1.0, 1.0],
+            0.05,
+            0.1,
+            [0.2, 0.4, 1.0],
+            2.0,
+        ));
+        let floor = renderer.create_material_projection(make_material(
+            [0.22, 0.22, 0.25, 1.0],
+            0.7,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         // ── Sky ─────────────────────────────────────────────────────────────
-        renderer
-            .scene_for_legacy_mut()
-            .insert_entity(SceneEntity::sky(
-                helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
-            ));
+        renderer.configure_default_sky([0.15, 0.25, 0.45]);
 
         // ── Ground ──────────────────────────────────────────────────────────
-        let ground_mesh = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object_with_movability(
+        let ground_mesh = renderer.create_mesh_asset(plane_mesh([0.0, 0.0, 0.0], 12.0));
+        let mut scene_db = scene_db;
+        let _ = spawn_object_with_movability(
+            &mut scene_db.world,
             &mut renderer,
             ground_mesh,
             floor,
@@ -211,19 +202,8 @@ impl ApplicationHandler for App {
         );
 
         // ── Columns (box pillars + sphere tops) ────────────────────────────
-        let pillar_mesh = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.15, 2.0, 0.15],
-            )))
-            .as_mesh()
-            .unwrap();
-        let sphere_mesh_id = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
+        let pillar_mesh = renderer.create_mesh_asset(box_mesh([0.0, 0.0, 0.0], [0.15, 2.0, 0.15]));
+        let sphere_mesh_id = renderer.create_mesh_asset(sphere_mesh([0.0, 0.0, 0.0], 0.4));
 
         let radius = 4.0;
         let positions = [
@@ -235,7 +215,8 @@ impl ApplicationHandler for App {
         let mut orbit_lights = Vec::new();
         for (i, (x, _, z)) in positions.iter().enumerate() {
             // Pillar
-            let _ = insert_object_with_movability(
+            let _ = spawn_object_with_movability(
+                &mut scene_db.world,
                 &mut renderer,
                 pillar_mesh,
                 marble,
@@ -244,7 +225,8 @@ impl ApplicationHandler for App {
                 None,
             );
             // Gold sphere on top
-            let _ = insert_object_with_movability(
+            let _ = spawn_object_with_movability(
+                &mut scene_db.world,
                 &mut renderer,
                 sphere_mesh_id,
                 gold,
@@ -259,26 +241,17 @@ impl ApplicationHandler for App {
                 [0.3, 0.5, 1.0],
                 [1.0, 0.8, 0.2],
             ];
-            let lid = renderer
-                .scene_for_legacy_mut()
-                .insert_entity(SceneEntity::light(point_light(
-                    [*x, 5.0, *z],
-                    colors[i],
-                    8.0,
-                    8.0,
-                )))
-                .as_light()
-                .unwrap();
+            let lid = spawn_light(
+                &mut scene_db.world,
+                point_light([*x, 5.0, *z], colors[i], 8.0, 8.0),
+            );
             orbit_lights.push(lid);
         }
 
         // ── Floating crystal (centre, rotating) ────────────────────────────
-        let crystal_mesh = renderer
-            .scene_for_legacy_mut()
-            .insert_entity(SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.6)))
-            .as_mesh()
-            .unwrap();
-        let spin_crystal = insert_object_with_movability(
+        let crystal_mesh = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.6));
+        let spin_crystal = spawn_object_with_movability(
+            &mut scene_db.world,
             &mut renderer,
             crystal_mesh,
             crystal,
@@ -303,6 +276,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             orbit_lights: orbit_lights.try_into().unwrap(),
             spin_crystal,
         });
@@ -466,7 +440,7 @@ impl State {
             let x = angle.cos() * 4.0;
             let z = angle.sin() * 4.0;
             update_point_light(
-                &mut self.renderer,
+                &mut self.scene_db.world,
                 lid,
                 glam::vec3(x, 5.0 + (elapsed * 1.2 + i as f32).sin() * 0.5, z),
                 colors[i],
@@ -479,10 +453,12 @@ impl State {
         let rot = glam::Quat::from_rotation_y(elapsed * 0.8)
             * glam::Quat::from_rotation_x((elapsed * 0.5).sin() * 0.3);
         let t = glam::Mat4::from_rotation_translation(rot, glam::vec3(0.0, 2.5, 0.0));
-        let _ = self
-            .renderer
-            .scene_for_legacy_mut()
-            .update_object_transform(self.spin_crystal, t);
+        let _ = update_object_transform(
+            &mut self.scene_db.world,
+            &mut self.renderer,
+            self.spin_crystal,
+            t,
+        );
 
         // ── Render ─────────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
