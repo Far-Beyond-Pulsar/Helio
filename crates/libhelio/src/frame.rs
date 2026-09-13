@@ -4,7 +4,6 @@
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
-use crate::material::GpuMaterial;
 use crate::CoronaEmitterFrameData;
 use std::collections::{HashMap, HashSet};
 
@@ -651,12 +650,6 @@ pub struct PassResources<'a> {
     /// `Renderer`-seeded bridge, not a pass publish.
     pub lights: Tracked<LightsFrameData<'a>>,
 
-    /// The material table, written by the `Renderer` each frame -- see
-    /// [`MaterialsFrameData`]'s own doc. A known, temporary stepping stone:
-    /// materials are slated for a real SceneDB-native migration (mirroring
-    /// `StaticObjectComponent`/`scene_lights`), not a destination.
-    pub materials: Tracked<MaterialsFrameData<'a>>,
-
     /// Shadow matrices, written by the `Renderer` each frame -- see
     /// [`ShadowMatricesFrameData`]'s own doc.
     pub shadow_matrices: Tracked<ShadowMatricesFrameData<'a>>,
@@ -902,31 +895,6 @@ pub struct LightsFrameData<'a> {
     pub movable_lights_generation: u64,
 }
 
-/// The material table for this frame -- written directly by the `Renderer`
-/// each frame, NOT published by a pass. A known, temporary stepping stone:
-/// nearly every shading pass reads this, and there is no single natural
-/// owning pass the way there is for lights/shadow-matrices/objects, so it
-/// stays centrally allocated in `helio::Scene` until it gets a real
-/// SceneDB-native `MaterialComponent` (mirroring `StaticObjectComponent`) --
-/// tracked as a dedicated follow-up, not solved by this struct.
-#[derive(Clone, Copy)]
-pub struct MaterialsFrameData<'a> {
-    /// Packed `GpuMaterial` storage buffer, GPU-bindable directly.
-    pub materials: &'a wgpu::Buffer,
-    /// CPU-side mirror of the same data, for passes doing PSO-relevant
-    /// classification without a GPU readback.
-    pub material_data: &'a [GpuMaterial],
-    /// Custom template registrations that survive graph rebuilds --
-    /// `GBufferPass` downcasts this to `RadiantTemplateRegistry` each frame.
-    pub template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
-    /// Separate registry for transparent-material templates (different base
-    /// shader/bind-group layout than gbuffer templates).
-    pub transparent_template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
-    /// Compiled graph WGSL snippets keyed by content hash, looked up by
-    /// shading passes when building a PSO for a given `graph_hash`.
-    pub graph_wgsl_snippets: &'a HashMap<u64, String>,
-}
-
 /// Shadow matrices + per-caster dirty tracking for this frame -- written
 /// directly by the `Renderer`, NOT published by `helio-pass-shadow-matrix`
 /// (that pass computes into this buffer but does not yet own its
@@ -1021,7 +989,6 @@ impl<'a> PassResources<'a> {
             cluster_light_grid: Tracked::empty(),
             object_batch: Tracked::empty(),
             lights: Tracked::empty(),
-            materials: Tracked::empty(),
             shadow_matrices: Tracked::empty(),
             coordinate_spaces: Tracked::empty(),
             indirect_dispatch: Tracked::empty(),
@@ -1149,7 +1116,6 @@ impl<'a> PassResources<'a> {
             reset_field!(cluster_light_grid);
             reset_field!(object_batch);
             reset_field!(lights);
-            reset_field!(materials);
             reset_field!(shadow_matrices);
             reset_field!(coordinate_spaces);
             reset_field!(indirect_dispatch);

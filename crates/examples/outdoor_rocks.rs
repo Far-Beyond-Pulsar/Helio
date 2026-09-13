@@ -305,15 +305,13 @@ impl ApplicationHandler for App {
         };
 
         // ── Ground plane ──────────────────────────────────────────────────
-        let ground_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.28, 0.23, 0.18, 1.0],
-                0.92,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let ground_mat = renderer.scene().insert_material(make_material(
+            [0.28, 0.23, 0.18, 1.0],
+            0.92,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let ground_mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(v3_demo_common::plane_mesh(
@@ -341,15 +339,13 @@ impl ApplicationHandler for App {
         ];
 
         // Fallback cube material/mesh for any type that failed to load
-        let fallback_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.35, 0.30, 0.25, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let fallback_mat = renderer.scene().insert_material(make_material(
+            [0.35, 0.30, 0.25, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let fallback_mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
@@ -455,17 +451,20 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(vm_id, mat_slot) in entries {
-                            let _ = renderer.scene().insert_entity(
-                                helio::SceneEntity::virtual_object(VirtualObjectDescriptor {
-                                    virtual_mesh: vm_id,
-                                    material_id: mat_slot,
-                                    transform,
-                                    bounds: [center.x, center.y, center.z, bounds_radius],
-                                    flags: 0,
-                                    groups: helio::GroupMask::NONE,
-                                    movability: None, // Static rocks
-                                }),
-                            );
+                            let _ =
+                                renderer
+                                    .scene()
+                                    .insert_entity(helio::SceneEntity::virtual_object(
+                                        VirtualObjectDescriptor {
+                                            virtual_mesh: vm_id,
+                                            material_id: mat_slot,
+                                            transform,
+                                            bounds: [center.x, center.y, center.z, bounds_radius],
+                                            flags: 0,
+                                            groups: helio::GroupMask::NONE,
+                                            movability: None, // Static rocks
+                                        },
+                                    ));
                         }
                     }
                 }
@@ -529,15 +528,13 @@ impl ApplicationHandler for App {
                     .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
                     .as_mesh()
                     .unwrap();
-                let ship_mat = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.55, 0.70, 0.90, 1.0],
-                        0.25,
-                        0.75,
-                        [0.0, 0.0, 0.0],
-                        0.0,
-                    ));
+                let ship_mat = renderer.scene().insert_material(make_material(
+                    [0.55, 0.70, 0.90, 1.0],
+                    0.25,
+                    0.75,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
                 let transform = Mat4::from_translation(ship_pos);
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,

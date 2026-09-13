@@ -82,8 +82,14 @@ mod lifecycle_tests {
         let entity = world.spawn();
         let value: ReflectionCaptureComponent = bytemuck::Zeroable::zeroed();
         world.insert(entity, value);
-        assert_eq!(world.get::<ReflectionCaptureComponent>(entity), Some(&value));
-        assert_eq!(world.remove::<ReflectionCaptureComponent>(entity), Some(value));
+        assert_eq!(
+            world.get::<ReflectionCaptureComponent>(entity),
+            Some(&value)
+        );
+        assert_eq!(
+            world.remove::<ReflectionCaptureComponent>(entity),
+            Some(value)
+        );
         assert!(world.get::<ReflectionCaptureComponent>(entity).is_none());
     }
 }

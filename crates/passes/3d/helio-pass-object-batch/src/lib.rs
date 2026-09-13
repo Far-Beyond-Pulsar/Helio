@@ -83,7 +83,9 @@ fn create_storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu:
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: size.max(4),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }
@@ -106,7 +108,11 @@ fn create_dual_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Bu
     })
 }
 
-fn bgl_entry_storage(binding: u32, visibility: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+fn bgl_entry_storage(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    read_only: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -254,7 +260,11 @@ impl ScratchBuffers {
             instances_out: create_storage_buffer(device, "ObjBatch Instances", n * INSTANCE_BYTES),
             aabbs_out: create_storage_buffer(device, "ObjBatch Aabbs", n * AABB_BYTES),
             local_group_rank: create_storage_buffer(device, "ObjBatch LocalGroupRank", n * 4),
-            block_group_totals: create_storage_buffer(device, "ObjBatch BlockGroupTotals", blocks * 4),
+            block_group_totals: create_storage_buffer(
+                device,
+                "ObjBatch BlockGroupTotals",
+                blocks * 4,
+            ),
             group_count: create_storage_buffer(device, "ObjBatch GroupCount", 16),
             group_starts: create_storage_buffer(device, "ObjBatch GroupStarts", (n + 1) * 4),
             dispatch_args_groups: create_dual_buffer(device, "ObjBatch DispatchArgsGroups", 12),
@@ -263,14 +273,34 @@ impl ScratchBuffers {
             group_graph_hash_hi: create_storage_buffer(device, "ObjBatch GroupHashHi", n * 4),
             group_shading: create_storage_buffer(device, "ObjBatch GroupShading", n * 4),
             local_range_rank: create_storage_buffer(device, "ObjBatch LocalRangeRank", n * 4),
-            block_range_totals: create_storage_buffer(device, "ObjBatch BlockRangeTotals", blocks * 4),
+            block_range_totals: create_storage_buffer(
+                device,
+                "ObjBatch BlockRangeTotals",
+                blocks * 4,
+            ),
             range_count: create_storage_buffer(device, "ObjBatch RangeCount", 16),
             opaque_ranges: create_storage_buffer(device, "ObjBatch OpaqueRanges", n * RANGE_BYTES),
-            transparent_ranges: create_storage_buffer(device, "ObjBatch TransparentRanges", n * RANGE_BYTES),
-            forward_ranges: create_storage_buffer(device, "ObjBatch ForwardRanges", n * RANGE_BYTES),
+            transparent_ranges: create_storage_buffer(
+                device,
+                "ObjBatch TransparentRanges",
+                n * RANGE_BYTES,
+            ),
+            forward_ranges: create_storage_buffer(
+                device,
+                "ObjBatch ForwardRanges",
+                n * RANGE_BYTES,
+            ),
             range_bucket_counts: create_storage_buffer(device, "ObjBatch RangeBucketCounts", 16),
-            shadow_static_indirect: create_storage_buffer(device, "ObjBatch ShadowStaticIndirect", n * INDIRECT_ARGS_BYTES),
-            shadow_movable_indirect: create_storage_buffer(device, "ObjBatch ShadowMovableIndirect", n * INDIRECT_ARGS_BYTES),
+            shadow_static_indirect: create_storage_buffer(
+                device,
+                "ObjBatch ShadowStaticIndirect",
+                n * INDIRECT_ARGS_BYTES,
+            ),
+            shadow_movable_indirect: create_storage_buffer(
+                device,
+                "ObjBatch ShadowMovableIndirect",
+                n * INDIRECT_ARGS_BYTES,
+            ),
             shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
         }
     }
@@ -411,17 +441,22 @@ impl ObjectBatchPass {
                     bgl_entry_storage(5, cs, false),
                 ],
             }),
-            group_write_sentinel: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ObjBatch GroupWriteSentinel BGL"),
+            group_write_sentinel: device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
+                    label: Some("ObjBatch GroupWriteSentinel BGL"),
+                    entries: &[
+                        bgl_entry_storage(0, cs, true),
+                        bgl_entry_storage(1, cs, false),
+                        bgl_entry_storage(2, cs, true),
+                    ],
+                },
+            ),
+            prepare_groups: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ObjBatch PrepareGroups BGL"),
                 entries: &[
                     bgl_entry_storage(0, cs, true),
                     bgl_entry_storage(1, cs, false),
-                    bgl_entry_storage(2, cs, true),
                 ],
-            }),
-            prepare_groups: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ObjBatch PrepareGroups BGL"),
-                entries: &[bgl_entry_storage(0, cs, true), bgl_entry_storage(1, cs, false)],
             }),
             build_draw_calls: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ObjBatch BuildDrawCalls BGL"),
@@ -488,22 +523,112 @@ impl ObjectBatchPass {
         };
 
         let pipelines = Pipelines {
-            gather: make_compute_pipeline(device, "ObjBatch Gather", &bgls.gather, &shader, "cs_gather"),
-            prepare: make_compute_pipeline(device, "ObjBatch Prepare", &bgls.prepare, &shader, "cs_prepare"),
-            histogram: make_compute_pipeline(device, "ObjBatch Histogram", &bgls.histogram, &shader, "cs_histogram"),
+            gather: make_compute_pipeline(
+                device,
+                "ObjBatch Gather",
+                &bgls.gather,
+                &shader,
+                "cs_gather",
+            ),
+            prepare: make_compute_pipeline(
+                device,
+                "ObjBatch Prepare",
+                &bgls.prepare,
+                &shader,
+                "cs_prepare",
+            ),
+            histogram: make_compute_pipeline(
+                device,
+                "ObjBatch Histogram",
+                &bgls.histogram,
+                &shader,
+                "cs_histogram",
+            ),
             scan: make_compute_pipeline(device, "ObjBatch Scan", &bgls.scan, &shader, "cs_scan"),
-            scatter: make_compute_pipeline(device, "ObjBatch Scatter", &bgls.scatter, &shader, "cs_scatter"),
-            final_gather: make_compute_pipeline(device, "ObjBatch FinalGather", &bgls.final_gather, &shader, "cs_final_gather"),
-            group_local_scan: make_compute_pipeline(device, "ObjBatch GroupLocalScan", &bgls.group_local_scan, &shader, "cs_group_local_scan"),
-            group_block_scan: make_compute_pipeline(device, "ObjBatch GroupBlockScan", &bgls.group_block_scan, &shader, "cs_group_block_scan"),
-            group_write: make_compute_pipeline(device, "ObjBatch GroupWrite", &bgls.group_write, &shader, "cs_group_write"),
-            group_write_sentinel: make_compute_pipeline(device, "ObjBatch GroupWriteSentinel", &bgls.group_write_sentinel, &shader, "cs_group_write_sentinel"),
-            prepare_groups: make_compute_pipeline(device, "ObjBatch PrepareGroups", &bgls.prepare_groups, &shader, "cs_prepare_groups"),
-            build_draw_calls: make_compute_pipeline(device, "ObjBatch BuildDrawCalls", &bgls.build_draw_calls, &shader, "cs_build_draw_calls"),
-            range_local_scan: make_compute_pipeline(device, "ObjBatch RangeLocalScan", &bgls.range_local_scan, &shader, "cs_range_local_scan"),
-            range_block_scan: make_compute_pipeline(device, "ObjBatch RangeBlockScan", &bgls.range_block_scan, &shader, "cs_range_block_scan"),
-            range_write: make_compute_pipeline(device, "ObjBatch RangeWrite", &bgls.range_write, &shader, "cs_range_write"),
-            shadow_partition: make_compute_pipeline(device, "ObjBatch ShadowPartition", &bgls.shadow_partition, &shader, "cs_shadow_partition"),
+            scatter: make_compute_pipeline(
+                device,
+                "ObjBatch Scatter",
+                &bgls.scatter,
+                &shader,
+                "cs_scatter",
+            ),
+            final_gather: make_compute_pipeline(
+                device,
+                "ObjBatch FinalGather",
+                &bgls.final_gather,
+                &shader,
+                "cs_final_gather",
+            ),
+            group_local_scan: make_compute_pipeline(
+                device,
+                "ObjBatch GroupLocalScan",
+                &bgls.group_local_scan,
+                &shader,
+                "cs_group_local_scan",
+            ),
+            group_block_scan: make_compute_pipeline(
+                device,
+                "ObjBatch GroupBlockScan",
+                &bgls.group_block_scan,
+                &shader,
+                "cs_group_block_scan",
+            ),
+            group_write: make_compute_pipeline(
+                device,
+                "ObjBatch GroupWrite",
+                &bgls.group_write,
+                &shader,
+                "cs_group_write",
+            ),
+            group_write_sentinel: make_compute_pipeline(
+                device,
+                "ObjBatch GroupWriteSentinel",
+                &bgls.group_write_sentinel,
+                &shader,
+                "cs_group_write_sentinel",
+            ),
+            prepare_groups: make_compute_pipeline(
+                device,
+                "ObjBatch PrepareGroups",
+                &bgls.prepare_groups,
+                &shader,
+                "cs_prepare_groups",
+            ),
+            build_draw_calls: make_compute_pipeline(
+                device,
+                "ObjBatch BuildDrawCalls",
+                &bgls.build_draw_calls,
+                &shader,
+                "cs_build_draw_calls",
+            ),
+            range_local_scan: make_compute_pipeline(
+                device,
+                "ObjBatch RangeLocalScan",
+                &bgls.range_local_scan,
+                &shader,
+                "cs_range_local_scan",
+            ),
+            range_block_scan: make_compute_pipeline(
+                device,
+                "ObjBatch RangeBlockScan",
+                &bgls.range_block_scan,
+                &shader,
+                "cs_range_block_scan",
+            ),
+            range_write: make_compute_pipeline(
+                device,
+                "ObjBatch RangeWrite",
+                &bgls.range_write,
+                &shader,
+                "cs_range_write",
+            ),
+            shadow_partition: make_compute_pipeline(
+                device,
+                "ObjBatch ShadowPartition",
+                &bgls.shadow_partition,
+                &shader,
+                "cs_shadow_partition",
+            ),
         };
 
         let sort_pass_uniforms: [wgpu::Buffer; SORT_BITS] = std::array::from_fn(|_| {
@@ -525,8 +650,16 @@ impl ObjectBatchPass {
 
         let scratch_capacity = MIN_SCRATCH_CAPACITY;
         let scratch = ScratchBuffers::new(device, scratch_capacity);
-        let draw_calls_out = create_storage_buffer(device, "ObjBatch DrawCalls", scratch_capacity as u64 * DRAW_CALL_BYTES);
-        let indirect_out = create_storage_buffer(device, "ObjBatch Indirect", scratch_capacity as u64 * INDIRECT_ARGS_BYTES);
+        let draw_calls_out = create_storage_buffer(
+            device,
+            "ObjBatch DrawCalls",
+            scratch_capacity as u64 * DRAW_CALL_BYTES,
+        );
+        let indirect_out = create_storage_buffer(
+            device,
+            "ObjBatch Indirect",
+            scratch_capacity as u64 * INDIRECT_ARGS_BYTES,
+        );
 
         let fallback_buf = create_dual_buffer(device, "ObjBatch Fallback", 16);
 
@@ -573,13 +706,26 @@ impl ObjectBatchPass {
         }
         let new_capacity = needed.next_power_of_two().max(MIN_SCRATCH_CAPACITY);
         self.scratch = ScratchBuffers::new(device, new_capacity);
-        self.draw_calls_out = create_storage_buffer(device, "ObjBatch DrawCalls", new_capacity as u64 * DRAW_CALL_BYTES);
-        self.indirect_out = create_storage_buffer(device, "ObjBatch Indirect", new_capacity as u64 * INDIRECT_ARGS_BYTES);
+        self.draw_calls_out = create_storage_buffer(
+            device,
+            "ObjBatch DrawCalls",
+            new_capacity as u64 * DRAW_CALL_BYTES,
+        );
+        self.indirect_out = create_storage_buffer(
+            device,
+            "ObjBatch Indirect",
+            new_capacity as u64 * INDIRECT_ARGS_BYTES,
+        );
         self.scratch_capacity = new_capacity;
         true
     }
 
-    fn rebuild_bind_groups(&mut self, device: &wgpu::Device, static_objects: &wgpu::Buffer, materials: &wgpu::Buffer) {
+    fn rebuild_bind_groups(
+        &mut self,
+        device: &wgpu::Device,
+        static_objects: &wgpu::Buffer,
+        materials: &wgpu::Buffer,
+    ) {
         let s = &self.scratch;
         let cs = wgpu::ShaderStages::COMPUTE;
         let _ = cs;
@@ -712,7 +858,10 @@ impl ObjectBatchPass {
         self.prepare_groups_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ObjBatch PrepareGroups BG"),
             layout: &self.bgls.prepare_groups,
-            entries: &[bg_entry(0, &s.group_count), bg_entry(1, &s.dispatch_args_groups)],
+            entries: &[
+                bg_entry(0, &s.group_count),
+                bg_entry(1, &s.dispatch_args_groups),
+            ],
         }));
 
         self.build_draw_calls_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1064,7 +1213,11 @@ impl ObjectBatchPass {
             }),
         );
         for (i, buf) in self.sort_pass_uniforms.iter().enumerate() {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }));
+            queue.write_buffer(
+                buf,
+                0,
+                bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }),
+            );
         }
         // `RangeBlockUniform` reuses `dispatch_args_groups[0]` directly (the
         // dual-bind trick) -- nothing to write here.
@@ -1146,11 +1299,10 @@ impl RenderPass for ObjectBatchPass {
             .as_ref()
             .map(|h| h.buffer.clone())
             .unwrap_or_else(|| self.fallback_buf.clone());
-        let materials_buf = ctx
-            .pass_resources
-            .materials
-            .get()
-            .map(|m| m.materials)
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .as_ref()
+            .map(|h| &h.buffer)
             .unwrap_or(&static_objects_buf);
         let key = (
             self.scratch_capacity,
@@ -1173,10 +1325,15 @@ impl RenderPass for ObjectBatchPass {
             }),
         );
         for (i, buf) in self.sort_pass_uniforms.iter().enumerate() {
-            ctx.write_buffer(buf, 0, bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }));
+            ctx.write_buffer(
+                buf,
+                0,
+                bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }),
+            );
         }
 
-        self.readback.poll_and_kick_off(ctx.device, ctx.queue, &self.scratch);
+        self.readback
+            .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch);
         Ok(())
     }
 
@@ -1184,7 +1341,9 @@ impl RenderPass for ObjectBatchPass {
         let capacity = {
             let handle = ctx.scene_buffers.get(BufferKey::of("static_objects"));
             handle
-                .map(|h| (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32)
+                .map(|h| {
+                    (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32
+                })
                 .unwrap_or(0)
         };
         self.record(unsafe { &mut *ctx.encoder_ptr }, capacity);

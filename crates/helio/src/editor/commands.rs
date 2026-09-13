@@ -1,6 +1,5 @@
 use super::EditorState;
 use crate::renderer::Renderer;
-use crate::scene::{Scene, SceneEntityId};
 
 impl EditorState {
     /// Delete the selected object from the scene and clear the selection.

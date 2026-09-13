@@ -8,8 +8,8 @@
 //! representation against the other, which is precisely the artefact the fade exists to
 //! hide.
 
-use helio_pass_foliage_place::{select_blade_lod, DEFAULT_LOD_DISTANCES, FOLIAGE_LOD_NONE};
 use helio_pass_foliage_gbuffer::{cross_fade_alpha, lod_threshold};
+use helio_pass_foliage_place::{select_blade_lod, DEFAULT_LOD_DISTANCES, FOLIAGE_LOD_NONE};
 
 const LADDER: [f32; 4] = DEFAULT_LOD_DISTANCES; // [8, 20, 45, 120]
 const BAND: f32 = 4.0;

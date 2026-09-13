@@ -240,31 +240,27 @@ impl ApplicationHandler for App {
         );
         renderer.set_editor_mode(true);
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.75, 0.72, 0.68, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.75, 0.72, 0.68, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(
-                helio::SkyActor::indoor([0.05, 0.05, 0.1]).with_clouds(helio::VolumetricClouds {
-                    coverage: 0.7,
-                    density: 0.8,
-                    base: 1200.0,
-                    top: 1800.0,
-                    wind_x: 0.8,
-                    wind_z: 0.2,
-                    speed: 1.3,
-                    skylight_intensity: 0.25,
-                    infinite_extent: false,
-                }),
-            ));
+        renderer.scene().insert_entity(helio::SceneEntity::Sky(
+            helio::SkyActor::indoor([0.05, 0.05, 0.1]).with_clouds(helio::VolumetricClouds {
+                coverage: 0.7,
+                density: 0.8,
+                base: 1200.0,
+                top: 1800.0,
+                wind_x: 0.8,
+                wind_z: 0.2,
+                speed: 1.3,
+                skylight_intensity: 0.25,
+                infinite_extent: false,
+            }),
+        ));
 
         let _floor = renderer
             .scene()
@@ -573,15 +569,13 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        let chandelier_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.28, 0.25, 1.0],
-                0.5,
-                0.8,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let chandelier_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.28, 0.25, 1.0],
+            0.5,
+            0.8,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
@@ -641,12 +635,12 @@ impl ApplicationHandler for App {
             );
         }
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.scene().insert_entity(
-                helio::SceneEntity::light_with_movability(
+            let _ = renderer
+                .scene()
+                .insert_entity(helio::SceneEntity::light_with_movability(
                     point_light([x, y, z], [r, g, b], 1.8, 8.0),
                     Some(Movability::Stationary),
-                ),
-            );
+                ));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {

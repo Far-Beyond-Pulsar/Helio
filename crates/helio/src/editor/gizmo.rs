@@ -3,7 +3,7 @@ use glam::Vec3;
 use super::{ring_frame, GizmoAxis, GizmoMode};
 use crate::handles::{ObjectId, SectionedInstanceId};
 use crate::renderer::DebugBatch;
-use crate::scene::{Camera, Scene};
+use crate::camera::Camera;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Color helpers

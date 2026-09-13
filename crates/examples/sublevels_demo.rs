@@ -188,15 +188,13 @@ impl ApplicationHandler for App {
         );
 
         // ── Hub room: 12m x 4m x 12m box shell, walls facing inward ──────────
-        let wall_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let wall_mat = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let floor = renderer
             .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
@@ -294,15 +292,13 @@ impl ApplicationHandler for App {
         // (origin at the platform's centre) — that never changes. The whole
         // group is placed and re-placed purely via the sublevel's coordinate
         // space, not by touching these objects again.
-        let platform_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.55, 0.95, 1.0],
-                0.35,
-                0.6,
-                [0.05, 0.35, 0.9],
-                1.2,
-            ));
+        let platform_mat = renderer.scene().insert_material(make_material(
+            [0.15, 0.55, 0.95, 1.0],
+            0.35,
+            0.6,
+            [0.05, 0.35, 0.9],
+            1.2,
+        ));
         let deck_mesh = renderer
             .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
@@ -349,15 +345,13 @@ impl ApplicationHandler for App {
             )))
             .as_mesh()
             .unwrap();
-        let stud_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.9, 1.0, 1.0],
-                0.4,
-                0.3,
-                [0.3, 0.6, 1.0],
-                0.4,
-            ));
+        let stud_mat = renderer.scene().insert_material(make_material(
+            [0.85, 0.9, 1.0, 1.0],
+            0.4,
+            0.3,
+            [0.3, 0.6, 1.0],
+            0.4,
+        ));
         const GRID: i32 = 128; // 128*128 = 16,384 cubes
         let spacing = 2.6 / GRID as f32;
         for ix in 0..GRID {

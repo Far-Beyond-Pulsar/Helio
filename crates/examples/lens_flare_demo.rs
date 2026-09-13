@@ -177,24 +177,20 @@ impl ApplicationHandler for App {
         );
 
         // ── Scene objects ──────────────────────────────────────────────────────
-        let mat_wall = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.6, 0.58, 0.55, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.28, 0.25, 1.0],
-                0.4,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat_wall = renderer.scene().insert_material(make_material(
+            [0.6, 0.58, 0.55, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let mat_floor = renderer.scene().insert_material(make_material(
+            [0.3, 0.28, 0.25, 1.0],
+            0.4,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         // Ground plane
         let floor = renderer
             .scene()

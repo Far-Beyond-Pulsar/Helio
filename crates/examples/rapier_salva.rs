@@ -519,42 +519,34 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
 
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.3, 0.35, 1.0],
-                0.8,
-                0.05,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let wall_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.35, 0.3, 0.28, 1.0],
-                0.7,
-                0.02,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let water_material = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.4, 0.75, 0.85],
-                0.1,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let faucet_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.6, 0.6, 0.65, 1.0],
-                0.3,
-                0.6,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let floor_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.3, 0.35, 1.0],
+            0.8,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let wall_mat = renderer.scene().insert_material(make_material(
+            [0.35, 0.3, 0.28, 1.0],
+            0.7,
+            0.02,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let water_material = renderer.scene().insert_material(make_material(
+            [0.15, 0.4, 0.75, 0.85],
+            0.1,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let faucet_mat = renderer.scene().insert_material(make_material(
+            [0.6, 0.6, 0.65, 1.0],
+            0.3,
+            0.6,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let sphere_mesh = renderer
             .scene()
@@ -892,10 +884,7 @@ impl AppState {
 
         // Clear all fluid particles
         for particle in self.fluid_particles.drain(..) {
-            let _ = self
-                .renderer
-                .scene()
-                .remove_object(particle.id);
+            let _ = self.renderer.scene().remove_object(particle.id);
         }
 
         // Request reset (direct state access)

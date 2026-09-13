@@ -35,105 +35,83 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         // Materials
-        let floor_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.18, 0.20, 1.0],
-                0.6,
-                0.2,
-                [0.0; 3],
-                0.0,
-            ));
-        let ceil_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.22, 0.22, 0.24, 1.0],
-                0.7,
-                0.1,
-                [0.0; 3],
-                0.0,
-            ));
-        let wall_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.25, 0.27, 1.0],
-                0.8,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let rack_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.08, 0.08, 0.10, 1.0],
-                0.5,
-                0.3,
-                [0.0; 3],
-                0.0,
-            ));
-        let blade_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.12, 0.13, 0.15, 1.0],
-                0.3,
-                0.5,
-                [0.0; 3],
-                0.0,
-            ));
-        let led_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.0, 0.15, 0.0, 1.0],
-                1.0,
-                0.0,
-                [0.0, 1.0, 0.0],
-                3.5,
-            ));
-        let led_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.0, 0.0, 1.0],
-                1.0,
-                0.0,
-                [1.0, 0.0, 0.0],
-                3.5,
-            ));
-        let led_amber = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.08, 0.0, 1.0],
-                1.0,
-                0.0,
-                [1.0, 0.6, 0.0],
-                3.5,
-            ));
-        let led_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.0, 0.0, 0.15, 1.0],
-                1.0,
-                0.0,
-                [0.1, 0.2, 1.0],
-                3.5,
-            ));
-        let cable_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.05, 0.05, 0.06, 1.0],
-                0.9,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let strip_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.8, 0.85, 0.9, 1.0],
-                0.3,
-                0.0,
-                [0.6, 0.7, 0.9],
-                2.0,
-            ));
+        let floor_m = renderer.scene().insert_material(make_material(
+            [0.18, 0.18, 0.20, 1.0],
+            0.6,
+            0.2,
+            [0.0; 3],
+            0.0,
+        ));
+        let ceil_m = renderer.scene().insert_material(make_material(
+            [0.22, 0.22, 0.24, 1.0],
+            0.7,
+            0.1,
+            [0.0; 3],
+            0.0,
+        ));
+        let wall_m = renderer.scene().insert_material(make_material(
+            [0.25, 0.25, 0.27, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let rack_m = renderer.scene().insert_material(make_material(
+            [0.08, 0.08, 0.10, 1.0],
+            0.5,
+            0.3,
+            [0.0; 3],
+            0.0,
+        ));
+        let blade_m = renderer.scene().insert_material(make_material(
+            [0.12, 0.13, 0.15, 1.0],
+            0.3,
+            0.5,
+            [0.0; 3],
+            0.0,
+        ));
+        let led_green = renderer.scene().insert_material(make_material(
+            [0.0, 0.15, 0.0, 1.0],
+            1.0,
+            0.0,
+            [0.0, 1.0, 0.0],
+            3.5,
+        ));
+        let led_red = renderer.scene().insert_material(make_material(
+            [0.15, 0.0, 0.0, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.0, 0.0],
+            3.5,
+        ));
+        let led_amber = renderer.scene().insert_material(make_material(
+            [0.15, 0.08, 0.0, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.6, 0.0],
+            3.5,
+        ));
+        let led_blue = renderer.scene().insert_material(make_material(
+            [0.0, 0.0, 0.15, 1.0],
+            1.0,
+            0.0,
+            [0.1, 0.2, 1.0],
+            3.5,
+        ));
+        let cable_m = renderer.scene().insert_material(make_material(
+            [0.05, 0.05, 0.06, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let strip_m = renderer.scene().insert_material(make_material(
+            [0.8, 0.85, 0.9, 1.0],
+            0.3,
+            0.0,
+            [0.6, 0.7, 0.9],
+            2.0,
+        ));
 
         // Room shell
         let floor = renderer
@@ -180,13 +158,12 @@ impl HelioWasmApp for Demo {
             // Server blades (6 per rack)
             for blade_y in 0..6 {
                 let blade_pos = [pos[0] + 0.26, pos[1] - 0.85 + blade_y as f32 * 0.3, pos[2]];
-                let blade =
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                            blade_pos,
-                            [0.04, 0.12, 0.85],
-                        )));
+                let blade = renderer
+                    .scene()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                        blade_pos,
+                        [0.04, 0.12, 0.85],
+                    )));
                 insert_object(renderer, blade, blade_m, glam::Mat4::IDENTITY, 0.85).unwrap();
                 // LEDs
                 let led_x = pos[0] + 0.48;
@@ -200,13 +177,12 @@ impl HelioWasmApp for Demo {
                 .enumerate()
                 {
                     let _ = k;
-                    let led =
-                        renderer
-                            .scene()
-                            .insert_entity(helio::SceneEntity::mesh(cube_mesh(
-                                [led_x, blade_pos[1], pos[2] + dz],
-                                0.018,
-                            )));
+                    let led = renderer
+                        .scene()
+                        .insert_entity(helio::SceneEntity::mesh(cube_mesh(
+                            [led_x, blade_pos[1], pos[2] + dz],
+                            0.018,
+                        )));
                     insert_object(renderer, led, *led_mat, glam::Mat4::IDENTITY, 0.018).unwrap();
                 }
             }

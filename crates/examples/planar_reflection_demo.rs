@@ -506,12 +506,7 @@ impl ApplicationHandler for App {
                 state.cam_pos += state.velocity * dt;
 
                 // ---- Animate ----
-                let angle = state
-                    .renderer
-                    .scene()
-                    .gpu_scene()
-                    .frame_count as f32
-                    * 0.02;
+                let angle = state.renderer.scene().gpu_scene().frame_count as f32 * 0.02;
                 let cube_transform = Mat4::from_axis_angle(Vec3::Y, angle)
                     * Mat4::from_axis_angle(Vec3::X, angle * 0.5)
                     * Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0));
@@ -524,13 +519,10 @@ impl ApplicationHandler for App {
                 let orbit_x = 2.5 * state.sphere_angle.cos();
                 let orbit_z = 2.5 * state.sphere_angle.sin();
                 let sphere_pos = Vec3::new(orbit_x, 1.0 + 0.5 * state.sphere_angle.sin(), orbit_z);
-                let _ = state
-                    .renderer
-                    .scene()
-                    .update_object_transform(
-                        state.orbiting_sphere,
-                        Mat4::from_translation(sphere_pos),
-                    );
+                let _ = state.renderer.scene().update_object_transform(
+                    state.orbiting_sphere,
+                    Mat4::from_translation(sphere_pos),
+                );
 
                 // ---- Camera ----
                 let target = state.cam_pos + forward;

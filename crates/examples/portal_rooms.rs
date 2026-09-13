@@ -9,7 +9,7 @@
 //! portal, right here", it's not obvious at a glance which face is
 //! solid-looking-but-isn't, which makes the illusion more disorienting (in a
 //! good way) than `portal_cube`'s framed doorways. None of it is faked: each
-//! face is a real `helio::Scene::add_portal` pairing that whole face with the
+//! face is a real SceneDB portal components pairing that whole face with the
 //! real entrance of a real, hand-furnished room built somewhere else in world
 //! space, and the engine's own portal pipeline (`helio-pass-portal-cull` /
 //! `helio-pass-portal-instances`) does the rest — the only difference from
@@ -29,8 +29,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId, Renderer,
-    RendererConfig, Scene, SceneEntity,
+    DebugDrawState, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
+    SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, point_light, sphere_mesh};
@@ -113,7 +113,7 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _portal_ids: Vec<PortalId>,
+    _portal_pairs: Vec<helio::PortalPair>,
     _light_ids: Vec<LightId>,
 
     /// Debug-only: when `ROOMS_SCREENSHOT` is set, counts frames so a single
@@ -260,24 +260,20 @@ impl ApplicationHandler for App {
         // Shared furniture materials, reused across every room so the six
         // spaces read as built from the same "kit" — only each room's own
         // wall/accent colors (below) tell them apart.
-        let wood_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.32, 0.2, 0.11, 1.0],
-                0.75,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let metal_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.5, 0.51, 0.54, 1.0],
-                0.4,
-                0.6,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let wood_mat = renderer.scene().insert_material(make_material(
+            [0.32, 0.2, 0.11, 1.0],
+            0.75,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let metal_mat = renderer.scene().insert_material(make_material(
+            [0.5, 0.51, 0.54, 1.0],
+            0.4,
+            0.6,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         // ── The hub: one full-face portal per axis direction, no wall, no
         // doorway cutout, no frame. `up_hint` just needs to not be parallel
@@ -357,7 +353,7 @@ impl ApplicationHandler for App {
         const ROOM_UP: Vec3 = Vec3::Y;
         const ROOM_FORWARD: Vec3 = Vec3::Z;
 
-        let mut portal_ids = Vec::new();
+        let mut portal_pairs = Vec::new();
         let mut light_ids = Vec::new();
         for (i, (normal, up_hint, theme)) in faces.iter().enumerate() {
             let normal = *normal;
@@ -370,24 +366,20 @@ impl ApplicationHandler for App {
             // position has nothing to do with `normal` at all; only the
             // *portal* (`a`, below) needs to know which cube face it's on.
             let room_center = Vec3::new(ROOM_LINE_START_X + i as f32 * ROOM_LINE_SPACING, 0.0, 0.0);
-            let room_wall_mat = renderer
-                .scene()
-                .insert_material(make_material(
-                    theme.wall_color,
-                    0.85,
-                    0.0,
-                    [0.0, 0.0, 0.0],
-                    0.0,
-                ));
-            let room_accent_mat = renderer
-                .scene()
-                .insert_material(make_material(
-                    [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
-                    0.3,
-                    0.0,
-                    theme.accent,
-                    3.0,
-                ));
+            let room_wall_mat = renderer.scene().insert_material(make_material(
+                theme.wall_color,
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ));
+            let room_accent_mat = renderer.scene().insert_material(make_material(
+                [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
+                0.3,
+                0.0,
+                theme.accent,
+                3.0,
+            ));
             // Leave the entrance wall (`-ROOM_FORWARD`) open — that's the
             // room's real entrance, the same real surface the portal's far
             // pose sits at, so there's real geometry (floor, ceiling, far
@@ -461,15 +453,8 @@ impl ApplicationHandler for App {
             let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, -normal, up);
             let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
             let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
-            let portal = renderer
-                .scene()
-                .add_portal(PortalDescriptor {
-                    a,
-                    b,
-                    half_extent: Vec2::new(HUB_HALF_SIZE, HUB_HALF_SIZE),
-                })
-                .expect("add_portal");
-            portal_ids.push(portal);
+            let portal = helio::PortalPair { a, b };
+            portal_pairs.push(portal);
         }
 
         // ── A light near the hub's center so its own walls read clearly.
@@ -540,7 +525,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            _portal_ids: portal_ids,
+            _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
         });

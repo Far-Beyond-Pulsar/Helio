@@ -204,9 +204,13 @@ impl ApplicationHandler for App {
         let materials: Vec<_> = palette
             .iter()
             .map(|&color| {
-                renderer
-                    .scene()
-                    .insert_material(make_material(color, 0.5, 0.1, [0.0, 0.0, 0.0], 0.0))
+                renderer.scene().insert_material(make_material(
+                    color,
+                    0.5,
+                    0.1,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ))
             })
             .collect();
 

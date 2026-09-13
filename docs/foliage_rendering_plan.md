@@ -196,7 +196,7 @@ like a culling bug is the failure mode we are explicitly designing against.
 ### 4.6 `generic transient resource registry` additions (`libhelio::frame`)
 
 ```rust
-pub foliage: Tracked<FoliageFrameData<'a>>,      // types, layers, wind, config, generation
+pub foliage: Tracked<SceneDB foliage projection<'a>>,      // types, layers, wind, config, generation
 pub foliage_terrain: Tracked<FoliageTerrainViews<'a>>,  // height, normal, mask
 pub foliage_interaction: Tracked<&'a wgpu::TextureView>,
 pub foliage_interaction_sampler: Tracked<&'a wgpu::Sampler>,
@@ -562,10 +562,10 @@ scene.insert_foliage_layer(FoliageLayer {
     seed: 0x5EED,
 });
 
-scene.set_wind(Wind { direction: Vec3::X, speed: 4.0, gust_amplitude: 0.6, ..Default::default() });
+world.insert(entity, FoliageWindComponent { direction_speed: [1.0, 0.0, 0.0, 4.0], gust: [0.6, 0.0, 0.0, 0.0], time_prev_time: [0.0, 0.0], _pad: [0.0; 2] });
 
 let player = scene.insert_foliage_interactor(FoliageInteractor { position, radius: 0.5, velocity });
-scene.update_foliage_interactor(player, position, velocity);   // per tick, O(1)
+*world.get_mut::<FoliageInteractorComponent>(player).unwrap() = FoliageInteractorComponent { position_radius: [position.x, position.y, position.z, radius], velocity: [velocity.x, velocity.y, velocity.z, 0.0] };   // per tick, O(1)
 ```
 
 `FoliageQuality::{Low, Medium, High, Ultra}` scales ring radius, density multiplier, LOD

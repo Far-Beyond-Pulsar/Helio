@@ -38,15 +38,13 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         // Single white cube at origin
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.95, 0.95, 1.0],
-                0.5,
-                0.05,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.95, 0.95, 0.95, 1.0],
+            0.5,
+            0.05,
+            [0.0; 3],
+            0.0,
+        ));
         let mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.0)));

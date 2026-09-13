@@ -1226,11 +1226,7 @@ impl RenderPass for WaterSimPass {
                     // Top face: instance_count = water_volume_count
                     pass.set_vertex_buffer(0, self.top_vbuf.slice(..));
                     pass.set_index_buffer(self.top_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(
-                        0..self.top_index_count,
-                        0,
-                        0..volume_count,
-                    );
+                    pass.draw_indexed(0..self.top_index_count, 0, 0..volume_count);
 
                     // Static box sides/bottom
                     pass.set_vertex_buffer(0, self.static_box_vbuf.slice(..));
@@ -1238,11 +1234,7 @@ impl RenderPass for WaterSimPass {
                         self.static_box_ibuf.slice(..),
                         wgpu::IndexFormat::Uint32,
                     );
-                    pass.draw_indexed(
-                        0..self.static_box_index_count,
-                        0,
-                        0..volume_count,
-                    );
+                    pass.draw_indexed(0..self.static_box_index_count, 0, 0..volume_count);
                 }
 
                 // 3. Underwater effect

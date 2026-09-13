@@ -25,11 +25,17 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, FoliageInteractor, FoliageInteractorId, FoliageLayer, FoliageTypeDescriptor,
-    LightId, Renderer, RendererConfig, Scene,
+    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
-use libhelio::Wind;
+use helio_pass_foliage_place::components::{
+    FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
+};
+use helio_pass_foliage_place::{
+    pack_kind_and_flags, FoliageKind, GpuFoliageLayer, GpuFoliageType,
+    FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
+};
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{directional_light, make_material, plane_mesh, sphere_mesh};
 
 use winit::{
@@ -176,7 +182,9 @@ struct AppState {
 
     wind_speed: f32,
     interactor_enabled: bool,
-    interactor_id: FoliageInteractorId,
+    scene_db: SceneDb,
+    interactor_entity: Entity,
+    wind_entity: Entity,
     interactor_prev_pos: glam::Vec3,
     marker_object: helio::ObjectId,
 
@@ -490,26 +498,22 @@ impl ApplicationHandler for App {
         // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
         // colour target each frame, so its absence is what made geometry smear over itself.
         // See `Renderer::rebuild_graph_if_sky_changed`.
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::sky(
-                helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
-            ));
+        renderer.scene().insert_entity(helio::SceneEntity::sky(
+            helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
+        ));
 
         // ── Ground ───────────────────────────────────────────────────────────
         // Flat for now: `FoliageTerrainPass` (the top-down height/slope capture the
         // placement shader samples) is a later phase, and until it exists placement falls
         // back to a plane at y=0. This mesh is what that fallback is pretending to be, so
         // the two agree and the grass sits on the ground rather than floating.
-        let ground_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.16, 0.22, 0.10, 1.0],
-                0.95,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let ground_mat = renderer.scene().insert_material(make_material(
+            [0.16, 0.22, 0.10, 1.0],
+            0.95,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let ground_mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh(
@@ -526,114 +530,122 @@ impl ApplicationHandler for App {
         // slightly wrong deletes the entire ground the moment a corner leaves the frustum.
         // One object always being submitted costs a single draw; the alternative is a
         // whole-screen artefact.
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
-                mesh: ground_mesh,
-                material: ground_mat,
-                transform: glam::Mat4::IDENTITY,
-                bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
-                flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        let _ =
+            renderer
+                .scene()
+                .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
+                    mesh: ground_mesh,
+                    material: ground_mat,
+                    transform: glam::Mat4::IDENTITY,
+                    bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
+                    flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
+                    groups: helio::GroupMask::NONE,
+                    movability: None,
+                    user_tag: 0,
+                }));
 
         // A visible marker for the roaming interactor, so the grass displacement has
         // something obviously attached to it.
-        let marker_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.8, 0.2, 0.15, 1.0],
-                0.4,
-                0.0,
-                [0.5, 0.05, 0.0],
-                2.0,
-            ));
+        let marker_mat = renderer.scene().insert_material(make_material(
+            [0.8, 0.2, 0.15, 1.0],
+            0.4,
+            0.0,
+            [0.5, 0.05, 0.0],
+            2.0,
+        ));
         let marker_mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.6)))
             .as_mesh()
             .unwrap();
-        let marker_object = v3_demo_common::insert_object(
-            &mut renderer,
-            marker_mesh,
-            marker_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.6, 0.0)),
-            0.6,
-        )
-        .expect("marker object");
+        let marker_object = renderer
+            .scene()
+            .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
+                mesh: marker_mesh,
+                material: marker_mat,
+                transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.6, 0.0)),
+                bounds: [0.0, 0.6, 0.0, 0.6],
+                flags: 0,
+                groups: helio::GroupMask::NONE,
+                movability: None,
+                user_tag: 0,
+            }))
+            .expect("marker object")
+            .as_object()
+            .expect("marker object id");
 
         // ── Foliage ──────────────────────────────────────────────────────────
-        let grass_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.28, 0.46, 0.14, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let grass_mat = renderer.scene().insert_material(make_material(
+            [0.28, 0.46, 0.14, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let grass = renderer
-            .scene()
-            .add_foliage_type(FoliageTypeDescriptor {
-                density: blades_per_m2,
-                height_range: [0.18, 0.5],
-                width_range: [0.012, 0.03],
-                // Everything up to 35° of slope. Flat ground here, but this is the knob
-                // that keeps grass off cliff faces once real terrain is under it.
-                slope_range: [0.0, 35f32.to_radians()],
-                lod_distances: [8.0, 20.0, 45.0, 120.0],
-                // Blades have no trunk, so the sway band is off; flutter carries the
-                // body of the motion and jitter the tips.
-                wind_response: [0.0, 0.35, 1.0],
-                interaction_stiffness: 6.0,
-                material_id: grass_mat.slot(),
-                receives_interaction: true,
-                casts_shadow: false,
-                ..Default::default()
-            });
+        let grass = GpuFoliageType {
+            density: blades_per_m2,
+            height_range: [0.18, 0.5],
+            width_range: [0.012, 0.03],
+            // Everything up to 35° of slope. Flat ground here, but this is the knob
+            // that keeps grass off cliff faces once real terrain is under it.
+            slope_range: [0.0, 35f32.to_radians()],
+            lod_distances: [8.0, 20.0, 45.0, 120.0],
+            // Blades have no trunk, so the sway band is off; flutter carries the
+            // body of the motion and jitter the tips.
+            wind_response: [0.0, 0.35, 1.0],
+            interaction_stiffness: 6.0,
+            material_id: grass_mat.slot(),
+            altitude_range: [f32::MIN, f32::MAX],
+            density_layer: 0,
+            kind_and_flags: pack_kind_and_flags(
+                FoliageKind::Blade,
+                FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_RECEIVES_INTERACTION,
+            ),
+            mesh_or_impostor_id: 0,
+            _pad: [0; 3],
+        };
+        let grass: FoliageTypeComponent = grass.into();
+        let layer: FoliageLayerComponent = GpuFoliageLayer {
+            bounds_min: [-FIELD_HALF_EXTENT, -1.0, -FIELD_HALF_EXTENT, 0.0],
+            bounds_max: [FIELD_HALF_EXTENT, 4.0, FIELD_HALF_EXTENT, 1.0],
+        }
+        .into();
 
-        renderer
-            .scene()
-            .add_foliage_layer(FoliageLayer {
-                types: vec![grass],
-                bounds: [
-                    glam::Vec3::new(-FIELD_HALF_EXTENT, -1.0, -FIELD_HALF_EXTENT),
-                    glam::Vec3::new(FIELD_HALF_EXTENT, 4.0, FIELD_HALF_EXTENT),
-                ],
-                seed: 0x5EED,
-                has_infinite_extent: true,
-            });
+        // Foliage authoring lives in SceneDB rows. The pass owns these schemas
+        // and its GPU mirror publishes insert/mutate/remove through the World.
+        let mut scene_db = v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
+        let grass_entity = scene_db.world.spawn();
+        scene_db.world.insert(grass_entity, grass);
+        let layer_entity = scene_db.world.spawn();
+        scene_db.world.insert(layer_entity, layer);
 
         let wind_speed = 2.0;
-        renderer.scene().set_wind(Wind {
-            direction: glam::Vec3::new(1.0, 0.0, 0.35).normalize(),
-            speed: wind_speed,
-            gust_amplitude: 0.6,
-            gust_frequency: 0.25,
-            turbulence_scale: 0.05,
-            ..Default::default()
-        });
-
-        let interactor_id =
-            renderer
-                .scene()
-                .add_foliage_interactor(FoliageInteractor {
-                    position: glam::Vec3::ZERO,
-                    radius: 1.2,
-                    velocity: glam::Vec3::ZERO,
-                });
+        let wind_entity = scene_db.world.spawn();
+        scene_db.world.insert(
+            wind_entity,
+            FoliageWindComponent {
+                direction_speed: [1.0, 0.0, 0.35, wind_speed],
+                gust: [0.6, 0.25, 0.0, 0.05],
+                time_prev_time: [0.0, 0.0],
+                _pad: [0.0; 2],
+            },
+        );
+        let interactor_entity = scene_db.world.spawn();
+        scene_db.world.insert(
+            interactor_entity,
+            FoliageInteractorComponent {
+                position_radius: [0.0, 0.0, 0.0, 1.2],
+                velocity: [0.0; 4],
+            },
+        );
 
         // ── Lighting ─────────────────────────────────────────────────────────
-        let sun_light_id = renderer
-            .scene()
-            .insert_light(directional_light(
-                [-0.35, -0.8, -0.5],
-                [1.0, 0.96, 0.88],
-                3.0,
-            ));
+        let sun_light_id = renderer.scene().insert_light(directional_light(
+            [-0.35, -0.8, -0.5],
+            [1.0, 0.96, 0.88],
+            3.0,
+        ));
 
         renderer.scene().flush();
 
@@ -656,7 +668,9 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             wind_speed,
             interactor_enabled: true,
-            interactor_id,
+            scene_db,
+            interactor_entity,
+            wind_entity,
             interactor_prev_pos: glam::Vec3::ZERO,
             marker_object,
             _sun_light_id: sun_light_id,
@@ -823,14 +837,17 @@ impl AppState {
         let time = self.start_time.elapsed().as_secs_f32();
 
         // ── Drive the foliage frame state ────────────────────────────────────
-        // Three O(1) calls. Nothing here scales with the number of blades on screen —
-        // that is the whole claim the design makes, and this loop is what it looks like.
-        let scene = self.renderer.scene();
-
-        let mut wind = scene.wind();
-        wind.speed = self.wind_speed;
-        scene.set_wind(wind);
-        scene.advance_wind(dt);
+        // SceneDB is the only authored state. Mutating these pass-owned rows
+        // updates the GPU mirror without a renderer-side resubmission call.
+        if let Some(mut wind) = self
+            .scene_db
+            .world
+            .get_mut::<FoliageWindComponent>(self.wind_entity)
+        {
+            wind.direction_speed[3] = self.wind_speed;
+            wind.time_prev_time[1] = wind.time_prev_time[0];
+            wind.time_prev_time[0] += dt;
+        }
 
         let marker_pos = if self.interactor_enabled {
             let radius = 9.0;
@@ -852,11 +869,19 @@ impl AppState {
         };
         self.interactor_prev_pos = marker_pos;
 
-        let _ = scene.update_foliage_interactor(self.interactor_id, marker_pos, velocity);
-        let _ = scene
-            .update_object_transform(self.marker_object, glam::Mat4::from_translation(marker_pos));
-
-        scene.flush();
+        if let Some(mut interactor) = self
+            .scene_db
+            .world
+            .get_mut::<FoliageInteractorComponent>(self.interactor_entity)
+        {
+            interactor.position_radius = [
+                marker_pos.x,
+                marker_pos.y,
+                marker_pos.z,
+                interactor.position_radius[3],
+            ];
+            interactor.velocity = [velocity.x, velocity.y, velocity.z, 0.0];
+        }
     }
 
     /// Desktop mirror path: WASD + mouse free camera, then a normal render.

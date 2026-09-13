@@ -214,51 +214,41 @@ impl ApplicationHandler for App {
         );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let flooring = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.15, 0.18, 1.0],
-                0.86,
-                0.05,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.84, 0.14, 0.14, 1.0],
-                0.45,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.85, 0.25, 1.0],
-                0.45,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.2, 0.38, 0.90, 1.0],
-                0.45,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let yellow = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.85, 0.17, 1.0],
-                0.45,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let flooring = renderer.scene().insert_material(make_material(
+            [0.15, 0.15, 0.18, 1.0],
+            0.86,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let red = renderer.scene().insert_material(make_material(
+            [0.84, 0.14, 0.14, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let green = renderer.scene().insert_material(make_material(
+            [0.18, 0.85, 0.25, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let blue = renderer.scene().insert_material(make_material(
+            [0.2, 0.38, 0.90, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let yellow = renderer.scene().insert_material(make_material(
+            [0.95, 0.85, 0.17, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let floor_mesh = renderer
             .scene()
@@ -609,10 +599,7 @@ impl AppState {
     fn start_new_round(&mut self) {
         // clear old objects
         for shape in self.battle_shapes.drain(..) {
-            let _ = self
-                .renderer
-                .scene()
-                .remove_object(shape.object_id);
+            let _ = self.renderer.scene().remove_object(shape.object_id);
             self.physics_colliders.remove(
                 shape.collider_handle,
                 &mut self.physics_forces,
@@ -629,10 +616,7 @@ impl AppState {
             );
         }
         for part in self.explosion_particles.drain(..) {
-            let _ = self
-                .renderer
-                .scene()
-                .remove_object(part.object_id);
+            let _ = self.renderer.scene().remove_object(part.object_id);
         }
         self.round_active = true;
         self.round_end_instant = None;
@@ -797,10 +781,7 @@ impl AppState {
 
         for (_i, explosion_pos, object_id, collider_handle, body_handle) in eliminated {
             self.create_explosion(explosion_pos);
-            let _ = self
-                .renderer
-                .scene()
-                .remove_object(object_id);
+            let _ = self.renderer.scene().remove_object(object_id);
             self.physics_colliders.remove(
                 collider_handle,
                 &mut self.physics_forces,
@@ -844,10 +825,7 @@ impl AppState {
                     .scene()
                     .update_object_transform(p.object_id, new_transform);
             } else {
-                let _ = self
-                    .renderer
-                    .scene()
-                    .remove_object(p.object_id);
+                let _ = self.renderer.scene().remove_object(p.object_id);
             }
             alive
         });

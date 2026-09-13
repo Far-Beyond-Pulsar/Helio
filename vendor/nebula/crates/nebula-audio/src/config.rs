@@ -1,13 +1,12 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::traits::BakeInput;
+use serde::{Deserialize, Serialize};
 
 /// Number of frequency bands modelled in the acoustic simulation.
 pub const FREQ_BAND_COUNT: usize = 8;
 
 /// Centre frequencies (Hz) of the 8 octave bands.
-pub const FREQ_BAND_CENTRES: [f32; FREQ_BAND_COUNT] = [
-    62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0,
-];
+pub const FREQ_BAND_CENTRES: [f32; FREQ_BAND_COUNT] =
+    [62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
 
 /// A single listener position at which RIRs and reverb parameters are baked.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,12 +55,22 @@ impl Default for AcousticConfig {
 impl AcousticConfig {
     /// Fast low-quality preview preset (few rays, low order, short tail).
     pub fn fast() -> Self {
-        Self { max_order: 1, diffuse_rays: 64, max_duration_secs: 0.5, ..Default::default() }
+        Self {
+            max_order: 1,
+            diffuse_rays: 64,
+            max_duration_secs: 0.5,
+            ..Default::default()
+        }
     }
 
     /// High-quality production preset.
     pub fn ultra() -> Self {
-        Self { max_order: 5, diffuse_rays: 8192, max_duration_secs: 5.0, ..Default::default() }
+        Self {
+            max_order: 5,
+            diffuse_rays: 8192,
+            max_duration_secs: 5.0,
+            ..Default::default()
+        }
     }
 }
 

@@ -6,8 +6,6 @@ use std::sync::{Arc, Mutex};
 use helio_core::RenderGraph;
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 
-use crate::scene::Scene;
-
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::renderer_impl::Renderer;
@@ -30,9 +28,9 @@ pub type GraphBuilderFn = Box<
     dyn FnOnce(
         &Arc<wgpu::Device>,
         &Arc<wgpu::Queue>,
-        &Scene,
         RendererConfig,
         Arc<Mutex<DebugDrawState>>,
+        &wgpu::Buffer,
         &wgpu::Buffer,
         &wgpu::Buffer,
     ) -> RenderGraph,
@@ -44,7 +42,6 @@ pub type GraphBuilderFn = Box<
 pub struct PassBuildContext<'a> {
     pub device: &'a Arc<wgpu::Device>,
     pub queue: &'a Arc<wgpu::Queue>,
-    pub scene: &'a Scene,
     pub config: RendererConfig,
     pub debug_state: Arc<Mutex<DebugDrawState>>,
     pub camera_buffer: &'a wgpu::Buffer,
@@ -216,6 +213,14 @@ impl RendererBuilder {
         let height = height.max(1);
 
         let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Scene Camera Buffer"),
+            size: (std::mem::size_of::<helio_core::GpuCameraUniforms>() * 2) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let debug_camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
             size: 64,
@@ -231,17 +236,14 @@ impl RendererBuilder {
             mapped_at_creation: false,
         });
 
-        let scene = Scene::new(device.clone(), queue.clone());
-
         let config = self.config;
         let graph = if let Some(pass_graph_fn) = self.pass_graph_fn {
             pass_graph_fn(PassBuildContext {
                 device: &device,
                 queue: &queue,
-                scene: &scene,
                 config,
                 debug_state: debug_state.clone(),
-                camera_buffer: &debug_camera_buffer,
+                camera_buffer: &camera_buffer,
                 cull_stats_buffer: &cull_stats_buffer,
                 owns_device: self.owns_device,
                 scene_db: self.scene_db.clone(),
@@ -253,9 +255,9 @@ impl RendererBuilder {
             graph_fn(
                 &device,
                 &queue,
-                &scene,
                 config,
                 debug_state.clone(),
+                &camera_buffer,
                 &debug_camera_buffer,
                 &cull_stats_buffer,
             )
@@ -270,9 +272,9 @@ impl RendererBuilder {
             height,
             config.render_scale,
             config,
-            scene,
             graph,
             debug_state,
+            camera_buffer,
             debug_camera_buffer,
             cull_stats_buffer,
             scene_db,

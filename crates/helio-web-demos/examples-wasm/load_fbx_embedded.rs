@@ -88,22 +88,19 @@ impl HelioWasmApp for Demo {
 
                 // Stage + lighting
                 let floor_y = min.y - radius * 0.08;
-                let floor_m = renderer
+                let floor_m = renderer.scene().insert_material(make_material(
+                    [0.07, 0.08, 0.10, 1.0],
+                    0.16,
+                    0.02,
+                    [0.0; 3],
+                    0.0,
+                ));
+                let floor = renderer
                     .scene()
-                    .insert_material(make_material(
-                        [0.07, 0.08, 0.10, 1.0],
-                        0.16,
-                        0.02,
-                        [0.0; 3],
-                        0.0,
-                    ));
-                let floor =
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(plane_mesh(
-                            [center.x, floor_y, center.z],
-                            radius * 1.55,
-                        )));
+                    .insert_entity(helio::SceneEntity::mesh(plane_mesh(
+                        [center.x, floor_y, center.z],
+                        radius * 1.55,
+                    )));
                 insert_object(
                     renderer,
                     floor,
@@ -113,15 +110,13 @@ impl HelioWasmApp for Demo {
                 )
                 .unwrap();
 
-                let ped_m = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.11, 0.12, 0.15, 1.0],
-                        0.28,
-                        0.04,
-                        [0.0; 3],
-                        0.0,
-                    ));
+                let ped_m = renderer.scene().insert_material(make_material(
+                    [0.11, 0.12, 0.15, 1.0],
+                    0.28,
+                    0.04,
+                    [0.0; 3],
+                    0.0,
+                ));
                 let ped = renderer
                     .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(
@@ -130,15 +125,13 @@ impl HelioWasmApp for Demo {
                     )));
                 insert_object(renderer, ped, ped_m, glam::Mat4::IDENTITY, radius).unwrap();
 
-                let back_m = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.04, 0.05, 0.08, 1.0],
-                        0.82,
-                        0.0,
-                        [0.04, 0.06, 0.12],
-                        0.03,
-                    ));
+                let back_m = renderer.scene().insert_material(make_material(
+                    [0.04, 0.05, 0.08, 1.0],
+                    0.82,
+                    0.0,
+                    [0.04, 0.06, 0.12],
+                    0.03,
+                ));
                 let back = renderer
                     .scene()
                     .insert_entity(helio::SceneEntity::mesh(box_mesh(

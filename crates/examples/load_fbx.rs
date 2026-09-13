@@ -226,15 +226,15 @@ impl ApplicationHandler for App {
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer.scene().insert_material(
-                                v3_demo_common::make_material(
+                            renderer
+                                .scene()
+                                .insert_material(v3_demo_common::make_material(
                                     [0.7, 0.7, 0.75, 1.0],
                                     0.6,
                                     0.0,
                                     [0.0, 0.0, 0.0],
                                     0.0,
-                                ),
-                            )
+                                ))
                         });
                     let _ = v3_demo_common::insert_object(
                         &mut renderer,
@@ -256,16 +256,15 @@ impl ApplicationHandler for App {
                     .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
                     .as_mesh()
                     .unwrap();
-                let material =
-                    renderer
-                        .scene()
-                        .insert_material(v3_demo_common::make_material(
-                            [0.55, 0.68, 0.9, 1.0],
-                            0.35,
-                            0.15,
-                            [0.0, 0.0, 0.0],
-                            0.0,
-                        ));
+                let material = renderer
+                    .scene()
+                    .insert_material(v3_demo_common::make_material(
+                        [0.55, 0.68, 0.9, 1.0],
+                        0.35,
+                        0.15,
+                        [0.0, 0.0, 0.0],
+                        0.0,
+                    ));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     mesh,

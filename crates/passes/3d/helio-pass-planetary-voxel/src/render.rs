@@ -8,14 +8,14 @@ use crate::{
     TransvoxelTransitionGpuError, REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL,
     TERRAIN_MESHLET_CULL_WGSL, TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
 };
+use crate::{
+    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
+    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+};
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
-};
-use crate::{
-    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -2481,10 +2481,8 @@ mod tests {
     fn dependency_invalidations_wait_for_bounded_queue_capacity() {
         let planet = PlanetId([9; 16]);
         let generation = SourceGeneration::new(3, 7);
-        let first =
-            PlanetPageKey::new(planet, crate::PageKey::new(0, [-1, 0, 0]));
-        let second =
-            PlanetPageKey::new(planet, crate::PageKey::new(0, [0, 0, 0]));
+        let first = PlanetPageKey::new(planet, crate::PageKey::new(0, [-1, 0, 0]));
+        let second = PlanetPageKey::new(planet, crate::PageKey::new(0, [0, 0, 0]));
         let request = |key| PlanetarySurfaceRequest {
             key,
             generation,

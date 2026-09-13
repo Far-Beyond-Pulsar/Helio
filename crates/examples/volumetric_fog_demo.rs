@@ -220,15 +220,13 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let stone = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.62, 0.60, 0.58, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let stone = renderer.scene().insert_material(make_material(
+            [0.62, 0.60, 0.58, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         // Floor
         let floor = renderer
@@ -607,10 +605,7 @@ impl AppState {
 
         let mut sun = directional_light(sun_light_dir(self.sun_angle), [1.0, 0.9, 0.75], 4.0);
         sun.god_rays_enabled = self.shafts_enabled as u32;
-        let _ = self
-            .renderer
-            .scene()
-            .update_light(self.sun_light_id, sun);
+        let _ = self.renderer.scene().update_light(self.sun_light_id, sun);
 
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);

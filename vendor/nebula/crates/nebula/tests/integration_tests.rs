@@ -165,6 +165,9 @@ fn nav_module_is_accessible() {
 fn bake_context_can_be_created() {
     pollster::block_on(async {
         let ctx = BakeContext::new().await;
-        assert!(ctx.is_ok(), "BakeContext::new() should succeed on a GPU system");
+        assert!(
+            ctx.is_ok(),
+            "BakeContext::new() should succeed on a GPU system"
+        );
     });
 }

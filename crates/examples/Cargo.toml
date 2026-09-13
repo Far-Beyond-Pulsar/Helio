@@ -274,6 +274,8 @@ helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 helio-default-graphs = { path = "../helio-default-graphs" }
 helio-controls = { workspace = true, features = ["winit"] }

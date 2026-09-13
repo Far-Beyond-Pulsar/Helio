@@ -50,7 +50,10 @@ const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
 struct Rng(u64);
 impl Rng {
     fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
     fn range(&mut self, lo: u32, hi: u32) -> u32 {
@@ -93,7 +96,11 @@ fn make_row(
         material_class,
         graph_hash_lo: graph_hash as u32,
         graph_hash_hi: (graph_hash >> 32) as u32,
-        flags: if rng.next_u32() % 2 == 0 { INSTANCE_FLAG_MOVABLE } else { 0 },
+        flags: if rng.next_u32() % 2 == 0 {
+            INSTANCE_FLAG_MOVABLE
+        } else {
+            0
+        },
     }
 }
 
@@ -234,7 +241,13 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
     });
 
     let mut pass = ObjectBatchPass::new(&device);
-    pass.run_once_for_testing(&device, &queue, &static_objects_buf, &materials_buf, rows.len() as u32);
+    pass.run_once_for_testing(
+        &device,
+        &queue,
+        &static_objects_buf,
+        &materials_buf,
+        rows.len() as u32,
+    );
 
     // ── Blocking readback (test-only; production uses the async path) ──
     let read_buf = |src: &wgpu::Buffer, label: &str| -> Vec<u8> {
@@ -244,7 +257,8 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         encoder.copy_buffer_to_buffer(src, 0, &staging, 0, src.size());
         queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -253,7 +267,11 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         });
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().expect("map callback").expect("map succeeded");
-        let data = staging.slice(..).get_mapped_range().expect("mapped").to_vec();
+        let data = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped")
+            .to_vec();
         staging.unmap();
         data
     };
@@ -261,7 +279,10 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
     let counts_bytes = read_buf(pass.group_count_buffer(), "counts readback (group)");
     let group_count = bytemuck::cast_slice::<u8, u32>(&counts_bytes)[0];
 
-    let bucket_bytes = read_buf(pass.range_bucket_counts_buffer(), "counts readback (buckets)");
+    let bucket_bytes = read_buf(
+        pass.range_bucket_counts_buffer(),
+        "counts readback (buckets)",
+    );
     let buckets: &[u32] = bytemuck::cast_slice(&bucket_bytes);
     let (n_opaque, n_transparent, n_forward) = (buckets[0], buckets[1], buckets[2]);
 
@@ -333,16 +354,32 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
             }
         };
         let opaque_dbg = read_ranges(pass.opaque_ranges_buffer(), n_opaque, "opaque dbg");
-        let transparent_dbg = read_ranges(pass.transparent_ranges_buffer(), n_transparent, "transparent dbg");
+        let transparent_dbg = read_ranges(
+            pass.transparent_ranges_buffer(),
+            n_transparent,
+            "transparent dbg",
+        );
         let forward_dbg = read_ranges(pass.forward_ranges_buffer(), n_forward, "forward dbg");
         dump_ranges("opaque", &opaque_dbg);
         dump_ranges("transparent", &transparent_dbg);
         dump_ranges("forward", &forward_dbg);
     }
 
-    let opaque = read_ranges(pass.opaque_ranges_buffer(), n_opaque, "opaque ranges readback");
-    let transparent = read_ranges(pass.transparent_ranges_buffer(), n_transparent, "transparent ranges readback");
-    let forward = read_ranges(pass.forward_ranges_buffer(), n_forward, "forward ranges readback");
+    let opaque = read_ranges(
+        pass.opaque_ranges_buffer(),
+        n_opaque,
+        "opaque ranges readback",
+    );
+    let transparent = read_ranges(
+        pass.transparent_ranges_buffer(),
+        n_transparent,
+        "transparent ranges readback",
+    );
+    let forward = read_ranges(
+        pass.forward_ranges_buffer(),
+        n_forward,
+        "forward ranges readback",
+    );
 
     Some(GpuResult {
         instances,
@@ -373,7 +410,14 @@ fn gpu_object_batch_matches_cpu_reference() {
         .collect();
 
     let mut rows: Vec<StaticObjectComponent> = (0..N)
-        .map(|_| make_row(&mut rng, mesh_count, material_count, &class_and_hash_by_material))
+        .map(|_| {
+            make_row(
+                &mut rng,
+                mesh_count,
+                material_count,
+                &class_and_hash_by_material,
+            )
+        })
         .collect();
     // Interleave dead rows to exercise the liveness gate.
     for i in (0..rows.len()).step_by(7) {
@@ -430,7 +474,11 @@ fn gpu_object_batch_matches_cpu_reference() {
     };
 
     // ── 1. Live instance count ──
-    assert_eq!(gpu.instances.len() as u32, expected.live_count, "GPU instance count doesn't match live row count");
+    assert_eq!(
+        gpu.instances.len() as u32,
+        expected.live_count,
+        "GPU instance count doesn't match live row count"
+    );
 
     // ── 2. Draw-call group count and per-group instance counts ──
     assert_eq!(gpu.group_count as usize, expected.groups.len(), "GPU draw-call group count doesn't match CPU reference's distinct (mesh,material) pair count");
@@ -438,8 +486,13 @@ fn gpu_object_batch_matches_cpu_reference() {
 
     let mut gpu_groups: BTreeMap<(u32, u32), u32> = BTreeMap::new();
     let mut total_instances_seen = 0u32;
-    for &(index_count, first_index, vertex_offset, first_instance, instance_count) in &gpu.draw_calls {
-        assert!(instance_count > 0, "a draw-call group with zero instances should never exist");
+    for &(index_count, first_index, vertex_offset, first_instance, instance_count) in
+        &gpu.draw_calls
+    {
+        assert!(
+            instance_count > 0,
+            "a draw-call group with zero instances should never exist"
+        );
         // Every instance in this group must actually share the SAME
         // (mesh_id, material_id) -- this is the exact bug the
         // `same_draw_group` fix in `object_batch.wgsl` prevents (a hash
@@ -468,24 +521,56 @@ fn gpu_object_batch_matches_cpu_reference() {
         total_instances_seen += instance_count;
     }
     assert_eq!(total_instances_seen, expected.live_count, "draw-call groups' instance counts don't sum to the live row count -- some instance was dropped or double-counted");
-    assert_eq!(gpu_groups, expected.groups, "GPU per-group instance counts don't match the CPU reference");
+    assert_eq!(
+        gpu_groups, expected.groups,
+        "GPU per-group instance counts don't match the CPU reference"
+    );
 
     // ── 2b. `indirect_buffer()` carries the same data as `draw_calls`, just
     // reordered to wgpu's hardware indirect-draw ABI ──
     assert_eq!(gpu.indirect.len(), gpu.draw_calls.len());
-    for (g, (&(dc_index, dc_first_idx, dc_vertex_off, dc_first_inst, dc_inst_count), &(ind_index, ind_inst_count, ind_first_idx, ind_base_vertex, ind_first_inst))) in
-        gpu.draw_calls.iter().zip(gpu.indirect.iter()).enumerate()
+    for (
+        g,
+        (
+            &(dc_index, dc_first_idx, dc_vertex_off, dc_first_inst, dc_inst_count),
+            &(ind_index, ind_inst_count, ind_first_idx, ind_base_vertex, ind_first_inst),
+        ),
+    ) in gpu.draw_calls.iter().zip(gpu.indirect.iter()).enumerate()
     {
-        assert_eq!((ind_index, ind_first_idx, ind_base_vertex, ind_first_inst, ind_inst_count), (dc_index, dc_first_idx, dc_vertex_off, dc_first_inst, dc_inst_count), "group {g}: indirect_buffer() disagrees with draw_calls_buffer()");
+        assert_eq!(
+            (
+                ind_index,
+                ind_first_idx,
+                ind_base_vertex,
+                ind_first_inst,
+                ind_inst_count
+            ),
+            (
+                dc_index,
+                dc_first_idx,
+                dc_vertex_off,
+                dc_first_inst,
+                dc_inst_count
+            ),
+            "group {g}: indirect_buffer() disagrees with draw_calls_buffer()"
+        );
     }
 
     // ── 3. Range tables: every group appears in exactly one bucket, in a
     // contiguous run sharing (class, graph_hash) ──
-    let mut seen_groups_in_ranges: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut seen_groups_in_ranges: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
     let mut range_shading_bucket: HashMap<u32, u32> = HashMap::new(); // group index -> bucket id
-    for (bucket_id, ranges) in [(0u32, &gpu.opaque), (1, &gpu.transparent), (2, &gpu.forward)] {
+    for (bucket_id, ranges) in [
+        (0u32, &gpu.opaque),
+        (1, &gpu.transparent),
+        (2, &gpu.forward),
+    ] {
         for &(class, hash, start, count) in ranges {
-            assert!(count > 0, "a range with zero draw-call groups should never exist");
+            assert!(
+                count > 0,
+                "a range with zero draw-call groups should never exist"
+            );
             for g in start..start + count {
                 assert!(seen_groups_in_ranges.insert(g), "draw-call group {g} appears in more than one range -- ranges must partition the group array");
                 range_shading_bucket.insert(g, bucket_id);
@@ -497,19 +582,38 @@ fn gpu_object_batch_matches_cpu_reference() {
                 };
                 let expected_key = (mesh_slot, material_slot);
                 let (expected_class, expected_hash) = expected.class_hash_of_group[&expected_key];
-                assert_eq!(class, expected_class, "range's material_class doesn't match its groups' real material_class");
-                assert_eq!(hash, expected_hash, "range's graph_hash doesn't match its groups' real graph_hash");
+                assert_eq!(
+                    class, expected_class,
+                    "range's material_class doesn't match its groups' real material_class"
+                );
+                assert_eq!(
+                    hash, expected_hash,
+                    "range's graph_hash doesn't match its groups' real graph_hash"
+                );
                 let expected_shading = expected.shading_of_group[&expected_key];
                 assert_eq!(bucket_id, expected_shading, "group {expected_key:?} ended up in the wrong opaque/transparent/forward bucket");
             }
         }
     }
-    assert_eq!(seen_groups_in_ranges.len() as u32, gpu.group_count, "every draw-call group must appear in exactly one range");
+    assert_eq!(
+        seen_groups_in_ranges.len() as u32,
+        gpu.group_count,
+        "every draw-call group must appear in exactly one range"
+    );
 
     // ── 4. Shadow partition counts ──
-    assert_eq!(gpu.shadow_static_count, expected.static_count, "shadow static-partition count mismatch");
-    assert_eq!(gpu.shadow_movable_count, expected.movable_count, "shadow movable-partition count mismatch");
-    assert_eq!(gpu.shadow_static_count + gpu.shadow_movable_count, expected.live_count);
+    assert_eq!(
+        gpu.shadow_static_count, expected.static_count,
+        "shadow static-partition count mismatch"
+    );
+    assert_eq!(
+        gpu.shadow_movable_count, expected.movable_count,
+        "shadow movable-partition count mismatch"
+    );
+    assert_eq!(
+        gpu.shadow_static_count + gpu.shadow_movable_count,
+        expected.live_count
+    );
 }
 
 #[test]

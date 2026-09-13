@@ -2,11 +2,11 @@ use crate::{
     transition_face_integer_basis, PlanetaryVoxelResidency, EXTRACTION_SAMPLE_COUNT,
     TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSITION_FACE_SAMPLE_EDGE,
 };
-use bytemuck::{Pod, Zeroable};
 use crate::{
     AddressError, GpuPageMeta, PageKey, PlanetId, PlanetPageKey, SourceGeneration, TransitionFace,
     PAGE_EDGE, TRANSITION_FACE_MASK,
 };
+use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeSet;
 
 const GATHER_WORKGROUP_SIZE: u32 = 64;
@@ -466,9 +466,7 @@ pub enum SurfaceSamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT,
-    };
+    use crate::{CellWord, PageUpload, PlanetFrameUniform, PlanetPosition, PAGE_CELL_COUNT};
     use std::sync::mpsc;
 
     #[test]

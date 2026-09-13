@@ -1061,15 +1061,13 @@ impl App {
         // regular mesh/debug scene to be composited over it.
         scene_renderer.set_clear_color([0.0, 0.0, 0.0, 0.0]);
         eprintln!("[CE] scene renderer configured");
-        let cube_material = scene_renderer
-            .scene()
-            .insert_material(make_material(
-                [0.74, 0.80, 0.92, 1.0],
-                0.58,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let cube_material = scene_renderer.scene().insert_material(make_material(
+            [0.74, 0.80, 0.92, 1.0],
+            0.58,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let cube_mesh = scene_renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh(

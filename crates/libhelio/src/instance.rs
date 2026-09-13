@@ -68,7 +68,7 @@ pub const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
 /// sublevel assigns its members a space id once and moves the whole sublevel
 /// by writing one matrix (`Scene::move_sublevel`); a portal draws a *second*,
 /// clipped copy of nearby geometry through its own space id
-/// (`Scene::add_portal`). See `docs/` for the full design.
+/// (the SceneDB portal projection). See `docs/` for the full design.
 pub const INSTANCE_COORDINATE_SPACE_SHIFT: u32 = 8;
 
 /// Mask for the 8-bit coordinate-space id within [`GpuInstanceData::flags`].

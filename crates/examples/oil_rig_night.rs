@@ -183,9 +183,7 @@ impl ApplicationHandler for App {
         );
 
         let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(sky));
+        renderer.scene().insert_entity(helio::SceneEntity::Sky(sky));
 
         // Ocean water volume — mid-ocean night, Beaufort 4 (~25 km/h)
         let ocean = helio::WaterVolumeDescriptor {
@@ -239,25 +237,21 @@ impl ApplicationHandler for App {
             .scene()
             .insert_entity(helio::SceneEntity::water_volume(ocean));
 
-        let mat_platform = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.2, 0.2, 0.2, 1.0],
-                0.35,
-                1.0,
-                [0.1, 0.1, 0.1],
-                0.3,
-            ));
+        let mat_platform = renderer.scene().insert_material(make_material(
+            [0.2, 0.2, 0.2, 1.0],
+            0.35,
+            1.0,
+            [0.1, 0.1, 0.1],
+            0.3,
+        ));
 
-        let mat_leg = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.25, 0.25, 1.0],
-                0.6,
-                1.0,
-                [0.02, 0.02, 0.02],
-                0.15,
-            ));
+        let mat_leg = renderer.scene().insert_material(make_material(
+            [0.25, 0.25, 0.25, 1.0],
+            0.6,
+            1.0,
+            [0.02, 0.02, 0.02],
+            0.15,
+        ));
 
         // Platform base
         let platform_mesh = renderer

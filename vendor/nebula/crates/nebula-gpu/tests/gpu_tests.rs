@@ -15,7 +15,10 @@ fn workgroup_size_is_8() {
 #[test]
 fn workgroup_size_squared_fits_in_u32() {
     let total = WORKGROUP_SIZE * WORKGROUP_SIZE;
-    assert!(total <= 1024, "workgroup total ({total}) should not exceed typical GPU limit of 1024");
+    assert!(
+        total <= 1024,
+        "workgroup total ({total}) should not exceed typical GPU limit of 1024"
+    );
 }
 
 #[test]
@@ -143,11 +146,21 @@ fn uniform_buffer_creation_does_not_panic() {
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct TestUniform { x: f32, y: f32, z: f32, w: f32 }
+    struct TestUniform {
+        x: f32,
+        y: f32,
+        z: f32,
+        w: f32,
+    }
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
-        let uniform = TestUniform { x: 1.0, y: 2.0, z: 3.0, w: 4.0 };
+        let uniform = TestUniform {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            w: 4.0,
+        };
         let _buf = UniformBuffer::new(&ctx.device, "test_uniform", &uniform);
     });
 }
@@ -163,7 +176,8 @@ fn bake_texture_creation_does_not_panic() {
         let _tex = BakeTexture::new(
             &ctx.device,
             "test_tex",
-            64, 64,
+            64,
+            64,
             TextureFormat2D::R32F,
             1,
             wgpu::TextureUsages::empty(),
@@ -182,7 +196,8 @@ fn bake_texture_dimensions_match_request() {
         let tex = BakeTexture::new(
             &ctx.device,
             "test_tex_dims",
-            128, 256,
+            128,
+            256,
             TextureFormat2D::RGBA32F,
             1,
             wgpu::TextureUsages::empty(),

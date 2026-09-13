@@ -229,51 +229,41 @@ impl ApplicationHandler for App {
         );
         renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
 
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.25, 0.30, 1.0],
-                0.85,
-                0.03,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.12, 0.12, 1.0],
-                0.65,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.17, 0.82, 0.28, 1.0],
-                0.60,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.16, 0.40, 0.90, 1.0],
-                0.70,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_steel = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.75, 1.0],
-                0.15,
-                0.80,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat_floor = renderer.scene().insert_material(make_material(
+            [0.25, 0.25, 0.30, 1.0],
+            0.85,
+            0.03,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let mat_red = renderer.scene().insert_material(make_material(
+            [0.85, 0.12, 0.12, 1.0],
+            0.65,
+            0.00,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let mat_green = renderer.scene().insert_material(make_material(
+            [0.17, 0.82, 0.28, 1.0],
+            0.60,
+            0.00,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let mat_blue = renderer.scene().insert_material(make_material(
+            [0.16, 0.40, 0.90, 1.0],
+            0.70,
+            0.00,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let mat_steel = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.75, 1.0],
+            0.15,
+            0.80,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let floor_mesh = renderer
             .scene()

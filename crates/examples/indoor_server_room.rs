@@ -193,78 +193,62 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
 
         // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.20, 0.18, 1.0],
-                0.90,
-                0.00,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_ceiling = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.90, 0.95, 1.0],
-                0.80,
-                0.00,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_wall = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.82, 0.86, 0.90, 1.0],
-                0.85,
-                0.00,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_rack = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.10, 0.10, 0.12, 1.0],
-                0.40,
-                0.70,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_panel = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.88, 0.93, 1.00, 1.0],
-                0.90,
-                0.00,
-                [0.5, 0.6, 0.8],
-                3.0,
-            ));
-        let mat_cooling = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.40, 0.50, 0.60, 1.0],
-                0.50,
-                0.60,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_door = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.40, 0.45, 0.50, 1.0],
-                0.60,
-                0.30,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_tray = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.30, 0.30, 0.35, 1.0],
-                0.40,
-                0.80,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_floor = renderer.scene().insert_material(make_material(
+            [0.18, 0.20, 0.18, 1.0],
+            0.90,
+            0.00,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_ceiling = renderer.scene().insert_material(make_material(
+            [0.85, 0.90, 0.95, 1.0],
+            0.80,
+            0.00,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_wall = renderer.scene().insert_material(make_material(
+            [0.82, 0.86, 0.90, 1.0],
+            0.85,
+            0.00,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_rack = renderer.scene().insert_material(make_material(
+            [0.10, 0.10, 0.12, 1.0],
+            0.40,
+            0.70,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_panel = renderer.scene().insert_material(make_material(
+            [0.88, 0.93, 1.00, 1.0],
+            0.90,
+            0.00,
+            [0.5, 0.6, 0.8],
+            3.0,
+        ));
+        let mat_cooling = renderer.scene().insert_material(make_material(
+            [0.40, 0.50, 0.60, 1.0],
+            0.50,
+            0.60,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_door = renderer.scene().insert_material(make_material(
+            [0.40, 0.45, 0.50, 1.0],
+            0.60,
+            0.30,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_tray = renderer.scene().insert_material(make_material(
+            [0.30, 0.30, 0.35, 1.0],
+            0.40,
+            0.80,
+            [0.0; 3],
+            0.0,
+        ));
 
         // ── Geometry ───────────────────────────────────────────────────────────────
         let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
@@ -472,20 +456,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if ks == ElementState::Pressed && key == KeyCode::KeyE {
-                    if state
-                        .renderer
-                        .scene()
-                        .is_group_hidden(GroupId::EDITOR)
-                    {
-                        state
-                            .renderer
-                            .scene()
-                            .show_group(GroupId::EDITOR);
+                    if state.renderer.scene().is_group_hidden(GroupId::EDITOR) {
+                        state.renderer.scene().show_group(GroupId::EDITOR);
                     } else {
-                        state
-                            .renderer
-                            .scene()
-                            .hide_group(GroupId::EDITOR);
+                        state.renderer.scene().hide_group(GroupId::EDITOR);
                     }
                 }
                 match ks {

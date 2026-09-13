@@ -188,7 +188,9 @@ impl RangeReadback {
             // buffers simply never get read -- harmless: the public arrays
             // just keep whatever they last held until a new generation's
             // map resolves.
-            self.gens = (0..GENERATIONS).map(|_| Generation::new(device, capacity)).collect();
+            self.gens = (0..GENERATIONS)
+                .map(|_| Generation::new(device, capacity))
+                .collect();
             self.capacity = capacity;
             self.next = 0;
         }
@@ -196,7 +198,9 @@ impl RangeReadback {
         // 1. Advance every generation's pending maps; harvest the first one
         // that's fully resolved this call.
         for gen in self.gens.iter_mut() {
-            let Some(pending) = gen.pending.as_mut() else { continue };
+            let Some(pending) = gen.pending.as_mut() else {
+                continue;
+            };
             if !pending.counts_ready {
                 if let Some(r) = try_recv(&pending.counts_slot) {
                     pending.counts_ready = r.is_ok();
@@ -206,7 +210,9 @@ impl RangeReadback {
                     }
                 }
             }
-            let Some(pending) = gen.pending.as_mut() else { continue };
+            let Some(pending) = gen.pending.as_mut() else {
+                continue;
+            };
             if !pending.opaque_ready {
                 if let Some(r) = try_recv(&pending.opaque_slot) {
                     pending.opaque_ready = r.is_ok();
@@ -262,15 +268,39 @@ impl RangeReadback {
         {
             let gen = &self.gens[slot];
             encoder.copy_buffer_to_buffer(&scratch.group_count, 0, &gen.counts_staging, 0, 4);
-            encoder.copy_buffer_to_buffer(&scratch.range_bucket_counts, 0, &gen.counts_staging, 4, 12);
+            encoder.copy_buffer_to_buffer(
+                &scratch.range_bucket_counts,
+                0,
+                &gen.counts_staging,
+                4,
+                12,
+            );
             encoder.copy_buffer_to_buffer(&scratch.shadow_counts, 0, &gen.counts_staging, 16, 8);
             // `frame_uniform`'s first u32 is `count` -- the gather's live
             // instance count (see `FrameUniformGpu`'s doc in `src/lib.rs`).
             encoder.copy_buffer_to_buffer(&scratch.frame_uniform, 0, &gen.counts_staging, 24, 4);
             let range_bytes = gen.range_capacity_bytes();
-            encoder.copy_buffer_to_buffer(&scratch.opaque_ranges, 0, &gen.opaque_staging, 0, range_bytes.min(scratch.opaque_ranges.size()));
-            encoder.copy_buffer_to_buffer(&scratch.transparent_ranges, 0, &gen.transparent_staging, 0, range_bytes.min(scratch.transparent_ranges.size()));
-            encoder.copy_buffer_to_buffer(&scratch.forward_ranges, 0, &gen.forward_staging, 0, range_bytes.min(scratch.forward_ranges.size()));
+            encoder.copy_buffer_to_buffer(
+                &scratch.opaque_ranges,
+                0,
+                &gen.opaque_staging,
+                0,
+                range_bytes.min(scratch.opaque_ranges.size()),
+            );
+            encoder.copy_buffer_to_buffer(
+                &scratch.transparent_ranges,
+                0,
+                &gen.transparent_staging,
+                0,
+                range_bytes.min(scratch.transparent_ranges.size()),
+            );
+            encoder.copy_buffer_to_buffer(
+                &scratch.forward_ranges,
+                0,
+                &gen.forward_staging,
+                0,
+                range_bytes.min(scratch.forward_ranges.size()),
+            );
         }
         queue.submit([encoder.finish()]);
 
@@ -278,30 +308,38 @@ impl RangeReadback {
         let counts_slot = new_map_slot();
         {
             let slot = Arc::clone(&counts_slot);
-            gen.counts_staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                *slot.lock().expect("map slot mutex poisoned") = Some(r);
-            });
+            gen.counts_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    *slot.lock().expect("map slot mutex poisoned") = Some(r);
+                });
         }
         let opaque_slot = new_map_slot();
         {
             let slot = Arc::clone(&opaque_slot);
-            gen.opaque_staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                *slot.lock().expect("map slot mutex poisoned") = Some(r);
-            });
+            gen.opaque_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    *slot.lock().expect("map slot mutex poisoned") = Some(r);
+                });
         }
         let transparent_slot = new_map_slot();
         {
             let slot = Arc::clone(&transparent_slot);
-            gen.transparent_staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                *slot.lock().expect("map slot mutex poisoned") = Some(r);
-            });
+            gen.transparent_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    *slot.lock().expect("map slot mutex poisoned") = Some(r);
+                });
         }
         let forward_slot = new_map_slot();
         {
             let slot = Arc::clone(&forward_slot);
-            gen.forward_staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                *slot.lock().expect("map slot mutex poisoned") = Some(r);
-            });
+            gen.forward_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    *slot.lock().expect("map slot mutex poisoned") = Some(r);
+                });
         }
 
         gen.pending = Some(PendingMaps {

@@ -223,33 +223,27 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
 
         // Materials
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.52, 0.45, 1.0],
-                0.85,
-                0.00,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_pillar = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.60, 0.60, 0.62, 1.0],
-                0.50,
-                0.30,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_crate = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.50, 0.38, 0.25, 1.0],
-                0.70,
-                0.00,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_floor = renderer.scene().insert_material(make_material(
+            [0.55, 0.52, 0.45, 1.0],
+            0.85,
+            0.00,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_pillar = renderer.scene().insert_material(make_material(
+            [0.60, 0.60, 0.62, 1.0],
+            0.50,
+            0.30,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_crate = renderer.scene().insert_material(make_material(
+            [0.50, 0.38, 0.25, 1.0],
+            0.70,
+            0.00,
+            [0.0; 3],
+            0.0,
+        ));
 
         let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = r

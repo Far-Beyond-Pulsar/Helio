@@ -6,6 +6,82 @@ use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 use std::marker::PhantomData;
 
+/// A material authored as a SceneDB component.
+///
+/// The row deliberately keeps the existing G-buffer shader ABI for this
+/// migration step, but its lifetime and updates are now owned by the World.
+/// Render passes resolve the packed `"materials"` buffer by key; no renderer
+/// material table publication is required for the row itself.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "materials")]
+pub struct MaterialComponent {
+    #[gpu]
+    pub base_color: [f32; 4],
+    #[gpu]
+    pub emissive: [f32; 4],
+    #[gpu]
+    pub roughness_metallic: [f32; 4],
+    #[gpu]
+    pub tex_base_color: u32,
+    #[gpu]
+    pub tex_normal: u32,
+    #[gpu]
+    pub tex_roughness: u32,
+    #[gpu]
+    pub tex_emissive: u32,
+    #[gpu]
+    pub tex_occlusion: u32,
+    #[gpu]
+    pub workflow: u32,
+    #[gpu]
+    pub flags: u32,
+    #[gpu]
+    pub material_class: u32,
+    #[gpu]
+    pub class_params: [f32; 4],
+}
+
+impl From<libhelio::GpuMaterial> for MaterialComponent {
+    fn from(value: libhelio::GpuMaterial) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+impl From<MaterialComponent> for libhelio::GpuMaterial {
+    fn from(value: MaterialComponent) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+impl MaterialComponent {
+    /// Construct a material row without involving a renderer or an asset
+    /// registry. Texture values are SceneDB texture-store slot indices.
+    pub fn new(
+        base_color: [f32; 4],
+        roughness: f32,
+        metallic: f32,
+        emissive: [f32; 3],
+        emissive_strength: f32,
+    ) -> Self {
+        let missing = libhelio::GpuMaterial::NO_TEXTURE;
+        Self {
+            base_color,
+            emissive: [emissive[0], emissive[1], emissive[2], emissive_strength],
+            roughness_metallic: [roughness, metallic, 1.5, 0.5],
+            tex_base_color: missing,
+            tex_normal: missing,
+            tex_roughness: missing,
+            tex_emissive: missing,
+            tex_occlusion: missing,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        }
+    }
+}
+
 /// Stable group membership. `group_mask == 0` means always visible.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -47,8 +123,8 @@ pub struct SectionedObjectComponent {
     pub movable: u32,
 }
 
-/// A single-mesh static-object placement: mesh + material asset references,
-/// a world transform, a culling bound, and the resolved static draw
+/// A single-mesh static-object placement: SceneDB-owned mesh/material row
+/// indices, a world transform, a culling bound, and the static draw
 /// parameters a GPU-driven instancing/culling pipeline needs to read this
 /// row directly with no per-frame CPU involvement.
 ///
@@ -58,24 +134,15 @@ pub struct SectionedObjectComponent {
 ///
 /// # Why the draw parameters are stored, not derived per frame
 ///
-/// `mesh_id` (= the mesh asset's pool slot), `index_count`/`first_index`/
-/// `vertex_offset` (its vertex/index range), and `material_class`/
-/// `graph_hash` (the owning material's pipeline-selection key) are all
-/// **static properties of the mesh/material assets**, immutable for the
-/// life of those assets. Re-deriving them every frame would require a
-/// per-frame CPU query; instead the frontend resolves them ONCE, via
-/// `Renderer::mesh_slice`/`material_batch_key` (read-only asset queries,
-/// not scene authoring), at the moment it spawns this component — see
-/// [`StaticObjectComponent::new`].
+/// `index_count`/`first_index`/`vertex_offset` (the mesh's vertex/index
+/// range), and `material_class`/`graph_hash` (the material's
+/// pipeline-selection key) are authored alongside the row. They are not
+/// resolved through a renderer API; the SceneDB asset/ingestion layer owns
+/// that resolution before inserting this component.
 ///
-/// `mesh`/`material` handles themselves are stored as raw `(slot,
-/// generation)` pairs rather than `helio::MeshId`/`MaterialId` directly:
-/// those handle types aren't `bytemuck::Pod`, so this row keeps their exact
-/// bit pattern and reconstructs the typed handle with
-/// `MeshId::from_raw`/`MaterialId::from_raw` on read (see `mesh()`/
-/// `material()` below) — needed only if the frontend wants to re-resolve
-/// the asset later (e.g. after a hot-reload); the draw pipeline itself never
-/// needs the typed handle, only the plain `u32`s below.
+/// `mesh_slot` and `material_slot` are indices into the keyed SceneDB asset
+/// buffers. The draw pipeline consumes those plain indices; no renderer
+/// handle type is stored or reconstructed here.
 ///
 /// # What's NOT solved by this component alone
 ///
@@ -136,44 +203,43 @@ pub struct StaticObjectComponent {
 }
 
 impl StaticObjectComponent {
-    /// `renderer` supplies the one-time `mesh_slice`/`material_batch_key`
-    /// asset queries this needs — see the struct doc.
+    /// Construct an object row from already-resolved SceneDB asset metadata.
+    ///
+    /// `mesh_slot` and `material_slot` are plain SceneDB row indices. The
+    /// renderer is intentionally absent: resolving those indices and the
+    /// associated draw range belongs to the asset/component authoring side.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        renderer: &helio::Renderer,
-        mesh: helio::MeshId,
-        material: helio::MaterialId,
+        mesh_slot: u32,
+        mesh_generation: u32,
+        material_slot: u32,
+        material_generation: u32,
         transform: glam::Mat4,
         bounds: [f32; 4],
+        index_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        material_class: u32,
+        graph_hash: u64,
         flags: u32,
-    ) -> Option<Self> {
-        let slice = renderer.mesh_slice(mesh)?;
-        let (material_class, graph_hash) = renderer.material_batch_key(material)?;
-        let normal = normal_matrix_cols(transform);
-        Some(Self {
-            mesh_slot: mesh.slot(),
-            mesh_generation: mesh.generation(),
-            material_slot: material.slot(),
-            material_generation: material.generation(),
+    ) -> Self {
+        Self {
+            mesh_slot,
+            mesh_generation,
+            material_slot,
+            material_generation,
             transform: transform.to_cols_array_2d(),
             prev_transform: transform.to_cols_array_2d(),
-            normal_mat: normal,
+            normal_mat: normal_matrix_cols(transform),
             bounds,
-            index_count: slice.index_count,
-            first_index: slice.first_index,
-            vertex_offset: slice.first_vertex as i32,
+            index_count,
+            first_index,
+            vertex_offset,
             material_class,
             graph_hash_lo: graph_hash as u32,
             graph_hash_hi: (graph_hash >> 32) as u32,
             flags,
-        })
-    }
-
-    pub fn mesh(&self) -> helio::MeshId {
-        helio::MeshId::from_raw(self.mesh_slot, self.mesh_generation)
-    }
-
-    pub fn material(&self) -> helio::MaterialId {
-        helio::MaterialId::from_raw(self.material_slot, self.material_generation)
+        }
     }
 
     pub fn transform(&self) -> glam::Mat4 {
@@ -257,6 +323,7 @@ mod tests {
     use super::*;
     #[test]
     fn component_layouts_are_stable() {
+        assert_eq!(std::mem::size_of::<MaterialComponent>(), 96);
         assert_eq!(std::mem::size_of::<RenderGroupComponent>(), 8);
         assert_eq!(std::mem::size_of::<SublevelComponent>(), 72);
         assert_eq!(std::mem::size_of::<SectionedObjectComponent>(), 32);

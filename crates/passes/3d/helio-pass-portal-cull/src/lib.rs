@@ -283,9 +283,7 @@ impl RenderPass for PortalCullPass {
         self.chain_count = ctx
             .scene_buffers
             .get(BufferKey::of("portal_chains"))
-            .map(|h| {
-                (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32
-            })
+            .map(|h| (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32)
             .unwrap_or(0)
             .min(MAX_PORTAL_CHAINS as u32);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);

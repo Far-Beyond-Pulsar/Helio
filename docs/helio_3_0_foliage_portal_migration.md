@@ -17,7 +17,7 @@ The packed records intentionally retain the established 96/32/32/48-byte foliage
 144/16-byte portal layouts. The existing frame slots in `libhelio::generic transient resource registry`
 remain only because this migration is not allowed to edit `libhelio` or `helio-core`.
 They are now unused by these domains and should be deleted in the next core-interface
-change, along with the corresponding `FoliageFrameData`/`PortalsFrameData` types.
+change, along with the corresponding `SceneDB foliage projection`/`SceneDB portal projection` types.
 
 ## Integration follow-up
 

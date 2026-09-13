@@ -34,51 +34,41 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let stone = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.65, 0.62, 0.58, 1.0],
-                0.9,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let marble = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.88, 0.86, 0.82, 1.0],
-                0.4,
-                0.1,
-                [0.0; 3],
-                0.0,
-            ));
-        let candle_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.8, 0.75, 0.6, 1.0],
-                1.0,
-                0.0,
-                [1.2, 0.9, 0.4],
-                3.5,
-            ));
-        let window_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.1, 0.4, 1.0],
-                0.1,
-                0.0,
-                [0.2, 0.15, 0.6],
-                1.0,
-            ));
-        let dark_stone = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.28, 0.26, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let stone = renderer.scene().insert_material(make_material(
+            [0.65, 0.62, 0.58, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let marble = renderer.scene().insert_material(make_material(
+            [0.88, 0.86, 0.82, 1.0],
+            0.4,
+            0.1,
+            [0.0; 3],
+            0.0,
+        ));
+        let candle_mat = renderer.scene().insert_material(make_material(
+            [0.8, 0.75, 0.6, 1.0],
+            1.0,
+            0.0,
+            [1.2, 0.9, 0.4],
+            3.5,
+        ));
+        let window_mat = renderer.scene().insert_material(make_material(
+            [0.15, 0.1, 0.4, 1.0],
+            0.1,
+            0.0,
+            [0.2, 0.15, 0.6],
+            1.0,
+        ));
+        let dark_stone = renderer.scene().insert_material(make_material(
+            [0.3, 0.28, 0.26, 1.0],
+            0.95,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         // Nave floor
         let floor = renderer
@@ -133,27 +123,24 @@ impl HelioWasmApp for Demo {
         // Nave columns (4 pairs)
         for (i, z) in [-20.0_f32, -10.0, 0.0, 10.0].iter().enumerate() {
             for sx in [-8.0_f32, 8.0] {
-                let col_mesh =
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                            [sx, 6.0, *z],
-                            [0.9, 12.0, 0.9],
-                        )));
-                let cap_mesh =
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                            [sx, 12.3, *z],
-                            [1.4, 0.6, 1.4],
-                        )));
-                let base_mesh =
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                            [sx, 0.3, *z],
-                            [1.2, 0.6, 1.2],
-                        )));
+                let col_mesh = renderer
+                    .scene()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                        [sx, 6.0, *z],
+                        [0.9, 12.0, 0.9],
+                    )));
+                let cap_mesh = renderer
+                    .scene()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                        [sx, 12.3, *z],
+                        [1.4, 0.6, 1.4],
+                    )));
+                let base_mesh = renderer
+                    .scene()
+                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                        [sx, 0.3, *z],
+                        [1.2, 0.6, 1.2],
+                    )));
                 insert_object(renderer, col_mesh, marble, glam::Mat4::IDENTITY, 1.0).unwrap();
                 insert_object(renderer, cap_mesh, marble, glam::Mat4::IDENTITY, 1.0).unwrap();
                 insert_object(renderer, base_mesh, marble, glam::Mat4::IDENTITY, 1.0).unwrap();

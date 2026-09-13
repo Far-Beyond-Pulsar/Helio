@@ -188,24 +188,20 @@ impl ApplicationHandler for App {
         );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.25, 0.3, 1.0],
-                0.85,
-                0.03,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let block_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.78, 0.72, 0.19, 1.0],
-                0.46,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let floor_mat = renderer.scene().insert_material(make_material(
+            [0.25, 0.25, 0.3, 1.0],
+            0.85,
+            0.03,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let block_mat = renderer.scene().insert_material(make_material(
+            [0.78, 0.72, 0.19, 1.0],
+            0.46,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let floor_mesh = renderer
             .scene()

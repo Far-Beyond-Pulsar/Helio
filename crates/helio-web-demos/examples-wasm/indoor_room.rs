@@ -32,33 +32,27 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let wall_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.68, 0.62, 1.0],
-                0.8,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.45, 0.35, 1.0],
-                0.9,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let wood_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.50, 0.35, 0.20, 1.0],
-                0.7,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let wall_mat = renderer.scene().insert_material(make_material(
+            [0.7, 0.68, 0.62, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let floor_mat = renderer.scene().insert_material(make_material(
+            [0.55, 0.45, 0.35, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let wood_mat = renderer.scene().insert_material(make_material(
+            [0.50, 0.35, 0.20, 1.0],
+            0.7,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         let mut meshes = Vec::new();
 

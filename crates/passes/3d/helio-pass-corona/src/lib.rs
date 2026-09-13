@@ -451,7 +451,13 @@ impl CoronaPass {
         }
         let mut sort_steps_buf = sort_steps_buf;
         let mut max_sort_steps = initial_sort_cap;
-        Self::upload_sort_steps(device, queue, &sort_steps, &mut sort_steps_buf, &mut max_sort_steps);
+        Self::upload_sort_steps(
+            device,
+            queue,
+            &sort_steps,
+            &mut sort_steps_buf,
+            &mut max_sort_steps,
+        );
 
         Self {
             simulate_pipeline,

@@ -246,7 +246,9 @@ impl RenderPass for PortalMaskPass {
             .scene_buffers
             .get(BufferKey::of("portal_views"))
             .map(|h| {
-                (h.buffer.size() / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64) as u32
+                (h.buffer.size()
+                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                    as u32
             })
             .unwrap_or(0);
         Ok(())

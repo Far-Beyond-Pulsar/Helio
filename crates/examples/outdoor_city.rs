@@ -245,15 +245,13 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.75, 0.75, 0.75, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.75, 0.75, 0.75, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let _ground = renderer
             .scene()

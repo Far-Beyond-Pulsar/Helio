@@ -1,5 +1,8 @@
 use crate::{chunk::*, Compression};
-use nebula_core::{traits::{BakeOutput, BakeSerializer}, NebulaError};
+use nebula_core::{
+    traits::{BakeOutput, BakeSerializer},
+    NebulaError,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -11,7 +14,9 @@ pub enum BinarySerError {
 }
 
 impl From<BinarySerError> for NebulaError {
-    fn from(e: BinarySerError) -> Self { NebulaError::Serialize(e.to_string()) }
+    fn from(e: BinarySerError) -> Self {
+        NebulaError::Serialize(e.to_string())
+    }
 }
 
 /// Configuration for the compact binary `.nebula` format.
@@ -21,14 +26,18 @@ pub struct NebulaBinarySerializer {
 }
 
 impl Default for NebulaBinarySerializer {
-    fn default() -> Self { Self { compression: Compression::Balanced } }
+    fn default() -> Self {
+        Self {
+            compression: Compression::Balanced,
+        }
+    }
 }
 
 /// Low-level helper: write any `bincode`-serializable value as a single chunk.
 pub(crate) fn write_bincode_chunk<W, T>(
-    w:           &mut W,
-    tag:         ChunkTag,
-    value:       &T,
+    w: &mut W,
+    tag: ChunkTag,
+    value: &T,
     compression: Compression,
 ) -> Result<(), BinarySerError>
 where

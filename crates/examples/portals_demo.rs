@@ -25,8 +25,8 @@ mod v3_demo_common;
 
 use helio::{
     portal_pose_facing, required_experimental_features, required_wgpu_features,
-    required_wgpu_limits, Camera, DebugDrawState, LightId, ObjectDescriptor, PortalDescriptor,
-    PortalId, Renderer, RendererConfig, Scene, SceneEntity,
+    required_wgpu_limits, Camera, DebugDrawState, LightId, ObjectDescriptor, Renderer,
+    RendererConfig, Scene, SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
@@ -82,10 +82,10 @@ struct AppState {
 
     /// Duplicates content near the far end (-Z) so it's visible through the
     /// near portal (+Z).
-    portal_near: PortalId,
+    portal_near: helio::PortalPair,
     /// Duplicates content near the near end (+Z) so it's visible through the
     /// far portal (-Z).
-    portal_far: PortalId,
+    portal_far: helio::PortalPair,
 
     _light_ids: Vec<LightId>,
 }
@@ -207,15 +207,13 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.72, 0.72, 0.75, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.72, 0.72, 0.75, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18) — same
         // shell as indoor_corridor.rs. No end walls this time: the portals
@@ -259,24 +257,20 @@ impl ApplicationHandler for App {
         // open ends (z = ±18) so the mapped duplicate never overlaps the real
         // corridor — that overlap is what the fragment z-clip exists to avoid.
         let room_half_len = 6.0;
-        let far_room_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.55, 0.95, 1.0],
-                0.7,
-                0.0,
-                [0.1, 0.5, 1.0],
-                0.4,
-            ));
-        let near_room_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.6, 0.25, 1.0],
-                0.7,
-                0.0,
-                [1.0, 0.5, 0.1],
-                0.4,
-            ));
+        let far_room_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.55, 0.95, 1.0],
+            0.7,
+            0.0,
+            [0.1, 0.5, 1.0],
+            0.4,
+        ));
+        let near_room_mat = renderer.scene().insert_material(make_material(
+            [0.95, 0.6, 0.25, 1.0],
+            0.7,
+            0.0,
+            [1.0, 0.5, 0.1],
+            0.4,
+        ));
         let room_floor = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
@@ -384,24 +378,20 @@ impl ApplicationHandler for App {
         // Colour-coded markers at each end so it's obvious at a glance which
         // end you're looking at through a portal: warm amber in the +Z room,
         // cool blue in the -Z room.
-        let near_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.6, 0.2, 1.0],
-                0.6,
-                0.0,
-                [1.0, 0.5, 0.1],
-                2.0,
-            ));
-        let far_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.2, 0.6, 1.0, 1.0],
-                0.6,
-                0.0,
-                [0.1, 0.5, 1.0],
-                2.0,
-            ));
+        let near_mat = renderer.scene().insert_material(make_material(
+            [1.0, 0.6, 0.2, 1.0],
+            0.6,
+            0.0,
+            [1.0, 0.5, 0.1],
+            2.0,
+        ));
+        let far_mat = renderer.scene().insert_material(make_material(
+            [0.2, 0.6, 1.0, 1.0],
+            0.6,
+            0.0,
+            [0.1, 0.5, 1.0],
+            2.0,
+        ));
         let marker_mesh = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
@@ -509,24 +499,16 @@ impl ApplicationHandler for App {
 
         // Looking through the near portal (standing near +Z, facing further
         // +Z) shows what's actually near the far end.
-        let portal_near = renderer
-            .scene()
-            .add_portal(PortalDescriptor {
-                a: pose_near,
-                b: pose_far,
-                half_extent,
-            })
-            .expect("add_portal (near)");
+        let portal_near = helio::PortalPair {
+            a: pose_near,
+            b: pose_far,
+        };
         // Looking through the far portal shows what's actually near the near
         // end — the reverse direction, completing the loop.
-        let portal_far = renderer
-            .scene()
-            .add_portal(PortalDescriptor {
-                a: pose_far,
-                b: pose_near,
-                half_extent,
-            })
-            .expect("add_portal (far)");
+        let portal_far = helio::PortalPair {
+            a: pose_far,
+            b: pose_near,
+        };
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -690,7 +672,7 @@ impl AppState {
         // and the position/direction remap are just the CPU-side half of the
         // same portal, unaffected by how it's drawn.
         let scene = self.renderer.scene();
-        if let Some(pair) = scene.portal_pair(self.portal_near) {
+        if let Some(pair) = Some(self.portal_near) {
             if helio::crossing_detected(
                 prev_pos,
                 self.cam_pos,
@@ -705,7 +687,7 @@ impl AppState {
                 self.cam_pitch = forward.y.clamp(-1.0, 1.0).asin();
             }
         }
-        if let Some(pair) = scene.portal_pair(self.portal_far) {
+        if let Some(pair) = Some(self.portal_far) {
             if helio::crossing_detected(
                 prev_pos,
                 self.cam_pos,

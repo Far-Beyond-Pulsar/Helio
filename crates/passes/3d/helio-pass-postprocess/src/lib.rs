@@ -45,8 +45,7 @@ const WG_EXPOSURE_Y: u32 = 16;
 /// governs it now, so this stays in lockstep with that by construction).
 /// Also hardcoded into `postprocess.wgsl`'s own `MAX_PP_VOLUMES` -- the
 /// assertion below keeps the two from drifting apart.
-pub const MAX_PP_VOLUMES: u32 =
-    pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
+pub const MAX_PP_VOLUMES: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
 const _: () = assert!(MAX_PP_VOLUMES == 64);
 
 /// Position in the uber-shader effect chain where a user effect is injected.

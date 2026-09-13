@@ -184,24 +184,20 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.72, 0.58, 0.42, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let fire_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.1, 0.05, 1.0],
-                0.9,
-                0.0,
-                [1.0, 0.4, 0.05],
-                4.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.72, 0.58, 0.42, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let fire_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.1, 0.05, 1.0],
+            0.9,
+            0.0,
+            [1.0, 0.4, 0.05],
+            4.0,
+        ));
 
         let valley_floor = renderer
             .scene()

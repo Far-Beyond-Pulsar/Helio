@@ -1,9 +1,9 @@
+use crate::{config::PvsConfig, output::PvsOutput};
 use async_trait::async_trait;
 use nebula_core::{
-    context::BakeContext, error::NebulaError, progress::ProgressReporter,
-    scene::SceneGeometry, traits::BakePass,
+    context::BakeContext, error::NebulaError, progress::ProgressReporter, scene::SceneGeometry,
+    traits::BakePass,
 };
-use crate::{config::PvsConfig, output::PvsOutput};
 
 /// GPU occlusion-query–based Potentially Visible Set baker.
 ///
@@ -28,16 +28,18 @@ pub struct PvsBaker;
 
 #[async_trait(?Send)]
 impl BakePass for PvsBaker {
-    type Input  = PvsConfig;
+    type Input = PvsConfig;
     type Output = PvsOutput;
 
-    fn name(&self) -> &'static str { "pvs" }
+    fn name(&self) -> &'static str {
+        "pvs"
+    }
 
     async fn execute(
         &self,
-        scene:    &SceneGeometry,
-        config:   &PvsConfig,
-        ctx:      &BakeContext,
+        scene: &SceneGeometry,
+        config: &PvsConfig,
+        ctx: &BakeContext,
         reporter: &dyn ProgressReporter,
     ) -> Result<PvsOutput, NebulaError> {
         reporter.begin("pvs", 4);
@@ -51,7 +53,19 @@ impl BakePass for PvsBaker {
         let (vbuf, ibuf, mbuf, n_meshes, n_indices) = upload_geometry(scene, ctx)?;
 
         reporter.step("pvs", 2, &format!("running PVS on {} cells", cell_count));
-        let bits_raw = run_pvs_gpu(config, ctx, world_min, grid_dims, cell_count, words_per_cell, &vbuf, &ibuf, &mbuf, n_meshes, n_indices)?;
+        let bits_raw = run_pvs_gpu(
+            config,
+            ctx,
+            world_min,
+            grid_dims,
+            cell_count,
+            words_per_cell,
+            &vbuf,
+            &ibuf,
+            &mbuf,
+            n_meshes,
+            n_indices,
+        )?;
 
         reporter.step("pvs", 3, "post-processing");
         let bits = if config.conservative {
@@ -62,133 +76,283 @@ impl BakePass for PvsBaker {
 
         reporter.finish("pvs", true, "done");
         let config_json = serde_json::to_string(config).unwrap_or_default();
-        Ok(PvsOutput { world_min, world_max, grid_dims, cell_size: config.cell_size, cell_count, words_per_cell, bits, config_json })
+        Ok(PvsOutput {
+            world_min,
+            world_max,
+            grid_dims,
+            cell_size: config.cell_size,
+            cell_count,
+            words_per_cell,
+            bits,
+            config_json,
+        })
     }
 }
 
 // ── Grid helper ───────────────────────────────────────────────────────────────
 
-fn compute_grid(scene: &SceneGeometry, config: &PvsConfig) -> ([f32;3], [f32;3], [u32;3]) {
-    let (mut mn, mut mx) = ([f32::MAX;3], [f32::MIN;3]);
+fn compute_grid(scene: &SceneGeometry, config: &PvsConfig) -> ([f32; 3], [f32; 3], [u32; 3]) {
+    let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
     for mesh in &scene.meshes {
         for &p in &mesh.positions {
             let wp = mesh.world_transform.0.transform_point3(glam::Vec3::from(p));
             let wp = wp.to_array();
-            for i in 0..3 { mn[i]=mn[i].min(wp[i]); mx[i]=mx[i].max(wp[i]); }
+            for i in 0..3 {
+                mn[i] = mn[i].min(wp[i]);
+                mx[i] = mx[i].max(wp[i]);
+            }
         }
     }
     // Expand by one cell in each direction
     let s = config.cell_size;
     let mn = mn.map(|v| v - s);
     let mx = mx.map(|v| v + s);
-    let dims: [u32;3] = core::array::from_fn(|i| ((mx[i] - mn[i]) / s).ceil().max(1.0) as u32);
+    let dims: [u32; 3] = core::array::from_fn(|i| ((mx[i] - mn[i]) / s).ceil().max(1.0) as u32);
     (mn, mx, dims)
 }
 
 // ── Geometry upload ───────────────────────────────────────────────────────────
 
-fn upload_geometry(scene: &SceneGeometry, ctx: &BakeContext) -> Result<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, u32, u32), NebulaError> {
-    use wgpu::util::DeviceExt;
+fn upload_geometry(
+    scene: &SceneGeometry,
+    ctx: &BakeContext,
+) -> Result<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, u32, u32), NebulaError> {
     use bytemuck::{Pod, Zeroable};
+    use wgpu::util::DeviceExt;
 
-    #[repr(C)] #[derive(Copy,Clone,Pod,Zeroable)]
-    struct GpuVert { pos: [f32;3], _p: f32 }
-    #[repr(C)] #[derive(Copy,Clone,Pod,Zeroable)]
-    struct GpuMesh { idx_off: u32, idx_cnt: u32, vert_off: u32, _p: u32, xform: [[f32;4];4] }
+    #[repr(C)]
+    #[derive(Copy, Clone, Pod, Zeroable)]
+    struct GpuVert {
+        pos: [f32; 3],
+        _p: f32,
+    }
+    #[repr(C)]
+    #[derive(Copy, Clone, Pod, Zeroable)]
+    struct GpuMesh {
+        idx_off: u32,
+        idx_cnt: u32,
+        vert_off: u32,
+        _p: u32,
+        xform: [[f32; 4]; 4],
+    }
 
-    let mut verts  = Vec::<GpuVert>::new();
-    let mut idxs   = Vec::<u32>::new();
+    let mut verts = Vec::<GpuVert>::new();
+    let mut idxs = Vec::<u32>::new();
     let mut meshes = Vec::<GpuMesh>::new();
 
     for mesh in &scene.meshes {
         let vb = verts.len() as u32;
-        let ib = idxs.len()  as u32;
-        for &p in &mesh.positions { verts.push(GpuVert { pos: p, _p: 0.0 }); }
+        let ib = idxs.len() as u32;
+        for &p in &mesh.positions {
+            verts.push(GpuVert { pos: p, _p: 0.0 });
+        }
         idxs.extend(mesh.indices.iter().map(|&i| i + vb));
-        meshes.push(GpuMesh { idx_off: ib, idx_cnt: mesh.indices.len() as u32, vert_off: vb, _p: 0, xform: mesh.world_transform.0.to_cols_array_2d() });
+        meshes.push(GpuMesh {
+            idx_off: ib,
+            idx_cnt: mesh.indices.len() as u32,
+            vert_off: vb,
+            _p: 0,
+            xform: mesh.world_transform.0.to_cols_array_2d(),
+        });
     }
 
     let n_indices = idxs.len() as u32;
-    let n_meshes  = meshes.len() as u32;
-    let mk = |label, data: &[u8]| ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage: wgpu::BufferUsages::STORAGE });
-    Ok((mk("nebula_pvs_vbuf",bytemuck::cast_slice(&verts)), mk("nebula_pvs_ibuf",bytemuck::cast_slice(&idxs)), mk("nebula_pvs_mbuf",bytemuck::cast_slice(&meshes)), n_meshes, n_indices))
+    let n_meshes = meshes.len() as u32;
+    let mk = |label, data: &[u8]| {
+        ctx.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: data,
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    };
+    Ok((
+        mk("nebula_pvs_vbuf", bytemuck::cast_slice(&verts)),
+        mk("nebula_pvs_ibuf", bytemuck::cast_slice(&idxs)),
+        mk("nebula_pvs_mbuf", bytemuck::cast_slice(&meshes)),
+        n_meshes,
+        n_indices,
+    ))
 }
 
 // ── GPU PVS kernel ────────────────────────────────────────────────────────────
 
 fn run_pvs_gpu(
-    config:         &PvsConfig,
-    ctx:            &BakeContext,
-    world_min:      [f32;3],
-    grid_dims:      [u32;3],
-    cell_count:     u32,
+    config: &PvsConfig,
+    ctx: &BakeContext,
+    world_min: [f32; 3],
+    grid_dims: [u32; 3],
+    cell_count: u32,
     words_per_cell: u32,
-    vbuf:           &wgpu::Buffer,
-    ibuf:           &wgpu::Buffer,
-    mbuf:           &wgpu::Buffer,
-    n_meshes:       u32,
-    n_indices:      u32,
+    vbuf: &wgpu::Buffer,
+    ibuf: &wgpu::Buffer,
+    mbuf: &wgpu::Buffer,
+    n_meshes: u32,
+    n_indices: u32,
 ) -> Result<Vec<u64>, NebulaError> {
-    use wgpu::util::DeviceExt;
     use bytemuck::{Pod, Zeroable};
+    use wgpu::util::DeviceExt;
 
-    #[repr(C)] #[derive(Copy,Clone,Pod,Zeroable)]
+    #[repr(C)]
+    #[derive(Copy, Clone, Pod, Zeroable)]
     struct PvsParams {
-        world_min: [f32;3], cell_size: f32,
-        grid_dims: [u32;3], cell_count: u32,
-        words_per_cell: u32, ray_budget: u32,
-        max_dist: f32, vis_threshold: u32,
-        num_meshes: u32, num_indices: u32,
-        seed: u32, _p: u32,
+        world_min: [f32; 3],
+        cell_size: f32,
+        grid_dims: [u32; 3],
+        cell_count: u32,
+        words_per_cell: u32,
+        ray_budget: u32,
+        max_dist: f32,
+        vis_threshold: u32,
+        num_meshes: u32,
+        num_indices: u32,
+        seed: u32,
+        _p: u32,
     }
 
-    let p = PvsParams { world_min, cell_size: config.cell_size, grid_dims, cell_count, words_per_cell, ray_budget: config.ray_budget, max_dist: config.max_ray_distance, vis_threshold: config.visibility_threshold, num_meshes: n_meshes, num_indices: n_indices, seed: 0xFEEDFACE, _p: 0 };
-    let pbuf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("nebula_pvs_params"), contents: bytemuck::bytes_of(&p), usage: wgpu::BufferUsages::UNIFORM });
+    let p = PvsParams {
+        world_min,
+        cell_size: config.cell_size,
+        grid_dims,
+        cell_count,
+        words_per_cell,
+        ray_budget: config.ray_budget,
+        max_dist: config.max_ray_distance,
+        vis_threshold: config.visibility_threshold,
+        num_meshes: n_meshes,
+        num_indices: n_indices,
+        seed: 0xFEEDFACE,
+        _p: 0,
+    };
+    let pbuf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("nebula_pvs_params"),
+            contents: bytemuck::bytes_of(&p),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
     let out_words = cell_count as u64 * words_per_cell as u64;
     let out_bytes = out_words * 8; // u64 = 8 bytes
-    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor { label: Some("nebula_pvs_bits"), size: out_bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-
-    let bgl = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("nebula_pvs_bgl"),
-        entries: &[
-            bgl_uniform(0), bgl_storage_ro(1), bgl_storage_ro(2), bgl_storage_ro(3),
-            wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-        ],
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("nebula_pvs_bits"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
     });
+
+    let bgl = ctx
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nebula_pvs_bgl"),
+            entries: &[
+                bgl_uniform(0),
+                bgl_storage_ro(1),
+                bgl_storage_ro(2),
+                bgl_storage_ro(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
     let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("nebula_pvs_bg"), layout: &bgl,
+        label: Some("nebula_pvs_bg"),
+        layout: &bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: pbuf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: vbuf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: ibuf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: mbuf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: out_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pbuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: vbuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: ibuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: mbuf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: out_buf.as_entire_binding(),
+            },
         ],
     });
 
-    let shader = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("nebula_pvs_cs"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/pvs.wgsl").into()) });
-    let pl = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
-    let pipeline = ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("nebula_pvs_pipeline"), layout: Some(&pl), module: &shader, entry_point: Some("main"), compilation_options: Default::default(), cache: None });
+    let shader = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nebula_pvs_cs"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/pvs.wgsl").into()),
+        });
+    let pl = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("nebula_pvs_pipeline"),
+            layout: Some(&pl),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
     // One thread per source cell; each thread fires ray_budget rays
     let wg = 64u32;
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("nebula_pvs_enc") });
-    { let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-      pass.set_pipeline(&pipeline); pass.set_bind_group(0, &bg, &[]);
-      pass.dispatch_workgroups(cell_count.div_ceil(wg), 1, 1); }
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("nebula_pvs_enc"),
+        });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(cell_count.div_ceil(wg), 1, 1);
+    }
     ctx.queue.submit(std::iter::once(enc.finish()));
     let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
 
     // Readback
-    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor { label: Some("nebula_pvs_staging"), size: out_bytes, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-    let mut enc2 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("nebula_pvs_staging"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc2 = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     enc2.copy_buffer_to_buffer(&out_buf, 0, &staging, 0, out_bytes);
     ctx.queue.submit(std::iter::once(enc2.finish()));
     let (tx, rx) = std::sync::mpsc::channel();
-    staging.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).ok(); });
+    staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).ok();
+    });
     let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok().and_then(|r| r.ok()).ok_or_else(|| NebulaError::ReadbackTimeout { ms: 30000 })?;
+    rx.recv()
+        .ok()
+        .and_then(|r| r.ok())
+        .ok_or_else(|| NebulaError::ReadbackTimeout { ms: 30000 })?;
     let raw = staging
         .slice(..)
         .get_mapped_range()
@@ -201,34 +365,59 @@ fn run_pvs_gpu(
 
 // ── Conservative dilation ─────────────────────────────────────────────────────
 
-fn apply_conservative_dilation(bits: &[u64], dims: [u32;3], wpc: u32) -> Vec<u64> {
+fn apply_conservative_dilation(bits: &[u64], dims: [u32; 3], wpc: u32) -> Vec<u64> {
     let [gx, gy, gz] = dims.map(|d| d as usize);
     let mut out = bits.to_vec();
     let cell = |x: usize, y: usize, z: usize| z * gy * gx + y * gx + x;
     let wpc = wpc as usize;
-    for z in 0..gz { for y in 0..gy { for x in 0..gx {
-        let src = cell(x,y,z);
-        // Six-connected neighbours
-        for (nx,ny,nz) in [
-            (x.wrapping_sub(1),y,z),(x+1,y,z),
-            (x,y.wrapping_sub(1),z),(x,y+1,z),
-            (x,y,z.wrapping_sub(1)),(x,y,z+1),
-        ] {
-            if nx < gx && ny < gy && nz < gz {
-                let nbr = cell(nx,ny,nz);
-                // OR the source cell's bitset into the neighbour's bitset
-                for w in 0..wpc {
-                    out[nbr * wpc + w] |= bits[src * wpc + w];
+    for z in 0..gz {
+        for y in 0..gy {
+            for x in 0..gx {
+                let src = cell(x, y, z);
+                // Six-connected neighbours
+                for (nx, ny, nz) in [
+                    (x.wrapping_sub(1), y, z),
+                    (x + 1, y, z),
+                    (x, y.wrapping_sub(1), z),
+                    (x, y + 1, z),
+                    (x, y, z.wrapping_sub(1)),
+                    (x, y, z + 1),
+                ] {
+                    if nx < gx && ny < gy && nz < gz {
+                        let nbr = cell(nx, ny, nz);
+                        // OR the source cell's bitset into the neighbour's bitset
+                        for w in 0..wpc {
+                            out[nbr * wpc + w] |= bits[src * wpc + w];
+                        }
+                    }
                 }
             }
         }
-    }}}
+    }
     out
 }
 
 fn bgl_uniform(b: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry { binding: b, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }
+    wgpu::BindGroupLayoutEntry {
+        binding: b,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }
 fn bgl_storage_ro(b: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry { binding: b, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }
+    wgpu::BindGroupLayoutEntry {
+        binding: b,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
 }

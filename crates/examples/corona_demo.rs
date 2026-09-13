@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    GpuLight, LightType, Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
+    LightType, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph;
 use winit::{
@@ -276,10 +276,8 @@ impl ApplicationHandler for App {
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 
         // ── Floor plane ─────────────────────────────────────────────────────
-        let floor_mesh_id = renderer.create_mesh_asset(v3_demo_common::plane_mesh(
-            [0.0, 0.0, 0.0],
-            30.0,
-        ));
+        let floor_mesh_id =
+            renderer.create_mesh_asset(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 30.0));
         let floor_mat = renderer.create_material_projection(v3_demo_common::make_material(
             [0.06, 0.06, 0.08, 1.0],
             0.8,

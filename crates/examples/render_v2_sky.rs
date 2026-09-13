@@ -193,15 +193,13 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let cube1 = renderer
             .scene()
@@ -303,21 +301,19 @@ impl ApplicationHandler for App {
             )));
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(helio::SkyActor::new().with_clouds(
-                helio::VolumetricClouds {
-                    coverage: 0.7,
-                    density: 0.8,
-                    base: 1200.0,
-                    top: 1800.0,
-                    wind_x: 0.8,
-                    wind_z: 0.2,
-                    speed: 1.3,
-                    skylight_intensity: 0.25,
-                    infinite_extent: true,
-                },
-            )));
+        renderer.scene().insert_entity(helio::SceneEntity::Sky(
+            helio::SkyActor::new().with_clouds(helio::VolumetricClouds {
+                coverage: 0.7,
+                density: 0.8,
+                base: 1200.0,
+                top: 1800.0,
+                wind_x: 0.8,
+                wind_z: 0.2,
+                speed: 1.3,
+                skylight_intensity: 0.25,
+                infinite_extent: true,
+            }),
+        ));
 
         self.state = Some(AppState {
             window,

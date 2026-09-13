@@ -350,10 +350,10 @@ pub const MAX_FOLIAGE_TYPES: usize = 256;
 /// pass does anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoliageTables {
-    /// Number of entries in `FoliageFrameData::types`.
+    /// Number of entries in the SceneDB `foliage_types` projection.
     pub type_count: u32,
-    /// `FoliageFrameData::generation`. Wind must not advance it — see the field's docs
-    /// in `libhelio::frame`.
+    /// Content generation for the projected foliage type table. Wind does not
+    /// advance it because wind is a separate SceneDB projection.
     pub generation: u64,
 }
 
@@ -381,10 +381,9 @@ pub struct FoliageFrameDecision {
 ///
 /// Three cases:
 ///
-/// - `frame.foliage` unwritten ⇒ nothing at all. Not "upload an empty table", not
-///   "record four empty draws" — the publisher deliberately leaves the slot empty rather
-///   than writing an empty [`FoliageFrameData`](libhelio::frame::FoliageFrameData) for
-///   this reason.
+/// - The SceneDB `foliage_types` projection is absent ⇒ nothing at all. Not
+///   "upload an empty table", not "record four empty draws" — the pass leaves
+///   the projection absent for this reason.
 /// - Published but no types registered ⇒ still nothing: a type id indexes the descriptor
 ///   table directly, so an empty table means no blade can resolve.
 /// - Types registered ⇒ four draws, whatever the ring holds. An empty ring is four
@@ -454,7 +453,8 @@ pub fn cross_fade_alpha(
     let mut alpha = helio_pass_foliage_place::lod_fade_alpha(distance, upper - band, upper);
     if level > 0 {
         let lower = lod_threshold(lod_distances, level - 1, quality_scale);
-        alpha = alpha.min(1.0 - helio_pass_foliage_place::lod_fade_alpha(distance, lower - band, lower));
+        alpha = alpha
+            .min(1.0 - helio_pass_foliage_place::lod_fade_alpha(distance, lower - band, lower));
     }
     alpha
 }

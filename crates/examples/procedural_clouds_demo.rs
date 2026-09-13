@@ -250,15 +250,13 @@ impl ApplicationHandler for App {
             debug_camera_buf,
             cull_stats_buf,
         );
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let cube1 = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
@@ -305,11 +303,9 @@ impl ApplicationHandler for App {
             skylight_intensity: 0.25,
             infinite_extent: true,
         };
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(
-                helio::SkyActor::new().with_clouds(volumetric),
-            ));
+        renderer.scene().insert_entity(helio::SceneEntity::Sky(
+            helio::SkyActor::new().with_clouds(volumetric),
+        ));
         renderer.set_cloud_render_mode(helio::CloudRenderMode::Volume3D);
         renderer.set_cloud_quality(helio::CloudQuality::High);
         renderer.set_cloud_resolution(helio::CloudResolution::Half);
@@ -527,11 +523,9 @@ impl AppState {
             infinite_extent: self.infinite,
         };
         // Re-insert sky actor — SkyActor is the single source of truth for sky+clouds
-        self.renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(
-                helio::SkyActor::new().with_clouds(clouds),
-            ));
+        self.renderer.scene().insert_entity(helio::SceneEntity::Sky(
+            helio::SkyActor::new().with_clouds(clouds),
+        ));
     }
     fn sync_clouds_with_preset(&mut self, p: CloudPreset) {
         let clouds = VolumetricClouds {
@@ -547,11 +541,9 @@ impl AppState {
         };
         self.coverage = p.coverage;
         self.density = p.density;
-        self.renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::Sky(
-                helio::SkyActor::new().with_clouds(clouds),
-            ));
+        self.renderer.scene().insert_entity(helio::SceneEntity::Sky(
+            helio::SkyActor::new().with_clouds(clouds),
+        ));
     }
     fn render(&mut self, dt: f32) {
         const SPEED: f32 = 5.0;

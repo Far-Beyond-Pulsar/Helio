@@ -31,7 +31,7 @@ use bytemuck::{Pod, Zeroable};
 
 pub mod components;
 pub use components::{
-    RenderGroupComponent, RenderGroupSceneBinding, SectionedObjectComponent,
+    MaterialComponent, RenderGroupComponent, RenderGroupSceneBinding, SectionedObjectComponent,
     SectionedObjectSceneBinding, StaticObjectComponent, SublevelComponent, SublevelSceneBinding,
 };
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
@@ -40,6 +40,7 @@ use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use std::collections::HashMap;
+use pulsar_scenedb::gpu::BufferKey;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -478,12 +479,26 @@ impl RenderPass for GBufferPass {
             return Ok(());
         };
         let draw_count = batch.draw_count;
-        let main_scene = ctx.resources.main_scene;
-
-        if draw_count == 0 || main_scene.is_none() {
+        if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = main_scene.read("GBuffer").unwrap();
+        let Some(main_scene) = ctx.resources.main_scene.read("GBuffer") else {
+            return Ok(());
+        };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.camera as *const _ as usize;
@@ -542,13 +557,19 @@ impl RenderPass for GBufferPass {
             self.bind_group_0_key = Some(key);
         }
 
-        let materials_data = ctx.resources.materials.get();
-        let materials_buf = materials_data
-            .map(|m| m.materials)
+        // Material rows are SceneDB component data.  The pass resolves the
+        // component column by key; it must not consume a renderer-owned
+        // material table hidden inside PassResources.
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
 
         // Rebuild bind group 1 when material textures version changes.
-        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+        let needs_rebuild = self.bind_group_1_version != Some(
+            main_scene.material_textures.version ^ materials_epoch,
+        )
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
@@ -576,7 +597,7 @@ impl RenderPass for GBufferPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version);
+            self.bind_group_1_version = Some(main_scene.material_textures.version ^ materials_epoch);
         }
 
         let indirect = culled.indirect;
@@ -584,27 +605,12 @@ impl RenderPass for GBufferPass {
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(
-            main_scene.mesh_buffers.indices.slice(..),
+            indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
 
-        // Sync template registry from scene (survives graph rebuilds). This
-        // is just an Arc clone (cheap refcount bump) — the registry itself
-        // is shared, never deep-copied.
-        if let Some(reg_any) = materials_data.and_then(|m| m.template_registry.as_ref()) {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                let new_keys = shared.read().unwrap().keys();
-                if self.last_template_keys != new_keys {
-                    // Registry changed — pipelines must be re-created
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_template_keys = new_keys;
-                }
-                self.template_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
         let ranges = batch.opaque_ranges;
         if ranges.is_empty() {
             // Fallback: no ranges (e.g. legacy mode without material_class data).
@@ -632,14 +638,7 @@ impl RenderPass for GBufferPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let empty_snippets = std::collections::HashMap::new();
-                let graph_wgsl = materials_data
-                    .map(|m| m.graph_wgsl_snippets)
-                    .unwrap_or(&empty_snippets)
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
                 // DrawIndexedIndirectArgs = 5 × u32 = 20 bytes per entry
                 #[cfg(not(target_arch = "wasm32"))]

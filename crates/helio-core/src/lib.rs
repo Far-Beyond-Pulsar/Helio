@@ -419,6 +419,6 @@ pub use graph::{
     PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
 };
 pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
-pub use scene_input::{SceneBufferProjection, SceneInput};
+pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
 pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

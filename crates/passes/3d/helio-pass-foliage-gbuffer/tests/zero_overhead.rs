@@ -76,7 +76,7 @@ fn registered_types_always_produce_exactly_four_draws() {
 
 #[test]
 fn the_type_table_uploads_only_when_the_generation_moves() {
-    // Wind deliberately does not advance `generation` (see `FoliageFrameData`), so a
+    // Wind deliberately does not advance the foliage type-table generation, so a
     // steady-state frame must re-upload nothing but the 48-byte wind uniform. If this
     // ever inverts, the residency cache's whole point — that steady-state foliage costs
     // nothing on the CPU — is lost to a 24 KiB per-frame copy.

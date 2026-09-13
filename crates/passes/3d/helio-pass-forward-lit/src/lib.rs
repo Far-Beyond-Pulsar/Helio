@@ -351,7 +351,14 @@ impl RenderPass for ForwardLitPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth", "pre_aa", "cluster_light_grid", "object_batch", "culled_batch"]
+        &[
+            "main_scene",
+            "depth",
+            "pre_aa",
+            "cluster_light_grid",
+            "object_batch",
+            "culled_batch",
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -462,23 +469,42 @@ impl RenderPass for ForwardLitPass {
             return Ok(());
         };
         let draw_count = batch.draw_count;
-        let main_scene = ctx.resources.main_scene;
 
-        if draw_count == 0 || main_scene.is_none() {
+        if draw_count == 0 {
             return Ok(());
         }
-        let ms = main_scene.read("ForwardLit").unwrap();
+        let Some(ms) = ctx.resources.main_scene.read("ForwardLit") else {
+            return Ok(());
+        };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
-        // `LightsFrameData`/`MaterialsFrameData` are the `Renderer`-seeded
-        // bridges -- see those structs' own docs. Fall back to
+        // `LightsFrameData` remains a compatibility bridge for light
+        // algorithm state. Material rows are resolved from SceneDB below.
+        // Fall back to
         // `batch.instances` (any valid, never-actually-dereferenced buffer)
         // if the `Renderer` hasn't published them yet, matching the fallback
         // idiom already used for `tile_lists`/`tile_counts`/`transforms`.
         let lights_data = ctx.resources.lights.get();
-        let materials_data = ctx.resources.materials.get();
-        let materials_buf = materials_data
-            .map(|m| m.materials)
+        // Material rows are SceneDB component data.  Resolve the column by
+        // key so the renderer never becomes the material authority again.
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
 
         // Same preference as `prepare()`: SceneDB-direct when present, else
         // the CPU-resolved bridge -- production's real, actively-populated
@@ -591,7 +617,9 @@ impl RenderPass for ForwardLitPass {
             self.bind_group_0_key = Some(bg0_key);
         }
 
-        let needs_rebuild = self.bind_group_1_version != Some(ms.material_textures.version)
+        let needs_rebuild = self.bind_group_1_version != Some(
+            ms.material_textures.version ^ materials_epoch,
+        )
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("ForwardLit: rebuilding bind group 1 (material textures version changed)");
@@ -616,33 +644,15 @@ impl RenderPass for ForwardLitPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(ms.material_textures.version);
+            self.bind_group_1_version = Some(ms.material_textures.version ^ materials_epoch);
         }
 
         let indirect = culled.indirect;
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        pass.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-
-        if let Some(reg_any) = materials_data.and_then(|m| m.template_registry.as_ref()) {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                let new_keys: Vec<u32> = shared
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .into_iter()
-                    .filter(|id| *id >= 5)
-                    .collect();
-                if self.last_shared_keys != new_keys {
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_shared_keys = new_keys;
-                }
-                self.shared_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = if self.render_all_opaque {
             batch.opaque_ranges
@@ -677,17 +687,10 @@ impl RenderPass for ForwardLitPass {
                 if self.render_all_opaque {
                     key.feature_flags |= 1;
                 }
-                let empty_snippets = std::collections::HashMap::new();
-                let graph_wgsl = materials_data
-                    .map(|m| m.graph_wgsl_snippets)
-                    .unwrap_or(&empty_snippets)
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
                 let pipeline = self.get_or_create_pipeline(
                     &ctx.device,
                     key,
-                    graph_wgsl,
+                    "",
                     self.render_all_opaque,
                 );
                 pass.set_pipeline(pipeline);

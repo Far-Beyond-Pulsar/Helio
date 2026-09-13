@@ -52,7 +52,6 @@ use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::{LightId, MeshId, ObjectId};
 use crate::mesh::MeshUpload;
-use crate::scene::{Scene, SceneEntityId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tunables

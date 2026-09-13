@@ -36,51 +36,41 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         // Runtime file I/O is not available on WASM.
         // Build a simple showcase stage as a stand-in for the loaded FBX.
-        let floor_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.07, 0.08, 0.10, 1.0],
-                0.16,
-                0.02,
-                [0.0; 3],
-                0.0,
-            ));
-        let pedestal_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.11, 0.12, 0.15, 1.0],
-                0.28,
-                0.04,
-                [0.0; 3],
-                0.0,
-            ));
-        let backdrop_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.04, 0.05, 0.08, 1.0],
-                0.82,
-                0.0,
-                [0.04, 0.06, 0.12],
-                0.03,
-            ));
-        let cube_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.52, 0.5, 1.0],
-                0.6,
-                0.1,
-                [0.0; 3],
-                0.0,
-            ));
-        let text_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.8, 0.2, 1.0],
-                0.1,
-                0.0,
-                [0.9, 0.8, 0.1],
-                2.0,
-            ));
+        let floor_m = renderer.scene().insert_material(make_material(
+            [0.07, 0.08, 0.10, 1.0],
+            0.16,
+            0.02,
+            [0.0; 3],
+            0.0,
+        ));
+        let pedestal_m = renderer.scene().insert_material(make_material(
+            [0.11, 0.12, 0.15, 1.0],
+            0.28,
+            0.04,
+            [0.0; 3],
+            0.0,
+        ));
+        let backdrop_m = renderer.scene().insert_material(make_material(
+            [0.04, 0.05, 0.08, 1.0],
+            0.82,
+            0.0,
+            [0.04, 0.06, 0.12],
+            0.03,
+        ));
+        let cube_mat = renderer.scene().insert_material(make_material(
+            [0.55, 0.52, 0.5, 1.0],
+            0.6,
+            0.1,
+            [0.0; 3],
+            0.0,
+        ));
+        let text_m = renderer.scene().insert_material(make_material(
+            [0.9, 0.8, 0.2, 1.0],
+            0.1,
+            0.0,
+            [0.9, 0.8, 0.1],
+            2.0,
+        ));
 
         // Floor
         let floor = renderer

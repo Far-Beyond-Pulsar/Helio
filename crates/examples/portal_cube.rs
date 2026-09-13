@@ -2,7 +2,7 @@
 //! each of its 6 walls, each one reflecting the *same real room* back at
 //! itself. No manually-authored "copies" anywhere in this file: every
 //! reflection you see — including the second, third bounce receding into
-//! each doorway — comes entirely from `helio::Scene::add_portal` and the
+//! each doorway — comes entirely from SceneDB portal components and the
 //! engine's own portal-chain composition (`helio-pass-portal-cull` /
 //! `helio-pass-portal-instances`). This is the automatic-recursion
 //! generalization of `infinite_tunnel`'s single hand-placed corridor: a
@@ -27,8 +27,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId, Renderer,
-    RendererConfig, Scene, SceneEntity,
+    DebugDrawState, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
+    SceneEntity,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, point_light};
@@ -85,7 +85,7 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _portal_ids: Vec<PortalId>,
+    _portal_pairs: Vec<helio::PortalPair>,
     _light_ids: Vec<LightId>,
 
     /// Debug-only: when `CUBE_SCREENSHOT` is set, counts frames so a single
@@ -211,24 +211,20 @@ impl ApplicationHandler for App {
         );
 
         // ── Materials ───────────────────────────────────────────────────────
-        let wall_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.75, 0.75, 0.78, 1.0],
-                0.75,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let frame_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.9, 1.0, 1.0],
-                0.4,
-                0.0,
-                [0.2, 0.85, 1.0],
-                2.5,
-            ));
+        let wall_mat = renderer.scene().insert_material(make_material(
+            [0.75, 0.75, 0.78, 1.0],
+            0.75,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let frame_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.9, 1.0, 1.0],
+            0.4,
+            0.0,
+            [0.2, 0.85, 1.0],
+            2.5,
+        ));
 
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
@@ -257,7 +253,7 @@ impl ApplicationHandler for App {
             (Vec3::NEG_Z, Vec3::Y),
         ];
 
-        let mut portal_ids = Vec::new();
+        let mut portal_pairs = Vec::new();
         for &(normal, up_hint) in &faces {
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
@@ -280,15 +276,8 @@ impl ApplicationHandler for App {
             // the module doc for why this is the whole trick.
             let a = helio::portal_pose_facing(normal * HALF_SIZE, normal, up);
             let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
-            let portal = renderer
-                .scene()
-                .add_portal(PortalDescriptor {
-                    a,
-                    b,
-                    half_extent: Vec2::new(DOOR_HALF_W, DOOR_HALF_H),
-                })
-                .expect("add_portal");
-            portal_ids.push(portal);
+            let portal = helio::PortalPair { a, b };
+            portal_pairs.push(portal);
         }
 
         // ── A light near the center so every wall reads, plus one per
@@ -375,7 +364,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            _portal_ids: portal_ids,
+            _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
         });

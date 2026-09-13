@@ -561,14 +561,25 @@ impl RenderPass for PortalInstancePass {
         let Some(main_scene) = main_scene else {
             return Ok(());
         };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
         let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
             || self.bind_group_1.is_none();
         if needs_rebuild {
             let materials_buf = ctx
-                .resources
-                .materials
-                .get()
-                .map(|m| m.materials)
+                .scene_buffers
+                .get(BufferKey::of("materials"))
+                .map(|handle| &handle.buffer)
                 .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
@@ -597,8 +608,8 @@ impl RenderPass for PortalInstancePass {
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);

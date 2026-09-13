@@ -229,7 +229,13 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth", "cluster_light_grid", "object_batch", "culled_batch"]
+        &[
+            "main_scene",
+            "depth",
+            "cluster_light_grid",
+            "object_batch",
+            "culled_batch",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -333,37 +339,24 @@ impl RenderPass for TransparentPass {
             return Ok(());
         }
 
-        // Sync transparent templates from GpuScene (merge into existing registry,
-        // keeping the transparent base at class 0).
-        if let Some(reg_any) = ctx
-            .resources
-            .materials
-            .get()
-            .and_then(|m| m.transparent_template_registry.as_ref())
-        {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                // Only custom templates (id >= 5) apply here — class 0 is
-                // always the transparent base and must not be overwritten.
-                let new_keys: Vec<u32> = shared
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .into_iter()
-                    .filter(|id| *id >= 5)
-                    .collect();
-                if self.last_shared_keys != new_keys {
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_shared_keys = new_keys;
-                }
-                self.shared_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
-
         let main_scene = ctx.resources.main_scene.read("Transparent");
         let ms = main_scene.as_ref().ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
         })?;
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         // Rebuild bind group 1 (lights + transforms + cluster data) when
         // buffer pointers change. Prefer the SceneDB-direct `"scene_lights"`
@@ -472,8 +465,8 @@ impl RenderPass for TransparentPass {
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        rp.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        rp.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+        rp.set_vertex_buffer(0, vertices.slice(..));
+        rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = batch.transparent_ranges;
         if ranges.is_empty() {
@@ -503,17 +496,7 @@ impl RenderPass for TransparentPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let empty_snippets = std::collections::HashMap::new();
-                let graph_wgsl = ctx
-                    .resources
-                    .materials
-                    .get()
-                    .map(|m| m.graph_wgsl_snippets)
-                    .unwrap_or(&empty_snippets)
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 rp.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);

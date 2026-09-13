@@ -174,15 +174,13 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.08, 0.10, 0.18], 0.035);
 
         // Single material for the whole station (cool grey metal)
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.62, 0.63, 0.66, 1.0],
-                0.55,
-                0.35,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.62, 0.63, 0.66, 1.0],
+            0.55,
+            0.35,
+            [0.0; 3],
+            0.0,
+        ));
 
         build_station(&mut renderer, mat);
 

@@ -116,15 +116,13 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         )))
         .as_mesh()
         .unwrap();
-    let floor_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.07, 0.08, 0.10, 1.0],
-            0.16,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+    let floor_material = renderer.scene().insert_material(make_material(
+        [0.07, 0.08, 0.10, 1.0],
+        0.16,
+        0.02,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
     let _ = v3_demo_common::insert_object(
         renderer,
         floor_mesh,
@@ -149,15 +147,13 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         )))
         .as_mesh()
         .unwrap();
-    let pedestal_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.11, 0.12, 0.15, 1.0],
-            0.28,
-            0.04,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+    let pedestal_material = renderer.scene().insert_material(make_material(
+        [0.11, 0.12, 0.15, 1.0],
+        0.28,
+        0.04,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
     let _ = v3_demo_common::insert_object(
         renderer,
         pedestal_mesh,
@@ -182,15 +178,13 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         )))
         .as_mesh()
         .unwrap();
-    let backdrop_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.04, 0.05, 0.08, 1.0],
-            0.82,
-            0.0,
-            [0.04, 0.06, 0.12],
-            0.03,
-        ));
+    let backdrop_material = renderer.scene().insert_material(make_material(
+        [0.04, 0.05, 0.08, 1.0],
+        0.82,
+        0.0,
+        [0.04, 0.06, 0.12],
+        0.03,
+    ));
     let _ = v3_demo_common::insert_object(
         renderer,
         backdrop_mesh,
@@ -438,15 +432,13 @@ impl ApplicationHandler for App {
                     )))
                     .as_mesh()
                     .unwrap();
-                let material = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.65, 0.72, 0.9, 1.0],
-                        0.35,
-                        0.1,
-                        [0.0, 0.0, 0.0],
-                        0.0,
-                    ));
+                let material = renderer.scene().insert_material(make_material(
+                    [0.65, 0.72, 0.9, 1.0],
+                    0.35,
+                    0.1,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     mesh,

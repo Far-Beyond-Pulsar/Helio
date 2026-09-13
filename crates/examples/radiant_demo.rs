@@ -280,22 +280,20 @@ impl ApplicationHandler for App {
         ));
 
         // Tier 2: Clear coat — dark base with bright, sharp coated specular
-        let coat_mat = renderer
-            .scene()
-            .insert_material(GpuMaterial {
-                base_color: [0.01, 0.01, 0.02, 1.0],
-                emissive: [0.0; 4],
-                roughness_metallic: [0.3, 0.0, 1.5, 0.0],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            });
+        let coat_mat = renderer.scene().insert_material(GpuMaterial {
+            base_color: [0.01, 0.01, 0.02, 1.0],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.3, 0.0, 1.5, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
         renderer
             .scene()
             .set_material_class(coat_mat, MATERIAL_CLASS_CLEAR_COAT, 0, None)
@@ -305,22 +303,20 @@ impl ApplicationHandler for App {
             .update_material_class_params(coat_mat, [1.0, 0.01, 0.0, 0.0]);
 
         // Tier 2: Crystal/gemstone — SSS with rim-transmission glow
-        let crystal_mat = renderer
-            .scene()
-            .insert_material(GpuMaterial {
-                base_color: [0.98, 0.95, 0.92, 1.0],
-                emissive: [0.0; 4],
-                roughness_metallic: [0.01, 0.0, 2.42, 0.0],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            });
+        let crystal_mat = renderer.scene().insert_material(GpuMaterial {
+            base_color: [0.98, 0.95, 0.92, 1.0],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.01, 0.0, 2.42, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
         renderer
             .scene()
             .set_material_class(crystal_mat, MATERIAL_CLASS_SUBSURFACE, 0, None)
@@ -422,22 +418,20 @@ impl ApplicationHandler for App {
         // 3D cell noise.  The opal template uses SSS for the translucent body
         // and a hash-based cell noise for the coloured patches.
         // class_params.x = patch_scale, .y = patch_strength, .z = view_shift
-        let opal_mat = renderer
-            .scene()
-            .insert_material(GpuMaterial {
-                base_color: [0.88, 0.84, 0.78, 1.0],
-                emissive: [0.0; 4],
-                roughness_metallic: [0.06, 0.0, 1.45, 0.0],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            });
+        let opal_mat = renderer.scene().insert_material(GpuMaterial {
+            base_color: [0.88, 0.84, 0.78, 1.0],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.06, 0.0, 1.45, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
         renderer
             .scene()
             .set_material_class(opal_mat, opal_class, 0, None)
@@ -448,22 +442,20 @@ impl ApplicationHandler for App {
 
         // ── Glass material ────────────────────────────────────────────────────
 
-        let glass_mat = renderer
-            .scene()
-            .insert_material(GpuMaterial {
-                base_color: [0.85, 0.90, 0.95, 0.70], // slightly blue-tinted glass
-                emissive: [0.0; 4],
-                roughness_metallic: [0.015, 0.0, 1.5, 0.0],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            });
+        let glass_mat = renderer.scene().insert_material(GpuMaterial {
+            base_color: [0.85, 0.90, 0.95, 0.70], // slightly blue-tinted glass
+            emissive: [0.0; 4],
+            roughness_metallic: [0.015, 0.0, 1.5, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
         renderer
             .scene()
             .set_material_class(
@@ -476,22 +468,20 @@ impl ApplicationHandler for App {
 
         // ── Water material ────────────────────────────────────────────────────
 
-        let water_mat = renderer
-            .scene()
-            .insert_material(GpuMaterial {
-                base_color: [0.02, 0.1, 0.15, 0.85],
-                emissive: [0.0; 4],
-                roughness_metallic: [0.02, 0.0, 1.33, 0.0],
-                tex_base_color: GpuMaterial::NO_TEXTURE,
-                tex_normal: GpuMaterial::NO_TEXTURE,
-                tex_roughness: GpuMaterial::NO_TEXTURE,
-                tex_emissive: GpuMaterial::NO_TEXTURE,
-                tex_occlusion: GpuMaterial::NO_TEXTURE,
-                workflow: 0,
-                flags: 0,
-                material_class: 0,
-                class_params: [0.0; 4],
-            });
+        let water_mat = renderer.scene().insert_material(GpuMaterial {
+            base_color: [0.02, 0.1, 0.15, 0.85],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.02, 0.0, 1.33, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
         renderer
             .scene()
             .set_material_class(water_mat, water_class, 0, None)
@@ -670,11 +660,9 @@ impl ApplicationHandler for App {
 
         // ── Sky: nearly black — reflections visible only from lights ──────────
 
-        renderer
-            .scene()
-            .insert_entity(SceneEntity::Sky(
-                helio::SkyActor::new().with_sky_color([0.02, 0.02, 0.04]),
-            ));
+        renderer.scene().insert_entity(SceneEntity::Sky(
+            helio::SkyActor::new().with_sky_color([0.02, 0.02, 0.04]),
+        ));
         renderer.set_ambient([0.01, 0.01, 0.02], 0.03);
 
         // ── Legend ───────────────────────────────────────────────────────────
@@ -828,18 +816,15 @@ impl ApplicationHandler for App {
                 );
 
                 // Animate iridescent
-                state
-                    .renderer
-                    .scene()
-                    .update_material_class_params(
-                        state.animated_iri_id,
-                        [
-                            3.0 + (t * 0.3).sin() * 2.0,
-                            0.5 + (t * 0.5).sin() * 0.5,
-                            0.0,
-                            0.0,
-                        ],
-                    );
+                state.renderer.scene().update_material_class_params(
+                    state.animated_iri_id,
+                    [
+                        3.0 + (t * 0.3).sin() * 2.0,
+                        0.5 + (t * 0.5).sin() * 0.5,
+                        0.0,
+                        0.0,
+                    ],
+                );
 
                 // Animate crystal: cycle internal colour
                 let crystal_tint = [
@@ -847,18 +832,15 @@ impl ApplicationHandler for App {
                     0.2 + (t * 0.9 + 2.0).cos() * 0.3,
                     0.2 + (t * 1.1 + 4.0).cos() * 0.35,
                 ];
-                state
-                    .renderer
-                    .scene()
-                    .update_material_class_params(
-                        state.crystal_mat_id,
-                        [
-                            crystal_tint[0],
-                            crystal_tint[1],
-                            crystal_tint[2],
-                            3.0 + (t * 0.5).sin() * 1.5,
-                        ],
-                    );
+                state.renderer.scene().update_material_class_params(
+                    state.crystal_mat_id,
+                    [
+                        crystal_tint[0],
+                        crystal_tint[1],
+                        crystal_tint[2],
+                        3.0 + (t * 0.5).sin() * 1.5,
+                    ],
+                );
 
                 // Animate anisotropic: rotate brush direction
                 state

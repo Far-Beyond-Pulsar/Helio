@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use bytemuck::Zeroable;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -6,7 +7,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use crate::radiant::RadiantTemplateRegistry;
-use crate::scene::Scene;
 use helio_core::{PipelineFormatSet, RenderGraph};
 
 use super::config::RendererConfig;
@@ -99,9 +99,9 @@ impl Renderer {
         height: u32,
         render_scale: f32,
         config: RendererConfig,
-        mut scene: Scene,
         mut graph: RenderGraph,
         debug_state: Arc<Mutex<DebugDrawState>>,
+        camera_buffer: wgpu::Buffer,
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
         scene_db: super::builder::SceneDbHandle,
@@ -114,9 +114,6 @@ impl Renderer {
             [surface_format],
             Some(wgpu::TextureFormat::Depth32Float),
         ));
-        scene.set_shadow_face_capacity(config.shadow_face_capacity);
-        scene.set_render_size(width, height);
-
         assert!(
             device
                 .features()
@@ -180,14 +177,12 @@ impl Renderer {
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        // Captured before `scene` is moved into `Self`.
-        let scene_has_sky = scene.sky_context().has_sky;
+        let scene_has_sky = false;
 
         let mut renderer = Self {
             device,
             queue,
             graph,
-            scene,
             depth_texture,
             depth_view,
             output_width: width,
@@ -196,6 +191,11 @@ impl Renderer {
             full_res_depth_texture,
             full_res_depth_view,
             surface_format,
+            camera_buffer,
+            camera_data: helio_core::GpuCameraUniforms::zeroed(),
+            camera_generation: 0,
+            frame_count: 0,
+            prev_view_proj: glam::Mat4::IDENTITY,
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
@@ -231,6 +231,8 @@ impl Renderer {
             bake_pending: None,
             #[cfg(feature = "bake")]
             baked_data: None,
+            #[cfg(feature = "bake")]
+            bake_scene: None,
             clear_target_next_frame: true,
             graph_has_sky: scene_has_sky,
             xr_stage_transform: glam::Mat4::IDENTITY,
@@ -277,16 +279,6 @@ impl Renderer {
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_format: None,
         };
-
-        // The SceneDB projection is the authoritative source for entity-stable
-        // transforms. Rebind the renderer's draw-time view to the SceneDB
-        // buffer at construction; this keeps the legacy Scene allocation from
-        // becoming a second transform authority when a frontend attaches a
-        // GPU mirror. SceneDB owns the buffer and the clone is only wgpu's
-        // reference-counted handle.
-        renderer.scene.rebind_transform_buffer(std::sync::Arc::new(
-            renderer.scene_db.store().transform_buffer(),
-        ));
 
         renderer
     }

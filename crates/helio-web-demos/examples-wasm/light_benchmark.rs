@@ -37,33 +37,27 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let ground_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.4, 0.4, 0.4, 1.0],
-                0.8,
-                0.05,
-                [0.0; 3],
-                0.0,
-            ));
-        let box_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.52, 0.48, 1.0],
-                0.7,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let light_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 1.0, 1.0, 1.0],
-                0.0,
-                0.0,
-                [2.0, 2.0, 2.0],
-                5.0,
-            ));
+        let ground_m = renderer.scene().insert_material(make_material(
+            [0.4, 0.4, 0.4, 1.0],
+            0.8,
+            0.05,
+            [0.0; 3],
+            0.0,
+        ));
+        let box_m = renderer.scene().insert_material(make_material(
+            [0.55, 0.52, 0.48, 1.0],
+            0.7,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let light_m = renderer.scene().insert_material(make_material(
+            [1.0, 1.0, 1.0, 1.0],
+            0.0,
+            0.0,
+            [2.0, 2.0, 2.0],
+            5.0,
+        ));
 
         // Ground plane
         let ground = renderer

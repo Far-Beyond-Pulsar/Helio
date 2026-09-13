@@ -233,24 +233,20 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let rock_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.2, 0.18, 1.0],
-                0.9,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let lava_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.08, 0.02, 1.0],
-                0.9,
-                0.0,
-                [1.0, 0.35, 0.05],
-                3.0,
-            ));
+        let rock_mat = renderer.scene().insert_material(make_material(
+            [0.25, 0.2, 0.18, 1.0],
+            0.9,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let lava_mat = renderer.scene().insert_material(make_material(
+            [0.3, 0.08, 0.02, 1.0],
+            0.9,
+            0.0,
+            [1.0, 0.35, 0.05],
+            3.0,
+        ));
 
         let _island_ground = renderer
             .scene()

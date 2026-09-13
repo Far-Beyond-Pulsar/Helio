@@ -363,9 +363,7 @@ impl RenderPass for LightCullPass {
         // can't fail -- `params.num_lights` is 0 whenever `transforms` would
         // actually be dereferenced at a live light's index, so this is never
         // read in practice.
-        let transforms_buf = lights_data
-            .and_then(|l| l.transforms)
-            .unwrap_or(ctx.camera);
+        let transforms_buf = lights_data.and_then(|l| l.transforms).unwrap_or(ctx.camera);
 
         // ── Light culling cache: skip compute if scene static ─────────────────
         // Use generation counters to detect actual data changes (not pointer
@@ -373,11 +371,18 @@ impl RenderPass for LightCullPass {
         // its buffer's own epoch instead, since nothing else identifies "did
         // the row data change" for it.
         let camera_gen = ctx.camera_generation;
-        let lights_gen = scene_lights_handle
-            .map(|h| h.epoch)
-            .unwrap_or_else(|| lights_data.map(|l| l.movable_lights_generation).unwrap_or(0));
+        let lights_gen = scene_lights_handle.map(|h| h.epoch).unwrap_or_else(|| {
+            lights_data
+                .map(|l| l.movable_lights_generation)
+                .unwrap_or(0)
+        });
 
-        let cache_key = (camera_gen, lights_gen, movable_light_count, use_direct_index);
+        let cache_key = (
+            camera_gen,
+            lights_gen,
+            movable_light_count,
+            use_direct_index,
+        );
 
         // `self.width/height` are internal-resolution values maintained by
         // on_resize. ctx.width/height are full output resolution, so do not
@@ -397,7 +402,12 @@ impl RenderPass for LightCullPass {
         let lights_ptr = lights_buf as *const _ as usize;
         let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
         let transforms_ptr = transforms_buf as *const _ as usize;
-        let key = (camera_ptr, lights_ptr, light_entity_indices_ptr, transforms_ptr);
+        let key = (
+            camera_ptr,
+            lights_ptr,
+            light_entity_indices_ptr,
+            transforms_ptr,
+        );
 
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

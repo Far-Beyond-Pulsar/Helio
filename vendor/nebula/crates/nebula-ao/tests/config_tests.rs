@@ -88,7 +88,8 @@ fn ao_output_kind_name_is_ao() {
 #[test]
 fn ao_output_fields_survive_clone() {
     let out = AoOutput {
-        width: 4, height: 4,
+        width: 4,
+        height: 4,
         texels: vec![0u8; 4 * 4 * 4],
         config_json: "{}".to_string(),
     };
@@ -113,7 +114,8 @@ fn ao_config_serde_roundtrip() {
 #[test]
 fn ao_output_serde_roundtrip() {
     let out = AoOutput {
-        width: 2, height: 2,
+        width: 2,
+        height: 2,
         texels: vec![0xFF, 0xFF, 0x00, 0x00],
         config_json: r#"{"resolution":512}"#.to_string(),
     };
@@ -130,15 +132,17 @@ fn ao_output_serde_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter"]
 fn ao_baker_produces_output_for_simple_scene() {
-    use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_ao::AoBaker;
     use nebula_core::traits::BakePass;
+    use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = AoConfig::fast();
-        let out = AoBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = AoBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
         assert_eq!(out.width, cfg.resolution);
         assert_eq!(out.height, cfg.resolution);

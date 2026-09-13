@@ -1,5 +1,5 @@
-use nebula_light::{LightmapConfig, LightmapOutput, AtlasRegion, CHUNK_TAG};
 use nebula_core::traits::BakeOutput;
+use nebula_light::{AtlasRegion, LightmapConfig, LightmapOutput, CHUNK_TAG};
 
 // ── LightmapConfig defaults ───────────────────────────────────────────────────
 
@@ -88,7 +88,9 @@ fn lightmap_config_resolution_ordering() {
 #[test]
 fn lightmap_config_sample_ordering() {
     assert!(LightmapConfig::fast().samples_per_texel < LightmapConfig::default().samples_per_texel);
-    assert!(LightmapConfig::default().samples_per_texel < LightmapConfig::ultra().samples_per_texel);
+    assert!(
+        LightmapConfig::default().samples_per_texel < LightmapConfig::ultra().samples_per_texel
+    );
 }
 
 // ── CHUNK_TAG ──────────────────────────────────────────────────────────────────
@@ -110,9 +112,9 @@ fn lightmap_output_kind_name_is_lightmap() {
 #[test]
 fn atlas_region_fields_accessible() {
     let region = AtlasRegion {
-        mesh_id:   uuid::Uuid::new_v4(),
+        mesh_id: uuid::Uuid::new_v4(),
         uv_offset: [0.0, 0.0],
-        uv_scale:  [1.0, 1.0],
+        uv_scale: [1.0, 1.0],
     };
     assert_eq!(region.uv_offset, [0.0_f32, 0.0]);
     assert_eq!(region.uv_scale, [1.0_f32, 1.0]);
@@ -122,14 +124,14 @@ fn atlas_region_fields_accessible() {
 fn atlas_region_non_overlapping_tiles() {
     // Two 50% tiles occupying left and right halves of the atlas.
     let left = AtlasRegion {
-        mesh_id:   uuid::Uuid::new_v4(),
+        mesh_id: uuid::Uuid::new_v4(),
         uv_offset: [0.0, 0.0],
-        uv_scale:  [0.5, 1.0],
+        uv_scale: [0.5, 1.0],
     };
     let right = AtlasRegion {
-        mesh_id:   uuid::Uuid::new_v4(),
+        mesh_id: uuid::Uuid::new_v4(),
         uv_offset: [0.5, 0.0],
-        uv_scale:  [0.5, 1.0],
+        uv_scale: [0.5, 1.0],
     };
     // Verify they don't share the same X origin.
     assert_ne!(left.uv_offset[0], right.uv_offset[0]);
@@ -153,7 +155,8 @@ fn lightmap_config_serde_roundtrip() {
 #[test]
 fn lightmap_output_serde_roundtrip() {
     let out = LightmapOutput {
-        width: 2, height: 2,
+        width: 2,
+        height: 2,
         channels: 4,
         is_f32: true,
         texels: vec![0u8; 64],
@@ -173,15 +176,17 @@ fn lightmap_output_serde_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter"]
 fn lightmap_baker_produces_output_for_simple_scene() {
+    use nebula_core::traits::BakePass;
     use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_light::LightmapBaker;
-    use nebula_core::traits::BakePass;
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = LightmapConfig::fast();
-        let out = LightmapBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = LightmapBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
         assert_eq!(out.width, cfg.resolution);
         assert_eq!(out.height, cfg.resolution);

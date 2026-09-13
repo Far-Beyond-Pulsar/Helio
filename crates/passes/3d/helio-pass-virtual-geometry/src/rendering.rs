@@ -9,6 +9,7 @@ use helio_core::{
     Result as HelioResult,
 };
 use libhelio::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
+use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
@@ -815,13 +816,10 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let materials = ctx
-                .pass_resources
-                .materials
-                .get()
-                .map(|m| m.material_data)
-                .unwrap_or(&[]);
-            self.instance_cull_scratch = build_instance_cull_data(instances, materials);
+            // Material classification is authored into the SceneDB material
+            // component and consumed on-GPU. The CPU preparation path must
+            // not resurrect a renderer-owned material mirror.
+            self.instance_cull_scratch = build_instance_cull_data(instances, &[]);
             ctx.write_buffer(
                 &self.instance_cull_buf,
                 0,
@@ -853,14 +851,7 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&instances[start..end]),
             );
 
-            let materials = ctx
-                .pass_resources
-                .materials
-                .get()
-                .map(|m| m.material_data)
-                .unwrap_or(&[]);
-            self.instance_cull_scratch =
-                build_instance_cull_data(&instances[start..end], materials);
+            self.instance_cull_scratch = build_instance_cull_data(&instances[start..end], &[]);
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
             ctx.write_buffer(
                 &self.instance_cull_buf,
@@ -960,7 +951,7 @@ impl RenderPass for VirtualGeometryPass {
         let Some(main_scene) = ctx.pass_resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
-        let Some(materials) = ctx.pass_resources.materials.get() else {
+        let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
         if self.draw_bg_1.is_none()
@@ -969,7 +960,7 @@ impl RenderPass for VirtualGeometryPass {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: materials.materials.as_entire_binding(),
+                    resource: materials.buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -990,7 +981,7 @@ impl RenderPass for VirtualGeometryPass {
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
-            self.bg1_version = Some(main_scene.material_textures.version);
+            self.bg1_version = Some(main_scene.material_textures.version ^ materials.epoch);
         }
 
         let globals = VgGlobals {
@@ -1218,6 +1209,20 @@ impl RenderPass for VirtualGeometryPass {
         let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let max_draw_count = self.last_max_draw_count;
 
@@ -1287,9 +1292,9 @@ impl RenderPass for VirtualGeometryPass {
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
-            rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+            rpass.set_vertex_buffer(0, vertices.slice(..));
             rpass.set_index_buffer(
-                main_scene.mesh_buffers.indices.slice(..),
+                indices.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
 

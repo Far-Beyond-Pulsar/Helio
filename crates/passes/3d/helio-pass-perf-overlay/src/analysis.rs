@@ -245,11 +245,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                     .get()
                     .map(|l| l.lights)
                     .unwrap_or(ctx.camera);
-                profiler.profile_next(
-                    ctx.device,
-                    unsafe { &mut *ctx.encoder_ptr },
-                    lights_buf,
-                );
+                profiler.profile_next(ctx.device, unsafe { &mut *ctx.encoder_ptr }, lights_buf);
 
                 profiler.read_current_sample_blocking(ctx.device, ctx.owns_device);
             }

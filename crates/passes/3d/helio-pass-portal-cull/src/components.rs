@@ -52,9 +52,43 @@ impl From<PortalChainComponent> for crate::GpuPortalChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytemuck::Zeroable;
     #[test]
     fn scene_records_preserve_gpu_abi() {
         assert_eq!(std::mem::size_of::<PortalViewComponent>(), 144);
         assert_eq!(std::mem::size_of::<PortalChainComponent>(), 16);
+    }
+
+    #[test]
+    fn scene_rows_support_insert_mutate_remove() {
+        let mut world = pulsar_scenedb::World::new();
+        let entity = world.spawn();
+        let view = PortalViewComponent::zeroed();
+        let chain = PortalChainComponent {
+            portals: [entity.index(), 0, 0],
+            depth: 1,
+        };
+        world.insert(entity, view);
+        world.insert(entity, chain);
+
+        world
+            .get_mut::<PortalViewComponent>(entity)
+            .unwrap()
+            .half_extent = [2.0, 3.0];
+        assert_eq!(
+            world
+                .get::<PortalViewComponent>(entity)
+                .unwrap()
+                .half_extent,
+            [2.0, 3.0]
+        );
+        assert_eq!(
+            world.remove::<PortalViewComponent>(entity),
+            Some(PortalViewComponent {
+                half_extent: [2.0, 3.0],
+                ..view
+            })
+        );
+        assert_eq!(world.remove::<PortalChainComponent>(entity), Some(chain));
     }
 }

@@ -32,9 +32,7 @@
 //! crate stack.
 
 use glam::{Mat4, Quat, Vec3};
-use helio::{
-    GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer,
-};
+use helio::{GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_pass_water_sim::WaterSimPass;
@@ -558,9 +556,13 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
     }
     let local_centre = (bb_min + bb_max) * 0.5;
 
-    let fallback = renderer
-        .scene()
-        .insert_material(make_material([0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
+    let fallback = renderer.scene().insert_material(make_material(
+        [0.5, 0.5, 0.5, 1.0],
+        0.8,
+        0.0,
+        [0.0; 3],
+        0.0,
+    ));
     let material = section
         .material_index
         .and_then(|i| mat_ids.get(i))
@@ -693,15 +695,13 @@ fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
             },
         ));
 
-    let sun_mat = renderer
-        .scene()
-        .insert_material(make_material(
-            [1.0, 0.9, 0.7, 1.0],
-            0.2,
-            0.0,
-            [50.0, 45.0, 35.0],
-            50.0,
-        ));
+    let sun_mat = renderer.scene().insert_material(make_material(
+        [1.0, 0.9, 0.7, 1.0],
+        0.2,
+        0.0,
+        [50.0, 45.0, 35.0],
+        50.0,
+    ));
     place(renderer, meshes.cube, sun_mat, Vec3::new(0.0, 1.4, z), 0.6);
     renderer
         .scene()
@@ -820,15 +820,13 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // ── Controller cubes ─────────────────────────────────────────────────────
     // Small bright cubes `main.rs` reparents to the OpenXR grip poses each frame.
     let hand_mesh = insert_box_mesh(renderer, Vec3::new(0.05, 0.05, 0.05));
-    let hand_mat = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.05, 0.05, 0.06, 1.0],
-            0.4,
-            0.0,
-            [0.2, 1.0, 0.9],
-            8.0,
-        ));
+    let hand_mat = renderer.scene().insert_material(make_material(
+        [0.05, 0.05, 0.06, 1.0],
+        0.4,
+        0.0,
+        [0.2, 1.0, 0.9],
+        8.0,
+    ));
     let mut hand_cubes = [ObjectId::from_raw(0, 0); 2];
     for (i, side) in [1.0_f32, -1.0].into_iter().enumerate() {
         let start = Vec3::new(side * 0.2, 1.4, -0.4);
@@ -905,11 +903,9 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
     // colour target each frame, so its absence is what made geometry smear over itself.
     // See `Renderer::rebuild_graph_if_sky_changed`.
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::sky(
-            helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
-        ));
+    renderer.scene().insert_entity(helio::SceneEntity::sky(
+        helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
+    ));
 
     anim
 }
@@ -927,9 +923,7 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
                 time * rate * 0.6,
                 0.0,
             ));
-        let _ = renderer
-            .scene()
-            .update_object_transform(*id, transform);
+        let _ = renderer.scene().update_object_transform(*id, transform);
     }
 
     for (index, (id, rest)) in animated.bobbers.iter().enumerate() {

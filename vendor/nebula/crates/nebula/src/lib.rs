@@ -32,8 +32,8 @@
 
 // ── Core / GPU / Serialization ────────────────────────────────────────────────
 
-pub use nebula_core   as core;
-pub use nebula_gpu    as gpu;
+pub use nebula_core as core;
+pub use nebula_gpu as gpu;
 pub use nebula_serialize as serialize;
 
 // ── Baker modules (feature-gated) ────────────────────────────────────────────

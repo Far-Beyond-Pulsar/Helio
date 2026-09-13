@@ -1,5 +1,5 @@
-use bytemuck::{Pod, Zeroable};
 use crate::{PlanetPageKey, TRANSITION_FACE_MASK};
+use bytemuck::{Pod, Zeroable};
 use std::collections::BTreeMap;
 
 pub const TERRAIN_MESHLET_MAX_VERTICES: u32 = 64;

@@ -1,9 +1,6 @@
 use nebula_core::{
     error::NebulaError,
-    progress::{
-        ChannelReporter, NullReporter, ProgressEvent, ProgressEventKind,
-        ProgressReporter,
-    },
+    progress::{ChannelReporter, NullReporter, ProgressEvent, ProgressEventKind, ProgressReporter},
 };
 
 // ── NullReporter ──────────────────────────────────────────────────────────────
@@ -127,7 +124,10 @@ fn nebula_error_deserialize_display() {
 
 #[test]
 fn nebula_error_bake_failed_display() {
-    let e = NebulaError::BakeFailed { pass: "ao".to_owned(), reason: "no geometry".to_owned() };
+    let e = NebulaError::BakeFailed {
+        pass: "ao".to_owned(),
+        reason: "no geometry".to_owned(),
+    };
     let s = e.to_string();
     assert!(s.contains("ao"));
     assert!(s.contains("no geometry"));

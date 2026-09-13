@@ -326,7 +326,8 @@ impl OcclusionCullPass {
             return false;
         }
         self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
-        self.compacted_indices_2_buf = create_compacted_indices_2_buf(device, self.instance_capacity);
+        self.compacted_indices_2_buf =
+            create_compacted_indices_2_buf(device, self.instance_capacity);
         true
     }
 
@@ -364,7 +365,13 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "static_hiz", "static_hiz_sampler", "object_batch", "indirect_dispatch"]
+        &[
+            "hiz",
+            "static_hiz",
+            "static_hiz_sampler",
+            "object_batch",
+            "indirect_dispatch",
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {

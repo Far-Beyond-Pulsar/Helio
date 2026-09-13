@@ -176,15 +176,13 @@ impl ApplicationHandler for App {
             cull_stats_buf,
         );
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.72, 0.72, 0.75, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.72, 0.72, 0.75, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
         let floor = renderer

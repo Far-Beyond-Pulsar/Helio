@@ -233,15 +233,13 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
 
         // Dark floor
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.15, 0.16, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let floor_mat = renderer.scene().insert_material(make_material(
+            [0.15, 0.15, 0.16, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let ground = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)))

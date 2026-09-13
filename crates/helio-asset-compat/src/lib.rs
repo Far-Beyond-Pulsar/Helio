@@ -430,19 +430,19 @@ pub fn upload_sectioned_scene(
                 .and_then(|idx| all_material_ids.get(idx).copied())
                 .unwrap_or_else(|| {
                     renderer.create_material_projection(helio::GpuMaterial {
-                            base_color: [0.7, 0.65, 0.55, 1.0],
-                            emissive: [0.0, 0.0, 0.0, 0.0],
-                            roughness_metallic: [0.6, 0.0, 1.5, 0.0],
-                            tex_base_color: helio::GpuMaterial::NO_TEXTURE,
-                            tex_normal: helio::GpuMaterial::NO_TEXTURE,
-                            tex_roughness: helio::GpuMaterial::NO_TEXTURE,
-                            tex_emissive: helio::GpuMaterial::NO_TEXTURE,
-                            tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
-                            workflow: 0,
-                            flags: 0,
-                            material_class: 0,
-                            class_params: [0.0; 4],
-                        })
+                        base_color: [0.7, 0.65, 0.55, 1.0],
+                        emissive: [0.0, 0.0, 0.0, 0.0],
+                        roughness_metallic: [0.6, 0.0, 1.5, 0.0],
+                        tex_base_color: helio::GpuMaterial::NO_TEXTURE,
+                        tex_normal: helio::GpuMaterial::NO_TEXTURE,
+                        tex_roughness: helio::GpuMaterial::NO_TEXTURE,
+                        tex_emissive: helio::GpuMaterial::NO_TEXTURE,
+                        tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
+                        workflow: 0,
+                        flags: 0,
+                        material_class: 0,
+                        class_params: [0.0; 4],
+                    })
                 })
         })
         .collect();

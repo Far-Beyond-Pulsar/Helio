@@ -8,7 +8,7 @@ use super::gizmo::{
 use super::{ring_frame, GizmoAxis, GizmoMode};
 use crate::handles::ObjectId;
 use crate::renderer::Renderer;
-use crate::scene::{Scene, SceneEntityId};
+use crate::camera::Camera;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal drag state

@@ -8,7 +8,6 @@
 /// - Asset pipeline tooling that needs to inspect outputs without decoding binary
 /// - Diffing metadata between bake runs in version control
 /// - Embedding bake parameters in editor project files
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -25,7 +24,9 @@ pub struct NebulaJsonSerializer {
 }
 
 impl Default for NebulaJsonSerializer {
-    fn default() -> Self { Self { pretty: true } }
+    fn default() -> Self {
+        Self { pretty: true }
+    }
 }
 
 impl NebulaJsonSerializer {
@@ -55,9 +56,9 @@ impl NebulaJsonSerializer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NebulaMeta {
     pub nebula_version: u32,
-    pub bake_date:      String,
-    pub scene_name:     String,
-    pub pass:           String,
+    pub bake_date: String,
+    pub scene_name: String,
+    pub pass: String,
     /// Arbitrary pass-specific key/value pairs.
-    pub parameters:     serde_json::Value,
+    pub parameters: serde_json::Value,
 }

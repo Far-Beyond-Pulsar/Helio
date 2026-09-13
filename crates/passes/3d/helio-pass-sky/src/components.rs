@@ -105,4 +105,3 @@ impl Default for SkyComponent {
         }
     }
 }
-

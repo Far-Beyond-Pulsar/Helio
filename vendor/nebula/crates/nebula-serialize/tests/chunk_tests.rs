@@ -1,4 +1,7 @@
-use nebula_serialize::{chunk::{ChunkTag, ChunkError, FORMAT_VERSION, MAGIC}, Compression};
+use nebula_serialize::{
+    chunk::{ChunkError, ChunkTag, FORMAT_VERSION, MAGIC},
+    Compression,
+};
 use std::io::Cursor;
 
 // ── ChunkTag ──────────────────────────────────────────────────────────────────
@@ -124,12 +127,15 @@ fn write_file_header_writes_magic_bytes() {
     use nebula_serialize::chunk::write_file_header;
     let mut buf = Vec::new();
     write_file_header(&mut buf).expect("write_file_header should succeed");
-    assert!(buf.starts_with(MAGIC), "file should start with NEBULA magic");
+    assert!(
+        buf.starts_with(MAGIC),
+        "file should start with NEBULA magic"
+    );
 }
 
 #[test]
 fn write_then_read_file_header() {
-    use nebula_serialize::chunk::{write_file_header, read_file_header};
+    use nebula_serialize::chunk::{read_file_header, write_file_header};
     let mut buf = Vec::new();
     write_file_header(&mut buf).expect("write");
     let mut cursor = Cursor::new(&buf);

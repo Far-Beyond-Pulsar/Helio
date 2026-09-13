@@ -29,24 +29,20 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.60, 0.58, 0.55, 1.0],
-                0.85,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let tile_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.80, 0.78, 0.75, 1.0],
-                0.6,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let concrete = renderer.scene().insert_material(make_material(
+            [0.60, 0.58, 0.55, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let tile_mat = renderer.scene().insert_material(make_material(
+            [0.80, 0.78, 0.75, 1.0],
+            0.6,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         // Long corridor: 2.4m wide, 3m tall, 40m long (z: 0..40)
         let floor = renderer

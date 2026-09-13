@@ -1,7 +1,6 @@
 use glam::{Mat4, Vec3};
 use helio::{
-    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, PackedVertex, Renderer,
-    SceneDbHandle,
+    GpuLight, LightType, MeshUpload, PackedVertex, Renderer, SceneDbHandle,
 };
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
@@ -48,21 +47,25 @@ pub fn make_material(
     metallic: f32,
     emissive: [f32; 3],
     emissive_strength: f32,
-) -> GpuMaterial {
-    GpuMaterial {
+) -> helio_pass_gbuffer::MaterialComponent {
+    helio_pass_gbuffer::MaterialComponent::new(
         base_color,
-        emissive: [emissive[0], emissive[1], emissive[2], emissive_strength],
-        roughness_metallic: [roughness, metallic, 1.5, 0.5],
-        tex_base_color: GpuMaterial::NO_TEXTURE,
-        tex_normal: GpuMaterial::NO_TEXTURE,
-        tex_roughness: GpuMaterial::NO_TEXTURE,
-        tex_emissive: GpuMaterial::NO_TEXTURE,
-        tex_occlusion: GpuMaterial::NO_TEXTURE,
-        workflow: 0,
-        flags: 0,
-        material_class: 0,
-        class_params: [0.0; 4],
-    }
+        roughness,
+        metallic,
+        emissive,
+        emissive_strength,
+    )
+}
+
+/// Insert a material as a normal SceneDB component row and return its entity
+/// index. The index is the value object rows store in `material_slot`.
+pub fn spawn_material(
+    world: &mut World,
+    material: helio_pass_gbuffer::MaterialComponent,
+) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, material);
+    entity
 }
 
 pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> GpuLight {
@@ -132,36 +135,18 @@ pub use helio_pass_gbuffer::StaticObjectComponent;
 
 pub fn spawn_object(
     world: &mut World,
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
-    transform: Mat4,
-    radius: f32,
+    component: StaticObjectComponent,
 ) -> helio::SceneResult<Entity> {
-    spawn_object_with_movability(world, renderer, mesh, material, transform, radius, None)
+    let entity = world.spawn();
+    world.insert(entity, component);
+    Ok(entity)
 }
 
 pub fn spawn_object_with_movability(
     world: &mut World,
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
-    transform: Mat4,
-    radius: f32,
+    component: StaticObjectComponent,
     movability: Option<helio::Movability>,
 ) -> helio::SceneResult<Entity> {
-    let bounds = [
-        transform.w_axis.x,
-        transform.w_axis.y,
-        transform.w_axis.z,
-        radius,
-    ];
-    // `StaticObjectComponent::new` resolves only asset-pool metadata. It does
-    // not place an object or create a renderer-owned scene record.
-    let Some(component) = StaticObjectComponent::new(renderer, mesh, material, transform, bounds, 0)
-    else {
-        return Err(helio::SceneError::InvalidHandle { resource: "mesh_or_material" });
-    };
     let entity = world.spawn();
     world.insert(entity, component);
     let _ = movability;
@@ -246,8 +231,7 @@ pub fn update_corona_emitter(
     slot: u32,
     emitter: libhelio::GpuCoronaEmitter,
 ) {
-    if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity)
-    {
+    if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity) {
         *existing = corona_component_for_slot(slot, emitter);
     }
 }
@@ -256,7 +240,9 @@ fn corona_component_for_slot(
     slot: u32,
     mut emitter: libhelio::GpuCoronaEmitter,
 ) -> helio_pass_corona::CoronaEmitterComponent {
-    emitter.particle_count = emitter.particle_count.min(libhelio::CORONA_MAX_PARTICLES_PER_EMITTER);
+    emitter.particle_count = emitter
+        .particle_count
+        .min(libhelio::CORONA_MAX_PARTICLES_PER_EMITTER);
     emitter.particle_offset = slot * libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
     helio_pass_corona::CoronaEmitterComponent::from(emitter)
 }

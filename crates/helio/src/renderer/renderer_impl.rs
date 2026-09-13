@@ -5,11 +5,9 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::handles::MaterialId;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
-use libhelio::SkyActor;
 
 use super::builder::SceneDbHandle;
 use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
@@ -19,9 +17,9 @@ pub type GraphRebuilder = Arc<
     dyn Fn(
             &Arc<wgpu::Device>,
             &Arc<wgpu::Queue>,
-            &Scene,
             RendererConfig,
             Arc<Mutex<DebugDrawState>>,
+            &wgpu::Buffer,
             &wgpu::Buffer,
             &wgpu::Buffer,
         ) -> RenderGraph
@@ -29,10 +27,8 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
-use crate::groups::GroupId;
-use crate::mesh::MeshBuffers;
 use crate::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
-use crate::scene::Scene;
+use crate::camera::Camera;
 
 use super::config::GiConfig;
 use super::debug::DebugDrawState;
@@ -63,7 +59,11 @@ pub struct Renderer {
     pub(crate) device: Arc<wgpu::Device>,
     pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) graph: RenderGraph,
-    pub(crate) scene: Scene,
+    pub(crate) camera_buffer: wgpu::Buffer,
+    pub(crate) camera_data: helio_core::GpuCameraUniforms,
+    pub(crate) camera_generation: u64,
+    pub(crate) frame_count: u64,
+    pub(crate) prev_view_proj: glam::Mat4,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) output_width: u32,
@@ -117,12 +117,17 @@ pub struct Renderer {
     pub(crate) enable_jitter: bool,
     pub(crate) camera_jitter_override: Option<[f32; 2]>,
     pub(crate) frame_delta_override: Option<f32>,
-    pub(crate) gizmo_camera: Option<crate::scene::Camera>,
+    pub(crate) gizmo_camera: Option<Camera>,
     pub(crate) gizmo_viewport_height: f32,
     #[cfg(feature = "bake")]
     pub(crate) bake_pending: Option<helio_bake::BakeRequest>,
     #[cfg(feature = "bake")]
     pub(crate) baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
+    /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
+    /// The renderer may execute it, but never traverses or synthesizes scene
+    /// entities to build it.
+    #[cfg(feature = "bake")]
+    pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
@@ -190,7 +195,7 @@ pub struct Renderer {
     /// `postprocess_settings`, near/far and the representative position used
     /// for RC bounds and the debug state. The per-eye view/proj are overridden
     /// by the headset each frame.
-    pub(crate) xr_camera: Option<crate::scene::Camera>,
+    pub(crate) xr_camera: Option<Camera>,
     #[cfg(not(target_arch = "wasm32"))]
     /// PC mirror blit: samples the acquired XR swapchain image (2-layer array)
     /// and draws both eyes side-by-side to the mirror window surface.
@@ -381,6 +386,40 @@ impl<'a> DebugBatch<'a> {
 }
 
 impl Renderer {
+    pub(crate) fn upload_camera(&mut self, camera: &Camera) {
+        let uniforms = helio_core::GpuCameraUniforms::new(
+            camera.view,
+            camera.proj,
+            camera.position,
+            camera.near,
+            camera.far,
+            self.frame_count as u32,
+            camera.jitter,
+            self.prev_view_proj,
+        );
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
+        self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
+        self.camera_data = uniforms;
+        self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn upload_stereo_camera(
+        &mut self,
+        left: &helio_core::GpuCameraUniforms,
+        right: &helio_core::GpuCameraUniforms,
+    ) {
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[*left, *right]),
+        );
+        self.camera_data = *left;
+        self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
+        self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
     pub fn set_gi_config(&mut self, gi_config: GiConfig) {
         self.gi_config = gi_config;
     }
@@ -431,11 +470,6 @@ impl Renderer {
 
     pub fn set_editor_mode(&mut self, enabled: bool) {
         self.editor_mode = enabled;
-        if enabled {
-            self.scene.show_group(GroupId::EDITOR);
-        } else {
-            self.scene.hide_group(GroupId::EDITOR);
-        }
         if let Ok(mut s) = self.debug_state.lock() {
             s.editor_enabled = enabled;
         }
@@ -449,122 +483,7 @@ impl Renderer {
         self.shadow_quality
     }
 
-    pub fn scene(&self) -> &Scene {
-        &self.scene
-    }
-
-    /// Renderer-internal access to frame-derived scene state. This is not
-    /// exported from the crate and must never be used as an application scene
-    /// mutation API; persistent entity data belongs to the frontend SceneDB.
-    pub(crate) fn scene_mut(&mut self) -> &mut Scene {
-        &mut self.scene
-    }
-
-    /// Consume the owning frontend's transient static-mesh projection.
-    pub fn submit_static_mesh_frame(&mut self, inputs: &[crate::scene::StaticMeshRenderInput]) {
-        self.scene.rebuild_static_mesh_instances(inputs);
-    }
-
-    /// Consume the owning frontend's transient light projection.
-    pub fn submit_light_frame(&mut self, inputs: &[crate::scene::LightRenderInput]) {
-        self.scene.rebuild_light_instances(inputs);
-    }
-
-    /// Apply the editor visibility mask to the current frame.
-    pub fn hide_render_group(&mut self, group: GroupId) {
-        self.scene.hide_group(group);
-    }
-
-    /// Install the frontend's default environment configuration.
-    pub fn configure_default_sky(&mut self, color: [f32; 3]) {
-        self.scene.insert_entity(crate::scene::SceneEntity::Sky(
-            SkyActor::new().with_sky_color(color),
-        ));
-    }
-
-    /// Supply the environment projection owned by the application SceneDB.
-    pub fn set_sky_context(&mut self, sky_context: libhelio::sky::SkyContext) {
-        self.scene.set_sky_context(sky_context);
-    }
-
-    /// Bind a frontend-owned GPU transform projection for this renderer.
-    pub fn bind_transform_projection(&mut self, buffer: std::sync::Arc<wgpu::Buffer>) {
-        self.scene.rebind_transform_buffer(buffer);
-    }
-
-    /// Bind the frontend-owned static mesh pools used by the current frame.
-    pub fn bind_static_mesh_projection(
-        &mut self,
-        vertices: std::sync::Arc<pulsar_scenedb::gpu::VarLenGpuPool<crate::PackedVertex>>,
-        indices: std::sync::Arc<pulsar_scenedb::gpu::VarLenGpuPool<u32>>,
-    ) {
-        self.scene.rebind_static_mesh_pools(vertices, indices);
-    }
-
-    /// Allocate a renderer material slot for a borrowed SceneDB material
-    /// projection. The slot is presentation state, not scene ownership.
-    pub fn create_material_projection(&mut self, material: libhelio::GpuMaterial) -> MaterialId {
-        self.scene.insert_material(material)
-    }
-
-    /// Refresh a previously allocated presentation material slot.
-    pub fn update_material_projection(
-        &mut self,
-        id: MaterialId,
-        material: libhelio::GpuMaterial,
-    ) -> bool {
-        self.scene.update_material(id, material).is_ok()
-    }
-
-    /// Upload raw mesh geometry (vertex/index bytes) into the renderer's GPU
-    /// mesh pool and return an opaque asset handle.
-    ///
-    /// This is a GPU asset-pool operation, not scene authoring: it has no
-    /// world placement, transform, or lifecycle, and it does not create a
-    /// second scene authority. Placement of an instance that *references*
-    /// this asset is the caller's SceneDB's job (a `StaticMeshComponent` or
-    /// equivalent); Helio only stores the vertex/index bytes and hands back
-    /// an id.
-    pub fn create_mesh_asset(&mut self, upload: crate::mesh::MeshUpload) -> crate::handles::MeshId {
-        self.scene.insert_mesh(upload)
-    }
-
-    /// Upload a multi-material (sectioned) mesh asset — shared vertex buffer,
-    /// N per-section index ranges. Same asset-pool classification as
-    /// [`Self::create_mesh_asset`]; see its docs.
-    pub fn create_sectioned_mesh_asset(
-        &mut self,
-        upload: crate::mesh::SectionedMeshUpload,
-    ) -> crate::handles::MultiMeshId {
-        self.scene.insert_sectioned_mesh(upload)
-    }
-
-    /// Upload a texture asset (image bytes + sampler config) into the
-    /// renderer's GPU texture pool. Same asset-pool classification as
-    /// [`Self::create_mesh_asset`]; see its docs.
-    pub fn create_texture_asset(
-        &mut self,
-        texture: crate::material::TextureUpload,
-    ) -> crate::scene::Result<crate::handles::TextureId> {
-        self.scene.insert_texture(texture)
-    }
-
-    /// Upload a material asset (GPU parameters + texture bindings) into the
-    /// renderer's material pool. Same asset-pool classification as
-    /// [`Self::create_mesh_asset`]; see its docs.
-    pub fn create_material_asset(
-        &mut self,
-        material: crate::material::MaterialAsset,
-    ) -> crate::scene::Result<MaterialId> {
-        self.scene.insert_material_asset(material)
-    }
-
-    /// Release a previously created material asset/projection slot.
-    pub fn remove_material_asset(&mut self, id: MaterialId) -> crate::scene::Result<()> {
-        self.scene.remove_material(id)
-    }
-
-    /// Return the frontend-owned SceneDB handle, if one was attached during
+    /// Return the frontend-owned SceneDB GPU projection.
     /// construction. The handle is exposed for pass integration and debug
     /// tooling; Helio does not take ownership of scene content.
     pub fn scene_db(&self) -> SceneDbHandle {
@@ -603,27 +522,6 @@ impl Renderer {
     /// can safely be copied across the renderer/UI boundary.
     pub fn graph_timeline(&self) -> helio_core::GraphTimelineData {
         self.graph.collect_graph_timeline()
-    }
-
-    pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
-        self.scene.mesh_buffers()
-    }
-
-    /// Read-only query of a mesh asset's vertex/index range — see
-    /// `Scene::mesh_slice`'s doc for why this is an asset query, not scene
-    /// authoring.
-    pub fn mesh_slice(&self, mesh: crate::handles::MeshId) -> Option<crate::mesh::MeshSlice> {
-        self.scene.mesh_slice(mesh)
-    }
-
-    /// Read-only query of a material asset's `(material_class, graph_hash)`
-    /// pipeline-selection key — see `Scene::material_batch_key`'s doc.
-    pub fn material_batch_key(&self, material: MaterialId) -> Option<(u32, u64)> {
-        self.scene.material_batch_key(material)
-    }
-
-    pub fn dynamic_mesh_buffers(&self) -> MeshBuffers<'_> {
-        self.scene.dynamic_mesh_buffers()
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
@@ -695,26 +593,6 @@ impl Renderer {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Sync the renderer's template registries into the GpuScene so passes
-    /// can find them across graph rebuilds.
-    ///
-    /// This hands out `Arc` clones (cheap refcount bumps) of the SAME shared
-    /// registries every frame — never a deep clone. Deep-cloning
-    /// `RadiantTemplateRegistry` leaks: `RadiantTemplate::clone()`
-    /// intentionally `Box::leak`s its WGSL source to satisfy its
-    /// `&'static str` fields, so doing that every frame (as this used to,
-    /// plus again in every pass that merged its own copy) leaked
-    /// continuously for as long as any templates were registered.
-    pub(crate) fn sync_template_registry_to_scene(&mut self) {
-        let reg: Box<dyn std::any::Any + Send + Sync> =
-            Box::new(std::sync::Arc::clone(&self.template_registry));
-        self.scene.set_template_registry(reg);
-
-        let treg: Box<dyn std::any::Any + Send + Sync> =
-            Box::new(std::sync::Arc::clone(&self.transparent_template_registry));
-        self.scene.set_transparent_template_registry(treg);
-    }
-
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
     }
@@ -740,49 +618,34 @@ impl Renderer {
     }
 
     #[cfg(feature = "bake")]
-    pub fn configure_bake(&mut self, mut request: helio_bake::BakeRequest) {
-        self.sync_reflection_capture_probes(&mut request.config);
+    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
         self.bake_pending = Some(request);
     }
 
-    /// Point the probe bake at the scene's static reflection captures, and bind
-    /// each capture to the cube array layer its probe will land in.
-    ///
-    /// Both halves come from one ordered traversal, which is the whole point:
-    /// hand-authored probe positions and hand-set layer indices are two lists
-    /// that silently rot apart the moment a capture moves or is deleted.
+    /// Supply the explicit CPU bake projection assembled by the SceneDB
+    /// owner. This replaces the removed renderer scene traversal.
     #[cfg(feature = "bake")]
-    fn sync_reflection_capture_probes(&mut self, config: &mut helio_bake::BakeConfig) {
-        let positions = self.scene.static_reflection_capture_positions();
-        if positions.is_empty() {
-            return;
-        }
-        match config.probes.as_mut() {
-            Some(spec) => spec.positions = positions,
-            None => {
-                config.probes = Some(helio_bake::ProbeSpec {
-                    positions,
-                    config: helio_bake::ProbeConfig::default(),
-                })
-            }
-        }
-        self.scene.assign_reflection_capture_layers();
+    pub fn set_bake_scene(&mut self, scene: helio_bake::SceneGeometry) {
+        self.bake_scene = Some(scene);
     }
 
     #[cfg(feature = "bake")]
     pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
-        let scene = self
-            .scene
-            .build_static_bake_scene(&self.device, &self.queue);
+        let Some(scene) = self.bake_scene.clone() else {
+            log::error!(
+                "Renderer::auto_bake requires set_bake_scene(SceneGeometry) from the SceneDB owner"
+            );
+            return;
+        };
         self.configure_bake(helio_bake::BakeRequest { scene, config });
     }
 
-    pub fn set_gizmo_camera(&mut self, camera: &crate::scene::Camera, viewport_height: f32) {
+    pub fn set_gizmo_camera(&mut self, camera: &Camera, viewport_height: f32) {
         self.gizmo_camera = Some(camera.clone());
         self.gizmo_viewport_height = viewport_height;
     }
 
-    pub fn gizmo_camera_info(&self) -> Option<(&crate::scene::Camera, f32)> {
+    pub fn gizmo_camera_info(&self) -> Option<(&Camera, f32)> {
         self.gizmo_camera
             .as_ref()
             .map(|c| (c, self.gizmo_viewport_height))
@@ -864,7 +727,7 @@ impl Renderer {
     /// matrices are overridden by the headset pose each frame; only the
     /// post-processing settings and clip distances are read back.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_xr_camera(&mut self, camera: crate::scene::Camera) {
+    pub fn set_xr_camera(&mut self, camera: Camera) {
         self.xr_camera = Some(camera);
     }
 

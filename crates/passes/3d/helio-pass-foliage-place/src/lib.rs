@@ -63,8 +63,8 @@
 use bytemuck::{Pod, Zeroable};
 
 mod contract;
-pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
 pub use contract::*;
+pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
 
 pub mod components;
 mod pass;

@@ -1015,12 +1015,14 @@ dependencies = [
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",
+ "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
  "helio-pass-perf-overlay",
  "helio-pass-planetary-voxel",
+ "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades-2d",
  "helio-pass-sprite-batch",
@@ -1582,6 +1584,7 @@ dependencies = [
  "helio-pass-water-sim",
  "image",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -2109,6 +2112,7 @@ dependencies = [
  "libhelio",
  "log",
  "naga",
+ "pulsar_scenedb",
  "wgpu",
 ]
 

@@ -1,5 +1,5 @@
-use nebula_nav::{NavConfig, NavOutput, NavVertex, NavPolygon, CHUNK_TAG};
 use nebula_core::traits::BakeOutput;
+use nebula_nav::{NavConfig, NavOutput, NavPolygon, NavVertex, CHUNK_TAG};
 
 // ── Chunk tag ─────────────────────────────────────────────────────────────────
 
@@ -110,17 +110,21 @@ fn nav_output_kind_name_is_navmesh() {
 fn make_triangle_navmesh() -> NavOutput {
     NavOutput {
         vertices: vec![
-            NavVertex { position: [0.0, 0.0, 0.0] },
-            NavVertex { position: [1.0, 0.0, 0.0] },
-            NavVertex { position: [0.5, 0.0, 1.0] },
+            NavVertex {
+                position: [0.0, 0.0, 0.0],
+            },
+            NavVertex {
+                position: [1.0, 0.0, 0.0],
+            },
+            NavVertex {
+                position: [0.5, 0.0, 1.0],
+            },
         ],
-        polygons: vec![
-            NavPolygon {
-                vertex_indices: vec![0, 1, 2],
-                neighbour_indices: vec![u32::MAX, u32::MAX, u32::MAX],
-                area_flags: 0,
-            }
-        ],
+        polygons: vec![NavPolygon {
+            vertex_indices: vec![0, 1, 2],
+            neighbour_indices: vec![u32::MAX, u32::MAX, u32::MAX],
+            area_flags: 0,
+        }],
         aabb_min: [0.0, 0.0, 0.0],
         aabb_max: [1.0, 0.0, 1.0],
         walkable_area: 0.5,
@@ -171,13 +175,17 @@ fn nav_output_walkable_area_is_positive() {
 
 #[test]
 fn nav_vertex_position_accessible() {
-    let v = NavVertex { position: [1.0, 2.0, 3.0] };
+    let v = NavVertex {
+        position: [1.0, 2.0, 3.0],
+    };
     assert_eq!(v.position, [1.0_f32, 2.0, 3.0]);
 }
 
 #[test]
 fn nav_vertex_clone() {
-    let v = NavVertex { position: [1.0, 0.0, 0.0] };
+    let v = NavVertex {
+        position: [1.0, 0.0, 0.0],
+    };
     let c = v;
     assert_eq!(c.position[0], 1.0);
 }
@@ -253,15 +261,17 @@ fn nav_config_bake_aabb_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter for BakeContext"]
 fn nav_baker_produces_output_for_empty_scene() {
+    use nebula_core::traits::BakePass;
     use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_nav::NavBaker;
-    use nebula_core::traits::BakePass;
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = NavConfig::fast();
-        let out = NavBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = NavBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
         // Empty scene may produce an empty or minimal mesh.
         assert!(out.polygons.len() < 1_000_000); // sanity bound
