@@ -3,6 +3,7 @@
 @group(2) @binding(1) var<storage, read_write> fine_grid: array<LightTile>;
 @group(2) @binding(2) var depth_bounds: texture_storage_2d<r32float,write>;
 var<workgroup> accepted: atomic<u32>;
+var<workgroup> has_directional: atomic<u32>;
 var<workgroup> min_depth: atomic<u32>;
 var<workgroup> max_depth: atomic<u32>;
 var<workgroup> packed: array<u32, 256>;
@@ -31,15 +32,22 @@ fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi: 
 }
 @compute @workgroup_size(64)
 fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
-    if lane == 0u { atomicStore(&accepted,0u); }
+    if lane == 0u { atomicStore(&accepted,0u); atomicStore(&has_directional,0u); }
     workgroupBarrier();
     let lo=group.xy*COARSE_TILE_SIZE;
     if globals.light_count>65535u {
-        if lane==0u { coarse_grid[group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x].count=INVALID_LIGHT; }
+        if lane==0u {
+            let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
+            coarse_grid[index].count=INVALID_LIGHT;
+            // Packed IDs cannot represent this population. Conservatively keep
+            // the budget scan when the coarse pass bypasses light inspection.
+            coarse_grid[index].has_directional=1u;
+        }
         return;
     }
     for (var i=lane; i<globals.light_count; i+=64u) {
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
+            if lights[i].light_type==0u { atomicStore(&has_directional,1u); }
             let slot=atomicAdd(&accepted,1u);
             if slot<COARSE_CAPACITY { packed[slot]=i; }
         }
@@ -47,7 +55,7 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     workgroupBarrier();
     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
     let count=atomicLoad(&accepted);
-    if lane==0u { coarse_grid[index].count=count; }
+    if lane==0u { coarse_grid[index].count=count; coarse_grid[index].has_directional=atomicLoad(&has_directional); }
     for(var i=lane;i<(min(count,COARSE_CAPACITY)+1u)/2u;i+=64u) {
         coarse_grid[index].indices[i]=packed[2u*i]|(select(65535u,packed[2u*i+1u],2u*i+1u<count)<<16u);
     }
@@ -69,6 +77,9 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     let ci=(lo.y/COARSE_TILE_SIZE)*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+lo.x/COARSE_TILE_SIZE;
     let coarse_count=coarse_grid[ci].count;
     let ti=group.y*div_ceil(globals.screen_size,TILE_SIZE).x+group.x;
+    // Directional lights intersect every tile. The coarse flag remains valid
+    // even when coarse/fine indices overflow and sampling uses the global set.
+    if lane==0u { fine_grid[ti].has_directional=coarse_grid[ci].has_directional; }
     if coarse_count>COARSE_CAPACITY {
         // The sampler switches to the complete global set. All lights retain support.
         if lane==0u { fine_grid[ti].count=INVALID_LIGHT; }

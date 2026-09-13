@@ -50,8 +50,8 @@ const GRID_CAPACITY: u32 = 64u;
 const COARSE_CAPACITY: u32 = 256u;
 const VISIBLE_CAPACITY: u32 = 16u;
 
-struct LightTile { count: u32, indices: array<u32, 32>, }
-struct CoarseTile { count: u32, indices: array<u32, 128>, }
+struct LightTile { count: u32, has_directional: u32, indices: array<u32, 32>, }
+struct CoarseTile { count: u32, has_directional: u32, indices: array<u32, 128>, }
 struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, }
 
 fn div_ceil(n: vec2<u32>, d: u32) -> vec2<u32> { return (n + d - 1u) / d; }

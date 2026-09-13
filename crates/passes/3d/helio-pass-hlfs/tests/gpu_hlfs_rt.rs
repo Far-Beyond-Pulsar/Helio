@@ -328,9 +328,16 @@ fn perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers
 #[ignore = "explicit RT GPU benchmark; run alone with --ignored --nocapture"]
 fn benchmark_rt_resolution_and_acceleration() {
     pollster::block_on(async {
-        let focus = std::env::var_os("HLFS_RT_PROBE_FOCUS").is_some();
-        let warmup = if focus { 120 } else { 16 };
-        let measured = if focus { 600 } else { 40 };
+        let focus = std::env::var("HLFS_RT_PROBE_FOCUS").ok().map(|value| {
+            match value.as_str() {
+                "1" | "1440p-reconstructed" => (2560, 2),
+                "1440p-native" => (2560, 1),
+                "4k-reconstructed" => (3840, 2),
+                _ => panic!("HLFS_RT_PROBE_FOCUS must be 1, 1440p-reconstructed, 1440p-native or 4k-reconstructed"),
+            }
+        });
+        let warmup = if focus.is_some() { 120 } else { 16 };
+        let measured = if focus.is_some() { 600 } else { 40 };
         for (width, height, scale, candidates) in [
             (2560, 1440, 1, 8),
             (2560, 1440, 2, 8),
@@ -339,7 +346,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             (3840, 2160, 2, 8),
             (3840, 2160, 2, 2),
         ] {
-            if focus && (width != 2560 || scale != 2 || candidates != 8) {
+            if focus.is_some_and(|selected| (width, scale) != selected || candidates != 8) {
                 continue;
             }
             let mut f = Fixture::new_rt(width, height).await;
@@ -511,6 +518,89 @@ fn benchmark_rt_resolution_and_acceleration() {
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
             eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp=2 candidates={candidates} warmup={warmup} measured={measured} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+        }
+    });
+}
+
+// Explicit cross-build audit: compare exported f32 pixels from two shader
+// implementations with identical lights, seeds, history and moving blockers.
+#[test]
+#[ignore = "explicit cross-build GPU output audit; requires HLFS_RT_AUDIT_OUTPUT"]
+fn benchmark_candidate_output_audit() {
+    let directory = std::env::var("HLFS_RT_AUDIT_OUTPUT").expect("audit output directory");
+    std::fs::create_dir_all(&directory).unwrap();
+    pollster::block_on(async {
+        for (case, count, mixed, scale, candidates) in [
+            ("local-grid", 48, false, 1, 8),
+            ("local-overflow", 1024, false, 2, 8),
+            ("mixed-overflow", 1024, true, 2, 16),
+            ("mixed-grid", 48, true, 1, 1),
+            ("packed-id-overflow", 65536, true, 2, 8),
+        ] {
+            let mut f = Fixture::new_rt(65, 49).await;
+            f.config(HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                sample_scale: scale,
+                candidates_per_sample: candidates,
+                ..Default::default()
+            });
+            let lights = (0..count)
+                .map(|i| {
+                    let mut light = point(
+                        [
+                            (i % 32) as f32 * 0.25 - 4.0,
+                            (i / 32) as f32 * 0.25 - 4.0,
+                            2.0,
+                        ],
+                        [1.0, 0.7, 0.4],
+                        if i % 13 == 0 { 0.0 } else { 4.0 },
+                    );
+                    if mixed && i % 7 == 0 {
+                        light.light_type = 0;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.0];
+                    } else if mixed && i % 5 == 0 {
+                        light.light_type = 2;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.5];
+                        light.inner_angle = 0.9;
+                    }
+                    light.set_ray_traced_shadows(true);
+                    light
+                })
+                .collect::<Vec<_>>();
+            f.lights(lights.clone());
+            let mut bytes = Vec::new();
+            for frame in 0..16 {
+                if frame == 0 || frame == 12 {
+                    empty_scene(&mut f);
+                }
+                if frame == 4 {
+                    receiver_plane(&mut f, 1.0);
+                }
+                if frame == 8 {
+                    let mut moved = lights.clone();
+                    for light in &mut moved {
+                        light.position_range[0] += 0.2;
+                    }
+                    f.lights(moved);
+                }
+                f.frame();
+                let pixels = f.read();
+                assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+                if frame == 0 {
+                    let unoccluded_mean = mean(&pixels);
+                    assert!(
+                        unoccluded_mean > 0.1,
+                        "{case}: nonzero direct light required"
+                    );
+                }
+                eprintln!("RT_AUDIT case={case} frame={frame} mean={}", mean(&pixels));
+                bytes.extend_from_slice(bytemuck::cast_slice(&pixels));
+            }
+            std::fs::write(
+                std::path::Path::new(&directory).join(format!("{case}.f32")),
+                bytes,
+            )
+            .unwrap();
         }
     });
 }

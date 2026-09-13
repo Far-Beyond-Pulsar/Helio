@@ -1,0 +1,57 @@
+{
+  "local-grid": {
+    "float_count": 152880,
+    "baseline_sha256": "122610fbf2c00a2d7541bf9d0e0fee33c9c7017d0ec3243172ddd94d3f1259bd",
+    "candidate_sha256": "08ef7d4e08f791f9e0d2c8be9b33cd9a9653ec2e903b0764c747572ac2d9c732",
+    "bit_identical": false,
+    "changed_floats": 51276,
+    "baseline_mean": 0.2165535479175801,
+    "candidate_mean": 0.21668734148745136,
+    "relative_mean_error": 0.0006178313454470672,
+    "nrmse": 0.0632740599317945
+  },
+  "local-overflow": {
+    "float_count": 152880,
+    "baseline_sha256": "7713a4de14cc78d9aba3449682f590c7eea172af8716cba71067b69ee057b067",
+    "candidate_sha256": "7713a4de14cc78d9aba3449682f590c7eea172af8716cba71067b69ee057b067",
+    "bit_identical": true,
+    "changed_floats": 0,
+    "baseline_mean": 10.398097828456335,
+    "candidate_mean": 10.398097828456335,
+    "relative_mean_error": 0.0,
+    "nrmse": 0.0
+  },
+  "mixed-grid": {
+    "float_count": 152880,
+    "baseline_sha256": "fcf75592802cb267e472a4928b3eb8ce0100cdac909344a205d28b3295dc37ee",
+    "candidate_sha256": "3b6f3a1c602ca9e17791e1a56af6ae7106c1c7f36e8b41eb980b00a683d17dc1",
+    "bit_identical": false,
+    "changed_floats": 58079,
+    "baseline_mean": 0.4605520535114234,
+    "candidate_mean": 0.4596397794147613,
+    "relative_mean_error": 0.0019808273347314163,
+    "nrmse": 0.4948797530568599
+  },
+  "mixed-overflow": {
+    "float_count": 152880,
+    "baseline_sha256": "4ec796a96a12f973f111858bfa8d7fe06a05edb7a32cadcfa8f45a034de6b23c",
+    "candidate_sha256": "4ec796a96a12f973f111858bfa8d7fe06a05edb7a32cadcfa8f45a034de6b23c",
+    "bit_identical": true,
+    "changed_floats": 0,
+    "baseline_mean": 13.821968192595078,
+    "candidate_mean": 13.821968192595078,
+    "relative_mean_error": 0.0,
+    "nrmse": 0.0
+  },
+  "packed-id-overflow": {
+    "float_count": 152880,
+    "baseline_sha256": "1ede8ea26d0ab862dfd42dfc82b50773884551a33c15f5c7308330d1877ccf7d",
+    "candidate_sha256": "1ede8ea26d0ab862dfd42dfc82b50773884551a33c15f5c7308330d1877ccf7d",
+    "bit_identical": true,
+    "changed_floats": 0,
+    "baseline_mean": 446.5573108285338,
+    "candidate_mean": 446.5573108285338,
+    "relative_mean_error": 0.0,
+    "nrmse": 0.0
+  }
+}

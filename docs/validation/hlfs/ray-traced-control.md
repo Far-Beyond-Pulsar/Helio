@@ -2,6 +2,8 @@
 
 September 12, 2026. Implementation continues in [PR #248](https://github.com/Far-Beyond-Pulsar/Helio/pull/248), with [issue #247](https://github.com/Far-Beyond-Pulsar/Helio/issues/247) still in progress. The research document remains the design record; this is the first executable opaque-triangle control.
 
+Latest continuation: the [directional-budget optimization](directional-budget.md) reduces the release synthetic 1440p reconstructed median from 11.99 to 9.78 ms across three repeated blocks. The 3-4 ms target remains unmet; earlier development-build timing below is retained as historical evidence.
+
 ## Implemented
 
 - `HlfsMode::RayTraced` uses hardware ray queries in both stochastic sampling and full-resolution reconstruction repair. The existing bounded visibility-guided estimator, filtering, history and output remain shared with ScreenSpace mode.
@@ -65,7 +67,7 @@ After the user cleared other work from the PC, a synthetic 1,024-moving-light / 
 
 Pooled baseline/candidate medians are 13.3663/12.4365 ms, but pooled p95 is 14.9248/15.3610 ms and run-to-run ranges overlap. This single block is inconclusive evidence of a repeatable improvement. The serial production path is retained. The candidate passed exact winner/weight equivalence on 8,192 contributions and is preserved as an [experimental patch](rt-control/visibility-reduction-candidate.patch), not active production code.
 
-[Raw per-frame CSVs and metadata](rt-control/cleared-machine/summary.json) preserve all four runs. Timings sum six HLFS GPU stages plus the per-frame TLAS rebuild. They exclude initial BLAS construction, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. The harness serializes readback and changes light generation every frame, invalidating history. It is a synthetic work-accounting probe, not the frozen scene/quality acceptance protocol. Earlier short probes ran under less controlled conditions and are not comparative performance evidence.
+[Raw per-frame CSVs and metadata](rt-control/cleared-machine/summary.json) preserve all four runs. Timings sum six HLFS GPU stages plus the per-frame TLAS rebuild. They exclude initial BLAS construction, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. The harness serializes readback and changes light generation every frame, disabling temporal composite repair reuse while retaining the reweighted sampler guide. It is a synthetic work-accounting probe, not the frozen scene/quality acceptance protocol. Earlier short probes ran under less controlled conditions and are not comparative performance evidence.
 
 **The 3-4 ms goal is not met**, even with reduced-resolution sampling. The clean retest does not justify blaming the entire gap on the other application. The sampled lighting stage remains the main measured cost. A larger reduction in candidate evaluation and visibility work needs to preserve lighting quality before adoption.
 

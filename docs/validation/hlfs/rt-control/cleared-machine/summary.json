@@ -21,7 +21,7 @@
   "moving_triangle_instances": 256,
   "warmup_per_run": 120,
   "measured_per_run": 600,
-  "cost_scope": "Sum of six HLFS GPU stages plus TLAS rebuild; excludes first BLAS build, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. Serialized synthetic harness; light generation changes every frame invalidate history.",
+  "cost_scope": "Sum of six HLFS GPU stages plus TLAS rebuild; excludes first BLAS build, upload GPU cost, real scene CPU preparation, GBuffer, AA and other frame work. Serialized synthetic harness; light generation changes every frame disable temporal composite repair reuse; the reweighted sampler guide remains available.",
   "results": {
     "a1": {
       "implementation": "serial",
