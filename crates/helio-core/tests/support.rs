@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 /// -- `helio-core` has zero knowledge of any specific scene-object type, so
 /// this adapter carries only the truly generic per-frame handles `SceneInput`
 /// asks for (device/queue/frame count/camera); everything else a pass needs
-/// comes through `scene_buffers`/`libhelio::FrameResources` instead.
+/// comes through `scene_buffers`/the transient resource registry instead.
 pub struct SceneInputAdapter {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
