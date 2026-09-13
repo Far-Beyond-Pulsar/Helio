@@ -1,0 +1,149 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
+index 805bd19e..4df8a03f 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
+@@ -50,8 +50,8 @@ const GRID_CAPACITY: u32 = 64u;
+ const COARSE_CAPACITY: u32 = 256u;
+ const VISIBLE_CAPACITY: u32 = 16u;
+ 
+-struct LightTile { count: u32, indices: array<u32, 32>, }
+-struct CoarseTile { count: u32, indices: array<u32, 128>, }
++struct LightTile { count: u32, has_directional: u32, indices: array<u32, 32>, }
++struct CoarseTile { count: u32, has_directional: u32, indices: array<u32, 128>, }
+ struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, }
+ 
+ fn div_ceil(n: vec2<u32>, d: u32) -> vec2<u32> { return (n + d - 1u) / d; }
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/light_grid.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/light_grid.wgsl
+index aafd96fe..1eda53ec 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/light_grid.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/light_grid.wgsl
+@@ -3,6 +3,7 @@
+ @group(2) @binding(1) var<storage, read_write> fine_grid: array<LightTile>;
+ @group(2) @binding(2) var depth_bounds: texture_storage_2d<r32float,write>;
+ var<workgroup> accepted: atomic<u32>;
++var<workgroup> has_directional: atomic<u32>;
+ var<workgroup> min_depth: atomic<u32>;
+ var<workgroup> max_depth: atomic<u32>;
+ var<workgroup> packed: array<u32, 256>;
+@@ -31,15 +32,22 @@ fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi:
+ }
+ @compute @workgroup_size(64)
+ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+-    if lane == 0u { atomicStore(&accepted,0u); }
++    if lane == 0u { atomicStore(&accepted,0u); atomicStore(&has_directional,0u); }
+     workgroupBarrier();
+     let lo=group.xy*COARSE_TILE_SIZE;
+     if globals.light_count>65535u {
+-        if lane==0u { coarse_grid[group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x].count=INVALID_LIGHT; }
++        if lane==0u {
++            let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
++            coarse_grid[index].count=INVALID_LIGHT;
++            // Packed IDs cannot represent this population. Conservatively keep
++            // the budget scan when the coarse pass bypasses light inspection.
++            coarse_grid[index].has_directional=1u;
++        }
+         return;
+     }
+     for (var i=lane; i<globals.light_count; i+=64u) {
+         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
++            if lights[i].light_type==0u { atomicStore(&has_directional,1u); }
+             let slot=atomicAdd(&accepted,1u);
+             if slot<COARSE_CAPACITY { packed[slot]=i; }
+         }
+@@ -47,7 +55,7 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
+     workgroupBarrier();
+     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
+     let count=atomicLoad(&accepted);
+-    if lane==0u { coarse_grid[index].count=count; }
++    if lane==0u { coarse_grid[index].count=count; coarse_grid[index].has_directional=atomicLoad(&has_directional); }
+     for(var i=lane;i<(min(count,COARSE_CAPACITY)+1u)/2u;i+=64u) {
+         coarse_grid[index].indices[i]=packed[2u*i]|(select(65535u,packed[2u*i+1u],2u*i+1u<count)<<16u);
+     }
+@@ -69,6 +77,9 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
+     let ci=(lo.y/COARSE_TILE_SIZE)*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+lo.x/COARSE_TILE_SIZE;
+     let coarse_count=coarse_grid[ci].count;
+     let ti=group.y*div_ceil(globals.screen_size,TILE_SIZE).x+group.x;
++    // Directional lights intersect every tile. The coarse flag remains valid
++    // even when coarse/fine indices overflow and sampling uses the global set.
++    if lane==0u { fine_grid[ti].has_directional=coarse_grid[ci].has_directional; }
+     if coarse_count>COARSE_CAPACITY {
+         // The sampler switches to the complete global set. All lights retain support.
+         if lane==0u { fine_grid[ti].count=INVALID_LIGHT; }
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+index c55e0858..c62d7348 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+@@ -99,11 +99,15 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                 // The guide and surface are shared by every sample. Preserve
+                 // their accumulation order without rescoring the same lights.
+                 var guided_directional_weight=0.0; var guided_local_weight=0.0;
+-                for(var i=0u;i<guide_count;i++) {
+-                    let id=previous_visible[guide_tile].indices[i];
+-                    let proxy=importance(id,s);
+-                    if lights[id].light_type==0u { guided_directional_weight+=proxy; }
+-                    else { guided_local_weight+=proxy; }
++                // Directional lights intersect every coarse tile, including
++                // overflow tiles. With none, guide budget scores are unused too.
++                if grid[tile].has_directional!=0u {
++                    for(var i=0u;i<guide_count;i++) {
++                        let id=previous_visible[guide_tile].indices[i];
++                        let proxy=importance(id,s);
++                        if lights[id].light_type==0u { guided_directional_weight+=proxy; }
++                        else { guided_local_weight+=proxy; }
++                    }
+                 }
+                 for(var sample=0u;sample<globals.sample_count;sample++) {
+                     // Replay proposals after computing the directional budget.
+@@ -111,13 +115,18 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                     let candidate_seed=rng;
+                     var directional_weight=guided_directional_weight; var local_weight=guided_local_weight;
+                     let inverse_proposal=f32(population)/f32(candidate_count);
+-                    for(var candidate=0u;candidate<candidate_count;candidate++) {
+-                        let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);
+-                        var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+-                        var proxy=importance(id,s);
+-                        if guided(guide_tile,guide_count,id) { proxy=0.0; }
+-                        if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
+-                        else { local_weight+=proxy*inverse_proposal; }
++                    // With no directional proposals the scale is exactly one.
++                    // Keep private arrays out of the shader and advance the RNG
++                    // through the reservoir scan below when this scan is skipped.
++                    if grid[tile].has_directional!=0u || guided_directional_weight>0.0 {
++                        for(var candidate=0u;candidate<candidate_count;candidate++) {
++                            let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);
++                            var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
++                            var proxy=importance(id,s);
++                            if guided(guide_tile,guide_count,id) { proxy=0.0; }
++                            if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
++                            else { local_weight+=proxy*inverse_proposal; }
++                        }
+                     }
+                     var directional_scale=1.0;
+                     if local_weight>1e-5 && directional_weight>0.0 { directional_scale=min(1.0,0.5*local_weight/directional_weight); }
+@@ -138,6 +147,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                         if lights[id].light_type==0u { proxy*=directional_scale; }
+                         reservoir_add(&hidden_reservoir,id,proxy,proxy*inverse_proposal);
+                     }
++                    rng=replay;
+                     let v=visible_reservoir.weight_sum; let h=hidden_reservoir.weight_sum;
+                     var hidden_budget=h;
+                     // Cap hidden selection weight to 20% (50% on disocclusion),
+diff --git a/crates/passes/3d/helio-pass-hlfs/src/resources.rs b/crates/passes/3d/helio-pass-hlfs/src/resources.rs
+index ac34b3c1..4545af1b 100644
+--- a/crates/passes/3d/helio-pass-hlfs/src/resources.rs
++++ b/crates/passes/3d/helio-pass-hlfs/src/resources.rs
+@@ -143,12 +143,12 @@ impl Targets {
+             coarse: buffer(
+                 device,
+                 "HLFS coarse light grid",
+-                tile_count(width, height, COARSE_TILE_SIZE) * (1 + COARSE_CAPACITY / 2) * 4,
++                tile_count(width, height, COARSE_TILE_SIZE) * (2 + COARSE_CAPACITY / 2) * 4,
+             ),
+             grid: buffer(
+                 device,
+                 "HLFS fine light grid",
+-                tile_count(width, height, TILE_SIZE) * (1 + GRID_CAPACITY / 2) * 4,
++                tile_count(width, height, TILE_SIZE) * (2 + GRID_CAPACITY / 2) * 4,
+             ),
+             width,
+             height,

@@ -72,6 +72,9 @@ pub struct GpuLight {
     pub light_type: u32,
     /// Spot inner cos angle
     pub inner_angle: f32,
+    /// Shadow-intent flags (name retained for source/ABI compatibility).
+    /// Bit 0 marks explicit RT intent; bit 1 enables RT shadows. When bit 0 is
+    /// clear, legacy lights derive intent from shadow_index before atlas admission.
     pub _pad: u32,
 
     // ── Light shafts / god rays (volumetric fog pass) ──
@@ -113,6 +116,22 @@ const _: () = assert!(std::mem::size_of::<GpuLight>() == 128);
 // (vec4<f32> members). If the Rust size were not a multiple of 16 the two sides
 // would stride differently even at identical field counts.
 const _: () = assert!(std::mem::size_of::<GpuLight>() % 16 == 0);
+
+impl GpuLight {
+    /// Set ray-traced shadow intent independently of shadow-map allocation.
+    /// External GPU light writers must encode the same low two bits in `_pad`.
+    pub fn set_ray_traced_shadows(&mut self, enabled: bool) {
+        self._pad = (self._pad & !3) | 1 | (u32::from(enabled) << 1);
+    }
+
+    pub fn ray_traced_shadows(&self) -> bool {
+        if self._pad & 1 != 0 {
+            self._pad & 2 != 0
+        } else {
+            self.shadow_index != u32::MAX
+        }
+    }
+}
 
 impl Default for GpuLight {
     fn default() -> Self {
@@ -160,4 +179,22 @@ impl Default for GpuLight {
 pub struct GpuShadowMatrix {
     /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
     pub light_view_proj: [f32; 16],
+}
+
+#[cfg(test)]
+mod ray_shadow_tests {
+    use super::*;
+    #[test]
+    fn explicit_shadow_intent_survives_atlas_assignment() {
+        let mut light = GpuLight::default();
+        light.shadow_index = 0;
+        assert!(light.ray_traced_shadows());
+        light.set_ray_traced_shadows(true);
+        light.shadow_index = u32::MAX;
+        assert!(light.ray_traced_shadows());
+        light.set_ray_traced_shadows(false);
+        light.shadow_index = 0;
+        assert!(!light.ray_traced_shadows());
+        assert_eq!(std::mem::size_of::<GpuLight>(), 128);
+    }
 }

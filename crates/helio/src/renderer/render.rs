@@ -200,6 +200,9 @@ impl Renderer {
         jittered_camera.jitter = [jx, jy];
         self.scene.update_camera(jittered_camera);
         self.scene.flush();
+        if self.graph.requires_ray_tracing() {
+            self.scene.prepare_ray_tracing()?;
+        }
 
         // Sync template registry to GpuScene before anything takes &self.scene
         self.sync_template_registry_to_scene();
@@ -766,6 +769,9 @@ impl Renderer {
     /// the shaders is a follow-up (stereo depth requires it).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+        if self.graph.requires_ray_tracing() {
+            return Err(helio_core::Error::InvalidPassConfig("HLFS RT stereo support is not implemented".into()));
+        }
         self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
 

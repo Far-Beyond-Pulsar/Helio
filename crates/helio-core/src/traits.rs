@@ -323,6 +323,11 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// - **O(1)**: Returns a static string (no allocations)
     fn name(&self) -> &'static str;
 
+    /// Whether this pass needs a current scene acceleration structure.
+    fn requires_ray_tracing(&self) -> bool {
+        false
+    }
+
     /// Whether this pass consumes a deliberately jittered camera projection.
     ///
     /// Temporal reconstruction passes opt in so the renderer can keep FXAA and

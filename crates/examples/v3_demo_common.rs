@@ -105,7 +105,7 @@ pub fn insert_object_with_movability(
                     transform.w_axis.z,
                     radius,
                 ],
-                flags: 0,
+                flags: libhelio::INSTANCE_FLAG_CASTS_SHADOW | libhelio::INSTANCE_FLAG_RECEIVES_SHADOW,
                 groups: helio::GroupMask::NONE,
                 movability,
                 user_tag: 0,

@@ -1,0 +1,42 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+index c55e0858..94083fbc 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+@@ -106,9 +106,10 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                     else { guided_local_weight+=proxy; }
+                 }
+                 for(var sample=0u;sample<globals.sample_count;sample++) {
+-                    // Replay proposals after computing the directional budget.
+-                    // Streaming both scans keeps candidates out of private arrays.
+-                    let candidate_seed=rng;
++                    // Keep the bounded proposal set until the directional budget
++                    // is known. Reuse scores without repeating light evaluation.
++                    var candidate_ids: array<u32,16>;
++                    var candidate_proxies: array<f32,16>;
+                     var directional_weight=guided_directional_weight; var local_weight=guided_local_weight;
+                     let inverse_proposal=f32(population)/f32(candidate_count);
+                     for(var candidate=0u;candidate<candidate_count;candidate++) {
+@@ -116,6 +117,8 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                         var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+                         var proxy=importance(id,s);
+                         if guided(guide_tile,guide_count,id) { proxy=0.0; }
++                        candidate_ids[candidate]=id;
++                        candidate_proxies[candidate]=proxy;
+                         if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
+                         else { local_weight+=proxy*inverse_proposal; }
+                     }
+@@ -129,12 +132,9 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                         if lights[id].light_type==0u { proxy*=directional_scale; }
+                         reservoir_add(&visible_reservoir,id,proxy,proxy);
+                     }
+-                    var replay=candidate_seed;
+                     for(var candidate=0u;candidate<candidate_count;candidate++) {
+-                        let pick=min(u32((f32(candidate)+random(&replay))*inverse_proposal),population-1u);
+-                        var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+-                        var proxy=importance(id,s);
+-                        if guided(guide_tile,guide_count,id) { proxy=0.0; }
++                        let id=candidate_ids[candidate];
++                        var proxy=candidate_proxies[candidate];
+                         if lights[id].light_type==0u { proxy*=directional_scale; }
+                         reservoir_add(&hidden_reservoir,id,proxy,proxy*inverse_proposal);
+                     }

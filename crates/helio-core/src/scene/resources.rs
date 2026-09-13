@@ -252,4 +252,7 @@ pub struct SceneResources<'a> {
 
     /// Whether hardware ray tracing (TLAS + ray queries) is available.
     pub rt_available: bool,
+    /// Current encoded scene TLAS. The producer must build it before consuming
+    /// render work and must not expose an earlier scene epoch as current.
+    pub tlas: Option<&'a wgpu::Tlas>,
 }

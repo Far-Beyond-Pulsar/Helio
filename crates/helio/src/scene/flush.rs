@@ -96,7 +96,11 @@ impl Scene {
                     if record.movability.can_move() {
                         record.gpu_index = gpu_idx;
                         gpu_idx += 1;
-                        movable_lights.push(record.gpu);
+                        let mut light = record.gpu;
+                        // Preserve authored shadow intent before the atlas allocator
+                        // changes shadow_index for lights outside its finite budget.
+                        light.set_ray_traced_shadows(light.ray_traced_shadows());
+                        movable_lights.push(light);
                         movable_entity_indices.push(record.entity_index);
                     }
                 }

@@ -35,6 +35,9 @@ pub enum HlfsMode {
     /// visibility and sampling settings. Never selects hardware rays implicitly.
     #[default]
     ScreenSpace,
+    /// Native Vulkan opaque triangle ray queries. Requires a current built TLAS;
+    /// never falls back to screen-space visibility when it is unavailable.
+    RayTraced,
 }
 
 /// Lighting output used by capture/benchmark tools. Reference deliberately
@@ -68,6 +71,9 @@ pub struct HlfsConfig {
     pub pre_exposure: f32,
     /// Maximum contact-shadow trace distance in world units; 0 disables it.
     pub screen_trace_distance: f32,
+    /// Maximum directional-light shadow distance for RayTraced mode, in world
+    /// units. Local-light rays always cover the complete receiver-to-light segment.
+    pub ray_trace_distance: f32,
     pub debug_mode: HlfsDebugMode,
 }
 impl Default for HlfsConfig {
@@ -81,11 +87,30 @@ impl Default for HlfsConfig {
             discovery_fraction: 0.2,
             pre_exposure: 1.0,
             screen_trace_distance: 0.5,
+            ray_trace_distance: 10_000.0,
             debug_mode: HlfsDebugMode::Final,
         }
     }
 }
 impl HlfsConfig {
+    fn validate_device(&self, device: &wgpu::Device) -> Result<()> {
+        if self.mode == HlfsMode::RayTraced
+            && (!device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                || device.limits().max_tlas_instance_count == 0)
+        {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "HLFS RayTraced requires enabled ray queries and nonzero TLAS limits".into(),
+            ));
+        }
+        if !self.ray_trace_distance.is_finite() || self.ray_trace_distance <= 0.0 {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "HLFS ray_trace_distance must be finite and positive".into(),
+            ));
+        }
+        Ok(())
+    }
     /// Two samples over each 2x2 shading block. Uses less sampling work than
     /// `performance()`, with more variance. Output format is selected separately;
     /// pair with `HlfsPass::preferred_output_format()` for packed HDR.
@@ -151,6 +176,9 @@ struct Globals {
     ambient: [f32; 4],
     csm_splits: [f32; 4],
     previous_view: [f32; 16],
+    ray_settings: [f32; 4],
+    inverse_view: [f32; 16],
+    inverse_projection: [f32; 16],
 }
 
 pub struct HlfsPass {
@@ -209,6 +237,19 @@ impl HlfsPass {
         output_format: wgpu::TextureFormat,
         config: HlfsConfig,
     ) -> Self {
+        Self::try_with_config(device, queue, width, height, output_format, config)
+            .expect("invalid HLFS configuration")
+    }
+    /// Fallible configuration entry point for an explicitly requested backend.
+    pub fn try_with_config(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        output_format: wgpu::TextureFormat,
+        config: HlfsConfig,
+    ) -> Result<Self> {
+        config.validate_device(device)?;
         let config = config.normalized();
         let pipelines = Pipelines::new(device, output_format, config.mode);
         let targets = Targets::new(device, width, height, output_format, config, None);
@@ -232,7 +273,7 @@ impl HlfsPass {
             0,
             bytemuck::bytes_of(&libhelio::ShadowConfig::from_quality(shadow_quality)),
         );
-        Self {
+        Ok(Self {
             pipelines,
             targets,
             fallbacks: Fallbacks::new(device, queue),
@@ -250,26 +291,34 @@ impl HlfsPass {
             previous_light_generation: None,
             previous_frame: None,
             timing_query: None,
-        }
+        })
     }
     pub fn config(&self) -> HlfsConfig {
         self.config
     }
     pub fn set_config(&mut self, device: &wgpu::Device, config: HlfsConfig) {
+        self.try_set_config(device, config)
+            .expect("invalid HLFS configuration");
+    }
+    /// Reject an unsupported backend without changing the current mode or history.
+    pub fn try_set_config(&mut self, device: &wgpu::Device, config: HlfsConfig) -> Result<()> {
+        config.validate_device(device)?;
         let config = config.normalized();
         if config == self.config {
-            return;
+            return Ok(());
         }
         let mode_changed = config.mode != self.config.mode;
         let resize = config.sample_scale != self.config.sample_scale;
         self.config = config;
         if mode_changed {
             self.pipelines.set_mode(device, config.mode);
+            self.external.clear_ray_binding();
         }
         if resize {
             self.recreate_targets(device, self.targets.width, self.targets.height);
         }
         self.invalidate_history();
+        Ok(())
     }
     pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
         self.shadow_quality = quality;
@@ -411,7 +460,13 @@ impl HlfsPass {
             t.height.div_ceil(TILE_SIZE),
             None,
         );
-        for (index, resources) in self.internal.depth_reduce.iter().enumerate() {
+        for (index, resources) in self
+            .internal
+            .depth_reduce
+            .iter()
+            .enumerate()
+            .filter(|_| self.config.mode == HlfsMode::ScreenSpace)
+        {
             let mip = index as u32 + 1;
             dispatch(
                 encoder,
@@ -434,7 +489,7 @@ impl HlfsPass {
             &self.internal.sample[parity],
             t.sample_width.div_ceil(8),
             t.sample_height.div_ceil(8),
-            None,
+            self.external.ray.as_ref(),
         );
         timestamp(encoder, 3);
         dispatch(
@@ -479,6 +534,9 @@ impl HlfsPass {
             pass.set_bind_group(0, common, &[]);
             pass.set_bind_group(1, gbuffer, &[]);
             pass.set_bind_group(2, &self.internal.composite[parity], &[]);
+            if let Some(ray) = &self.external.ray {
+                pass.set_bind_group(3, ray, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
         timestamp(encoder, 6);
@@ -490,6 +548,10 @@ impl RenderPass for HlfsPass {
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);
     }
+    fn requires_ray_tracing(&self) -> bool {
+        self.config.mode == HlfsMode::RayTraced
+    }
+
     fn name(&self) -> &'static str {
         "HLFS"
     }
@@ -514,6 +576,22 @@ impl RenderPass for HlfsPass {
         builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
+        if self.config.mode == HlfsMode::RayTraced
+            && ctx
+                .frame_resources
+                .main_scene
+                .get()
+                .and_then(|s| s.tlas)
+                .or_else(|| ctx.scene.tlas_manager.tlas())
+                .is_none()
+        {
+            self.invalidate_history();
+            self.external.clear_ray_binding();
+            return Err(helio_core::Error::InvalidPassConfig(
+                "HLFS RayTraced requires a current built scene TLAS (including for an empty scene)"
+                    .into(),
+            ));
+        }
         let camera = *ctx.scene.camera.data();
         let light_count = ctx.scene.movable_light_count;
         let continuity = self
@@ -561,6 +639,17 @@ impl RenderPass for HlfsPass {
             ambient,
             csm_splits: libhelio::CSM_SPLITS,
             previous_view: self.previous_camera.map_or(camera.view, |c| c.view),
+            ray_settings: [self.config.ray_trace_distance, 0.0, 0.0, 0.0],
+            inverse_view: glam::Mat4::from_cols_array(&camera.view)
+                .as_dmat4()
+                .inverse()
+                .as_mat4()
+                .to_cols_array(),
+            inverse_projection: glam::Mat4::from_cols_array(&camera.proj)
+                .as_dmat4()
+                .inverse()
+                .as_mat4()
+                .to_cols_array(),
         };
         ctx.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         self.previous_camera = Some(camera);
@@ -619,6 +708,24 @@ impl RenderPass for HlfsPass {
             &self.shadows,
             &inputs,
         );
+        if self.config.mode == HlfsMode::RayTraced {
+            let tlas = ctx
+                .resources
+                .main_scene
+                .get()
+                .and_then(|s| s.tlas)
+                .or(ctx.scene.tlas)
+                .ok_or_else(|| {
+                    helio_core::Error::InvalidPassConfig(
+                        "HLFS RayTraced lost its frame TLAS".into(),
+                    )
+                })?;
+            self.external.update_ray(
+                ctx.device,
+                self.pipelines.rt_bgl.as_ref().expect("validated RT layout"),
+                tlas,
+            );
+        }
         // These dispatches read the GBuffer just rendered, so they belong on the
         // render encoder rather than the early compute encoder.
         // Returning no render descriptor guarantees there is no active render pass.
@@ -662,7 +769,8 @@ mod tests {
             "temporal",
             "spatial",
             "composite",
-            "ray_query_prototype",
+            "ray_traced",
+            "ray_traced_composite",
         ] {
             let source = super::pipelines::shader_source(stage);
             let module = naga::front::wgsl::parse_str(&source)

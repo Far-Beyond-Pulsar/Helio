@@ -541,6 +541,7 @@ impl GpuScene {
             portal_chains: self.portal_chains.buffer(),
             portal_chain_count: self.portal_chains.len() as u32,
             rt_available: self.tlas_manager.is_rt_available(),
+            tlas: self.tlas_manager.tlas(),
         }
     }
 

@@ -143,12 +143,12 @@ impl Targets {
             coarse: buffer(
                 device,
                 "HLFS coarse light grid",
-                tile_count(width, height, COARSE_TILE_SIZE) * (1 + COARSE_CAPACITY / 2) * 4,
+                tile_count(width, height, COARSE_TILE_SIZE) * (2 + COARSE_CAPACITY / 2) * 4,
             ),
             grid: buffer(
                 device,
                 "HLFS fine light grid",
-                tile_count(width, height, TILE_SIZE) * (1 + GRID_CAPACITY / 2) * 4,
+                tile_count(width, height, TILE_SIZE) * (2 + GRID_CAPACITY / 2) * 4,
             ),
             width,
             height,

@@ -1,0 +1,29 @@
+{
+  "scope": "One run per implementation per wider resolution, 120 warmup and 600 measured frames each. These are broader resolution probes, not repeated ABBA blocks or scene-quality acceptance. A/B were adjacent; C followed final primary validation.",
+  "runs": {
+    "1440p-native-A": {
+      "median_gpu_ms": 42.759168,
+      "p95_gpu_ms": 47.306752
+    },
+    "1440p-native-B": {
+      "median_gpu_ms": 34.996736,
+      "p95_gpu_ms": 38.9632
+    },
+    "4k-reconstructed-A": {
+      "median_gpu_ms": 25.395200000000003,
+      "p95_gpu_ms": 28.642304
+    },
+    "4k-reconstructed-B": {
+      "median_gpu_ms": 22.561792000000004,
+      "p95_gpu_ms": 25.284608000000002
+    },
+    "1440p-native-C": {
+      "median_gpu_ms": 32.76544,
+      "p95_gpu_ms": 34.74944
+    },
+    "4k-reconstructed-C": {
+      "median_gpu_ms": 21.092864000000002,
+      "p95_gpu_ms": 24.252416000000004
+    }
+  }
+}

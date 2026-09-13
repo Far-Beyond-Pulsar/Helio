@@ -113,6 +113,7 @@ pub struct MeshSlice {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeshRecord {
+    pub revision: u64,
     pub slice: MeshSlice,
     pub ref_count: u32,
     pub kind: MeshKind,
@@ -387,6 +388,7 @@ impl MeshPool {
             index_count: index_handle.count,
         };
         let (id, _, _) = self.meshes.insert(MeshRecord {
+            revision: 0,
             slice,
             ref_count: 0,
             kind: MeshKind::Static,
@@ -439,6 +441,7 @@ impl MeshPool {
         };
 
         let (id, _, _) = self.meshes.insert(MeshRecord {
+            revision: 0,
             slice,
             ref_count: 0,
             kind,
@@ -467,6 +470,7 @@ impl MeshPool {
                 sub.live_index_count += sec_indices.len();
 
                 let (id, _, _) = self.meshes.insert(MeshRecord {
+                    revision: 0,
                     slice: MeshSlice {
                         first_vertex: vhandle.offset,
                         vertex_count: vhandle.count,
@@ -506,6 +510,8 @@ impl MeshPool {
         };
         self.dynamic_sub
             .rewrite_dynamic_vertices(handle, new_vertices);
+        let record = self.get_mut(id).unwrap();
+        record.revision = record.revision.wrapping_add(1);
         Ok(())
     }
 

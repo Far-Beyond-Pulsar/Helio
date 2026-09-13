@@ -99,11 +99,15 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 // The guide and surface are shared by every sample. Preserve
                 // their accumulation order without rescoring the same lights.
                 var guided_directional_weight=0.0; var guided_local_weight=0.0;
-                for(var i=0u;i<guide_count;i++) {
-                    let id=previous_visible[guide_tile].indices[i];
-                    let proxy=importance(id,s);
-                    if lights[id].light_type==0u { guided_directional_weight+=proxy; }
-                    else { guided_local_weight+=proxy; }
+                // Directional lights intersect every coarse tile, including
+                // overflow tiles. With none, guide budget scores are unused too.
+                if grid[tile].has_directional!=0u {
+                    for(var i=0u;i<guide_count;i++) {
+                        let id=previous_visible[guide_tile].indices[i];
+                        let proxy=importance(id,s);
+                        if lights[id].light_type==0u { guided_directional_weight+=proxy; }
+                        else { guided_local_weight+=proxy; }
+                    }
                 }
                 for(var sample=0u;sample<globals.sample_count;sample++) {
                     // Replay proposals after computing the directional budget.
@@ -111,13 +115,18 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     let candidate_seed=rng;
                     var directional_weight=guided_directional_weight; var local_weight=guided_local_weight;
                     let inverse_proposal=f32(population)/f32(candidate_count);
-                    for(var candidate=0u;candidate<candidate_count;candidate++) {
-                        let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);
-                        var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
-                        var proxy=importance(id,s);
-                        if guided(guide_tile,guide_count,id) { proxy=0.0; }
-                        if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
-                        else { local_weight+=proxy*inverse_proposal; }
+                    // With no directional proposals the scale is exactly one.
+                    // Keep private arrays out of the shader and advance the RNG
+                    // through the reservoir scan below when this scan is skipped.
+                    if grid[tile].has_directional!=0u || guided_directional_weight>0.0 {
+                        for(var candidate=0u;candidate<candidate_count;candidate++) {
+                            let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);
+                            var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+                            var proxy=importance(id,s);
+                            if guided(guide_tile,guide_count,id) { proxy=0.0; }
+                            if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
+                            else { local_weight+=proxy*inverse_proposal; }
+                        }
                     }
                     var directional_scale=1.0;
                     if local_weight>1e-5 && directional_weight>0.0 { directional_scale=min(1.0,0.5*local_weight/directional_weight); }
@@ -138,6 +147,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                         if lights[id].light_type==0u { proxy*=directional_scale; }
                         reservoir_add(&hidden_reservoir,id,proxy,proxy*inverse_proposal);
                     }
+                    rng=replay;
                     let v=visible_reservoir.weight_sum; let h=hidden_reservoir.weight_sum;
                     var hidden_budget=h;
                     // Cap hidden selection weight to 20% (50% on disocclusion),
