@@ -88,7 +88,7 @@ crates/
 
 Extended, not replaced:
 
-- `libhelio` — new `FrameResources` slots and the `GpuWind` uniform.
+- `libhelio` — new `generic transient resource registry` slots and the `GpuWind` uniform.
 - `helio-pass-virtual-geometry` — WPO bounds dilation; later, a GPU-appended object range.
 - `helio-bake` — impostor atlas baking.
 - `helio-default-graphs` — conditional pass insertion.
@@ -193,7 +193,7 @@ Every capacity is a hard ceiling with an overflow counter, exactly like
 `VirtualGeometryBudget::clamp_draw_count` and `draw_counters[2]` — silent truncation that looks
 like a culling bug is the failure mode we are explicitly designing against.
 
-### 4.6 `FrameResources` additions (`libhelio::frame`)
+### 4.6 `generic transient resource registry` additions (`libhelio::frame`)
 
 ```rust
 pub foliage: Tracked<FoliageFrameData<'a>>,      // types, layers, wind, config, generation
@@ -204,7 +204,7 @@ pub foliage_interactors: Tracked<&'a wgpu::Buffer>,
 pub foliage_interactor_count: u32,
 ```
 
-All added to `FrameResources::empty()` and `reset_tracking()`. `foliage_interactors` follows
+All added to `generic transient resource registry::empty()` and `reset_tracking()`. `foliage_interactors` follows
 the `water_hitboxes` / `water_hitbox_count` pattern verbatim.
 
 ---
@@ -434,7 +434,7 @@ and bend proportional to normalised height. Outside the field, foliage is simply
 seam, because the field's edge is always ≥ 32 m from the camera and grass geometry ends at
 120 m with the displacement already decayed to zero at the boundary.
 
-`Scene` gets `add_foliage_interactor` / `update_foliage_interactor`, mirroring the existing
+`Scene` gets `insert_foliage_interactor` / `update_foliage_interactor`, mirroring the existing
 water-hitbox API so the physics-side integration in Pulsar-Native is a one-liner per body.
 
 ---
@@ -535,7 +535,7 @@ Three independent guarantees, each with a test:
 ## 11. Public API (`helio::Scene`)
 
 ```rust
-let grass = scene.add_foliage_type(FoliageTypeDescriptor {
+let grass = scene.insert_foliage_type(FoliageTypeComponent {
     kind: FoliageKind::Blade,
     material: grass_mat,
     density: 40.0,                       // per m²
@@ -547,14 +547,14 @@ let grass = scene.add_foliage_type(FoliageTypeDescriptor {
     ..Default::default()
 });
 
-let oak = scene.add_foliage_type(FoliageTypeDescriptor {
+let oak = scene.insert_foliage_type(FoliageTypeComponent {
     kind: FoliageKind::Mesh { virtual_mesh: oak_mesh, impostor: oak_impostor },
     density: 0.02,
     wpo_extent: 0.6,
     ..Default::default()
 });
 
-scene.add_foliage_layer(FoliageLayer {
+scene.insert_foliage_layer(FoliageLayer {
     types: vec![grass, oak],
     density_map: Some(density_tex),      // R8, optional
     exclusion_map: Some(roads_tex),
@@ -564,7 +564,7 @@ scene.add_foliage_layer(FoliageLayer {
 
 scene.set_wind(Wind { direction: Vec3::X, speed: 4.0, gust_amplitude: 0.6, ..Default::default() });
 
-let player = scene.add_foliage_interactor(FoliageInteractor { position, radius: 0.5, velocity });
+let player = scene.insert_foliage_interactor(FoliageInteractor { position, radius: 0.5, velocity });
 scene.update_foliage_interactor(player, position, velocity);   // per tick, O(1)
 ```
 
@@ -679,7 +679,7 @@ Each phase is independently shippable and leaves the engine in a working state.
 
 | Phase | Deliverable | Acceptance |
 |---|---|---|
-| **1. Foundations** | `helio-pass-foliage-place` types, `FrameResources` slots, `Scene` API, `FoliageTerrainPass` | Terrain capture renders correctly over voxel terrain; zero-overhead tests pass |
+| **1. Foundations** | `helio-pass-foliage-place` types, `generic transient resource registry` slots, `Scene` API, `FoliageTerrainPass` | Terrain capture renders correctly over voxel terrain; zero-overhead tests pass |
 | **2. Grass** | `FoliagePlacePass` + `FoliageGBufferPass`, L0–L3, residency cache, tile/cluster cull | 1 M blades render, fully lit and shadowed; deterministic placement test passes |
 | **3. Wind + interaction** | `foliage_wind.wgsl` prelude, `FoliageInteractionPass`, motion vectors | No TAA ghosting on moving grass; footprint recovery matches golden curve |
 | **4. Trees** | Mesh foliage via VG, `wpo_extent` in `InstanceCullData`, `wpo_disable_distance`, proxy-mesh shadow publication | Wind-displaced leaves never cull at screen edges; tree LOD selection matches VG debug histogram; trees cast shadows via proxy |

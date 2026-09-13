@@ -5,7 +5,6 @@
 //! passes can read outputs of earlier passes without any allocation or locking.
 
 use crate::material::GpuMaterial;
-use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
 use std::collections::{HashMap, HashSet};
 

@@ -1,7 +1,7 @@
 //! Per-portal-*chain* GPU frustum culling.
 //!
-//! For each active portal chain (a sequence of up to `libhelio::MAX_CHAIN_DEPTH`
-//! portals — see `libhelio::GpuPortalChain`'s docs for why chains, not single
+//! For each active portal chain (a sequence of up to `MAX_CHAIN_DEPTH` portals
+//! — see `GpuPortalChain`'s docs for why chains, not single
 //! portals, are what makes portals reflect each other automatically), tests
 //! every draw-call group's instances — mapped through that chain's *composed*
 //! transform — against the main camera frustum, and compacts survivors into
