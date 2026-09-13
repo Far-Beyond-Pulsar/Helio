@@ -242,6 +242,14 @@ impl RenderPass for ShadowCullPass {
         "ShadowCull"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["object_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -252,8 +260,14 @@ impl RenderPass for ShadowCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let instance_count = ctx
+            .frame_resources
+            .object_batch
+            .get()
+            .map(|b| b.shadow_movable_draw_count)
+            .unwrap_or(0);
         let u = CullUniforms {
-            instance_count: ctx.scene.shadow_movable_draw_count,
+            instance_count,
             max_draws_per_face: MAX_DRAWS_PER_FACE,
             _pad0: 0,
             _pad1: 0,
@@ -264,7 +278,10 @@ impl RenderPass for ShadowCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let movable_count = ctx.scene.shadow_movable_draw_count;
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let movable_count = batch.shadow_movable_draw_count;
         let face_count = ctx.scene.shadow_count;
 
         if face_count == 0 || movable_count == 0 {
@@ -280,8 +297,8 @@ impl RenderPass for ShadowCullPass {
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
         let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances as *const _ as usize;
-        let src_ptr = ctx.scene.shadow_movable_indirect as *const _ as usize;
+        let inst_ptr = batch.instances as *const _ as usize;
+        let src_ptr = batch.shadow_movable_indirect as *const _ as usize;
         let fd_ptr = &*self.face_dirty_buf as *const _ as usize;
         let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
@@ -301,11 +318,11 @@ impl RenderPass for ShadowCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.shadow_movable_indirect.as_entire_binding(),
+                        resource: batch.shadow_movable_indirect.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,

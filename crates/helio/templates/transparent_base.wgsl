@@ -28,6 +28,14 @@ struct Globals {
     num_tiles_y:       u32,
     screen_width:      f32,
     screen_height:     f32,
+    // 1 when `lights[i]`/`transforms[i]` share the same raw entity index
+    // (SceneDB-direct); 0 when `lights` is `ctx.scene.lights`, a freshly
+    // rebuilt dense array needing `light_entity_indices[i]`. See that
+    // binding's doc.
+    light_mode_direct_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuInstanceData {
@@ -80,11 +88,15 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 @group(1) @binding(1) var<storage, read> tile_light_lists:  array<u32>;
 @group(1) @binding(2) var<storage, read> tile_light_counts: array<u32>;
 
-// SceneDB's `Transform` component. `lights` is itself a SceneDB
-// `#[gpu(layout = packed)]` buffer, entity-indexed (row `i` is whichever
-// entity has raw index `i`) -- the same indexing `transforms` uses, so
-// `light_idx` (a raw index into `lights`) is already the correct index
-// here with no indirection needed. This is the ONLY source of light world
+// Parallel to `lights` when `globals.light_mode_direct_index == 0` -- entry
+// `i` is the real SceneDB entity index `lights[i]` was built from this frame
+// (`ctx.scene.lights` is a freshly-rebuilt dense array every frame, not
+// itself entity-indexed). Ignored (identity) when
+// `light_mode_direct_index == 1`, since `lights` is then the SceneDB
+// `"scene_lights"` buffer directly, already entity-indexed the same way
+// `transforms` is.
+@group(1) @binding(3) var<storage, read> light_entity_indices: array<u32>;
+// SceneDB's `Transform` component. This is the ONLY source of light world
 // position -- `GpuLight.position_range.xyz` carries a stale/zeroed
 // placeholder for it (see `helio_pass_forward_lit`'s identical binding
 // doc); `.position_range.w` (range) is a real light property and still
@@ -94,7 +106,7 @@ struct Transform {
     rotation: array<f32, 3>,
     scale:    array<f32, 3>,
 }
-@group(1) @binding(3) var<storage, read> transforms: array<Transform>;
+@group(1) @binding(4) var<storage, read> transforms: array<Transform>;
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -222,7 +234,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < tile_light_count; i++) {
         let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
         let light = lights[light_idx];
-        let t = transforms[light_idx];
+        let entity_idx = select(light_entity_indices[light_idx], light_idx, globals.light_mode_direct_index != 0u);
+        let t = transforms[entity_idx];
         let light_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
         if light.light_type != 0u {
             let dist = length(light_pos - input.world_position);

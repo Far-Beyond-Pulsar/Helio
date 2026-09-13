@@ -76,9 +76,9 @@ use crate::acceleration::{BlasManager, TlasManager};
 use crate::scene::managers::GrowableBuffer;
 use crate::scene::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
-    GpuCompactedIndicesBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
-    GpuInstanceBuffer, GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer,
-    GpuShadowMatrixBuffer, GpuVisibilityBuffer, GpuVoxelEditRing, GpuVoxelVolumeBuffer,
+    GpuCompactedIndicesBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
+    GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuVisibilityBuffer, GpuVoxelEditRing, GpuVoxelVolumeBuffer,
 };
 use crate::scene::SceneResources;
 use std::sync::Arc;
@@ -197,7 +197,6 @@ pub struct GpuScene {
     /// lights`. `None` until rebound -- no dummy buffer, so a pass reaching
     /// for this before it's bound fails loudly instead of reading garbage.
     pub transform_buffer: Option<Arc<wgpu::Buffer>>,
-    pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
     pub indirect: GpuIndirectBuffer,
@@ -349,7 +348,6 @@ impl GpuScene {
         let draw_calls = GpuDrawCallBuffer::new(device.clone());
         let lights = GpuLightBuffer::new(device.clone());
         let light_entity_indices = GpuLightEntityIndexBuffer::new(device.clone());
-        let decals = GpuDecalBuffer::new(device.clone());
         let materials = GpuMaterialBuffer::new(device.clone());
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
         let indirect = GpuIndirectBuffer::new(device.clone());
@@ -419,7 +417,6 @@ impl GpuScene {
             lights,
             light_entity_indices,
             transform_buffer: None,
-            decals,
             materials,
             shadow_matrices,
             indirect,
@@ -486,36 +483,20 @@ impl GpuScene {
         SceneResources {
             camera: self.camera.buffer(),
             camera_data: self.camera.data(),
-            instances: self.instances.buffer(),
-            aabbs: self.aabbs.buffer(),
-            draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
             light_entity_indices: self.light_entity_indices.buffer(),
             transforms: self.transform_buffer.as_deref(),
-            decals: self.decals.buffer(),
-            decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),
             material_data: self.materials.as_slice(),
             shadow_matrices: self.shadow_matrices.buffer(),
-            indirect: self.indirect.buffer(),
-            visibility: self.visibility.buffer(),
-            compacted_indices: self.compacted_indices.buffer(),
-            compacted_indices_2: self.compacted_indices_2.buffer(),
             coordinate_spaces: self.coordinate_spaces.buffer(),
             coordinate_spaces_prev: self.coordinate_spaces.prev_buffer(),
-            instance_count: self.instances.len() as u32,
-            draw_count: self.draw_calls.len() as u32,
             light_count: self.lights.len() as u32,
             shadow_count: self.shadow_matrices.len() as u32,
             movable_objects_generation: self.movable_objects_generation,
             movable_lights_generation: self.movable_lights_generation,
             camera_generation: self.camera_generation,
-            shadow_static_indirect: self.shadow_static_indirect.buffer(),
-            shadow_movable_indirect: self.shadow_movable_indirect.buffer(),
-            shadow_static_draw_count: self.shadow_static_draw_count,
-            shadow_movable_draw_count: self.shadow_movable_draw_count,
             movable_light_count: self.movable_light_count,
-            static_objects_generation: self.static_objects_generation,
             per_caster_dirty_gen: self.per_caster_dirty_gen,
             voxel_volumes: self.voxel_volumes.buffer(),
             voxel_edit_ring: self.voxel_edit_ring.buffer(),
@@ -523,9 +504,6 @@ impl GpuScene {
             voxel_data_pool: &self.voxel_data_pool,
             voxel_volume_count: self.voxel_volume_count,
             voxel_volumes_generation: self.voxel_volumes_generation,
-            material_class_ranges: &self.material_class_ranges,
-            transparent_material_class_ranges: &self.transparent_material_class_ranges,
-            forward_material_class_ranges: &self.forward_material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
             template_registry: &self.template_registry,
@@ -601,7 +579,6 @@ impl GpuScene {
         self.aabbs.flush(queue);
         self.draw_calls.flush(queue);
         self.lights.flush(queue);
-        self.decals.flush(queue);
         self.materials.flush(queue);
         self.shadow_matrices.flush(queue);
         self.indirect.flush(queue);

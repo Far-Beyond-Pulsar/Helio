@@ -1,5 +1,5 @@
 use crate::handles::{
-    DecalId, LightId, MeshId, ObjectId, ReflectionCaptureId, SectionedInstanceId, VirtualObjectId,
+    LightId, MeshId, ObjectId, ReflectionCaptureId, SectionedInstanceId, VirtualObjectId,
     WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::MeshUpload;
@@ -15,7 +15,6 @@ use libhelio::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneEntityId {
     None,
-    Decal(DecalId),
     Mesh(MeshId),
     Light(LightId),
     ReflectionCapture(ReflectionCaptureId),
@@ -27,14 +26,6 @@ pub enum SceneEntityId {
 }
 
 impl SceneEntityId {
-    pub fn as_decal(self) -> Option<DecalId> {
-        if let SceneEntityId::Decal(id) = self {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
     pub fn as_mesh(self) -> Option<MeshId> {
         if let SceneEntityId::Mesh(id) = self {
             Some(id)
@@ -661,60 +652,10 @@ impl WaterHitboxDescriptor {
     }
 }
 
-// ── Decal Actor ──────────────────────────────────────────────────────────────────
-
-/// A decal actor (GPU decal descriptor + optional handle).
-#[derive(Debug, Clone, Copy)]
-pub struct DecalActor {
-    pub decal: libhelio::GpuDecal,
-    pub decal_id: Option<DecalId>,
-    pub movability: Option<libhelio::Movability>,
-    /// Application-defined tag.
-    pub user_tag: u64,
-}
-
-impl DecalActor {
-    pub fn new(decal: libhelio::GpuDecal) -> Self {
-        Self {
-            decal,
-            decal_id: None,
-            movability: None,
-            user_tag: 0,
-        }
-    }
-
-    pub fn new_with_tag(
-        decal: libhelio::GpuDecal,
-        user_tag: u64,
-        movability: Option<libhelio::Movability>,
-    ) -> Self {
-        Self {
-            decal,
-            decal_id: None,
-            movability,
-            user_tag,
-        }
-    }
-
-    pub fn id(&self) -> Option<DecalId> {
-        self.decal_id
-    }
-}
-
-impl SceneEntityTrait for DecalActor {
-    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
-        if self.decal_id.is_none() {
-            self.decal_id =
-                Some(scene.insert_decal_with_tag(self.decal, self.user_tag, self.movability));
-        }
-    }
-
-    fn inserted_id(&self) -> SceneEntityId {
-        self.decal_id
-            .map(SceneEntityId::Decal)
-            .unwrap_or(SceneEntityId::None)
-    }
-}
+// Decals are SceneDB-only now (see `helio_pass_decal::DecalComponent`); the
+// central actor/CRUD path that used to live here (`DecalActor`,
+// `Scene::insert_decal*`) is gone -- author a `DecalComponent` row on the
+// SceneDB `World` directly instead.
 
 // ── Reflection Capture ──────────────────────────────────────────────────────────
 
@@ -870,7 +811,6 @@ impl SceneEntityTrait for ReflectionCaptureActor {
 #[derive(Debug, Clone)]
 pub enum SceneEntity {
     Sky(SkyActor),
-    Decal(DecalActor),
     Mesh(MeshActor),
     Light(LightActor),
     ReflectionCapture(ReflectionCaptureActor),
@@ -882,18 +822,6 @@ pub enum SceneEntity {
 impl SceneEntity {
     pub fn sky(sky: SkyActor) -> Self {
         SceneEntity::Sky(sky)
-    }
-
-    pub fn decal(decal: libhelio::GpuDecal) -> Self {
-        SceneEntity::Decal(DecalActor::new(decal))
-    }
-
-    pub fn decal_with_tag(
-        decal: libhelio::GpuDecal,
-        user_tag: u64,
-        movability: Option<libhelio::Movability>,
-    ) -> Self {
-        SceneEntity::Decal(DecalActor::new_with_tag(decal, user_tag, movability))
     }
 
     pub fn mesh(upload: MeshUpload) -> Self {
@@ -940,7 +868,6 @@ impl SceneEntityTrait for SceneEntity {
     fn inserted_id(&self) -> SceneEntityId {
         match self {
             SceneEntity::Sky(_) => SceneEntityId::None,
-            SceneEntity::Decal(actor) => actor.inserted_id(),
             SceneEntity::Mesh(actor) => actor.inserted_id(),
             SceneEntity::Light(actor) => actor.inserted_id(),
             SceneEntity::ReflectionCapture(actor) => actor.inserted_id(),
@@ -955,7 +882,6 @@ impl SceneEntityTrait for SceneEntity {
             SceneEntity::Sky(_) => {
                 // No additional per-frame state. Scene will query context from actors.
             }
-            SceneEntity::Decal(actor) => actor.on_attach(scene),
             SceneEntity::Mesh(actor) => actor.on_attach(scene),
             SceneEntity::Light(actor) => actor.on_attach(scene),
             SceneEntity::ReflectionCapture(actor) => actor.on_attach(scene),
@@ -967,7 +893,6 @@ impl SceneEntityTrait for SceneEntity {
 
     fn on_tick(&mut self, scene: &mut crate::scene::Scene) {
         match self {
-            SceneEntity::Decal(actor) => actor.on_tick(scene),
             SceneEntity::Mesh(actor) => actor.on_tick(scene),
             SceneEntity::Light(actor) => actor.on_tick(scene),
             SceneEntity::ReflectionCapture(actor) => actor.on_tick(scene),

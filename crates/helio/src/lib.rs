@@ -29,9 +29,9 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    DecalId, FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId,
-    MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
-    SublevelId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId, MultiMeshId,
+    ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId, SublevelId,
+    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
@@ -57,7 +57,7 @@ pub use renderer::{
     RendererBuilder, RendererConfig, SceneDbHandle,
 };
 pub use scene::{
-    portal_pose_facing, Camera, DecalActor, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
+    portal_pose_facing, Camera, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
     GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
     ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
     SceneEntityId, SceneEntityTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,

@@ -83,7 +83,7 @@ mod voxel;
 mod water;
 
 pub use actor::{
-    DecalActor, ReflectionCaptureActor, ReflectionCaptureDescriptor, SceneEntity, SceneEntityId,
+    ReflectionCaptureActor, ReflectionCaptureDescriptor, SceneEntity, SceneEntityId,
     SceneEntityTrait, WaterHitboxDescriptor, WaterVolumeDescriptor,
 };
 pub use camera::Camera;

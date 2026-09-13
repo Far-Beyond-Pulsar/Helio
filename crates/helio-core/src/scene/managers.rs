@@ -6,8 +6,8 @@
 use crate::upload;
 use bytemuck::Zeroable;
 use libhelio::{
-    DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDecal, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
+    DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
+    GpuLight, GpuMaterial, GpuShadowMatrix,
 };
 use std::sync::Arc;
 
@@ -465,8 +465,6 @@ pub struct GpuLightBuffer(pub GrowableBuffer<GpuLight>);
 /// and indexes it with the same `light_idx` it already uses for `lights`;
 /// every pass that doesn't need it is completely unaffected.
 pub struct GpuLightEntityIndexBuffer(pub GrowableBuffer<u32>);
-/// Storage buffer for GPU decals.
-pub struct GpuDecalBuffer(pub GrowableBuffer<GpuDecal>);
 /// Storage buffer for GPU materials.
 pub struct GpuMaterialBuffer(pub GrowableBuffer<GpuMaterial>);
 /// Storage buffer for shadow matrices.
@@ -777,29 +775,6 @@ impl std::ops::Deref for GpuVoxelVolumeBuffer {
     }
 }
 impl std::ops::DerefMut for GpuVoxelVolumeBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl GpuDecalBuffer {
-    pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(
-            device,
-            1024,
-            wgpu::BufferUsages::STORAGE,
-            "Decal Buffer",
-        ))
-    }
-}
-
-impl std::ops::Deref for GpuDecalBuffer {
-    type Target = GrowableBuffer<GpuDecal>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl std::ops::DerefMut for GpuDecalBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

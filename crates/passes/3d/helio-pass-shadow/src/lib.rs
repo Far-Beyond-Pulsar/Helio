@@ -442,6 +442,7 @@ impl RenderPass for ShadowPass {
         builder.with_layers(self.atlas_layers);
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
         builder.with_layers(self.atlas_layers);
+        builder.read("object_batch");
     }
 
     fn name(&self) -> &'static str {
@@ -449,7 +450,7 @@ impl RenderPass for ShadowPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["main_scene", "object_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -463,11 +464,14 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
         let face_count = (ctx.scene.shadow_count as usize)
             .min(self.atlas_layers as usize)
             .min(MAX_SHADOW_FACES);
-        let static_draw_count = ctx.scene.shadow_static_draw_count;
-        let movable_draw_count = ctx.scene.shadow_movable_draw_count;
+        let static_draw_count = batch.shadow_static_draw_count;
+        let movable_draw_count = batch.shadow_movable_draw_count;
 
         // ── Lazily initialize per-face views from graph-owned textures ─────────
         if self.face_views.is_empty() {
@@ -491,7 +495,7 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let static_gen = ctx.scene.static_objects_generation;
+        let static_gen = batch.shadow_static_generation;
         let shadow_count = ctx.scene.shadow_count;
         let caster_count = (face_count / 6).min(42);
 
@@ -526,7 +530,7 @@ impl RenderPass for ShadowPass {
         // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
         let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances as *const _ as usize;
+        let inst_ptr = batch.instances as *const _ as usize;
         let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, cs_ptr);
         if self.bg_0_key != Some(key) {
@@ -540,7 +544,7 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -564,7 +568,7 @@ impl RenderPass for ShadowPass {
 
         // ── Static atlas render ────────────────────────────────────────────────
         if need_static || any_dirty_caster {
-            let static_indirect = ctx.scene.shadow_static_indirect;
+            let static_indirect = batch.shadow_static_indirect;
             if static_draw_count > 0 {
                 for face in 0..face_count {
                     let caster_slot = face / 6;
@@ -654,8 +658,6 @@ impl RenderPass for ShadowPass {
         //     clean faces.  The loop runs for all active faces but clean faces produce
         //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
         if any_dirty_caster || objects_moved {
-            let _movable_indirect = ctx.scene.shadow_movable_indirect;
-
             for face in 0..face_count {
                 let caster_slot = face / 6;
                 let light_dirty = caster_slot < 42 && dirty_casters[caster_slot];

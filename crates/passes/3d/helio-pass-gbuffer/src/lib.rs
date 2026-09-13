@@ -243,6 +243,8 @@ impl RenderPass for GBufferPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("object_batch");
+        builder.read("culled_batch");
         // The 4 bundled G-buffer targets consumed together downstream as one
         // `Tracked<GBufferViews>` (see `publish_group` below) — declared as a
         // single named group so the generic allocator combines them itself,
@@ -464,7 +466,13 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.culled_batch.get() else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
         let main_scene = ctx.resources.main_scene;
 
         if draw_count == 0 || main_scene.is_none() {
@@ -474,8 +482,8 @@ impl RenderPass for GBufferPass {
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
         let coordinate_spaces_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
         let key = (
             camera_ptr,
@@ -499,7 +507,7 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -507,7 +515,7 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: culled.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -554,7 +562,7 @@ impl RenderPass for GBufferPass {
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
-        let indirect = ctx.scene.indirect;
+        let indirect = culled.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
@@ -580,7 +588,7 @@ impl RenderPass for GBufferPass {
                 self.template_registry = Some(std::sync::Arc::clone(shared));
             }
         }
-        let ranges = ctx.scene.material_class_ranges;
+        let ranges = batch.opaque_ranges;
         if ranges.is_empty() {
             // Fallback: no ranges (e.g. legacy mode without material_class data).
             // Use the default PBR pipeline and draw everything in one batch.
@@ -653,7 +661,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["main_scene", "object_batch", "culled_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

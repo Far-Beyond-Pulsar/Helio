@@ -35,7 +35,7 @@ struct LightCullParams {
     num_lights: u32,
     screen_width: u32,
     screen_height: u32,
-    _pad0: u32,
+    light_mode_direct_index: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -56,12 +56,15 @@ pub struct LightCullPass {
     pub tile_light_counts: wgpu::Buffer,
     /// Cached bind group, rebuilt when camera or lights buffer pointer changes.
     bind_group: Option<wgpu::BindGroup>,
-    /// Key: (camera_ptr, lights_ptr) — used to skip needless bind-group rebuilds.
-    bind_group_key: Option<(usize, usize, usize)>,
-    /// Light culling cache key: (camera_generation, scene_lights buffer epoch,
-    /// transforms buffer pointer) — used to skip culling compute when nothing
-    /// the shader reads has changed.
-    cull_cache_key: Option<(u64, u64, u64)>,
+    /// Key: (camera_ptr, lights_ptr, light_entity_indices_ptr, transforms_ptr)
+    /// — used to skip needless bind-group rebuilds.
+    bind_group_key: Option<(usize, usize, usize, usize)>,
+    /// Light culling cache key: (camera_generation, lights generation --
+    /// either the SceneDB buffer's epoch or `movable_lights_generation`
+    /// depending on which source is active, movable_light_count,
+    /// use_direct_index) — used to skip culling compute when nothing the
+    /// shader reads has changed.
+    cull_cache_key: Option<(u64, u64, u32, bool)>,
     num_tiles_x: u32,
     num_tiles_y: u32,
     width: u32,
@@ -129,9 +132,21 @@ impl LightCullPass {
                     },
                     count: None,
                 },
-                // 4: tile_light_lists read_write
+                // 4: light_entity_indices storage read -- parallel to `lights`
+                // only in CPU-resolved mode, see `light_cull.wgsl`'s binding doc.
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 5: tile_light_lists read_write
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -140,9 +155,9 @@ impl LightCullPass {
                     },
                     count: None,
                 },
-                // 5: tile_light_counts read_write
+                // 6: tile_light_counts read_write
                 wgpu::BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -288,14 +303,16 @@ impl RenderPass for LightCullPass {
         // ctx.width/height are internal_w/h from the graph.
         self.num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
         self.num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
-        // `"scene_lights"` is a fixed-capacity SceneDB buffer (`MAX_LIGHTS`
-        // rows), not a live count -- see that constant's doc. Culling always
-        // covers the whole capacity once any `LightComponent` has ever been
-        // inserted; there is no per-frame CPU light count to query.
-        let num_lights = if ctx.scene_buffers.contains(BufferKey::of("scene_lights")) {
+        // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
+        // `MAX_LIGHTS`, no per-frame CPU query) when populated; else
+        // `ctx.scene.movable_light_count`, production's actual light count
+        // today (`Renderer::submit_light_frame`, driven by `engine_backend`'s
+        // own SceneDB resolve) -- see `light_mode_direct_index`'s doc.
+        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
+        let num_lights = if use_direct_index {
             MAX_LIGHTS
         } else {
-            0
+            ctx.scene.movable_light_count
         };
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
@@ -303,7 +320,7 @@ impl RenderPass for LightCullPass {
             num_lights,
             screen_width: ctx.width,
             screen_height: ctx.height,
-            _pad0: 0,
+            light_mode_direct_index: use_direct_index as u32,
             _pad1: 0,
             _pad2: 0,
         };
@@ -313,15 +330,27 @@ impl RenderPass for LightCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(lights_handle) = ctx.scene_buffers.get(BufferKey::of("scene_lights")) else {
-            // No `LightComponent` has ever been inserted this session: clear
-            // light lists/counts to avoid stale data usage.
+        // Same preference as `prepare()`: SceneDB-direct when present, else
+        // `ctx.scene.lights` -- production's real, actively-populated light
+        // source (see `light_mode_direct_index`'s doc).
+        let scene_lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let use_direct_index = scene_lights_handle.is_some();
+        let lights_buf = scene_lights_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.scene.lights);
+        let light_entity_indices_buf = ctx.scene.light_entity_indices;
+        let movable_light_count = ctx.scene.movable_light_count;
+
+        if !use_direct_index && movable_light_count == 0 {
+            // No active movable lights via either source: clear light
+            // lists/counts to avoid stale data usage. Static/stationary
+            // lights are baked and don't need runtime culling.
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
             return Ok(());
-        };
-        let lights_buf = &lights_handle.buffer;
+        }
+
         // Fallback mirrors `ForwardLitPass`'s: before any entity has a
         // `Transform` yet, bind *some* valid buffer so bind-group creation
         // can't fail -- `params.num_lights` is 0 whenever `transforms` would
@@ -330,10 +359,16 @@ impl RenderPass for LightCullPass {
         let transforms_buf = ctx.scene.transforms.unwrap_or(ctx.scene.camera);
 
         // ── Light culling cache: skip compute if scene static ─────────────────
-        // Use generation counters to detect actual data changes (not pointer addresses).
+        // Use generation counters to detect actual data changes (not pointer
+        // addresses) for the CPU-resolved path; the SceneDB-direct path uses
+        // its buffer's own epoch instead, since nothing else identifies "did
+        // the row data change" for it.
         let camera_gen = ctx.scene.camera_generation;
+        let lights_gen = scene_lights_handle
+            .map(|h| h.epoch)
+            .unwrap_or(ctx.scene.movable_lights_generation);
 
-        let cache_key = (camera_gen, lights_handle.epoch, transforms_buf as *const _ as usize as u64);
+        let cache_key = (camera_gen, lights_gen, movable_light_count, use_direct_index);
 
         // `self.width/height` are internal-resolution values maintained by
         // on_resize. ctx.width/height are full output resolution, so do not
@@ -351,8 +386,9 @@ impl RenderPass for LightCullPass {
 
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
+        let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
         let transforms_ptr = transforms_buf as *const _ as usize;
-        let key = (camera_ptr, lights_ptr, transforms_ptr);
+        let key = (camera_ptr, lights_ptr, light_entity_indices_ptr, transforms_ptr);
 
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -377,10 +413,14 @@ impl RenderPass for LightCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: self.tile_light_lists.as_entire_binding(),
+                        resource: light_entity_indices_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
+                        resource: self.tile_light_lists.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
                         resource: self.tile_light_counts.as_entire_binding(),
                     },
                 ],

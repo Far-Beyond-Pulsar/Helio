@@ -27,6 +27,7 @@ helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
+helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
 helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
 helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }

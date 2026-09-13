@@ -59,7 +59,6 @@ impl DecalPass {
     pub fn new(
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        _decal_buf: &wgpu::Buffer,
         _camera_buf: &wgpu::Buffer,
         _w: u32,
         _h: u32,
@@ -657,19 +656,13 @@ mod tests {
                 panic!("Decal {backend} validation error: {error:?}");
             }));
 
-            let decals = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Decal Portability Decals"),
-                size: 256,
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
             let camera = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Decal Portability Camera"),
                 size: 512,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
-            let _pass = DecalPass::new(&device, &queue, &decals, &camera, 1280, 720);
+            let _pass = DecalPass::new(&device, &queue, &camera, 1280, 720);
         }
 
         adapters.len()

@@ -18,7 +18,6 @@ const COLOR_POST_PROCESS: [f32; 4] = [0.75, 0.4, 1.0, 1.0]; // violet
 const COLOR_POST_PROCESS_BLEND: [f32; 4] = [0.45, 0.25, 0.6, 1.0]; // dim violet
 const COLOR_WATER: [f32; 4] = [0.2, 0.55, 1.0, 1.0]; // blue
 const COLOR_WATER_HITBOX: [f32; 4] = [0.2, 0.9, 0.8, 1.0]; // teal
-const COLOR_DECAL: [f32; 4] = [1.0, 0.5, 0.2, 1.0]; // orange
 const COLOR_FOLIAGE: [f32; 4] = [0.45, 0.85, 0.25, 1.0]; // green
 const COLOR_FOLIAGE_INTERACTOR: [f32; 4] = [0.85, 1.0, 0.4, 1.0]; // pale green
 
@@ -232,12 +231,8 @@ impl super::Scene {
             );
         }
 
-        // Decals project through a [-1,1] local cube, and GpuDecal.transform is
-        // world→local (decal_collect.wgsl:111), so it inverts to draw.
-        for (_, rec) in self.decals.iter_with_handles() {
-            let world_to_local = Mat4::from_cols_array(&rec.gpu.transform);
-            sink.wire_box(world_to_local.inverse(), Vec3::ONE, COLOR_DECAL);
-        }
+        // Decals are SceneDB-only now (see `helio_pass_decal`); no central
+        // record to draw a gizmo from here.
 
         // Voxel volumes — the octree root's extent, placed by the volume's
         // transform, so a rotated volume outlines correctly.

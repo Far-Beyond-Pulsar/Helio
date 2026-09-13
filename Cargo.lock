@@ -1563,6 +1563,7 @@ dependencies = [
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
  "helio-pass-light-cull",
+ "helio-pass-object-batch",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
@@ -1806,6 +1807,20 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-object-batch"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-gbuffer",
+ "libhelio",
+ "log",
+ "pollster 0.4.0",
  "pulsar_scenedb",
  "wgpu",
 ]

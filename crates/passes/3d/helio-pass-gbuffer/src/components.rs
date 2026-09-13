@@ -104,6 +104,13 @@ pub struct StaticObjectComponent {
     pub material_generation: u32,
     #[gpu]
     pub transform: [[f32; 4]; 4],
+    /// Previous frame's `transform`, for TAA/TSR motion vectors. Equal to
+    /// `transform` (zero apparent velocity) the frame this row is first
+    /// inserted or whenever a caller uses [`Self::with_transform`] without
+    /// tracking real per-frame motion -- a quality simplification (a
+    /// stationary-looking first frame), never a correctness one.
+    #[gpu]
+    pub prev_transform: [[f32; 4]; 4],
     #[gpu]
     pub normal_mat: [[f32; 4]; 3],
     #[gpu]
@@ -148,6 +155,7 @@ impl StaticObjectComponent {
             material_slot: material.slot(),
             material_generation: material.generation(),
             transform: transform.to_cols_array_2d(),
+            prev_transform: transform.to_cols_array_2d(),
             normal_mat: normal,
             bounds,
             index_count: slice.index_count,
@@ -182,6 +190,7 @@ impl StaticObjectComponent {
     /// static asset properties and are carried over unchanged -- moving an
     /// object never needs to re-resolve them.
     pub fn with_transform(mut self, transform: glam::Mat4, bounds: [f32; 4]) -> Self {
+        self.prev_transform = self.transform;
         self.transform = transform.to_cols_array_2d();
         self.normal_mat = normal_matrix_cols(transform);
         self.bounds = bounds;

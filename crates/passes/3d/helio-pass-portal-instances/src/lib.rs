@@ -333,10 +333,11 @@ impl RenderPass for PortalInstancePass {
         builder.read("gbuffer");
         // Written by helio-pass-portal-mask, which must run before this pass.
         builder.read("portal_mask");
+        builder.read("object_batch");
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "portal_mask"]
+        &["gbuffer", "portal_mask", "object_batch"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -429,7 +430,12 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_count;
+        self.draw_count = ctx
+            .frame_resources
+            .object_batch
+            .get()
+            .map(|b| b.draw_count)
+            .unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,
@@ -476,10 +482,14 @@ impl RenderPass for PortalInstancePass {
             return Ok(());
         };
 
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
             ctx.scene.camera as *const _ as usize,
-            ctx.scene.instances as *const _ as usize,
+            batch.instances as *const _ as usize,
             ctx.scene.coordinate_spaces as *const _ as usize,
             ctx.scene.portal_views as *const _ as usize,
             ctx.scene.portal_chains as *const _ as usize,
@@ -502,7 +512,7 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,

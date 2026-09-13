@@ -23,6 +23,14 @@ struct Globals {
     num_tiles_y:       u32,
     screen_width:      f32,
     screen_height:     f32,
+    // 1 when `lights[i]`/`transforms[i]` share the same raw entity index
+    // (SceneDB-direct); 0 when `lights` is `ctx.scene.lights`, a freshly
+    // rebuilt dense array whose entry `i` needs `light_entity_indices[i]`
+    // to find its real entity. See `light_entity_indices`'s binding doc.
+    light_mode_direct_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 const TILE_SIZE: u32 = 16u;
@@ -128,17 +136,21 @@ struct Transform {
 @group(0) @binding(4) var<storage, read>    lights:            array<GpuLight>;
 @group(0) @binding(5) var<storage, read>    tile_light_lists:  array<u32>;
 @group(0) @binding(6) var<storage, read>    tile_light_counts: array<u32>;
-// SceneDB's live `Transform` buffer. `lights` is itself a SceneDB
-// `#[gpu(layout = packed)]` buffer, entity-indexed (row `i` is whichever
-// entity has raw index `i`) -- exactly the same indexing `transforms` uses,
-// so `light_idx` (a raw index into `lights`) is already the correct index
-// here with no indirection needed. This is the ONLY source of light world
+// Parallel to `lights` when `globals.light_mode_direct_index == 0` -- entry
+// `i` is the real SceneDB entity index `lights[i]` was built from this frame
+// (`ctx.scene.lights` is a freshly-rebuilt dense array every frame, not
+// itself entity-indexed). Ignored (identity) when
+// `light_mode_direct_index == 1`, since `lights` is then the SceneDB
+// `"scene_lights"` buffer directly, already entity-indexed the same way
+// `transforms` is.
+@group(0) @binding(7) var<storage, read>    light_entity_indices: array<u32>;
+// SceneDB's live `Transform` buffer. This is the ONLY source of light world
 // position/direction -- `GpuLight.position_range`/`direction_outer` carry a
 // stale/zeroed placeholder for these fields (see
 // `LightComponentGpuMirror::to_helio_gpu_light`'s doc, helio-component);
 // `.range`/`.outer_angle` (the `.w` components) are real light properties,
 // not positional data, and still come from `lights` as before.
-@group(0) @binding(7) var<storage, read>    transforms: array<Transform>;
+@group(0) @binding(8) var<storage, read>    transforms: array<Transform>;
 
 @group(1) @binding(0) var<storage, read>    materials:         array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures: array<MaterialTextureData>;
@@ -470,10 +482,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
         let light = lights[light_idx];
         // World position/direction come from SceneDB's own Transform buffer,
-        // at the SAME raw index -- not from `light`'s own (stale/zeroed)
-        // `position_range`/`direction_outer` xyz. See the `transforms`
-        // binding's own doc above for why.
-        let transform  = transforms[light_idx];
+        // not from `light`'s own (stale/zeroed) `position_range`/
+        // `direction_outer` xyz -- see the `transforms` binding's own doc.
+        // The entity index to look it up under depends on which light
+        // source is active this frame; see `light_entity_indices`'s doc.
+        let entity_idx = select(light_entity_indices[light_idx], light_idx, globals.light_mode_direct_index != 0u);
+        let transform  = transforms[entity_idx];
         let light_pos  = vec3<f32>(transform.position[0], transform.position[1], transform.position[2]);
         let light_dir  = light_direction_from_rotation(transform.rotation);
         if light.light_type != 0u {

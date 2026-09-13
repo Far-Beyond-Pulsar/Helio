@@ -21,6 +21,7 @@ use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
+use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
@@ -108,6 +109,15 @@ fn add_common_early_passes(
 ) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
     let gpu_scene = scene.gpu_scene();
     let camera_buf = gpu_scene.camera.buffer();
+
+    // Must run before every pass below — they all read `object_batch`
+    // (instances/draw_calls/indirect/shadow partitions) published by this
+    // pass from SceneDB's `StaticObjectComponent` rows. Ordering among
+    // `add_pass` calls doesn't matter to the graph's own scheduler (it
+    // topologically sorts on declared reads/writes), but this stays first
+    // for readability, matching its role as the scene's sole GPU-driven
+    // object-batch producer.
+    graph.add_pass(Box::new(ObjectBatchPass::new(device)));
 
     let hiz_pass = HiZBuildPass::new(device, queue, w, h);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
@@ -694,10 +704,11 @@ fn build_default_graph_internal(
     let camera_buf = scene.gpu_scene().camera.buffer();
 
     // Decal pass — projects decals into the G-buffer after it's been written.
-    // Runs as a compute pass between GBuffer and deferred lighting.
-    let decal_buf = scene.gpu_scene().decals.buffer();
+    // Runs as a compute pass between GBuffer and deferred lighting. Reads
+    // SceneDB's `"decals"` buffer directly at execute time; no central
+    // buffer to pass in here.
     graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
+        device, queue, camera_buf, iw, ih,
     )));
 
     // SSR pass — screen-space reflections for glossy/metallic surfaces.
@@ -776,12 +787,10 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     // Transparent pass — alpha-blended geometry (simple fixed shader).
-    let camera_buf = scene.gpu_scene().camera.buffer();
-    let instances_buf = scene.gpu_scene().instances.buffer();
+    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
+    // resources at execute time, so no buffers are passed in here.
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
         device,
-        camera_buf,
-        instances_buf,
         config.surface_format,
     )));
 
@@ -973,10 +982,9 @@ fn build_fxaa_graph_internal(
 
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
+        device, queue, camera_buf, iw, ih,
     )));
 
     // Both off by default; see the notes in the primary graph builder above.
@@ -1114,10 +1122,9 @@ fn build_hlfs_graph_internal(
 
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
+        device, queue, camera_buf, iw, ih,
     )));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
@@ -1341,10 +1348,9 @@ fn build_fxaa_hlfs_graph_internal(
 
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, w, h,
+        device, queue, camera_buf, w, h,
     )));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
@@ -1643,12 +1649,10 @@ fn build_forward_graph_internal(
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     // Transparent pass — alpha-blended geometry (simple fixed shader).
-    let camera_buf = scene.gpu_scene().camera.buffer();
-    let instances_buf = scene.gpu_scene().instances.buffer();
+    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
+    // resources at execute time, so no buffers are passed in here.
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
         device,
-        camera_buf,
-        instances_buf,
         config.surface_format,
     )));
 

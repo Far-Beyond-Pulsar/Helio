@@ -247,6 +247,14 @@ impl RenderPass for PortalCullPass {
         "PortalCull"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["object_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -257,7 +265,12 @@ impl RenderPass for PortalCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_count;
+        self.draw_count = ctx
+            .frame_resources
+            .object_batch
+            .get()
+            .map(|b| b.draw_count)
+            .unwrap_or(0);
         self.chain_count = ctx.scene.portal_chain_count;
         let planes = extract_frustum_planes(ctx.scene.camera_data.view_proj);
 
@@ -291,11 +304,14 @@ impl RenderPass for PortalCullPass {
         if self.draw_count == 0 || self.chain_count == 0 {
             return Ok(());
         }
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
 
         let key = (
             ctx.scene.camera as *const wgpu::Buffer as usize,
-            ctx.scene.instances as *const wgpu::Buffer as usize,
-            ctx.scene.draw_calls as *const wgpu::Buffer as usize,
+            batch.instances as *const wgpu::Buffer as usize,
+            batch.draw_calls as *const wgpu::Buffer as usize,
             ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
             ctx.scene.portal_views as *const wgpu::Buffer as usize,
             ctx.scene.portal_chains as *const wgpu::Buffer as usize,
@@ -315,11 +331,11 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                        resource: batch.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,

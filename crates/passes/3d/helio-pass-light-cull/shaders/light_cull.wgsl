@@ -37,7 +37,11 @@ struct LightCullParams {
     num_lights:    u32,
     screen_width:  u32,
     screen_height: u32,
-    _pad0:         u32,
+    // 1 when `lights[i]`/`transforms[i]` share the same raw entity index
+    // (SceneDB-direct); 0 when `lights` is `ctx.scene.lights`, a freshly
+    // rebuilt dense array needing `light_entity_indices[i]`. See that
+    // binding's doc.
+    light_mode_direct_index: u32,
     _pad1:         u32,
     _pad2:         u32,
 }
@@ -83,10 +87,14 @@ struct Transform {
     scale:    array<f32, 3>,
 }
 @group(0) @binding(3) var<storage, read> transforms: array<Transform>;
+// Parallel to `lights` when `params.light_mode_direct_index == 0` -- entry
+// `i` is the real SceneDB entity index `lights[i]` was built from this frame.
+// Ignored (identity) when `light_mode_direct_index == 1`.
+@group(0) @binding(4) var<storage, read> light_entity_indices: array<u32>;
 
 // Output: flat arrays, one slot per tile
-@group(0) @binding(4) var<storage, read_write> tile_light_lists:  array<u32>;
-@group(0) @binding(5) var<storage, read_write> tile_light_counts: array<u32>;
+@group(0) @binding(5) var<storage, read_write> tile_light_lists:  array<u32>;
+@group(0) @binding(6) var<storage, read_write> tile_light_counts: array<u32>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -177,10 +185,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         // Transform light position to view space. Position comes from
-        // SceneDB's own `Transform` row for this same entity index, not
-        // from `light.position_range.xyz` -- see the `transforms` binding's
-        // doc above.
-        let t = transforms[i];
+        // SceneDB's own `Transform` row, not from `light.position_range.xyz`
+        // -- see the `transforms` binding's doc above. Which entity index to
+        // read it at depends on which light source is active this frame;
+        // see `light_entity_indices`'s doc.
+        let entity_idx = select(light_entity_indices[i], i, params.light_mode_direct_index != 0u);
+        let t = transforms[entity_idx];
         let world_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
         let pos_vs = (cameras[0].view * vec4<f32>(world_pos, 1.0)).xyz;
         let range  = light.position_range.w;

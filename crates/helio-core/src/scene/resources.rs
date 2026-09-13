@@ -132,9 +132,12 @@ pub struct SceneResources<'a> {
     /// CPU-side frame projection for passes that need scalar camera values
     /// while retaining the GPU buffer as the binding resource.
     pub camera_data: &'a GpuCameraUniforms,
-    pub instances: &'a wgpu::Buffer,
-    pub aabbs: &'a wgpu::Buffer,
-    pub draw_calls: &'a wgpu::Buffer,
+    // `instances`/`aabbs`/`draw_calls` — removed. These were per-object-type
+    // (static mesh) data; central crates must not know about any particular
+    // scene-object type. Owning passes now get this from
+    // `libhelio::FrameResources::object_batch`, published by
+    // `helio-pass-object-batch` from SceneDB's `StaticObjectComponent` rows
+    // -- see `ObjectBatchFrameData`.
     pub lights: &'a wgpu::Buffer,
     /// Parallel to `lights` -- entry `i` is the SceneDB `Entity` index
     /// `lights[i]` was built from this frame. See `GpuLightEntityIndexBuffer`'s
@@ -144,23 +147,16 @@ pub struct SceneResources<'a> {
     /// SceneDB's `Transform` buffer, if `Scene::rebind_transform_buffer`
     /// has been called yet -- see that method's own doc.
     pub transforms: Option<&'a wgpu::Buffer>,
-    pub decals: &'a wgpu::Buffer,
-    pub decal_count: u32,
     pub materials: &'a wgpu::Buffer,
     /// Read-only material projection for pass-local classification.
     pub material_data: &'a [GpuMaterial],
     pub shadow_matrices: &'a wgpu::Buffer,
-    pub indirect: &'a wgpu::Buffer,
-    pub visibility: &'a wgpu::Buffer,
-    /// Per-draw-call-group compacted original instance slots surviving GPU
-    /// frustum culling (see `IndirectDispatchPass`). Passes drawing through
-    /// `indirect`/`draw_calls` should index `instances` through this buffer
-    /// (`instances[compacted_indices[instance_index]]`) rather than directly.
-    pub compacted_indices: &'a wgpu::Buffer,
-    /// Final surviving instance slots after frustum + Hi-Z occlusion culling.
-    /// Consumers drawing through `indirect`/`draw_calls` should use this one,
-    /// not `compacted_indices` (which is frustum-only, an intermediate stage).
-    pub compacted_indices_2: &'a wgpu::Buffer,
+    // `indirect`/`visibility`/`compacted_indices`/`compacted_indices_2` —
+    // removed for the same reason as `instances`/`aabbs`/`draw_calls` above.
+    // Owning passes now read `IndirectDispatchFrameData`/`CulledBatchFrameData`
+    // from `libhelio::FrameResources` (published by `helio-pass-indirect-
+    // dispatch`/`helio-pass-occlusion-cull`, each of which now owns its
+    // output buffers directly instead of writing into central storage).
     /// Coordinate-space transforms (current frame). Slot 0 = identity. Shaders
     /// index this with the id packed into `GpuInstanceData.flags` bits 8-15
     /// (`libhelio::coordinate_space`) to place sublevel/portal content.
@@ -168,8 +164,7 @@ pub struct SceneResources<'a> {
     /// Coordinate-space transforms as of the previous frame — same indexing as
     /// `coordinate_spaces`, used to compute correct per-space motion vectors.
     pub coordinate_spaces_prev: &'a wgpu::Buffer,
-    pub instance_count: u32,
-    pub draw_count: u32,
+    // `instance_count`/`draw_count` — removed; see `ObjectBatchFrameData`.
     pub light_count: u32,
     pub shadow_count: u32,
     /// Generation counter for movable objects (increments when any Movable object moves)
@@ -179,18 +174,10 @@ pub struct SceneResources<'a> {
     /// Generation counter for camera (increments when camera view/projection changes)
     pub camera_generation: u64,
 
-    // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
-    // Both passes use `instances` (main buffer) — only the indirect call lists differ.
-    /// Indirect draw commands for Static/Stationary objects (first_instance into main `instances`).
-    pub shadow_static_indirect: &'a wgpu::Buffer,
-    /// Indirect draw commands for Movable objects (first_instance into main `instances`).
-    pub shadow_movable_indirect: &'a wgpu::Buffer,
-    /// Number of draw calls in shadow_static_indirect.
-    pub shadow_static_draw_count: u32,
-    /// Number of draw calls in shadow_movable_indirect.
-    pub shadow_movable_draw_count: u32,
-    /// Increments when static object topology changes; triggers static atlas re-render.
-    pub static_objects_generation: u64,
+    // `shadow_static_indirect`/`shadow_movable_indirect`/
+    // `shadow_static_draw_count`/`shadow_movable_draw_count`/
+    // `static_objects_generation` — removed; see `ObjectBatchFrameData`'s
+    // fields of the same names.
     /// Number of movable lights in the lights buffer (static/stationary excluded from runtime).
     pub movable_light_count: u32,
     /// Per-caster dirty generation counters (one per shadow caster slot, 42 max).
@@ -205,15 +192,9 @@ pub struct SceneResources<'a> {
     pub voxel_volume_count: u32,
     pub voxel_volumes_generation: u64,
 
-    /// Material class ranges for the GBuffer pass: [(class, graph_hash, start, count), ...]
-    /// Each range is uniform in both material_class and graph_hash so a single
-    /// PSO works for all indirect entries it covers.
-    /// Built during scene flush.
-    pub material_class_ranges: &'a [(u32, u64, u32, u32)],
-    pub transparent_material_class_ranges: &'a [(u32, u64, u32, u32)],
-    /// Forward-shaded material class ranges (excluded from GBuffer pass).
-    pub forward_material_class_ranges: &'a [(u32, u64, u32, u32)],
-
+    // `material_class_ranges`/`transparent_material_class_ranges`/
+    // `forward_material_class_ranges` — removed; see `ObjectBatchFrameData`'s
+    // `opaque_ranges`/`transparent_ranges`/`forward_ranges`.
     /// Graph hashes indexed by material slot. Populated during flush.
     pub material_graph_hashes: &'a [u64],
 
