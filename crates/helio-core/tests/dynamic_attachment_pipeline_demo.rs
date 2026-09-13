@@ -213,8 +213,7 @@ fn dynamic_attachment_and_pipeline_cache_round_trip() {
         graph.add_pass(Box::new(DemoPass::new(&device)));
         graph.lock(64, 64);
 
-        let scene = helio_core::GpuScene::new(device.clone(), queue.clone());
-        let scene_input = support::SceneInputAdapter(&scene);
+        let scene_input = support::SceneInputAdapter::new(device.clone(), queue.clone());
         let target_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Demo Swapchain Stand-in"),
             size: wgpu::Extent3d {

@@ -687,7 +687,9 @@ impl RenderGraph {
                         device: scene.device(),
                         queue: scene.queue(),
                         frame_num: scene.frame_count(),
-                        scene: scene.resources(),
+                        camera: scene.camera(),
+                        camera_data: scene.camera_data(),
+                        camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
                         frame_resources: visible,
                         registry: &*registry,
@@ -704,7 +706,9 @@ impl RenderGraph {
             let registry_ref: &libhelio::ResourceRegistry<'_> = &*registry;
             let device = scene.device().clone();
             let queue = scene.queue().clone();
-            let scene_resources = scene.resources();
+            let camera = scene.camera();
+            let camera_data = scene.camera_data();
+            let camera_generation = scene.camera_generation();
             let scene_buffers = scene.scene_buffers();
             let pipelines = pipeline_registries;
             let width = internal_w;
@@ -723,7 +727,6 @@ impl RenderGraph {
                     let pipeline_registry = &pipelines[pass_index];
                     let worker_device = device.clone();
                     let worker_queue = queue.clone();
-                    let worker_scene = scene_resources;
                     handles.push(scope.spawn(move || {
                         let mut encoder =
                             worker_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -758,7 +761,9 @@ impl RenderGraph {
                                 compute_encoder_ptr: &mut compute_encoder,
                                 target,
                                 depth,
-                                scene: worker_scene,
+                                camera,
+                                camera_data,
+                                camera_generation,
                                 scene_buffers,
                                 profiler: &mut local_profiler,
                                 frame_num,
@@ -788,7 +793,9 @@ impl RenderGraph {
                                 compute_encoder_ptr: &mut compute_encoder,
                                 target,
                                 depth,
-                                scene: worker_scene,
+                                camera,
+                                camera_data,
+                                camera_generation,
                                 scene_buffers,
                                 profiler: &mut local_profiler,
                                 frame_num,
@@ -971,13 +978,14 @@ impl RenderGraph {
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
                         pass_encoder.execute_bundles(std::iter::once(bundle));
                     } else {
-                        let scene_resources = scene.resources();
                         let mut ctx = PassContext {
                             encoder_ptr: &mut encoder as *mut _,
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
-                            scene: scene_resources,
+                            camera: scene.camera(),
+                            camera_data: scene.camera_data(),
+                            camera_generation: scene.camera_generation(),
                             scene_buffers: scene.scene_buffers(),
                             profiler: &mut self.profiler,
                             frame_num: scene.frame_count(),
@@ -1016,7 +1024,9 @@ impl RenderGraph {
                         device: scene.device(),
                         queue: scene.queue(),
                         frame_num: scene.frame_count(),
-                        scene: scene.resources(),
+                        camera: scene.camera(),
+                        camera_data: scene.camera_data(),
+                        camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
                         frame_resources: &visible_frame_resources,
                         registry: &*registry,
@@ -1105,13 +1115,14 @@ impl RenderGraph {
                             chain_rp = Some(std::mem::ManuallyDrop::new(rp));
                         }
 
-                        let scene_resources = scene.resources();
                         let mut ctx = PassContext {
                             encoder_ptr: std::ptr::addr_of_mut!(encoder),
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
-                            scene: scene_resources,
+                            camera: scene.camera(),
+                            camera_data: scene.camera_data(),
+                            camera_generation: scene.camera_generation(),
                             scene_buffers: scene.scene_buffers(),
                             profiler: &mut self.profiler,
                             frame_num: scene.frame_count(),
@@ -1186,13 +1197,14 @@ impl RenderGraph {
                             enc.begin_render_pass(&standalone_desc)
                         };
                         {
-                            let scene_resources = scene.resources();
                             let mut ctx = PassContext {
                                 encoder_ptr: std::ptr::addr_of_mut!(encoder),
                                 compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                                 target,
                                 depth,
-                                scene: scene_resources,
+                                camera: scene.camera(),
+                                camera_data: scene.camera_data(),
+                                camera_generation: scene.camera_generation(),
                                 scene_buffers: scene.scene_buffers(),
                                 profiler: &mut self.profiler,
                                 frame_num: scene.frame_count(),
@@ -1233,13 +1245,14 @@ impl RenderGraph {
                         }
                     }
 
-                    let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
                         compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                         target,
                         depth,
-                        scene: scene_resources,
+                        camera: scene.camera(),
+                        camera_data: scene.camera_data(),
+                        camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
                         profiler: &mut self.profiler,
                         frame_num: scene.frame_count(),

@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use helio_core::scene::GrowableBuffer;
-use helio_core::GpuScene;
+use crate::scene::gpu_storage::GpuScene;
+use crate::scene::gpu_storage::GrowableBuffer;
 use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
 

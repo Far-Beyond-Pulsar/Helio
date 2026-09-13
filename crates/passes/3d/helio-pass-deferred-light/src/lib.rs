@@ -918,7 +918,12 @@ impl RenderPass for DeferredLightPass {
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.movable_light_count)
+                .unwrap_or(0), // Only movable lights (static/stationary are baked)
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
@@ -1169,11 +1174,23 @@ impl RenderPass for DeferredLightPass {
             .get()
             .unwrap_or(&self.fallback_planar_view);
 
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices_buf = ctx
+            .resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
         let scene_key = [
-            ctx.scene.lights as *const _ as usize,
+            lights_buf as *const _ as usize,
             shadow_view as *const _ as usize,
             shadow_sampler as *const _ as usize,
-            ctx.scene.shadow_matrices as *const _ as usize,
+            shadow_matrices_buf as *const _ as usize,
             rc_view as *const _ as usize,
             &self.shadow_depth_sampler as *const _ as usize,
             caustics_view as *const _ as usize,
@@ -1192,7 +1209,7 @@ impl RenderPass for DeferredLightPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1204,7 +1221,7 @@ impl RenderPass for DeferredLightPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        resource: shadow_matrices_buf.as_entire_binding(),
                     },
                     texture_view_entry(5, rc_view),
                     wgpu::BindGroupEntry {

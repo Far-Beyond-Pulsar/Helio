@@ -239,10 +239,16 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
         if let Some(profiler) = &mut shared.material_profiler {
             if !profiler.profiling_complete {
+                let lights_buf = ctx
+                    .resources
+                    .lights
+                    .get()
+                    .map(|l| l.lights)
+                    .unwrap_or(ctx.camera);
                 profiler.profile_next(
                     ctx.device,
                     unsafe { &mut *ctx.encoder_ptr },
-                    ctx.scene.lights,
+                    lights_buf,
                 );
 
                 profiler.read_current_sample_blocking(ctx.device, ctx.owns_device);

@@ -514,8 +514,13 @@ impl RenderPass for HlfsPass {
         builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        let camera = *ctx.scene.camera_data;
-        let light_count = ctx.scene.movable_light_count;
+        let camera = *ctx.camera_data;
+        let light_count = ctx
+            .frame_resources
+            .lights
+            .get()
+            .map(|l| l.movable_light_count)
+            .unwrap_or(0);
         let continuity = self
             .previous_frame
             .is_some_and(|f| f.wrapping_add(1) == ctx.frame_num);
@@ -552,7 +557,12 @@ impl RenderPass for HlfsPass {
                 && ctx.frame_resources.gbuffer_lightmap_uv.get().is_some())
                 as u32
                 | (u32::from(
-                    self.previous_light_generation == Some(ctx.scene.movable_lights_generation),
+                    self.previous_light_generation
+                        == ctx
+                            .frame_resources
+                            .lights
+                            .get()
+                            .map(|l| l.movable_lights_generation),
                 ) << 1),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
@@ -566,7 +576,11 @@ impl RenderPass for HlfsPass {
         self.previous_camera = Some(camera);
         self.previous_frame = Some(ctx.frame_num);
         self.previous_light_count = Some(light_count);
-        self.previous_light_generation = Some(ctx.scene.movable_lights_generation);
+        self.previous_light_generation = ctx
+            .frame_resources
+            .lights
+            .get()
+            .map(|l| l.movable_lights_generation);
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
@@ -578,10 +592,22 @@ impl RenderPass for HlfsPass {
                 helio_core::Error::InvalidPassConfig("HLFS requires pre_aa".into())
             })?;
         let f = &self.fallbacks;
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices_buf = ctx
+            .resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
         let inputs = Inputs {
-            camera: ctx.scene.camera,
-            lights: ctx.scene.lights,
-            shadow_matrices: ctx.scene.shadow_matrices,
+            camera: ctx.camera,
+            lights: lights_buf,
+            shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx.resources.shadow_atlas.get().unwrap_or(&f.shadow_view),
             shadow_sampler: ctx
                 .resources

@@ -15,7 +15,13 @@ impl SceneInput for FrontendProjection {
     fn frame_count(&self) -> u64 {
         0
     }
-    fn resources(&self) -> helio_core::SceneResources<'_> {
+    fn camera(&self) -> &wgpu::Buffer {
+        todo!()
+    }
+    fn camera_data(&self) -> &helio_core::GpuCameraUniforms {
+        todo!()
+    }
+    fn camera_generation(&self) -> u64 {
         todo!()
     }
     fn scene_buffers(&self) -> &SceneBufferProjection {

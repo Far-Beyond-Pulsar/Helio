@@ -102,7 +102,8 @@
 //! ```
 
 use crate::graph::PipelineRegistry;
-use crate::{Profiler, SceneBufferProjection, SceneResources};
+use crate::{Profiler, SceneBufferProjection};
+use libhelio::GpuCameraUniforms;
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -211,9 +212,26 @@ pub struct PassContext<'a> {
     /// Depth/stencil buffer.
     pub depth: &'a wgpu::TextureView,
 
-    /// Zero-copy scene resources (lights, meshes, materials).
-    pub scene: SceneResources<'a>,
-    /// Type-erased SceneDB GPU columns supplied by the frontend.
+    /// The active camera's GPU-bound uniform buffer -- see
+    /// `SceneInput::camera`'s doc for why this is a first-class field rather
+    /// than part of `scene_buffers`.
+    pub camera: &'a wgpu::Buffer,
+    /// CPU-side mirror of the same camera data.
+    pub camera_data: &'a GpuCameraUniforms,
+    /// Increments whenever the camera's view/projection changes -- passes
+    /// that cache camera-dependent GPU state (Hi-Z, SSR, ...) use this to
+    /// detect the change cheaply instead of comparing matrices.
+    pub camera_generation: u64,
+
+    /// Type-erased SceneDB GPU columns supplied by the frontend. The sole
+    /// scene-data seam: `helio-core` has zero knowledge of any specific
+    /// scene-object type past this point -- a pass resolves its own
+    /// `BufferKey`s and interprets the bytes itself. (Formerly there was
+    /// also a `scene: SceneResources<'a>` field here with named fields per
+    /// type -- lights, camera, materials, shadow matrices, coordinate
+    /// spaces, voxels, portals -- removed; every such field's replacement
+    /// data source, if one exists yet, lives behind a `BufferKey` or a
+    /// `libhelio::FrameResources` slot published by the pass that owns it.)
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Profiler (automatic - injected by RenderGraph).
@@ -591,12 +609,15 @@ pub struct PrepareContext<'a> {
     /// Useful for time-based effects (e.g., animations, TAA jitter).
     pub frame_num: u64,
 
-    /// Zero-copy scene resource projection for prepare().
-    ///
-    /// Prepare and execute deliberately consume the same pass-owned projection;
-    /// the core never reaches back into a concrete scene container.
-    pub scene: SceneResources<'a>,
-    /// Type-erased SceneDB GPU columns supplied by the frontend.
+    /// The active camera -- see `PassContext::camera`'s doc.
+    pub camera: &'a wgpu::Buffer,
+    /// CPU-side mirror of the same camera data.
+    pub camera_data: &'a GpuCameraUniforms,
+    /// See `PassContext::camera_generation`'s doc.
+    pub camera_generation: u64,
+
+    /// Type-erased SceneDB GPU columns supplied by the frontend -- see
+    /// `PassContext::scene_buffers`'s doc; the same field, same removal.
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Per-frame transient resource views (for passes that need them in prepare).

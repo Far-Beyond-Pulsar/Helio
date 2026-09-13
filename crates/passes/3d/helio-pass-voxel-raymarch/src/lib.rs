@@ -326,13 +326,23 @@ impl VoxelRayMarchPass {
     }
 
     fn rebuild_compute_bg(&mut self, ctx: &PassContext) {
+        let voxels = ctx.resources.voxels.get();
+        let voxel_volumes_buf = voxels.map(|v| v.voxel_volumes).unwrap_or(ctx.camera);
+        let voxel_brick_pool_buf = voxels.map(|v| v.voxel_brick_pool).unwrap_or(ctx.camera);
+        let voxel_data_pool_buf = voxels.map(|v| v.voxel_data_pool).unwrap_or(ctx.camera);
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VoxelRayMarch Compute BG"),
             layout: &self.compute_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.camera.as_entire_binding(),
+                    resource: ctx.camera.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -340,15 +350,15 @@ impl VoxelRayMarchPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: ctx.scene.voxel_volumes.as_entire_binding(),
+                    resource: voxel_volumes_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: ctx.scene.voxel_brick_pool.as_entire_binding(),
+                    resource: voxel_brick_pool_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: ctx.scene.voxel_data_pool.as_entire_binding(),
+                    resource: voxel_data_pool_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -360,12 +370,12 @@ impl VoxelRayMarchPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: ctx.scene.lights.as_entire_binding(),
+                    resource: lights_buf.as_entire_binding(),
                 },
             ],
         });
         self.compute_bg = Some(bg);
-        self.compute_bg_key = Some(ctx.scene.camera_generation as usize);
+        self.compute_bg_key = Some(ctx.camera_generation as usize);
     }
 
     fn rebuild_shade_bg(&mut self, ctx: &PassContext) {
@@ -414,17 +424,26 @@ impl RenderPass for VoxelRayMarchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        if ctx.scene.voxel_volume_count != self.last_volume_count
-            || ctx.frame_num != self.params_frame
-        {
-            self.last_volume_count = ctx.scene.voxel_volume_count;
+        let voxel_volume_count = ctx
+            .frame_resources
+            .voxels
+            .get()
+            .map(|v| v.voxel_volume_count)
+            .unwrap_or(0);
+        if voxel_volume_count != self.last_volume_count || ctx.frame_num != self.params_frame {
+            self.last_volume_count = voxel_volume_count;
 
             let params = RayMarchParams {
                 width: self.width as f32,
                 height: self.height as f32,
                 time: ctx.frame_num as f32 * 0.016,
-                volume_count: ctx.scene.voxel_volume_count,
-                light_count: ctx.scene.light_count,
+                volume_count: voxel_volume_count,
+                light_count: ctx
+                    .frame_resources
+                    .lights
+                    .get()
+                    .map(|l| l.light_count)
+                    .unwrap_or(0),
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -437,11 +456,17 @@ impl RenderPass for VoxelRayMarchPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Skip when no voxel volumes are present (composited into default graph).
-        if ctx.scene.voxel_volume_count == 0 {
+        let voxel_volume_count = ctx
+            .resources
+            .voxels
+            .get()
+            .map(|v| v.voxel_volume_count)
+            .unwrap_or(0);
+        if voxel_volume_count == 0 {
             return Ok(());
         }
 
-        let gen = ctx.scene.camera_generation as usize;
+        let gen = ctx.camera_generation as usize;
         if self.compute_bg_key != Some(gen) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);
         }

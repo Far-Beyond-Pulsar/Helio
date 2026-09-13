@@ -186,7 +186,12 @@ impl RenderPass for ShadowMatrixPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = ShadowMatrixUniforms {
-            light_count: ctx.scene.light_count,
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0),
             shadow_atlas_size: self.shadow_atlas_size,
             _pad: [0; 2],
         };
@@ -196,7 +201,12 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = ctx.scene.movable_light_count; // Only movable lights (static/stationary shadows are baked)
+        let count = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.movable_light_count)
+            .unwrap_or(0); // Only movable lights (static/stationary shadows are baked)
         if count == 0 {
             return Ok(());
         }

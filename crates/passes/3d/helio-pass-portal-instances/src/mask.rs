@@ -241,7 +241,12 @@ impl RenderPass for PortalMaskPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx.scene.portal_view_count;
+        self.portal_count = ctx
+            .frame_resources
+            .portals
+            .get()
+            .map(|p| p.portal_view_count)
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -256,11 +261,14 @@ impl RenderPass for PortalMaskPass {
             );
             return Ok(());
         };
+        let Some(portal_data) = ctx.resources.portals.get() else {
+            return Ok(());
+        };
 
         // ── Sub-pass 1: stamp ────────────────────────────────────────────
         let stamp_key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            portal_data.portal_views as *const _ as usize,
         );
         if self.stamp_bind_group_key != Some(stamp_key) {
             self.stamp_bind_group =
@@ -270,11 +278,11 @@ impl RenderPass for PortalMaskPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: ctx.scene.portal_views.as_entire_binding(),
+                            resource: portal_data.portal_views.as_entire_binding(),
                         },
                     ],
                 }));

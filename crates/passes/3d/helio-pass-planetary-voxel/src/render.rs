@@ -1994,14 +1994,14 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             "Planetary Surface Visibility",
         );
 
-        let camera_key = ctx.scene.camera as *const _ as usize;
+        let camera_key = ctx.camera as *const _ as usize;
         if self.render_camera_key != Some(camera_key) {
             self.regular_meshlet_cull_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Planetary Regular Meshlet Cull Bind Group"),
                     layout: &self.regular_meshlet_cull_pipeline.get_bind_group_layout(0),
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.regular_cull_uniform),
                         buffer_entry(2, &self.state_buffer),
                         buffer_entry(3, &self.draw_page_buffer),
@@ -2019,7 +2019,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                         .transition_meshlet_cull_pipeline
                         .get_bind_group_layout(0),
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.transition_cull_uniform),
                         buffer_entry(2, &self.state_buffer),
                         buffer_entry(3, &self.draw_page_buffer),
@@ -2036,7 +2036,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     label: Some("Planetary Regular Surface Draw Bind Group"),
                     layout: &self.render_bind_group_layout,
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.draw_page_buffer),
                         buffer_entry(2, &self.regular_meshlet_draws),
                         buffer_entry(3, &self.debug_uniform),
@@ -2047,7 +2047,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     label: Some("Planetary Transition Surface Draw Bind Group"),
                     layout: &self.render_bind_group_layout,
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.draw_page_buffer),
                         buffer_entry(2, &self.transition_meshlet_draws),
                         buffer_entry(3, &self.debug_uniform),

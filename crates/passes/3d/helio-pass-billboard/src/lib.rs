@@ -495,7 +495,7 @@ impl RenderPass for BillboardPass {
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: ctx.scene.camera.as_entire_binding(),
+                                resource: ctx.camera.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,

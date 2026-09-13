@@ -467,7 +467,13 @@ impl RenderPass for ShadowPass {
         let Some(batch) = ctx.resources.object_batch.get() else {
             return Ok(());
         };
-        let face_count = (ctx.scene.shadow_count as usize)
+        let Some(shadow_data) = ctx.resources.shadow_matrices.get() else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let face_count = (shadow_data.shadow_count as usize)
             .min(self.atlas_layers as usize)
             .min(MAX_SHADOW_FACES);
         let static_draw_count = batch.shadow_static_draw_count;
@@ -496,7 +502,7 @@ impl RenderPass for ShadowPass {
         }
 
         let static_gen = batch.shadow_static_generation;
-        let shadow_count = ctx.scene.shadow_count;
+        let shadow_count = shadow_data.shadow_count;
         let caster_count = (face_count / 6).min(42);
 
         let need_static = self.static_atlas_cache_gen != Some(static_gen)
@@ -507,14 +513,14 @@ impl RenderPass for ShadowPass {
         let mut dirty_casters = [false; 42];
         let mut any_dirty_caster = false;
         for slot in 0..caster_count {
-            if ctx.scene.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
+            if shadow_data.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
                 dirty_casters[slot] = true;
                 any_dirty_caster = true;
             }
         }
 
         // O(1) CPU gate: did any movable object move this frame?
-        let objects_moved = ctx.scene.movable_objects_generation != self.last_movable_objects_gen;
+        let objects_moved = shadow_data.movable_objects_generation != self.last_movable_objects_gen;
 
         if !need_static && !any_dirty_caster && !objects_moved {
             return Ok(());
@@ -529,9 +535,9 @@ impl RenderPass for ShadowPass {
 
         // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
         let inst_ptr = batch.instances as *const _ as usize;
-        let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, cs_ptr);
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -540,7 +546,7 @@ impl RenderPass for ShadowPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        resource: shadow_data.shadow_matrices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -556,7 +562,7 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));
@@ -809,11 +815,11 @@ impl RenderPass for ShadowPass {
             // Update per-caster gen tracking (light movement only).
             for slot in 0..caster_count {
                 if dirty_casters[slot] {
-                    self.per_caster_last_gen[slot] = ctx.scene.per_caster_dirty_gen[slot];
+                    self.per_caster_last_gen[slot] = shadow_data.per_caster_dirty_gen[slot];
                 }
             }
 
-            self.last_movable_objects_gen = ctx.scene.movable_objects_generation;
+            self.last_movable_objects_gen = shadow_data.movable_objects_generation;
         }
 
         Ok(())

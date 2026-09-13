@@ -1145,7 +1145,7 @@ impl RenderPass for FoliageGBufferPass {
                 .get()
                 .unwrap_or(&self.placeholder_sampler);
             let key = (
-                ctx.scene.camera as *const _ as usize,
+                ctx.camera as *const _ as usize,
                 interaction_view as *const wgpu::TextureView as usize,
                 interaction_sampler as *const wgpu::Sampler as usize,
             );
@@ -1157,7 +1157,7 @@ impl RenderPass for FoliageGBufferPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,

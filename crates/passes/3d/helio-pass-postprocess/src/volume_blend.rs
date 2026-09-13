@@ -167,7 +167,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             .get(BufferKey::of("post_process_volumes"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_pp_volumes);
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         let key = (
             postprocess_buf as *const _ as usize,

@@ -1179,7 +1179,7 @@ impl RenderPass for PostProcessPass {
             None => return Ok(()),
         };
 
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         // None when no VolumetricFogPass is in the graph; rebuild_bind_groups then
         // binds the 1x1 no-op fallback. Part of the key so that a fog pass being

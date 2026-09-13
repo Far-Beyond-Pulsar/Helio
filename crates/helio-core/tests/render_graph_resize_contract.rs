@@ -1,7 +1,5 @@
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{
-    GpuScene, PassContext, PrepareContext, RenderGraph, RenderPass, Result as HelioResult,
-};
+use helio_core::{PassContext, PrepareContext, RenderGraph, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 mod support;
 
@@ -115,8 +113,7 @@ fn prepare_receives_one_resize_pulse_after_graph_resize() {
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let scene = GpuScene::new(Arc::clone(&device), Arc::clone(&queue));
-        let scene_input = support::SceneInputAdapter(&scene);
+        let scene_input = support::SceneInputAdapter::new(Arc::clone(&device), Arc::clone(&queue));
         let observations = Arc::new(Mutex::new(Vec::new()));
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(ResizeProbePass {
@@ -171,8 +168,7 @@ fn graph_owned_internal_attachment_matches_depth_after_resize() {
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let scene = GpuScene::new(Arc::clone(&device), Arc::clone(&queue));
-        let scene_input = support::SceneInputAdapter(&scene);
+        let scene_input = support::SceneInputAdapter::new(Arc::clone(&device), Arc::clone(&queue));
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(InternalAttachmentPass));
         graph.lock(32, 24);

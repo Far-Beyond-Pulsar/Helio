@@ -312,7 +312,11 @@ impl RenderPass for LightCullPass {
         let num_lights = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.scene.movable_light_count
+            ctx.frame_resources
+                .lights
+                .get()
+                .map(|l| l.movable_light_count)
+                .unwrap_or(0)
         };
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
@@ -333,13 +337,16 @@ impl RenderPass for LightCullPass {
         // Same preference as `prepare()`: SceneDB-direct when present, else
         // `ctx.scene.lights` -- production's real, actively-populated light
         // source (see `light_mode_direct_index`'s doc).
+        let lights_data = ctx.resources.lights.get();
         let scene_lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
         let use_direct_index = scene_lights_handle.is_some();
         let lights_buf = scene_lights_handle
             .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.scene.lights);
-        let light_entity_indices_buf = ctx.scene.light_entity_indices;
-        let movable_light_count = ctx.scene.movable_light_count;
+            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(ctx.camera));
+        let light_entity_indices_buf = lights_data
+            .map(|l| l.light_entity_indices)
+            .unwrap_or(ctx.camera);
+        let movable_light_count = lights_data.map(|l| l.movable_light_count).unwrap_or(0);
 
         if !use_direct_index && movable_light_count == 0 {
             // No active movable lights via either source: clear light
@@ -356,17 +363,19 @@ impl RenderPass for LightCullPass {
         // can't fail -- `params.num_lights` is 0 whenever `transforms` would
         // actually be dereferenced at a live light's index, so this is never
         // read in practice.
-        let transforms_buf = ctx.scene.transforms.unwrap_or(ctx.scene.camera);
+        let transforms_buf = lights_data
+            .and_then(|l| l.transforms)
+            .unwrap_or(ctx.camera);
 
         // ── Light culling cache: skip compute if scene static ─────────────────
         // Use generation counters to detect actual data changes (not pointer
         // addresses) for the CPU-resolved path; the SceneDB-direct path uses
         // its buffer's own epoch instead, since nothing else identifies "did
         // the row data change" for it.
-        let camera_gen = ctx.scene.camera_generation;
+        let camera_gen = ctx.camera_generation;
         let lights_gen = scene_lights_handle
             .map(|h| h.epoch)
-            .unwrap_or(ctx.scene.movable_lights_generation);
+            .unwrap_or_else(|| lights_data.map(|l| l.movable_lights_generation).unwrap_or(0));
 
         let cache_key = (camera_gen, lights_gen, movable_light_count, use_direct_index);
 
@@ -384,7 +393,7 @@ impl RenderPass for LightCullPass {
         // Update cache key
         self.cull_cache_key = Some(cache_key);
 
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
         let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
         let transforms_ptr = transforms_buf as *const _ as usize;
@@ -397,7 +406,7 @@ impl RenderPass for LightCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,

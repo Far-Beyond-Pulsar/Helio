@@ -654,7 +654,12 @@ impl RenderPass for VoxelMeshPass {
             return Ok(());
         }
         let params = MeshletParams {
-            light_count: ctx.scene.light_count,
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0),
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -689,8 +694,14 @@ impl RenderPass for VoxelMeshPass {
         // ── Step 2: Render — draw the resident brick range indirectly ───────
         // Rebuild the bind group when the camera or lights buffer pointer changes
         // (the lights buffer can be reallocated by GrowableBuffer as it grows).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let lights_ptr = lights_buf as *const _ as usize;
         if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
             self.render_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -699,11 +710,11 @@ impl RenderPass for VoxelMeshPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: ctx.scene.lights.as_entire_binding(),
+                            resource: lights_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,

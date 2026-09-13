@@ -435,6 +435,72 @@ impl Renderer {
             },
             "Renderer",
         );
+        // Lights and materials are not yet published by an owning pass the
+        // way `object_batch`/etc. are -- see `libhelio::LightsFrameData`/
+        // `MaterialsFrameData`'s own docs for why the `Renderer` seeds these
+        // directly from `self.scene.gpu_scene()` (still-central storage)
+        // instead. `helio-core`/passes see only the generic `FrameResources`
+        // slot, never a named `GpuScene` field.
+        {
+            let gpu_scene = self.scene.gpu_scene();
+            frame_resources.lights.write(
+                libhelio::LightsFrameData {
+                    lights: gpu_scene.lights.buffer(),
+                    light_count: gpu_scene.lights.len() as u32,
+                    movable_light_count: gpu_scene.movable_light_count,
+                    light_entity_indices: gpu_scene.light_entity_indices.buffer(),
+                    transforms: gpu_scene.transform_buffer.as_deref(),
+                    movable_lights_generation: gpu_scene.movable_lights_generation,
+                },
+                "Renderer",
+            );
+            frame_resources.materials.write(
+                libhelio::MaterialsFrameData {
+                    materials: gpu_scene.materials.buffer(),
+                    material_data: gpu_scene.materials.as_slice(),
+                    template_registry: &gpu_scene.template_registry,
+                    transparent_template_registry: &gpu_scene.transparent_template_registry,
+                    graph_wgsl_snippets: &gpu_scene.graph_wgsl_snippets,
+                },
+                "Renderer",
+            );
+            frame_resources.shadow_matrices.write(
+                libhelio::ShadowMatricesFrameData {
+                    shadow_matrices: gpu_scene.shadow_matrices.buffer(),
+                    shadow_count: gpu_scene.shadow_matrices.len() as u32,
+                    per_caster_dirty_gen: gpu_scene.per_caster_dirty_gen,
+                    movable_objects_generation: gpu_scene.movable_objects_generation,
+                },
+                "Renderer",
+            );
+            frame_resources.coordinate_spaces.write(
+                libhelio::CoordinateSpacesFrameData {
+                    coordinate_spaces: gpu_scene.coordinate_spaces.buffer(),
+                    coordinate_spaces_prev: gpu_scene.coordinate_spaces.prev_buffer(),
+                },
+                "Renderer",
+            );
+            frame_resources.portals.write(
+                libhelio::PortalsFrameData {
+                    portal_views: gpu_scene.portal_views.buffer(),
+                    portal_view_count: gpu_scene.portal_views.len() as u32,
+                    portal_chains: gpu_scene.portal_chains.buffer(),
+                    portal_chain_count: gpu_scene.portal_chains.len() as u32,
+                },
+                "Renderer",
+            );
+            frame_resources.voxels.write(
+                libhelio::VoxelsFrameData {
+                    voxel_volumes: gpu_scene.voxel_volumes.buffer(),
+                    voxel_edit_ring: gpu_scene.voxel_edit_ring.buffer(),
+                    voxel_brick_pool: &gpu_scene.voxel_brick_pool,
+                    voxel_data_pool: &gpu_scene.voxel_data_pool,
+                    voxel_volume_count: gpu_scene.voxel_volume_count,
+                    voxel_volumes_generation: gpu_scene.voxel_volumes_generation,
+                },
+                "Renderer",
+            );
+        }
         frame_resources
             .postprocess_uniforms
             .write(&self.postprocess_buffer, "Renderer");

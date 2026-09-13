@@ -271,8 +271,13 @@ impl RenderPass for PortalCullPass {
             .get()
             .map(|b| b.draw_count)
             .unwrap_or(0);
-        self.chain_count = ctx.scene.portal_chain_count;
-        let planes = extract_frustum_planes(ctx.scene.camera_data.view_proj);
+        self.chain_count = ctx
+            .frame_resources
+            .portals
+            .get()
+            .map(|p| p.portal_chain_count)
+            .unwrap_or(0);
+        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {
             frustum_planes: planes,
@@ -307,14 +312,20 @@ impl RenderPass for PortalCullPass {
         let Some(batch) = ctx.resources.object_batch.get() else {
             return Ok(());
         };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let Some(portal_data) = ctx.resources.portals.get() else {
+            return Ok(());
+        };
 
         let key = (
-            ctx.scene.camera as *const wgpu::Buffer as usize,
+            ctx.camera as *const wgpu::Buffer as usize,
             batch.instances as *const wgpu::Buffer as usize,
             batch.draw_calls as *const wgpu::Buffer as usize,
-            ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
-            ctx.scene.portal_views as *const wgpu::Buffer as usize,
-            ctx.scene.portal_chains as *const wgpu::Buffer as usize,
+            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
+            portal_data.portal_views as *const wgpu::Buffer as usize,
+            portal_data.portal_chains as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -323,7 +334,7 @@ impl RenderPass for PortalCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -339,11 +350,11 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_data.portal_views.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -359,7 +370,7 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                        resource: portal_data.portal_chains.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,

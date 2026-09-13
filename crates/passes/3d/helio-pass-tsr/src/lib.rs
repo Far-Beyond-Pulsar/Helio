@@ -552,7 +552,7 @@ impl RenderPass for TsrPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The camera is the sample authority. Reconstructing a separate
         // sequence here breaks manual offsets and externally owned frame clocks.
-        let ndc = ctx.scene.camera_data.jitter_frame;
+        let ndc = ctx.camera_data.jitter_frame;
         let jitter = [
             ndc[0] * ctx.width as f32 * 0.5,
             ndc[1] * ctx.height as f32 * 0.5,
@@ -617,7 +617,7 @@ impl RenderPass for TsrPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,

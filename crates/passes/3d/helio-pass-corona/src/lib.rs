@@ -902,7 +902,7 @@ impl RenderPass for CoronaPass {
         // ── Bind group rebuild when buffer pointers change ────────────────────
 
         let part_ptr = &self.particle_buf as *const _ as usize;
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let emitter_buf = ctx
             .scene_buffers
             .get(BufferKey::of("corona_emitters"))
@@ -921,7 +921,7 @@ impl RenderPass for CoronaPass {
                 &self.compact_buf,
                 &self.emitter_alive_buf,
                 &self.draw_args_staging,
-                ctx.scene.camera,
+                ctx.camera,
                 &self.prefix_buf,
                 &self.block_sums_buf,
                 &self.sort_key_buf,
@@ -938,7 +938,7 @@ impl RenderPass for CoronaPass {
                 &self.compact_buf,
                 &self.emitter_alive_buf,
                 &self.draw_args_staging,
-                ctx.scene.camera,
+                ctx.camera,
                 &self.prefix_buf,
                 &self.block_sums_buf,
                 &self.sort_key_buf,

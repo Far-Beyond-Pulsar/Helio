@@ -450,7 +450,12 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.light_count,
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0),
             ambient_intensity,
             ambient_color,
             rc_world_min,
@@ -481,10 +486,17 @@ impl RenderPass for GBufferPass {
         let main_scene = main_scene.read("GBuffer").unwrap();
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let coordinate_spaces_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let coord_spaces = ctx.resources.coordinate_spaces.get();
+        let coordinate_spaces_buf = coord_spaces
+            .map(|c| c.coordinate_spaces)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_prev_buf = coord_spaces
+            .map(|c| c.coordinate_spaces_prev)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_ptr = coordinate_spaces_buf as *const _ as usize;
         let key = (
             camera_ptr,
             instances_ptr,
@@ -499,7 +511,7 @@ impl RenderPass for GBufferPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -519,16 +531,21 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coordinate_spaces_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                        resource: coordinate_spaces_prev_buf.as_entire_binding(),
                     },
                 ],
             }));
             self.bind_group_0_key = Some(key);
         }
+
+        let materials_data = ctx.resources.materials.get();
+        let materials_buf = materials_data
+            .map(|m| m.materials)
+            .unwrap_or(batch.instances);
 
         // Rebuild bind group 1 when material textures version changes.
         let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
@@ -538,7 +555,7 @@ impl RenderPass for GBufferPass {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -576,7 +593,7 @@ impl RenderPass for GBufferPass {
         // Sync template registry from scene (survives graph rebuilds). This
         // is just an Arc clone (cheap refcount bump) — the registry itself
         // is shared, never deep-copied.
-        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
+        if let Some(reg_any) = materials_data.and_then(|m| m.template_registry.as_ref()) {
             if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
                 let new_keys = shared.read().unwrap().keys();
                 if self.last_template_keys != new_keys {
@@ -615,9 +632,10 @@ impl RenderPass for GBufferPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
+                let empty_snippets = std::collections::HashMap::new();
+                let graph_wgsl = materials_data
+                    .map(|m| m.graph_wgsl_snippets)
+                    .unwrap_or(&empty_snippets)
                     .get(&graph_hash)
                     .map(|s| s.as_str())
                     .unwrap_or("");

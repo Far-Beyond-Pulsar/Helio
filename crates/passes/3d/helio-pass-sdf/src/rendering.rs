@@ -762,7 +762,7 @@ impl RenderPass for SdfPass {
             self.bindings_dirty = false;
         }
 
-        let position_near = ctx.scene.camera_data.position_near;
+        let position_near = ctx.camera_data.position_near;
         let cam_pos = [position_near[0], position_near[1], position_near[2]];
         let mut any_level_dirty = false;
         for level in 0..self.level_count as usize {
@@ -788,13 +788,13 @@ impl RenderPass for SdfPass {
             return Ok(());
         }
 
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         if self.scroll_bg_camera_key != camera_ptr || self.scroll_bg.is_none() {
             let scroll_bgl = self.scroll_pipeline.get_bind_group_layout(0);
             self.scroll_bg = Some(Self::build_scroll_bg(
                 ctx.device,
                 &scroll_bgl,
-                ctx.scene.camera,
+                ctx.camera,
                 &self.clip_config_buffer,
                 &self.scroll_state_buffer,
                 &self.dirty_flags_buffer,
@@ -805,7 +805,7 @@ impl RenderPass for SdfPass {
             self.march_bg = Some(Self::build_march_bg(
                 ctx.device,
                 &self.march_bgl,
-                ctx.scene.camera,
+                ctx.camera,
                 &self.clip_config_buffer,
                 &self.scroll_state_buffer,
                 &self.atlas_buffers,

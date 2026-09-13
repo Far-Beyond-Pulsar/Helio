@@ -388,7 +388,12 @@ impl RenderPass for VolumetricFogPass {
 
         let globals = FogGlobals {
             csm_splits: libhelio::CSM_SPLITS,
-            light_count: ctx.scene.light_count,
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0),
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
@@ -406,9 +411,19 @@ impl RenderPass for VolumetricFogPass {
             return Ok(());
         };
 
-        let camera_buf = ctx.scene.camera;
-        let lights_buf = ctx.scene.lights;
-        let shadow_matrices = ctx.scene.shadow_matrices;
+        let camera_buf = ctx.camera;
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices = ctx
+            .resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
 
         // Swap the ping-pong: last frame's write target is this frame's history.
         self.write_idx ^= 1;

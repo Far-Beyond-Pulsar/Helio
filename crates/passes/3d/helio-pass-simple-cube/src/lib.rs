@@ -254,14 +254,14 @@ impl RenderPass for SimpleCubePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Rebuild camera bind group when the camera buffer pointer changes.
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         if self.bind_group_key != Some(camera_ptr) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("SimpleCube BG"),
                 layout: &self.bgl,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.camera.as_entire_binding(),
+                    resource: ctx.camera.as_entire_binding(),
                 }],
             }));
             self.bind_group_key = Some(camera_ptr);

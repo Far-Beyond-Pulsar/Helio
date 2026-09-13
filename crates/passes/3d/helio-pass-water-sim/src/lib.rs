@@ -1131,7 +1131,7 @@ impl RenderPass for WaterSimPass {
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: ctx.scene.camera.as_entire_binding(),
+                                    resource: ctx.camera.as_entire_binding(),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
@@ -1262,7 +1262,7 @@ impl RenderPass for WaterSimPass {
                                 entries: &[
                                     wgpu::BindGroupEntry {
                                         binding: 0,
-                                        resource: ctx.scene.camera.as_entire_binding(),
+                                        resource: ctx.camera.as_entire_binding(),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 1,

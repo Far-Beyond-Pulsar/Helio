@@ -436,7 +436,7 @@ pub mod entity;
 pub mod error;
 pub mod graph;
 pub mod profiling;
-pub mod scene;
+pub mod scene_input;
 pub mod shader;
 pub mod traits;
 pub mod upload;
@@ -451,7 +451,6 @@ pub use libhelio::{
 pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
 pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
-pub use crate::scene::managers::*;
 // Re-export core types
 pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
@@ -463,6 +462,6 @@ pub use graph::{
     PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
 };
 pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
-pub use scene::{GpuScene, SceneBufferProjection, SceneInput, SceneResources};
+pub use scene_input::{SceneBufferProjection, SceneInput};
 pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

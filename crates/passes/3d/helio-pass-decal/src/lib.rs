@@ -411,7 +411,7 @@ impl RenderPass for DecalPass {
             .get(BufferKey::of("decals"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_decals);
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let decal_ptr = decals_buf as *const _ as usize;
         let (_, ta) = self.temp_albedo.as_ref().unwrap();
         let (_, tn) = self.temp_normal.as_ref().unwrap();
@@ -432,7 +432,7 @@ impl RenderPass for DecalPass {
                 label: Some("Decal Collect BG"),
                 layout: &self.bgl_collect,
                 entries: &[
-                    bind_buf(0, ctx.scene.camera),
+                    bind_buf(0, ctx.camera),
                     bind_buf(1, &self.globals_buf),
                     bind_buf(2, decals_buf),
                     bind_tex(3, depth_view),
@@ -487,7 +487,7 @@ impl RenderPass for DecalPass {
                 label: Some("Decal Apply BG"),
                 layout: &self.bgl_apply,
                 entries: &[
-                    bind_buf(0, ctx.scene.camera),
+                    bind_buf(0, ctx.camera),
                     bind_buf(1, &self.globals_buf),
                     bind_buf(2, decals_buf),
                     bind_tex(3, ta),

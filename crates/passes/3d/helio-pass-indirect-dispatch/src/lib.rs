@@ -293,7 +293,7 @@ impl RenderPass for IndirectDispatchPass {
         self.draw_count = batch.draw_count;
         self.ensure_capacity(ctx.device, batch.draw_count, batch.instance_count);
 
-        let planes = extract_frustum_planes(ctx.scene.camera_data.view_proj);
+        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
         let uniforms = CullUniforms {
             frustum_planes: planes,
             draw_count: batch.draw_count,
@@ -312,17 +312,20 @@ impl RenderPass for IndirectDispatchPass {
         let Some(batch) = ctx.resources.object_batch.get() else {
             return Ok(());
         };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
 
         // Rebuild bind group if any source buffer has reallocated (pointer changed).
         let key = (
-            ctx.scene.camera as *const wgpu::Buffer as usize,
+            ctx.camera as *const wgpu::Buffer as usize,
             batch.instances as *const wgpu::Buffer as usize,
             batch.draw_calls as *const wgpu::Buffer as usize,
             batch.aabbs as *const wgpu::Buffer as usize,
             &self.indirect_buf as *const wgpu::Buffer as usize,
             &self.cull_stats_buf as *const wgpu::Buffer as usize,
             &self.compacted_indices_buf as *const wgpu::Buffer as usize,
-            ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
+            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -331,7 +334,7 @@ impl RenderPass for IndirectDispatchPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -363,7 +366,7 @@ impl RenderPass for IndirectDispatchPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

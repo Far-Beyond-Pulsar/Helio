@@ -485,14 +485,20 @@ impl RenderPass for PortalInstancePass {
         let Some(batch) = ctx.resources.object_batch.get() else {
             return Ok(());
         };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let Some(portal_data) = ctx.resources.portals.get() else {
+            return Ok(());
+        };
 
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
-            ctx.scene.camera as *const _ as usize,
+            ctx.camera as *const _ as usize,
             batch.instances as *const _ as usize,
-            ctx.scene.coordinate_spaces as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
-            ctx.scene.portal_chains as *const _ as usize,
+            coord_data.coordinate_spaces as *const _ as usize,
+            portal_data.portal_views as *const _ as usize,
+            portal_data.portal_chains as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
             &*self.portal_compacted_chains_buf as *const _ as usize,
             portal_mask_view as *const _ as usize,
@@ -504,7 +510,7 @@ impl RenderPass for PortalInstancePass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -516,11 +522,11 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces_prev.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -528,11 +534,11 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_data.portal_views.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                        resource: portal_data.portal_chains.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -554,10 +560,16 @@ impl RenderPass for PortalInstancePass {
         let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
             || self.bind_group_1.is_none();
         if needs_rebuild {
+            let materials_buf = ctx
+                .resources
+                .materials
+                .get()
+                .map(|m| m.materials)
+                .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

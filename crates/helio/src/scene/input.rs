@@ -1,6 +1,7 @@
 //! The renderer's read-only scene projection boundary.
 
-use helio_core::{SceneBufferProjection, SceneInput, SceneResources};
+use super::gpu_storage::SceneResources;
+use helio_core::{GpuCameraUniforms, SceneBufferProjection, SceneInput};
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use std::sync::Arc;
 
@@ -62,6 +63,8 @@ impl SceneInput for SceneInputAdapter<'_> {
     fn device(&self) -> &Arc<wgpu::Device> { &self.device }
     fn queue(&self) -> &Arc<wgpu::Queue> { self.queue }
     fn frame_count(&self) -> u64 { self.frame_count }
-    fn resources(&self) -> SceneResources<'_> { self.projection }
+    fn camera(&self) -> &wgpu::Buffer { self.projection.camera }
+    fn camera_data(&self) -> &GpuCameraUniforms { self.projection.camera_data }
+    fn camera_generation(&self) -> u64 { self.projection.camera_generation }
     fn scene_buffers(&self) -> &SceneBufferProjection { &self.buffers }
 }

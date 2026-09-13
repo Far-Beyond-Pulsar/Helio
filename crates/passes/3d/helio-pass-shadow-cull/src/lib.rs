@@ -282,7 +282,13 @@ impl RenderPass for ShadowCullPass {
             return Ok(());
         };
         let movable_count = batch.shadow_movable_draw_count;
-        let face_count = ctx.scene.shadow_count;
+        let Some(shadow_data) = ctx.resources.shadow_matrices.get() else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let face_count = shadow_data.shadow_count;
 
         if face_count == 0 || movable_count == 0 {
             return Ok(());
@@ -296,11 +302,11 @@ impl RenderPass for ShadowCullPass {
         );
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
         let inst_ptr = batch.instances as *const _ as usize;
         let src_ptr = batch.shadow_movable_indirect as *const _ as usize;
         let fd_ptr = &*self.face_dirty_buf as *const _ as usize;
-        let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
 
         if self.bind_group_key != Some(key) {
@@ -314,7 +320,7 @@ impl RenderPass for ShadowCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        resource: shadow_data.shadow_matrices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -338,7 +344,7 @@ impl RenderPass for ShadowCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

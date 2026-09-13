@@ -1146,13 +1146,19 @@ impl RenderPass for ObjectBatchPass {
             .as_ref()
             .map(|h| h.buffer.clone())
             .unwrap_or_else(|| self.fallback_buf.clone());
+        let materials_buf = ctx
+            .frame_resources
+            .materials
+            .get()
+            .map(|m| m.materials)
+            .unwrap_or(&static_objects_buf);
         let key = (
             self.scratch_capacity,
             static_objects_epoch,
-            ctx.scene.materials as *const _ as usize,
+            materials_buf as *const _ as usize,
         );
         if grew || self.bind_group_key != Some(key) {
-            self.rebuild_bind_groups(ctx.device, &static_objects_buf, ctx.scene.materials);
+            self.rebuild_bind_groups(ctx.device, &static_objects_buf, materials_buf);
             self.bind_group_key = Some(key);
         }
 

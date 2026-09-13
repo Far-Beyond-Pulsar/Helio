@@ -209,8 +209,7 @@ fn write_group_delivers_correctly_ordered_views_to_a_downstream_consumer() {
             .expect("Consumer's read of \"gbuffer\" must be satisfied by StandInGBuffer's write");
         graph.lock(64, 64);
 
-        let scene = helio_core::GpuScene::new(device.clone(), queue.clone());
-        let scene_input = support::SceneInputAdapter(&scene);
+        let scene_input = support::SceneInputAdapter::new(device.clone(), queue.clone());
         let target_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Write Group Swapchain Stand-in"),
             size: wgpu::Extent3d {

@@ -1,6 +1,6 @@
 //! Generic scene input boundary used by graph execution.
 
-use super::SceneResources;
+use libhelio::GpuCameraUniforms;
 use pulsar_scenedb::gpu::{BufferHandle, BufferKey, SceneGpuStore};
 use std::sync::Arc;
 
@@ -44,8 +44,17 @@ pub trait SceneInput {
     fn queue(&self) -> &Arc<wgpu::Queue>;
     /// Monotonic frontend frame number.
     fn frame_count(&self) -> u64;
-    /// Borrow the resource projection consumed by existing passes.
-    fn resources(&self) -> SceneResources<'_>;
+    /// The active camera's GPU-bound uniform buffer. Camera is a genuine
+    /// per-frame universal (exactly one per frame, needed by nearly every
+    /// pass), not a specific scene-object type -- unlike the removed
+    /// `SceneResources` type-bag, this is a first-class field for the same
+    /// reason `frame_num`/`width`/`height` already are.
+    fn camera(&self) -> &wgpu::Buffer;
+    /// CPU-side mirror of the same frame's camera data, for passes that need
+    /// scalar values (position, near/far, jitter, ...) alongside the buffer.
+    fn camera_data(&self) -> &GpuCameraUniforms;
+    /// See `helio_core::PassContext::camera_generation`'s doc.
+    fn camera_generation(&self) -> u64;
     /// Frontend-owned, type-erased SceneDB buffers. Every graph execution has
     /// this projection, even when a focused test intentionally supplies no
     /// keys. This keeps the graph on one SceneDB input path rather than

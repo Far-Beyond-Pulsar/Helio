@@ -421,15 +421,18 @@ impl RenderPass for ForwardLitPass {
         // `MAX_LIGHTS`, no per-frame CPU query -- see `LightComponent`'s
         // module doc) when something has actually inserted one. Nothing in
         // `engine_backend`/`helio_component` does today -- production's real
-        // light source is `ctx.scene.light_count`/`ctx.scene.lights`,
-        // rebuilt every frame by `Renderer::submit_light_frame` from
-        // `engine_backend`'s own SceneDB resolve (`rebuild_light_frame`) --
-        // so that CPU-resolved count is the fallback, not a legacy dead end.
+        // light source is `libhelio::LightsFrameData` (the `Renderer`-seeded
+        // `light_count`/`lights` bridge -- see that struct's own doc), so
+        // that CPU-resolved count is the fallback, not a legacy dead end.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
         let light_count = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.scene.light_count
+            ctx.frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0)
         };
 
         let globals = ForwardLitGlobals {
@@ -466,27 +469,39 @@ impl RenderPass for ForwardLitPass {
         }
         let ms = main_scene.read("ForwardLit").unwrap();
 
+        // `LightsFrameData`/`MaterialsFrameData` are the `Renderer`-seeded
+        // bridges -- see those structs' own docs. Fall back to
+        // `batch.instances` (any valid, never-actually-dereferenced buffer)
+        // if the `Renderer` hasn't published them yet, matching the fallback
+        // idiom already used for `tile_lists`/`tile_counts`/`transforms`.
+        let lights_data = ctx.resources.lights.get();
+        let materials_data = ctx.resources.materials.get();
+        let materials_buf = materials_data
+            .map(|m| m.materials)
+            .unwrap_or(batch.instances);
+
         // Same preference as `prepare()`: SceneDB-direct when present, else
-        // `ctx.scene.lights` -- production's real, actively-populated light
-        // source (see `light_mode_direct_index`'s doc).
+        // the CPU-resolved bridge -- production's real, actively-populated
+        // light source (see `light_mode_direct_index`'s doc).
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.scene.lights);
+            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(batch.instances));
 
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
-        let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
+        let light_entity_indices_ptr = lights_data
+            .map(|l| l.light_entity_indices as *const _ as usize)
+            .unwrap_or(0);
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
-        let transforms_ptr = ctx
-            .scene
-            .transforms
+        let transforms_ptr = lights_data
+            .and_then(|l| l.transforms)
             .map(|b| b as *const _ as usize)
             .unwrap_or(0);
 
@@ -523,7 +538,12 @@ impl RenderPass for ForwardLitPass {
             // creation can't fail -- `light_count` is 0 whenever no real
             // `Transform` buffer exists yet, so this fallback is never
             // actually dereferenced at a live light's index in practice.
-            let transforms = ctx.scene.transforms.unwrap_or(fallback_buf);
+            let transforms = lights_data
+                .and_then(|l| l.transforms)
+                .unwrap_or(fallback_buf);
+            let light_entity_indices_buf = lights_data
+                .map(|l| l.light_entity_indices)
+                .unwrap_or(fallback_buf);
 
             log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -532,7 +552,7 @@ impl RenderPass for ForwardLitPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -560,7 +580,7 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.light_entity_indices.as_entire_binding(),
+                        resource: light_entity_indices_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -578,7 +598,7 @@ impl RenderPass for ForwardLitPass {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -606,7 +626,7 @@ impl RenderPass for ForwardLitPass {
         pass.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
         pass.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
 
-        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
+        if let Some(reg_any) = materials_data.and_then(|m| m.template_registry.as_ref()) {
             if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
                 let new_keys: Vec<u32> = shared
                     .read()
@@ -657,9 +677,10 @@ impl RenderPass for ForwardLitPass {
                 if self.render_all_opaque {
                     key.feature_flags |= 1;
                 }
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
+                let empty_snippets = std::collections::HashMap::new();
+                let graph_wgsl = materials_data
+                    .map(|m| m.graph_wgsl_snippets)
+                    .unwrap_or(&empty_snippets)
                     .get(&graph_hash)
                     .map(|s| s.as_str())
                     .unwrap_or("");

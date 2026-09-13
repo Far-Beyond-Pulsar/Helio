@@ -759,7 +759,7 @@ impl RenderPass for VirtualGeometryPass {
         };
 
         if vg.buffer_version != self.last_version {
-            let camera_buf = ctx.scene.camera;
+            let camera_buf = ctx.camera;
             let mut grew = false;
             let bounded_max_draw_count = VirtualGeometryBudget::new(self.publication_limit)
                 .clamp_draw_count(vg.max_draw_count);
@@ -815,7 +815,12 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let materials = ctx.scene.material_data;
+            let materials = ctx
+                .frame_resources
+                .materials
+                .get()
+                .map(|m| m.material_data)
+                .unwrap_or(&[]);
             self.instance_cull_scratch = build_instance_cull_data(instances, materials);
             ctx.write_buffer(
                 &self.instance_cull_buf,
@@ -848,7 +853,12 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&instances[start..end]),
             );
 
-            let materials = ctx.scene.material_data;
+            let materials = ctx
+                .frame_resources
+                .materials
+                .get()
+                .map(|m| m.material_data)
+                .unwrap_or(&[]);
             self.instance_cull_scratch =
                 build_instance_cull_data(&instances[start..end], materials);
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
@@ -868,7 +878,7 @@ impl RenderPass for VirtualGeometryPass {
         // correctly handles large objects whose bounding sphere may be close
         // to the camera even when the instance centre is far away.
         {
-            let position_near = ctx.scene.camera_data.position_near;
+            let position_near = ctx.camera_data.position_near;
             let cam_pos = [position_near[0], position_near[1], position_near[2]];
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let objects: &[GpuVgObject] = bytemuck::cast_slice(vg.objects);
@@ -950,13 +960,16 @@ impl RenderPass for VirtualGeometryPass {
         let Some(main_scene) = ctx.frame_resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
+        let Some(materials) = ctx.frame_resources.materials.get() else {
+            return Ok(());
+        };
         if self.draw_bg_1.is_none()
             || self.bg1_version != Some(main_scene.material_textures.version)
         {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials.materials.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -983,7 +996,12 @@ impl RenderPass for VirtualGeometryPass {
         let globals = VgGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.016,
-            light_count: ctx.scene.light_count,
+            light_count: ctx
+                .frame_resources
+                .lights
+                .get()
+                .map(|l| l.light_count)
+                .unwrap_or(0),
             ambient_intensity: main_scene.ambient_intensity,
             ambient_color: [
                 main_scene.ambient_color[0],
@@ -1137,7 +1155,7 @@ impl RenderPass for VirtualGeometryPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,

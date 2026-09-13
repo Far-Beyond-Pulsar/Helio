@@ -73,9 +73,13 @@ pub use helio_bake::{
 };
 pub use helio_core::{
     Actor, DebugViewDescriptor, DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms,
-    GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuScene,
-    GpuTimingAvailability, RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
+    GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuTimingAvailability,
+    RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
+// `GpuScene`/`SceneResources` no longer live in `helio-core` (that crate has
+// zero knowledge of any specific scene-object type now) -- relocated here,
+// into `helio`, as a frontend-owned concern. See `scene::gpu_storage`'s doc.
+pub use scene::gpu_storage::{GpuScene, SceneResources};
 pub use libhelio::{
     HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,
     VolumetricClouds,

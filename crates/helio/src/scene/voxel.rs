@@ -5,7 +5,7 @@ use helio_voxel_core::{
 
 use super::types::VoxelVolumeDescriptor;
 use crate::handles::VoxelVolumeId;
-use helio_core::GpuScene;
+use crate::scene::gpu_storage::GpuScene;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelMode {

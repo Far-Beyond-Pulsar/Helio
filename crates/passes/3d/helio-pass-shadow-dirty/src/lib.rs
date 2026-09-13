@@ -302,7 +302,13 @@ impl RenderPass for ShadowDirtyPass {
             .get()
             .map(|b| b.shadow_movable_draw_count)
             .unwrap_or(0);
-        let face_count = ctx.scene.shadow_count.min(MAX_SHADOW_FACES as u32);
+        let face_count = ctx
+            .frame_resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_count)
+            .unwrap_or(0)
+            .min(MAX_SHADOW_FACES as u32);
 
         // Detect topology changes (objects added/removed from movable set).
         let force_dirty_all = if movable_draw_count != self.last_movable_draw_count {
@@ -328,7 +334,10 @@ impl RenderPass for ShadowDirtyPass {
             return Ok(());
         };
         let movable_draw_count = batch.shadow_movable_draw_count;
-        let face_count = ctx.scene.shadow_count;
+        let Some(shadow_data) = ctx.resources.shadow_matrices.get() else {
+            return Ok(());
+        };
+        let face_count = shadow_data.shadow_count;
 
         if face_count == 0 {
             return Ok(());
@@ -337,7 +346,7 @@ impl RenderPass for ShadowDirtyPass {
         // ── Lazy bind group rebuild on GrowableBuffer reallocation ─────────────
         let inst_ptr = batch.instances as *const _ as usize;
         let mov_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
         let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
         let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr);
 
@@ -360,7 +369,7 @@ impl RenderPass for ShadowDirtyPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        resource: shadow_data.shadow_matrices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,

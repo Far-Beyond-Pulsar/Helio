@@ -778,7 +778,7 @@ impl RenderPass for HiZBuildPass {
         self.build_min_pyramid(ctx);
 
         // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        let camera_gen = ctx.scene.camera_generation;
+        let camera_gen = ctx.camera_generation;
         let resolution_changed = false;
 
         if !self.first_frame && camera_gen == self.prev_camera_generation && !resolution_changed {

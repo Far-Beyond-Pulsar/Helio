@@ -694,7 +694,7 @@ impl RenderPass for DofPass {
             return Ok(());
         };
         let depth_view = ctx.depth;
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         let half_w = (self.width + 1) / 2;
         let half_h = (self.height + 1) / 2;

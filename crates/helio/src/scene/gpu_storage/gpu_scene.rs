@@ -72,15 +72,15 @@
 //! # }
 //! ```
 
-use crate::acceleration::{BlasManager, TlasManager};
-use crate::scene::managers::GrowableBuffer;
-use crate::scene::managers::{
+use helio_core::acceleration::{BlasManager, TlasManager};
+use super::managers::GrowableBuffer;
+use super::managers::{
     CoordinateSpaceBuffer, GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndices2Buffer,
     GpuCompactedIndicesBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
     GpuLightBuffer, GpuLightEntityIndexBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
     GpuVisibilityBuffer, GpuVoxelEditRing, GpuVoxelVolumeBuffer,
 };
-use crate::scene::SceneResources;
+use super::resources::SceneResources;
 use std::sync::Arc;
 
 /// GPU-native scene container with dirty-tracked state.

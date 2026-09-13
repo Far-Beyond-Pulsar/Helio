@@ -4,6 +4,7 @@
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
+use crate::material::GpuMaterial;
 use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
 use std::collections::HashMap;
@@ -634,6 +635,30 @@ pub struct FrameResources<'a> {
     /// see [`ObjectBatchFrameData`]'s own doc.
     pub object_batch: Tracked<ObjectBatchFrameData<'a>>,
 
+    /// Lights, written by the `Renderer` each frame from its still-central
+    /// light storage -- see [`LightsFrameData`]'s own doc for why this is a
+    /// `Renderer`-seeded bridge, not a pass publish.
+    pub lights: Tracked<LightsFrameData<'a>>,
+
+    /// The material table, written by the `Renderer` each frame -- see
+    /// [`MaterialsFrameData`]'s own doc. A known, temporary stepping stone:
+    /// materials are slated for a real SceneDB-native migration (mirroring
+    /// `StaticObjectComponent`/`scene_lights`), not a destination.
+    pub materials: Tracked<MaterialsFrameData<'a>>,
+
+    /// Shadow matrices, written by the `Renderer` each frame -- see
+    /// [`ShadowMatricesFrameData`]'s own doc.
+    pub shadow_matrices: Tracked<ShadowMatricesFrameData<'a>>,
+    /// Coordinate-space transforms, written by the `Renderer` each frame --
+    /// see [`CoordinateSpacesFrameData`]'s own doc.
+    pub coordinate_spaces: Tracked<CoordinateSpacesFrameData<'a>>,
+    /// Active portals, written by the `Renderer` each frame -- see
+    /// [`PortalsFrameData`]'s own doc.
+    pub portals: Tracked<PortalsFrameData<'a>>,
+    /// Voxel terrain storage, written by the `Renderer` each frame -- see
+    /// [`VoxelsFrameData`]'s own doc.
+    pub voxels: Tracked<VoxelsFrameData<'a>>,
+
     /// Frustum-culled draw args (populated by `IndirectDispatchPass`) --
     /// see [`IndirectDispatchFrameData`]'s own doc.
     pub indirect_dispatch: Tracked<IndirectDispatchFrameData<'a>>,
@@ -841,6 +866,119 @@ pub struct CulledBatchFrameData<'a> {
     pub compacted_indices: &'a wgpu::Buffer,
 }
 
+/// Light data for this frame -- written directly by the `Renderer`
+/// (`helio` crate) each frame from its still-central light storage, NOT
+/// published by a `RenderPass::publish()` the way `ObjectBatchFrameData`
+/// etc. are. Unlike static objects, lights are not yet SceneDB-native in
+/// production (`BufferKey::of("scene_lights")` is the preferred path when
+/// something has populated it, but nothing in `engine_backend` does today --
+/// this is the actual, live fallback, not a legacy dead end). Also carries
+/// real algorithmic state (which lights are static vs. movable, baked
+/// shadow-atlas assignment) that hasn't been relocated to a pass yet -- see
+/// the zero-central-type-knowledge mandate's own recorded precedent on why
+/// that's a deliberately separate, larger migration from simply exposing the
+/// data generically the way this struct does.
+#[derive(Clone, Copy)]
+pub struct LightsFrameData<'a> {
+    /// `GpuLight`-layout buffer, movable lights only (static/stationary are
+    /// baked and excluded from runtime).
+    pub lights: &'a wgpu::Buffer,
+    /// Live entry count in `lights`.
+    pub light_count: u32,
+    /// Same as `light_count` today (both mirror the same buffer's live
+    /// length) -- kept as a separate field because callers historically
+    /// distinguished them; collapse once confirmed redundant.
+    pub movable_light_count: u32,
+    /// Parallel to `lights` -- entry `i` is the SceneDB `Entity` index
+    /// `lights[i]` was built from this frame.
+    pub light_entity_indices: &'a wgpu::Buffer,
+    /// SceneDB's `Transform` buffer, once bound -- `None` until then.
+    pub transforms: Option<&'a wgpu::Buffer>,
+    /// Increments when any movable light moves -- shadow-cache invalidation.
+    pub movable_lights_generation: u64,
+}
+
+/// The material table for this frame -- written directly by the `Renderer`
+/// each frame, NOT published by a pass. A known, temporary stepping stone:
+/// nearly every shading pass reads this, and there is no single natural
+/// owning pass the way there is for lights/shadow-matrices/objects, so it
+/// stays centrally allocated in `helio::Scene` until it gets a real
+/// SceneDB-native `MaterialComponent` (mirroring `StaticObjectComponent`) --
+/// tracked as a dedicated follow-up, not solved by this struct.
+#[derive(Clone, Copy)]
+pub struct MaterialsFrameData<'a> {
+    /// Packed `GpuMaterial` storage buffer, GPU-bindable directly.
+    pub materials: &'a wgpu::Buffer,
+    /// CPU-side mirror of the same data, for passes doing PSO-relevant
+    /// classification without a GPU readback.
+    pub material_data: &'a [GpuMaterial],
+    /// Custom template registrations that survive graph rebuilds --
+    /// `GBufferPass` downcasts this to `RadiantTemplateRegistry` each frame.
+    pub template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Separate registry for transparent-material templates (different base
+    /// shader/bind-group layout than gbuffer templates).
+    pub transparent_template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Compiled graph WGSL snippets keyed by content hash, looked up by
+    /// shading passes when building a PSO for a given `graph_hash`.
+    pub graph_wgsl_snippets: &'a HashMap<u64, String>,
+}
+
+/// Shadow matrices + per-caster dirty tracking for this frame -- written
+/// directly by the `Renderer`, NOT published by `helio-pass-shadow-matrix`
+/// (that pass computes into this buffer but does not yet own its
+/// allocation -- a real, still-pending relocation, same shape as
+/// `ObjectBatchPass` got this session; tracked separately, not solved here).
+#[derive(Clone, Copy)]
+pub struct ShadowMatricesFrameData<'a> {
+    pub shadow_matrices: &'a wgpu::Buffer,
+    /// Live shadow-face count this frame.
+    pub shadow_count: u32,
+    /// Per-caster (42 max) dirty generation counters -- `ShadowPass`
+    /// compares against its own last-rendered gen to decide which faces to
+    /// re-render.
+    pub per_caster_dirty_gen: [u64; 42],
+    /// Increments whenever any movable object moves -- the O(1) CPU gate
+    /// `ShadowPass` checks before doing any per-face work.
+    pub movable_objects_generation: u64,
+}
+
+/// Coordinate-space transforms (portals + sublevels) for this frame --
+/// written directly by the `Renderer`. A real pass-owned relocation (reading
+/// `SublevelComponent` from SceneDB directly, owned by whichever pass ends
+/// up assembling the portal/sublevel registry) is still-pending future work,
+/// not solved here.
+#[derive(Clone, Copy)]
+pub struct CoordinateSpacesFrameData<'a> {
+    pub coordinate_spaces: &'a wgpu::Buffer,
+    pub coordinate_spaces_prev: &'a wgpu::Buffer,
+}
+
+/// Active portals' render data for this frame -- written directly by the
+/// `Renderer`. Real ownership belongs with `helio-pass-portal-cull` (still-
+/// pending future work, not solved here).
+#[derive(Clone, Copy)]
+pub struct PortalsFrameData<'a> {
+    pub portal_views: &'a wgpu::Buffer,
+    pub portal_view_count: u32,
+    pub portal_chains: &'a wgpu::Buffer,
+    pub portal_chain_count: u32,
+}
+
+/// Voxel terrain storage for this frame -- written directly by the
+/// `Renderer`. Deliberately NOT relocated to a pass this session (real
+/// stateful editing logic -- brick pool allocation, edit-ring management --
+/// needs the same GPU-correctness-tested treatment `ObjectBatchPass` got,
+/// not a rushed move); tracked as its own dedicated follow-up.
+#[derive(Clone, Copy)]
+pub struct VoxelsFrameData<'a> {
+    pub voxel_volumes: &'a wgpu::Buffer,
+    pub voxel_edit_ring: &'a wgpu::Buffer,
+    pub voxel_brick_pool: &'a wgpu::Buffer,
+    pub voxel_data_pool: &'a wgpu::Buffer,
+    pub voxel_volume_count: u32,
+    pub voxel_volumes_generation: u64,
+}
+
 // ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
 
 /// Owned CPU-side PVS data stored in [`BakedData`].
@@ -907,6 +1045,12 @@ impl<'a> FrameResources<'a> {
             baked_pvs: Tracked::empty(),
             cluster_light_grid: Tracked::empty(),
             object_batch: Tracked::empty(),
+            lights: Tracked::empty(),
+            materials: Tracked::empty(),
+            shadow_matrices: Tracked::empty(),
+            coordinate_spaces: Tracked::empty(),
+            portals: Tracked::empty(),
+            voxels: Tracked::empty(),
             indirect_dispatch: Tracked::empty(),
             culled_batch: Tracked::empty(),
             corona_emitters: Tracked::empty(),
@@ -1035,6 +1179,12 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(cluster_light_grid);
             reset_field!(object_batch);
+            reset_field!(lights);
+            reset_field!(materials);
+            reset_field!(shadow_matrices);
+            reset_field!(coordinate_spaces);
+            reset_field!(portals);
+            reset_field!(voxels);
             reset_field!(indirect_dispatch);
             reset_field!(culled_batch);
             reset_field!(corona_emitters);

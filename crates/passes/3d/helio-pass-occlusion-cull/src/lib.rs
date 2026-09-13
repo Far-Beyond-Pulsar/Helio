@@ -437,6 +437,9 @@ impl RenderPass for OcclusionCullPass {
         let Some(indirect_dispatch) = ctx.resources.indirect_dispatch.get() else {
             return Ok(());
         };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
         let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
@@ -480,7 +483,7 @@ impl RenderPass for OcclusionCullPass {
             .unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (
-            ctx.scene.camera as *const _ as usize,
+            ctx.camera as *const _ as usize,
             batch.instances as *const _ as usize,
             batch.draw_calls as *const _ as usize,
             indirect_dispatch.indirect as *const _ as usize,
@@ -490,7 +493,7 @@ impl RenderPass for OcclusionCullPass {
             &self.cull_stats_buf as *const _ as usize,
             indirect_dispatch.compacted_indices as *const _ as usize,
             &self.compacted_indices_2_buf as *const _ as usize,
-            ctx.scene.coordinate_spaces as *const _ as usize,
+            coord_data.coordinate_spaces as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -499,7 +502,7 @@ impl RenderPass for OcclusionCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -547,7 +550,7 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 12,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

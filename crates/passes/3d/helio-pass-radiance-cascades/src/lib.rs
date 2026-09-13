@@ -461,7 +461,12 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx.scene.light_count;
+        let light_count = ctx
+            .frame_resources
+            .lights
+            .get()
+            .map(|l| l.light_count)
+            .unwrap_or(0);
         let sky = ctx.frame_resources.sky.sky_color;
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],
@@ -552,7 +557,7 @@ impl RadianceCascadesPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                 ],
             }));
@@ -594,7 +599,12 @@ impl RadianceCascadesPass {
         })?;
         let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let lights_buf = ctx.scene.lights;
+        let lights_buf = ctx
+            .resources
+            .lights
+            .get()
+            .map(|l| l.lights)
+            .unwrap_or(ctx.camera);
 
         // Get TLAS from frame resources (set by the renderer from GpuScene)
         let main_scene = ctx.resources.main_scene.read("RadianceCascades");

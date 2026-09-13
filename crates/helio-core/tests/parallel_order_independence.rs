@@ -5,7 +5,7 @@
 //! orders to exercise.  The observed pass output and the publication contract
 //! must be the same regardless of that order.
 
-use helio_core::{GpuScene, PassContext, RenderGraph, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, RenderGraph, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 mod support;
 
@@ -113,8 +113,7 @@ fn run_order(
         .expect("independent writes must not require an ordering edge");
     graph.lock(8, 8);
 
-    let scene = GpuScene::new(Arc::clone(device), Arc::clone(queue));
-    let scene_input = support::SceneInputAdapter(&scene);
+    let scene_input = support::SceneInputAdapter::new(Arc::clone(device), Arc::clone(queue));
     let target = frame_texture_view(device, wgpu::TextureFormat::Rgba8Unorm);
     let depth = frame_texture_view(device, wgpu::TextureFormat::Depth32Float);
     graph

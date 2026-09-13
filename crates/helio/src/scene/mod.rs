@@ -63,6 +63,7 @@ mod actor;
 mod camera;
 mod core;
 mod editor_debug;
+pub mod gpu_storage;
 mod errors;
 mod flush;
 mod foliage;

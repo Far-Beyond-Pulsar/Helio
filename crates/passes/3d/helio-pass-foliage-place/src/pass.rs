@@ -944,7 +944,7 @@ impl RenderPass for FoliagePlacePass {
         // 4 billion authoring edits, and a collision only means one tile keeps its blades
         // through an edit it should have re-rolled.
         let generation = foliage.generation as u32;
-        let position_near = ctx.scene.camera_data.position_near;
+        let position_near = ctx.camera_data.position_near;
         let camera = [position_near[0], position_near[1], position_near[2]];
         let ring_update = self.ring.update([camera[0], camera[2]], generation);
         if ring_update.evicted > 0 {
@@ -1070,7 +1070,7 @@ impl RenderPass for FoliagePlacePass {
             .get()
             .unwrap_or(&self.placeholder_hiz_sampler);
         let key = (
-            ctx.scene.camera as *const _ as usize,
+            ctx.camera as *const _ as usize,
             hiz_view as *const _ as usize,
             hiz_sampler as *const _ as usize,
         );
@@ -1081,7 +1081,7 @@ impl RenderPass for FoliagePlacePass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,

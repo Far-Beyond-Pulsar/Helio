@@ -16,7 +16,7 @@ impl Scene {
     ///
     /// # Returns
     /// A reference to the [`GpuScene`].
-    pub fn gpu_scene(&self) -> &helio_core::GpuScene {
+    pub fn gpu_scene(&self) -> &crate::scene::gpu_storage::GpuScene {
         &self.gpu_scene
     }
 

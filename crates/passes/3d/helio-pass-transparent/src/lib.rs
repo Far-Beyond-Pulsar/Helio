@@ -243,14 +243,19 @@ impl RenderPass for TransparentPass {
         let num_tiles_x = ctx.width.div_ceil(16);
         let num_tiles_y = ctx.height.div_ceil(16);
         // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
-        // `MAX_LIGHTS`) when populated; else `ctx.scene.movable_light_count`,
-        // production's actual light count today -- see `ForwardLitPass`'s
-        // identical `light_mode_direct_index` doc for the full reasoning.
+        // `MAX_LIGHTS`) when populated; else the `Renderer`-seeded
+        // `LightsFrameData` bridge's `movable_light_count`, production's
+        // actual light count today -- see `ForwardLitPass`'s identical
+        // `light_mode_direct_index` doc for the full reasoning.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
         let light_count = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.scene.movable_light_count
+            ctx.frame_resources
+                .lights
+                .get()
+                .map(|l| l.movable_light_count)
+                .unwrap_or(0)
         };
         ctx.queue.write_buffer(
             &self.globals_buf,
@@ -330,7 +335,12 @@ impl RenderPass for TransparentPass {
 
         // Sync transparent templates from GpuScene (merge into existing registry,
         // keeping the transparent base at class 0).
-        if let Some(reg_any) = ctx.scene.transparent_template_registry.as_ref() {
+        if let Some(reg_any) = ctx
+            .resources
+            .materials
+            .get()
+            .and_then(|m| m.transparent_template_registry.as_ref())
+        {
             if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
                 // Only custom templates (id >= 5) apply here — class 0 is
                 // always the transparent base and must not be overwritten.
@@ -361,22 +371,24 @@ impl RenderPass for TransparentPass {
         // real, actively-populated light source (see `ForwardLitPass`'s
         // identical `light_mode_direct_index` doc).
         let cluster = ctx.resources.cluster_light_grid.get();
+        let lights_data = ctx.resources.lights.get();
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.scene.lights);
+            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(batch.instances));
         let lights_ptr = lights_buf as *const _ as usize;
-        let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
+        let light_entity_indices_ptr = lights_data
+            .map(|l| l.light_entity_indices as *const _ as usize)
+            .unwrap_or(0);
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
         let tile_counts_ptr = cluster
             .map(|c| c.tile_light_counts as *const _ as usize)
             .unwrap_or(0);
-        let transforms_ptr = ctx
-            .scene
-            .transforms
+        let transforms_ptr = lights_data
+            .and_then(|l| l.transforms)
             .map(|b| b as *const _ as usize)
             .unwrap_or(0);
         let bg1_key = (
@@ -394,7 +406,10 @@ impl RenderPass for TransparentPass {
             // yet, so this fallback is never actually dereferenced at a live
             // light's index in practice -- same reasoning as
             // `helio_pass_forward_lit`'s identical fallback.
-            let transforms = ctx.scene.transforms.unwrap_or(fallback);
+            let transforms = lights_data.and_then(|l| l.transforms).unwrap_or(fallback);
+            let light_entity_indices_buf = lights_data
+                .map(|l| l.light_entity_indices)
+                .unwrap_or(fallback);
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,
@@ -413,7 +428,7 @@ impl RenderPass for TransparentPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.light_entity_indices.as_entire_binding(),
+                        resource: light_entity_indices_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -428,7 +443,7 @@ impl RenderPass for TransparentPass {
         // pointers change -- `batch.instances` is a `GrowableBuffer` that can
         // reallocate across frames as the scene grows, so this can't be
         // built once at construction time (mirrors `bind_group_1`'s pattern).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let bg0_key = (camera_ptr, instances_ptr);
         if self.bind_group_key != Some(bg0_key) {
@@ -438,7 +453,7 @@ impl RenderPass for TransparentPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -488,9 +503,13 @@ impl RenderPass for TransparentPass {
                     graph_hash,
                     feature_flags: 0,
                 };
+                let empty_snippets = std::collections::HashMap::new();
                 let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
+                    .resources
+                    .materials
+                    .get()
+                    .map(|m| m.graph_wgsl_snippets)
+                    .unwrap_or(&empty_snippets)
                     .get(&graph_hash)
                     .map(|s| s.as_str())
                     .unwrap_or("");
