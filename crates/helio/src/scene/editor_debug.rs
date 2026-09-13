@@ -216,20 +216,6 @@ impl super::Scene {
         // `WaterHitboxComponent` rows now, no Renderer-owned CPU record for
         // `Scene` to draw from here.
 
-        // Foliage layers — the world-space AABB the placement pass samples.
-        // Interactors are invisible spheres, so outline them too; the editor
-        // needs to see where grass will part.
-        for (_, rec) in self.foliage_layers.iter_with_handles() {
-            sink.aabb(rec.layer.bounds[0], rec.layer.bounds[1], COLOR_FOLIAGE);
-        }
-        for (_, rec) in self.foliage_interactors.iter_with_handles() {
-            sink.wire_sphere(
-                rec.interactor.position,
-                rec.interactor.radius,
-                COLOR_FOLIAGE_INTERACTOR,
-            );
-        }
-
         // Decals are SceneDB-only now (see `helio_pass_decal`); no central
         // record to draw a gizmo from here.
 

@@ -28,22 +28,22 @@ pub struct PortalChainComponent {
     pub depth: u32,
 }
 
-impl From<libhelio::GpuPortalView> for PortalViewComponent {
-    fn from(v: libhelio::GpuPortalView) -> Self {
+impl From<crate::GpuPortalView> for PortalViewComponent {
+    fn from(v: crate::GpuPortalView) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<PortalViewComponent> for libhelio::GpuPortalView {
+impl From<PortalViewComponent> for crate::GpuPortalView {
     fn from(v: PortalViewComponent) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<libhelio::GpuPortalChain> for PortalChainComponent {
-    fn from(v: libhelio::GpuPortalChain) -> Self {
+impl From<crate::GpuPortalChain> for PortalChainComponent {
+    fn from(v: crate::GpuPortalChain) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<PortalChainComponent> for libhelio::GpuPortalChain {
+impl From<PortalChainComponent> for crate::GpuPortalChain {
     fn from(v: PortalChainComponent) -> Self {
         bytemuck::cast(v)
     }

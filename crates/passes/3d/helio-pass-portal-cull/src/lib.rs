@@ -53,6 +53,13 @@
 
 use std::sync::Arc;
 
+mod portal_math;
+pub use portal_math::{
+    crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
+};
+mod contract;
+pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
@@ -277,10 +284,10 @@ impl RenderPass for PortalCullPass {
             .scene_buffers
             .get(BufferKey::of("portal_chains"))
             .map(|h| {
-                (h.buffer.size() / std::mem::size_of::<libhelio::GpuPortalChain>() as u64) as u32
+                (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32
             })
             .unwrap_or(0)
-            .min(libhelio::MAX_PORTAL_CHAINS as u32);
+            .min(MAX_PORTAL_CHAINS as u32);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {

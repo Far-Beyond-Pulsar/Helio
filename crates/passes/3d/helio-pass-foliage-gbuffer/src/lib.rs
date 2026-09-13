@@ -75,7 +75,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_foliage_core::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
+use helio_pass_foliage_place::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
 use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -415,7 +415,7 @@ pub fn decide_frame(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Upper distance bound of LOD `level`, with the same non-decreasing repair
-/// [`helio_foliage_core::select_blade_lod`] applies.
+/// [`helio_pass_foliage_place::select_blade_lod`] applies.
 ///
 /// The repair matters: a mis-authored ladder like `[8, 45, 20, 120]` must degrade to an
 /// empty L2 rather than let a band be skipped, or the scene pops straight from a
@@ -451,10 +451,10 @@ pub fn cross_fade_alpha(
     band: f32,
 ) -> f32 {
     let upper = lod_threshold(lod_distances, level, quality_scale);
-    let mut alpha = helio_foliage_core::lod_fade_alpha(distance, upper - band, upper);
+    let mut alpha = helio_pass_foliage_place::lod_fade_alpha(distance, upper - band, upper);
     if level > 0 {
         let lower = lod_threshold(lod_distances, level - 1, quality_scale);
-        alpha = alpha.min(1.0 - helio_foliage_core::lod_fade_alpha(distance, lower - band, lower));
+        alpha = alpha.min(1.0 - helio_pass_foliage_place::lod_fade_alpha(distance, lower - band, lower));
     }
     alpha
 }

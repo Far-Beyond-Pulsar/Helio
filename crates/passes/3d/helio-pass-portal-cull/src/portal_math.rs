@@ -24,6 +24,11 @@
 
 use glam::{Mat4, Vec2, Vec3};
 
+/// Builds a portal pose from a position, outward-facing direction and up vector.
+pub fn portal_pose_facing(position: Vec3, forward: Vec3, up: Vec3) -> PortalPose {
+    PortalPose::from_look_at(position, position + forward, up)
+}
+
 // ── Portal pose ───────────────────────────────────────────────────────────────
 
 /// Position + orientation of a portal surface.

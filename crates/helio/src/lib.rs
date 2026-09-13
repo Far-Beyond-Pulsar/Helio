@@ -28,16 +28,17 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId, MultiMeshId,
-    ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId, SublevelId,
+    LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, SublevelId,
     TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
-/// Portal pair math (`pair_map`, crossing detection, teleport) — CPU-only,
-/// rendering-architecture-agnostic. See [`scene::portal_pose_facing`] and
-/// [`PortalDescriptor`] for the Helio-side portal API these compose with.
-pub use helio_portal_core::{crossing_detected, plane_signed_distance, PortalPair, PortalPose};
+/// Portal pair math and SceneDB GPU contracts owned by the portal passes.
+pub use helio_pass_portal_cull::{
+    crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalChain, GpuPortalView,
+    PortalPair, PortalPose, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS,
+};
 pub use libhelio::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
@@ -56,9 +57,8 @@ pub use renderer::{
     RendererBuilder, RendererConfig, SceneDbHandle,
 };
 pub use scene::{
-    portal_pose_facing, Camera, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
-    GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
-    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
+    Camera, LightRenderInput, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
+    ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
     SceneEntityId, SceneEntityTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
     WaterHitboxDescriptor, WaterVolumeDescriptor,
 };

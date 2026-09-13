@@ -1,6 +1,6 @@
 //! SceneDB-owned foliage authoring records.
 
-use helio_foliage_core::{GpuFoliageLayer, GpuFoliageType};
+use crate::{GpuFoliageLayer, GpuFoliageType};
 use pulsar_scenedb_derive::SceneStore;
 
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]

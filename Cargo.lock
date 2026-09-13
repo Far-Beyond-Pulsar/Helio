@@ -1436,14 +1436,14 @@ dependencies = [
  "glam 0.33.5",
  "helio-bake",
  "helio-core",
- "helio-foliage-core",
  "helio-pass-billboard",
  "helio-pass-corona",
+ "helio-pass-foliage-place",
+ "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-sky",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
- "helio-portal-core",
  "helio-xr",
  "image",
  "libhelio",
@@ -1542,7 +1542,6 @@ dependencies = [
  "glam 0.33.5",
  "helio",
  "helio-core",
- "helio-foliage-core",
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
@@ -1584,14 +1583,6 @@ dependencies = [
  "image",
  "pollster 0.4.0",
  "wgpu",
-]
-
-[[package]]
-name = "helio-foliage-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
 ]
 
 [[package]]
@@ -1702,7 +1693,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "helio-foliage-core",
+ "helio-pass-foliage-place",
  "libhelio",
  "log",
  "pulsar_scenedb",
@@ -1714,8 +1705,8 @@ name = "helio-pass-foliage-place"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
- "helio-foliage-core",
  "libhelio",
  "log",
  "pulsar_scenedb",
@@ -1875,6 +1866,7 @@ name = "helio-pass-portal-cull"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "libhelio",
  "log",
@@ -2191,14 +2183,6 @@ dependencies = [
 [[package]]
 name = "helio-passes"
 version = "0.0.0"
-
-[[package]]
-name = "helio-portal-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
-]
 
 [[package]]
 name = "helio-snapshot"

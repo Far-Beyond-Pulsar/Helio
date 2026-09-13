@@ -685,7 +685,7 @@ impl AppState {
         }
 
         // ── Teleport on crossing either portal ──────────────────────────────
-        // Same `helio_portal_core` math the renderer's own duplicate-content
+        // Same `helio_pass_portal_cull` math the renderer's own duplicate-content
         // mapping is built on (re-exported from `helio`) — crossing detection
         // and the position/direction remap are just the CPU-side half of the
         // same portal, unaffected by how it's drawn.

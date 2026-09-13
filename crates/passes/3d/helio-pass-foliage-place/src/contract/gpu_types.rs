@@ -18,7 +18,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::packing::{
+use super::packing::{
     f16_bits_to_f32, f32_to_f16_bits, pack_unorm16, pack_unorm8, pack_yaw, unpack_unorm16,
     unpack_unorm8, unpack_yaw,
 };

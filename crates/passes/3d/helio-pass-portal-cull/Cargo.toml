@@ -9,6 +9,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+glam = { workspace = true }
 helio-core = { workspace = true }
 libhelio = { workspace = true }
 wgpu = { workspace = true }

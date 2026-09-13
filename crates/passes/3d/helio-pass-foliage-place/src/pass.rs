@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_foliage_core::{
+use crate::{
     FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, TileState,
     DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS,
 };

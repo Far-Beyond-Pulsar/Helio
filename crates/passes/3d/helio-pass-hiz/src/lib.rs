@@ -24,7 +24,8 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use libhelio::PassResources;
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 

@@ -470,12 +470,6 @@ impl Renderer {
         self.scene.rebuild_light_instances(inputs);
     }
 
-    /// Advance renderer-owned simulation clocks without exposing the scene
-    /// container to the frontend.
-    pub fn advance_frame_simulation(&mut self, dt: f32) {
-        self.scene.advance_wind(dt);
-    }
-
     /// Apply the editor visibility mask to the current frame.
     pub fn hide_render_group(&mut self, group: GroupId) {
         self.scene.hide_group(group);
@@ -568,16 +562,6 @@ impl Renderer {
     /// Release a previously created material asset/projection slot.
     pub fn remove_material_asset(&mut self, id: MaterialId) -> crate::scene::Result<()> {
         self.scene.remove_material(id)
-    }
-
-    /// Current global wind state.
-    pub fn wind(&self) -> libhelio::Wind {
-        self.scene.wind()
-    }
-
-    /// Replace the global wind state.
-    pub fn set_wind(&mut self, wind: libhelio::Wind) {
-        self.scene.set_wind(wind)
     }
 
     /// Return the frontend-owned SceneDB handle, if one was attached during

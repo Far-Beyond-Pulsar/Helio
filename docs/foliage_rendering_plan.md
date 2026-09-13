@@ -79,7 +79,7 @@ Follows the established one-crate-per-pass rule, with shared POD types in a `*-c
 
 ```
 crates/
-  helio-foliage-core/            # POD GPU types, packing helpers, CPU mirrors of shader math
+  helio-pass-foliage-place/            # POD GPU types, packing helpers, CPU mirrors of shader math
   helio-pass-foliage-terrain/    # top-down height/normal/mask capture for the active ring
   helio-pass-foliage-interaction/# interaction field update (compute)
   helio-pass-foliage-place/      # tile residency, placement, cluster cull, compaction (compute)
@@ -656,7 +656,7 @@ Mirrors the conventions already in the repo rather than inventing a new harness.
 - **Layout asserts** — `const _: () = assert!(size_of::<GpuBladeInstance>() == 16)` etc., plus a
   `gpu_foliage_layouts_are_stable` test, exactly like `libhelio::meshlet::tests`.
 - **CPU mirrors of shader math** — `select_blade_lod`, `pack_blade`, `wind_offset` implemented
-  in `helio-foliage-core` and unit-tested, in the style of
+  in `helio-pass-foliage-place` and unit-tested, in the style of
   `helio_pass_virtual_geometry::select_object_lod`. The WGSL calls the same formulas.
 - **Placement determinism** — same tile + generation + seed ⇒ identical blade list, asserted
   across two dispatches and against a CPU reference.
@@ -679,7 +679,7 @@ Each phase is independently shippable and leaves the engine in a working state.
 
 | Phase | Deliverable | Acceptance |
 |---|---|---|
-| **1. Foundations** | `helio-foliage-core` types, `FrameResources` slots, `Scene` API, `FoliageTerrainPass` | Terrain capture renders correctly over voxel terrain; zero-overhead tests pass |
+| **1. Foundations** | `helio-pass-foliage-place` types, `FrameResources` slots, `Scene` API, `FoliageTerrainPass` | Terrain capture renders correctly over voxel terrain; zero-overhead tests pass |
 | **2. Grass** | `FoliagePlacePass` + `FoliageGBufferPass`, L0–L3, residency cache, tile/cluster cull | 1 M blades render, fully lit and shadowed; deterministic placement test passes |
 | **3. Wind + interaction** | `foliage_wind.wgsl` prelude, `FoliageInteractionPass`, motion vectors | No TAA ghosting on moving grass; footprint recovery matches golden curve |
 | **4. Trees** | Mesh foliage via VG, `wpo_extent` in `InstanceCullData`, `wpo_disable_distance`, proxy-mesh shadow publication | Wind-displaced leaves never cull at screen edges; tree LOD selection matches VG debug histogram; trees cast shadows via proxy |

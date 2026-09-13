@@ -4,7 +4,7 @@ use helio::DebugDrawState;
 use helio::GraphRebuilder;
 use helio::PassBuildContext;
 use helio::RendererConfig;
-use helio_foliage_core::FoliageQuality;
+use helio_pass_foliage_place::FoliageQuality;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};

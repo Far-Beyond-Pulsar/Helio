@@ -282,18 +282,6 @@ pub struct GpuScene {
     /// Reflection capture GPU storage buffer.
     pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
 
-    /// Active portals' render data (clip transform + which coordinate space
-    /// holds their content duplicate). Republished unconditionally each frame
-    /// by `helio::Scene::flush()` from its private portal registry — portal
-    /// counts are always small, so this is simpler than dirty-tracking it.
-    /// Consumed by `helio-pass-portal-cull` / `helio-pass-portal-instances`.
-    pub portal_views: GrowableBuffer<libhelio::GpuPortalView>,
-
-    /// Every valid portal chain up to `libhelio::MAX_CHAIN_DEPTH` deep —
-    /// see `SceneResources::portal_chains` for what this is and why it
-    /// exists. Rebuilt only when the portal set changes.
-    pub portal_chains: GrowableBuffer<libhelio::GpuPortalChain>,
-
     /// Bottom-Level Acceleration Structure manager (ray tracing).
     pub blas_manager: BlasManager,
 
@@ -353,19 +341,6 @@ impl GpuScene {
             "ReflectionCapture Buffer",
         );
 
-        let portal_views = GrowableBuffer::new(
-            device.clone(),
-            8,
-            wgpu::BufferUsages::STORAGE,
-            "Portal Views Buffer",
-        );
-        let portal_chains = GrowableBuffer::new(
-            device.clone(),
-            32,
-            wgpu::BufferUsages::STORAGE,
-            "Portal Chains Buffer",
-        );
-
         let device_for_rt = Arc::clone(&device);
 
         Self {
@@ -406,8 +381,6 @@ impl GpuScene {
             template_registry: None,
             transparent_template_registry: None,
             reflection_captures,
-            portal_views,
-            portal_chains,
             blas_manager: BlasManager::new(device_for_rt.clone()),
             tlas_manager: TlasManager::new(device_for_rt, 65536),
         }
@@ -465,10 +438,6 @@ impl GpuScene {
             transparent_template_registry: &self.transparent_template_registry,
             reflection_captures: self.reflection_captures.buffer(),
             reflection_capture_count: self.reflection_captures.len() as u32,
-            portal_views: self.portal_views.buffer(),
-            portal_view_count: self.portal_views.len() as u32,
-            portal_chains: self.portal_chains.buffer(),
-            portal_chain_count: self.portal_chains.len() as u32,
             rt_available: self.tlas_manager.is_rt_available(),
         }
     }

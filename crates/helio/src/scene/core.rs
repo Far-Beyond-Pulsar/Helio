@@ -14,7 +14,7 @@ use wgpu::util::DeviceExt;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId,
+    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
     SectionedInstanceId, SublevelId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
@@ -24,7 +24,6 @@ use crate::vg::VirtualMeshId;
 use libhelio::sky::SkyContext;
 
 use super::errors::{invalid, Result};
-use super::portals::PortalRecord;
 use super::sublevels::SublevelRecord;
 use super::types::{
     LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, ReflectionCaptureRecord,
@@ -165,45 +164,6 @@ pub struct Scene {
     /// Exact worst-case number of draws after choosing one LOD per object.
     pub(in crate::scene) vg_max_draw_count: u32,
 
-    // ── Foliage ───────────────────────────────────────────────────────────────
-    /// Registered foliage types (grass, bushes, trees).
-    pub(in crate::scene) foliage_types:
-        DenseArena<super::foliage::FoliageTypeRecord, crate::handles::FoliageTypeId>,
-
-    /// Set when foliage type or layer *topology* changes. Never set by a wind change —
-    /// see `scene::foliage`'s module header for why that distinction is load-bearing.
-    pub(in crate::scene) foliage_types_dirty: bool,
-
-    /// CPU mirror of the foliage type table, published as raw bytes each frame.
-    pub(in crate::scene) foliage_cpu_types: Vec<helio_foliage_core::GpuFoliageType>,
-
-    /// Version of the foliage type table. Gates re-upload; must not advance for wind.
-    pub(in crate::scene) foliage_generation: u64,
-
-    /// Foliage layers (where each type grows).
-    pub(in crate::scene) foliage_layers:
-        DenseArena<super::foliage::FoliageLayerRecord, crate::handles::FoliageLayerId>,
-
-    /// Set when the foliage layer table changes (bounds or infinite extent).
-    pub(in crate::scene) foliage_layers_dirty: bool,
-
-    /// CPU mirror of the foliage layer table, published as raw bytes each frame.
-    pub(in crate::scene) foliage_cpu_layers: Vec<helio_foliage_core::GpuFoliageLayer>,
-
-    /// Bodies that displace foliage.
-    pub(in crate::scene) foliage_interactors:
-        DenseArena<super::foliage::FoliageInteractorRecord, crate::handles::FoliageInteractorId>,
-
-    pub(in crate::scene) foliage_interactors_dirty: bool,
-
-    pub(in crate::scene) foliage_interactors_dirty_range: Option<(usize, usize)>,
-
-    /// CPU mirror of the interactor buffer.
-    pub(in crate::scene) foliage_cpu_interactors: Vec<super::foliage::GpuFoliageInteractor>,
-
-    /// Global wind state. Advanced once per frame via `Scene::advance_wind`.
-    pub(in crate::scene) wind: libhelio::Wind,
-
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
     /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
@@ -222,11 +182,8 @@ pub struct Scene {
     pub(in crate::scene) reflection_captures:
         DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
 
-    // ── Coordinate spaces (sublevels + portals) ──────────────────────────────────
-    // See `helio_core::CoordinateSpaceBuffer` for the GPU side. Sublevels and
-    // portals are both just consumers of the same small fixed-size slot table
-    // (slot 0 reserved, permanently identity/world-space); this free list is
-    // shared between them so neither can claim a slot the other already owns.
+    // ── Coordinate spaces (sublevels) ─────────────────────────────────────────
+    // See `helio_core::CoordinateSpaceBuffer` for the GPU side.
     /// Free GPU coordinate-space slots available for reuse (LIFO).
     pub(in crate::scene) coordinate_space_free: Vec<u32>,
     /// Next never-yet-allocated coordinate-space slot. Starts at 1 (slot 0 is
@@ -237,10 +194,6 @@ pub struct Scene {
     /// movable coordinate-space transform. See `scene::sublevels`.
     pub(in crate::scene) sublevels: SparsePool<SublevelRecord, SublevelId>,
 
-    /// Portals: a pair of poses whose `pair_map_inverse` is one more
-    /// coordinate space, used to draw a clipped duplicate of nearby geometry.
-    /// See `scene::portals`.
-    pub(in crate::scene) portals: SparsePool<PortalRecord, PortalId>,
 }
 
 impl Scene {
@@ -352,18 +305,6 @@ impl Scene {
             vg_cpu_work_items: Vec::new(),
             vg_max_draw_count: 0,
             radiant_graphs: RadiantGraphRegistry::new(),
-            foliage_types: DenseArena::new(),
-            foliage_types_dirty: false,
-            foliage_cpu_types: Vec::new(),
-            foliage_generation: 0,
-            foliage_layers: DenseArena::new(),
-            foliage_layers_dirty: false,
-            foliage_cpu_layers: Vec::new(),
-            foliage_interactors: DenseArena::new(),
-            foliage_interactors_dirty: false,
-            foliage_interactors_dirty_range: None,
-            foliage_cpu_interactors: Vec::new(),
-            wind: libhelio::Wind::default(),
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
@@ -371,7 +312,6 @@ impl Scene {
             coordinate_space_free: Vec::new(),
             coordinate_space_next: 1, // slot 0 reserved for world-space identity
             sublevels: SparsePool::new(),
-            portals: SparsePool::new(),
         }
     }
 
