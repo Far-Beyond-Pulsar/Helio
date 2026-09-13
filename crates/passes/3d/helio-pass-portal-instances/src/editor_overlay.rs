@@ -9,6 +9,7 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
@@ -218,13 +219,13 @@ impl RenderPass for PortalEditorOverlayPass {
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
             return Ok(());
         };
-        let Some(portal_data) = ctx.resources.portals.get() else {
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
 
         let key = (
             ctx.camera as *const _ as usize,
-            portal_data.portal_views as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -237,7 +238,7 @@ impl RenderPass for PortalEditorOverlayPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: portal_data.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                 ],
             }));

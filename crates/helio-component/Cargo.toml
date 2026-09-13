@@ -70,6 +70,8 @@ helio-planet-voxel-core = { workspace = true }
 helio-pass-planetary-voxel = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-water-sim = { workspace = true }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
 helio-pass-deferred-light = { workspace = true }
 pulsar_terrain.workspace = true
 thiserror.workspace = true

@@ -250,23 +250,6 @@ impl Renderer {
         // Water volumes/hitboxes are authored as `helio_pass_water_sim`'s
         // `WaterVolumeComponent`/`WaterHitboxComponent` SceneDB rows and
         // resolved by that pass (and `DeferredLightPass`) directly from
-        // `ctx.scene_buffers` -- no Renderer-owned arena, no CPU dirty-range
-        // upload here at all.
-        if self.scene.foliage_interactors_dirty() {
-            let interactors = self.scene.foliage_interactors_gpu_slice();
-            if let Some((start, end)) = self.scene.foliage_interactors_dirty_range() {
-                let end = end.min(interactors.len());
-                if start < end {
-                    self.queue.write_buffer(
-                        &self.foliage_interactors_buffer,
-                        (start * std::mem::size_of::<crate::scene::GpuFoliageInteractor>()) as u64,
-                        bytemuck::cast_slice(&interactors[start..end]),
-                    );
-                }
-            }
-            self.scene.clear_foliage_interactors_dirty();
-        }
-
         // Post-process volumes are authored as `helio_pass_postprocess::
         // PostProcessVolumeComponent` SceneDB rows and resolved by
         // `PostProcessVolumeBlendPass` directly from `ctx.scene_buffers` --
@@ -480,15 +463,6 @@ impl Renderer {
                 },
                 "Renderer",
             );
-            frame_resources.portals.write(
-                libhelio::PortalsFrameData {
-                    portal_views: gpu_scene.portal_views.buffer(),
-                    portal_view_count: gpu_scene.portal_views.len() as u32,
-                    portal_chains: gpu_scene.portal_chains.buffer(),
-                    portal_chain_count: gpu_scene.portal_chains.len() as u32,
-                },
-                "Renderer",
-            );
             frame_resources.voxels.write(
                 libhelio::VoxelsFrameData {
                     voxel_volumes: gpu_scene.voxel_volumes.buffer(),
@@ -557,20 +531,6 @@ impl Renderer {
         if let Some(vg_data) = self.scene.vg_frame_data() {
             frame_resources.vg.write(vg_data, "Renderer");
         }
-        // Foliage. `foliage_frame_data()` returns None when the scene registers no foliage
-        // types, and the slot is then deliberately left unwritten — that is the mechanism
-        // the foliage passes early-out on, and it is what makes an unplanted scene cost
-        // exactly nothing. Do not "helpfully" write an empty struct here.
-        let foliage_interactor_count = self.scene.foliage_interactor_count();
-        if let Some(foliage_data) = self.scene.foliage_frame_data() {
-            frame_resources.foliage.write(foliage_data, "Renderer");
-            if foliage_interactor_count > 0 {
-                frame_resources
-                    .foliage_interactors
-                    .write(&self.foliage_interactors_buffer, "Renderer");
-            }
-        }
-        frame_resources.foliage_interactor_count = foliage_interactor_count;
         frame_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
             frame_resources.baked_ao.write(ao, "Renderer");

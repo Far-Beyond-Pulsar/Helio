@@ -47,56 +47,6 @@ impl PendingWorldWrites {
     }
 }
 
-/// Per-component-instance foliage handles, keyed by `scene_object_id:component_index`.
-///
-/// Foliage types/layers/interactors are *not* re-created every sync pass (unlike
-/// lights): `add_foliage_type` re-rolls GPU placement on every publication
-/// generation bump, so the editor sync pass would re-roll the whole field every
-/// frame. Instead the first sync registers the handles and later syncs update
-/// them in place, gated by the stored hashes.
-pub struct FoliageCache {
-    pub map: HashMap<String, FoliageEntry>,
-}
-
-/// Handles and change-detection fingerprints for one foliage component instance.
-#[derive(Clone, Copy)]
-pub struct FoliageEntry {
-    pub type_id: helio::FoliageTypeId,
-    pub layer_id: helio::FoliageLayerId,
-    pub interactor_id: helio::FoliageInteractorId,
-    pub material_id: helio::MaterialId,
-    pub material_hash: u64,
-    pub descriptor_hash: u64,
-    pub bounds_hash: u64,
-    pub wind_hash: u64,
-}
-
-impl FoliageCache {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-}
-
-/// Tear down one foliage component instance from the scene, removing the type
-/// (which re-rolls its placement) before its material so the material is not
-/// tombstoned while referenced. Returns `false` when the key was not cached.
-pub fn remove_foliage_handles(
-    renderer: &mut helio::Renderer,
-    cache: &mut FoliageCache,
-    key: &str,
-) -> bool {
-    let Some(entry) = cache.map.remove(key) else {
-        return false;
-    };
-    let _ = renderer.remove_foliage_type(entry.type_id);
-    let _ = renderer.remove_foliage_layer(entry.layer_id);
-    let _ = renderer.remove_foliage_interactor(entry.interactor_id);
-    let _ = renderer.remove_material_asset(entry.material_id);
-    true
-}
-
 /// Cache of GPU-uploaded mesh geometry, keyed by the resolved asset path.
 ///
 /// Registered as a subsystem by both the game loader and editor contexts.
@@ -292,38 +242,6 @@ pub enum PortalPairAction {
 /// the tiny result back into `PortalLinkCache` as a third, separate borrow,
 /// avoids ever needing two subsystems live at once. `PortalComponent::sync_component`
 /// and the editor's stale-portal sweep both go through this same function.
-pub fn apply_portal_pair_action(
-    renderer: &mut helio::Renderer,
-    action: PortalPairAction,
-) -> Option<(i32, Option<helio::PortalId>)> {
-    match action {
-        PortalPairAction::None => None,
-        PortalPairAction::Create {
-            portal_id,
-            a,
-            b,
-            half_extent,
-        } => renderer
-            .add_portal(helio::PortalDescriptor { a, b, half_extent })
-            .ok()
-            .map(|id| (portal_id, Some(id))),
-        PortalPairAction::Update {
-            id,
-            a,
-            b,
-            half_extent,
-        } => {
-            let _ = renderer.update_portal_pose(id, a, b);
-            let _ = renderer.update_portal_half_extent(id, half_extent);
-            None
-        }
-        PortalPairAction::Remove { portal_id, id } => {
-            let _ = renderer.remove_portal(id);
-            Some((portal_id, None))
-        }
-    }
-}
-
 /// Pairs up to two [`PortalComponent`](crate::PortalComponent) instances
 /// that share the same `portal_id` into one real `helio::Scene` portal.
 ///

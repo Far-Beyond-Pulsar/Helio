@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Foliage tile residency, GPU placement, tile/cluster culling and per-LOD compaction for Helio"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
 helio-core = { workspace = true }
 helio-foliage-core = { workspace = true }
@@ -11,3 +15,5 @@ libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5" }

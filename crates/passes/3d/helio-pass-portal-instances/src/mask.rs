@@ -12,6 +12,7 @@
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalMaskPass {
     stamp_pipeline: wgpu::RenderPipeline,
@@ -242,10 +243,11 @@ impl RenderPass for PortalMaskPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.portal_count = ctx
-            .frame_resources
-            .portals
-            .get()
-            .map(|p| p.portal_view_count)
+            .scene_buffers
+            .get(BufferKey::of("portal_views"))
+            .map(|h| {
+                (h.buffer.size() / std::mem::size_of::<libhelio::GpuPortalView>() as u64) as u32
+            })
             .unwrap_or(0);
         Ok(())
     }
@@ -261,14 +263,14 @@ impl RenderPass for PortalMaskPass {
             );
             return Ok(());
         };
-        let Some(portal_data) = ctx.resources.portals.get() else {
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
 
         // ── Sub-pass 1: stamp ────────────────────────────────────────────
         let stamp_key = (
             ctx.camera as *const _ as usize,
-            portal_data.portal_views as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
         );
         if self.stamp_bind_group_key != Some(stamp_key) {
             self.stamp_bind_group =
@@ -282,7 +284,7 @@ impl RenderPass for PortalMaskPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: portal_data.portal_views.as_entire_binding(),
+                            resource: portal_views.buffer.as_entire_binding(),
                         },
                     ],
                 }));

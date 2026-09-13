@@ -29,6 +29,7 @@ use std::{borrow::Cow, sync::Arc};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_portal_cull::PORTAL_DRAW_CAPACITY;
+use pulsar_scenedb::gpu::BufferKey;
 
 mod mask;
 pub use mask::PortalMaskPass;
@@ -488,7 +489,10 @@ impl RenderPass for PortalInstancePass {
         let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
             return Ok(());
         };
-        let Some(portal_data) = ctx.resources.portals.get() else {
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
+        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
             return Ok(());
         };
 
@@ -497,8 +501,8 @@ impl RenderPass for PortalInstancePass {
             ctx.camera as *const _ as usize,
             batch.instances as *const _ as usize,
             coord_data.coordinate_spaces as *const _ as usize,
-            portal_data.portal_views as *const _ as usize,
-            portal_data.portal_chains as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
+            &portal_chains.buffer as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
             &*self.portal_compacted_chains_buf as *const _ as usize,
             portal_mask_view as *const _ as usize,
@@ -534,11 +538,11 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: portal_data.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: portal_data.portal_chains.as_entire_binding(),
+                        resource: portal_chains.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,

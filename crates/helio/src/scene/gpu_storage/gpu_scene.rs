@@ -591,8 +591,6 @@ impl GpuScene {
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
         self.reflection_captures.flush(queue);
-        self.portal_views.flush(queue);
-        self.portal_chains.flush(queue);
 
         // After flush, cycle prev_model = model so that next frame's velocity
         // buffer captures the movement between this frame and the next.

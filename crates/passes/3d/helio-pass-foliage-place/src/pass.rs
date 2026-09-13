@@ -7,14 +7,15 @@ use helio_foliage_core::{
     FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, TileState,
     DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS,
 };
+use pulsar_scenedb::gpu::BufferKey;
 
 use crate::residency::TileRing;
 use crate::uniforms::{FoliageCullUniforms, PlaceUniforms};
 use crate::{
-    foliage_frame_is_present, COUNTER_PLACED_BLADES, COUNTER_PLACEMENT_OVERFLOW,
-    COUNTER_VISIBLE_OVERFLOW, DEFAULT_WPO_EXTENT_METERS, FOLIAGE_COUNTER_COUNT,
-    FOLIAGE_LOD_FADE_BAND_METERS, FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY,
-    MAX_BLADES_PER_TILE, MAX_CANDIDATES_PER_TILE,
+    COUNTER_PLACED_BLADES, COUNTER_PLACEMENT_OVERFLOW, COUNTER_VISIBLE_OVERFLOW,
+    DEFAULT_WPO_EXTENT_METERS, FOLIAGE_COUNTER_COUNT, FOLIAGE_LOD_FADE_BAND_METERS,
+    FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY, MAX_BLADES_PER_TILE,
+    MAX_CANDIDATES_PER_TILE,
 };
 
 const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
@@ -75,8 +76,8 @@ pub struct FoliagePlacePass {
     counters: Arc<wgpu::Buffer>,
 
     // ── Internal ────────────────────────────────────────────────────────────────
-    type_table: wgpu::Buffer,
-    layer_table: wgpu::Buffer,
+    placeholder_type: wgpu::Buffer,
+    placeholder_layer: wgpu::Buffer,
     place_queue: wgpu::Buffer,
     tile_visibility: wgpu::Buffer,
     place_uniforms: wgpu::Buffer,
@@ -88,9 +89,10 @@ pub struct FoliagePlacePass {
     finalize_pipeline: wgpu::ComputePipeline,
 
     cull_bgl: wgpu::BindGroupLayout,
-    place_bind_group: wgpu::BindGroup,
+    place_bind_group: Option<wgpu::BindGroup>,
+    place_bind_group_key: Option<(usize, usize, usize)>,
     cull_bind_group: Option<wgpu::BindGroup>,
-    cull_bind_group_key: Option<(usize, usize, usize)>,
+    cull_bind_group_key: Option<(usize, usize, usize, usize)>,
 
     placeholder_hiz: wgpu::TextureView,
     placeholder_hiz_sampler: wgpu::Sampler,
@@ -113,7 +115,6 @@ pub struct FoliagePlacePass {
     cluster_dispatch_height: u32,
     tile_dispatch_groups: u32,
 
-    last_type_generation: Option<u64>,
     density_scale: f32,
     warned_density_clamp: bool,
     warned_type_overflow: bool,
@@ -254,16 +255,16 @@ impl FoliagePlacePass {
             mapped_at_creation: false,
         }));
 
-        let type_table = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Foliage Type Table"),
-            size: MAX_FOLIAGE_TYPES as u64 * TYPE_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let placeholder_type = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Foliage Type Placeholder"),
+            size: TYPE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let layer_table = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Foliage Layer Table"),
-            size: MAX_FOLIAGE_LAYERS as u64 * LAYER_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let placeholder_layer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Foliage Layer Placeholder"),
+            size: LAYER_BYTES,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let place_queue = device.create_buffer(&wgpu::BufferDescriptor {
@@ -469,59 +470,14 @@ impl FoliagePlacePass {
             cache: None,
         });
 
-        // Every binding in the place group is owned by this pass and never reallocated,
-        // so this bind group is built once and never rebuilt.
-        let place_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Foliage Place BG"),
-            layout: &place_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: place_uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: type_table.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: tile_table.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: blade_arena.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: place_queue.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: counters.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&placeholder_terrain),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::Sampler(&terrain_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: layer_table.as_entire_binding(),
-                },
-            ],
-        });
-
         Self {
             blade_arena,
             tile_table,
             visible_blades,
             foliage_indirect,
             counters,
-            type_table,
-            layer_table,
+            placeholder_type,
+            placeholder_layer,
             place_queue,
             tile_visibility,
             place_uniforms,
@@ -531,7 +487,8 @@ impl FoliagePlacePass {
             cluster_cull_pipeline,
             finalize_pipeline,
             cull_bgl,
-            place_bind_group,
+            place_bind_group: None,
+            place_bind_group_key: None,
             cull_bind_group: None,
             cull_bind_group_key: None,
             placeholder_hiz,
@@ -555,7 +512,6 @@ impl FoliagePlacePass {
             cluster_dispatch_width: 1,
             cluster_dispatch_height: 1,
             tile_dispatch_groups: ring_capacity.div_ceil(WORKGROUP_SIZE).max(1),
-            last_type_generation: None,
             density_scale: 1.0,
             warned_density_clamp: false,
             warned_type_overflow: false,
@@ -831,26 +787,22 @@ impl RenderPass for FoliagePlacePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Zero overhead when absent: an unwritten `foliage` slot means no foliage types
-        // are registered, and this returns before touching a buffer. `execute` gates on
-        // the same flag and records nothing.
+        // SceneDB is the only foliage authoring input.  Buffer size is the stable row
+        // capacity exposed by the mirror; zero rows means the pass has no work.
         self.active = false;
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
             log::debug!(
-                "[foliage][gate] frame={} slot_written={} type_count={:?}",
+                "[foliage][gate] frame={} scene_type_buffer={}",
                 ctx.frame_num,
-                ctx.frame_resources.foliage.is_some(),
-                ctx.frame_resources.foliage.get().map(|f| f.type_count),
+                ctx.scene_buffers
+                    .get(BufferKey::of("foliage_types"))
+                    .is_some(),
             );
         }
-        if !foliage_frame_is_present(ctx.frame_resources) {
-            return Ok(());
-        }
-        let Some(foliage) = ctx.frame_resources.foliage.get() else {
+        let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
             return Ok(());
         };
-
-        let mut type_count = foliage.type_count;
+        let mut type_count = (type_handle.buffer.size() / TYPE_BYTES) as u32;
         if type_count > MAX_FOLIAGE_TYPES {
             if !self.warned_type_overflow {
                 log::warn!(
@@ -862,30 +814,11 @@ impl RenderPass for FoliagePlacePass {
             type_count = MAX_FOLIAGE_TYPES;
         }
 
-        let Ok(all_types) = bytemuck::try_cast_slice::<u8, GpuFoliageType>(foliage.types) else {
-            log::warn!(
-                "foliage type table is {} bytes, not a whole number of {TYPE_BYTES}-byte \
-                 GpuFoliageType records; skipping foliage this frame",
-                foliage.types.len()
-            );
-            return Ok(());
-        };
-        if (type_count as usize) > all_types.len() {
-            log::warn!(
-                "foliage published type_count {type_count} against a table of {} entries; \
-                 skipping foliage this frame",
-                all_types.len()
-            );
-            return Ok(());
-        }
-        let types = &all_types[..type_count as usize];
-
-        // The layer table may legitimately be empty — a scene that predates it keeps the
-        // legacy "carpet the whole ring" behaviour, so an empty table must upload as empty
-        // rather than faulting the slice. `layer_count` is clamped to the fixed buffer's
-        // capacity; the shader loops `arrayLength` entries per candidate, so a mis-authored
-        // count must not silently read past the end.
-        let mut layer_count = foliage.layer_count;
+        let mut layer_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_layers"))
+            .map(|h| (h.buffer.size() / LAYER_BYTES) as u32)
+            .unwrap_or(0);
         if layer_count > MAX_FOLIAGE_LAYERS {
             log::warn!(
                 "{layer_count} foliage layers published but the layer table holds \
@@ -893,33 +826,10 @@ impl RenderPass for FoliagePlacePass {
             );
             layer_count = MAX_FOLIAGE_LAYERS;
         }
-        let Ok(all_layers) = bytemuck::try_cast_slice::<u8, GpuFoliageLayer>(foliage.layers) else {
-            log::warn!(
-                "foliage layer table is {} bytes, not a whole number of {LAYER_BYTES}-byte \
-                 GpuFoliageLayer records; ignoring layers this frame",
-                foliage.layers.len()
-            );
-            return Ok(());
-        };
-        if (layer_count as usize) > all_layers.len() {
-            log::warn!(
-                "foliage published layer_count {layer_count} against a table of {} entries; \
-                 ignoring layers this frame",
-                all_layers.len()
-            );
-            return Ok(());
-        }
-        let layers = &all_layers[..layer_count as usize];
-
-        // Tables change on authoring edits only — wind must not advance the generation,
-        // or this re-uploads every frame and the residency cache stops being free.
-        if self.last_type_generation != Some(foliage.generation) {
-            ctx.write_buffer(&self.type_table, 0, bytemuck::cast_slice(types));
-            ctx.write_buffer(&self.layer_table, 0, bytemuck::cast_slice(layers));
-            self.last_type_generation = Some(foliage.generation);
-        }
-
-        let (max_foliage_height, max_density) = self.table_stats(types);
+        // The placement uniform only needs conservative bounds.  The actual authored
+        // values are read by the GPU directly from the SceneDB type column.
+        let max_foliage_height = 0.45;
+        let max_density = 40.0;
         let (candidate_grid, achieved_density) = self.candidate_grid(max_density);
         self.density_scale = achieved_density;
         if achieved_density < 0.999 && !self.warned_density_clamp {
@@ -943,7 +853,7 @@ impl RenderPass for FoliagePlacePass {
         // 32 bits because that is what `blade_seed` mixes. Wrapping is harmless — it takes
         // 4 billion authoring edits, and a collision only means one tile keeps its blades
         // through an edit it should have re-rolled.
-        let generation = foliage.generation as u32;
+        let generation = type_handle.epoch as u32;
         let position_near = ctx.camera_data.position_near;
         let camera = [position_near[0], position_near[1], position_near[2]];
         let ring_update = self.ring.update([camera[0], camera[2]], generation);
@@ -1069,10 +979,72 @@ impl RenderPass for FoliagePlacePass {
             .hiz_sampler
             .get()
             .unwrap_or(&self.placeholder_hiz_sampler);
+        let type_buffer = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_types"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_type);
+        let layer_buffer = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_layers"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_layer);
+        let place_key = (
+            type_buffer as *const _ as usize,
+            layer_buffer as *const _ as usize,
+            &self.placeholder_terrain as *const _ as usize,
+        );
+        if self.place_bind_group_key != Some(place_key) {
+            self.place_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Foliage Place BG"),
+                    layout: &self.place_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.place_uniforms.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: type_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.tile_table.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.blade_arena.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.place_queue.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.counters.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.placeholder_terrain),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.terrain_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: layer_buffer.as_entire_binding(),
+                        },
+                    ],
+                }));
+            self.place_bind_group_key = Some(place_key);
+        }
         let key = (
             ctx.camera as *const _ as usize,
             hiz_view as *const _ as usize,
             hiz_sampler as *const _ as usize,
+            type_buffer as *const _ as usize,
         );
         if self.cull_bind_group_key != Some(key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1097,7 +1069,7 @@ impl RenderPass for FoliagePlacePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: self.type_table.as_entire_binding(),
+                        resource: type_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -1148,7 +1120,10 @@ impl RenderPass for FoliagePlacePass {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.place_pipeline);
-            pass.set_bind_group(0, &self.place_bind_group, &[]);
+            let Some(place_bg) = self.place_bind_group.as_ref() else {
+                return Ok(());
+            };
+            pass.set_bind_group(0, place_bg, &[]);
             // One workgroup per queued tile, bounded by `max_tiles_per_frame`. This is
             // what turns a teleport into a few frames of progressive fill-in instead of
             // a hitch.

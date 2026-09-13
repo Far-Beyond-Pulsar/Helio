@@ -155,17 +155,6 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        // Fixed 256-interactor ceiling. The
-        // interaction field is 64 m across; more than a couple of hundred bodies inside it
-        // at once is a gameplay problem, not a rendering one, and a fixed size keeps this
-        // off the per-frame allocation path entirely.
-        let foliage_interactors_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Foliage Interactors Buffer"),
-            size: 256 * std::mem::size_of::<crate::scene::GpuFoliageInteractor>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
@@ -224,7 +213,6 @@ impl Renderer {
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
-            foliage_interactors_buffer,
             postprocess_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
@@ -302,5 +290,4 @@ impl Renderer {
 
         renderer
     }
-
 }
