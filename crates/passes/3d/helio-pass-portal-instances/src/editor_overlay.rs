@@ -204,10 +204,13 @@ impl RenderPass for PortalEditorOverlayPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.portal_count = ctx
-            .pass_resources
-            .portals
-            .get()
-            .map(|p| p.portal_view_count)
+            .scene_buffers
+            .get(BufferKey::of("portal_views"))
+            .map(|h| {
+                (h.buffer.size()
+                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                    as u32
+            })
             .unwrap_or(0);
         Ok(())
     }
