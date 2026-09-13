@@ -99,7 +99,6 @@ pub struct Renderer {
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
-    pub(crate) foliage_interactors_buffer: wgpu::Buffer,
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
@@ -610,88 +609,16 @@ impl Renderer {
     /// [`Self::place_static_object`]'s doc; this is the other of the "two
     /// siblings" referenced there. A caller should also despawn its own
     /// `StaticObjectComponent` row alongside this call.
-    pub fn remove_static_object(&mut self, id: crate::handles::ObjectId) -> crate::scene::Result<()> {
+    pub fn remove_static_object(
+        &mut self,
+        id: crate::handles::ObjectId,
+    ) -> crate::scene::Result<()> {
         self.scene.remove_object(id)
     }
 
     /// Release a previously created material asset/projection slot.
     pub fn remove_material_asset(&mut self, id: MaterialId) -> crate::scene::Result<()> {
         self.scene.remove_material(id)
-    }
-
-    // ── Narrow component-runtime projections ────────────────────────────────
-    //
-    // The methods below (foliage, portal, post-process volume, reflection
-    // capture, water volume) replace the removed broad `scene_for_legacy_mut`
-    // accessor for `helio_component`'s per-frame `ComponentRuntimeBehavior`
-    // sync paths. Each SceneDB component in that crate already has a typed
-    // definition; these domains have not yet grown a generated GPU-mirrored
-    // buffer registration the way lights/static meshes/materials have (see
-    // the Helio 3.0 spec §15.2), so their runtime sync still projects into
-    // Helio's own renderer-local pools. Every method here is a single named
-    // operation with no broader scene access — not a hidden second authority
-    // reintroduced under a new name — and is a placeholder for a future
-    // generated-GPU-mirror projection, not a permanent design.
-
-    /// Register a foliage type (species) and return its handle.
-    pub fn add_foliage_type(
-        &mut self,
-        descriptor: crate::scene::FoliageTypeDescriptor,
-    ) -> crate::handles::FoliageTypeId {
-        self.scene.add_foliage_type(descriptor)
-    }
-
-    /// Update an existing foliage type's descriptor.
-    pub fn update_foliage_type(
-        &mut self,
-        id: crate::handles::FoliageTypeId,
-        descriptor: crate::scene::FoliageTypeDescriptor,
-    ) -> crate::scene::Result<()> {
-        self.scene.update_foliage_type(id, descriptor)
-    }
-
-    /// Remove a foliage type.
-    pub fn remove_foliage_type(&mut self, id: crate::handles::FoliageTypeId) -> crate::scene::Result<()> {
-        self.scene.remove_foliage_type(id)
-    }
-
-    /// Register a foliage layer (where a type grows) and return its handle.
-    pub fn add_foliage_layer(
-        &mut self,
-        layer: crate::scene::FoliageLayer,
-    ) -> crate::handles::FoliageLayerId {
-        self.scene.add_foliage_layer(layer)
-    }
-
-    /// Remove a foliage layer.
-    pub fn remove_foliage_layer(&mut self, id: crate::handles::FoliageLayerId) -> crate::scene::Result<()> {
-        self.scene.remove_foliage_layer(id)
-    }
-
-    /// Register a foliage interactor (a body that displaces foliage).
-    pub fn add_foliage_interactor(
-        &mut self,
-        interactor: crate::scene::FoliageInteractor,
-    ) -> crate::handles::FoliageInteractorId {
-        self.scene.add_foliage_interactor(interactor)
-    }
-
-    /// Update a foliage interactor's position/velocity.
-    pub fn update_foliage_interactor(
-        &mut self,
-        id: crate::handles::FoliageInteractorId,
-        position: glam::Vec3,
-        velocity: glam::Vec3,
-    ) -> crate::scene::Result<()> {
-        self.scene.update_foliage_interactor(id, position, velocity)
-    }
-
-    /// Remove a foliage interactor.
-    pub fn remove_foliage_interactor(
-        &mut self,
-        id: crate::handles::FoliageInteractorId,
-    ) -> crate::scene::Result<()> {
-        self.scene.remove_foliage_interactor(id)
     }
 
     /// Current global wind state.
@@ -702,38 +629,6 @@ impl Renderer {
     /// Replace the global wind state.
     pub fn set_wind(&mut self, wind: libhelio::Wind) {
         self.scene.set_wind(wind)
-    }
-
-    /// Create a portal from a paired descriptor.
-    pub fn add_portal(
-        &mut self,
-        descriptor: crate::scene::PortalDescriptor,
-    ) -> crate::scene::Result<crate::handles::PortalId> {
-        self.scene.add_portal(descriptor)
-    }
-
-    /// Update an existing portal's pose (the two linked transforms).
-    pub fn update_portal_pose(
-        &mut self,
-        id: crate::handles::PortalId,
-        a: helio_portal_core::PortalPose,
-        b: helio_portal_core::PortalPose,
-    ) -> crate::scene::Result<()> {
-        self.scene.update_portal_pose(id, a, b)
-    }
-
-    /// Update an existing portal's half-extent.
-    pub fn update_portal_half_extent(
-        &mut self,
-        id: crate::handles::PortalId,
-        half_extent: glam::Vec2,
-    ) -> crate::scene::Result<()> {
-        self.scene.update_portal_half_extent(id, half_extent)
-    }
-
-    /// Remove a portal.
-    pub fn remove_portal(&mut self, id: crate::handles::PortalId) -> crate::scene::Result<()> {
-        self.scene.remove_portal(id)
     }
 
     /// Return the frontend-owned SceneDB handle, if one was attached during

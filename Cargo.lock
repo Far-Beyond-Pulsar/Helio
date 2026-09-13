@@ -1709,6 +1709,7 @@ dependencies = [
  "helio-foliage-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1721,6 +1722,8 @@ dependencies = [
  "helio-foliage-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1880,6 +1883,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1893,6 +1898,7 @@ dependencies = [
  "helio-pass-portal-cull",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "wgpu",
 ]
 

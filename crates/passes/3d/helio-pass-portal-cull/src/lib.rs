@@ -55,6 +55,8 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
+pub mod components;
 
 /// Fixed cap on draw-call groups considered. Realistic scenes have dozens to
 /// low hundreds of distinct mesh+material combinations; this is generous
@@ -272,11 +274,13 @@ impl RenderPass for PortalCullPass {
             .map(|b| b.draw_count)
             .unwrap_or(0);
         self.chain_count = ctx
-            .frame_resources
-            .portals
-            .get()
-            .map(|p| p.portal_chain_count)
-            .unwrap_or(0);
+            .scene_buffers
+            .get(BufferKey::of("portal_chains"))
+            .map(|h| {
+                (h.buffer.size() / std::mem::size_of::<libhelio::GpuPortalChain>() as u64) as u32
+            })
+            .unwrap_or(0)
+            .min(libhelio::MAX_PORTAL_CHAINS as u32);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {
@@ -315,7 +319,10 @@ impl RenderPass for PortalCullPass {
         let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
             return Ok(());
         };
-        let Some(portal_data) = ctx.resources.portals.get() else {
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
+        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
             return Ok(());
         };
 
@@ -324,8 +331,8 @@ impl RenderPass for PortalCullPass {
             batch.instances as *const wgpu::Buffer as usize,
             batch.draw_calls as *const wgpu::Buffer as usize,
             coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
-            portal_data.portal_views as *const wgpu::Buffer as usize,
-            portal_data.portal_chains as *const wgpu::Buffer as usize,
+            &portal_views.buffer as *const wgpu::Buffer as usize,
+            &portal_chains.buffer as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -354,7 +361,7 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: portal_data.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -370,7 +377,7 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: portal_data.portal_chains.as_entire_binding(),
+                        resource: portal_chains.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,

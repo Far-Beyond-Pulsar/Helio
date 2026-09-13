@@ -229,7 +229,7 @@ pub struct SceneResources<'a> {
     /// *composed* transform of a whole chain, not just one portal, and each
     /// stage is independently clip-tested against its own portal's opening.
     /// Rebuilt whenever the portal set changes (add/remove/pose update), not
-    /// every frame — see `helio::Scene::add_portal` and neighbors.
+    /// every frame — authored portal rows are now resolved from SceneDB by the portal passes.
     pub portal_chains: &'a wgpu::Buffer,
     /// Number of valid chains in `portal_chains`.
     pub portal_chain_count: u32,

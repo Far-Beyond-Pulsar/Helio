@@ -273,7 +273,6 @@ impl Scene {
 
         // Foliage type/interactor mirrors. Both are internally dirty-gated, so this is a
         // pair of predictable-branch no-ops in the overwhelmingly common steady state.
-        self.rebuild_foliage_buffers();
 
         // ── Voxel volume flush ───────────────────────────────────────────────
         {

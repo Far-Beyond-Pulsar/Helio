@@ -245,7 +245,7 @@ pub struct RendererConfig {
     /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
     ///
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
-    /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
+    /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
     pub enable_foliage: bool,
     /// Foliage density budget in blades per square metre, or `None` for the quality
     /// preset default.
@@ -312,7 +312,7 @@ pub struct RendererConfig {
     /// mechanism with real fixed GPU allocations (~10 MB, see
     /// `helio-pass-portal-cull`'s module docs) and a per-frame dispatch, so
     /// unlike sublevels they get an actual off switch: a scene that never
-    /// calls `Scene::add_portal` can skip paying for it by setting this `false`.
+    /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
 }
 
