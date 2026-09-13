@@ -2175,7 +2175,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa = resources.pre_aa.read("PlanetaryVoxel")?;
         let color_load = match self.attachment_mode {

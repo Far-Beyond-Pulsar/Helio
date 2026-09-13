@@ -366,13 +366,13 @@ impl RenderPass for ForwardLitPass {
         builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("ForwardLit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
@@ -408,7 +408,7 @@ impl RenderPass for ForwardLitPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let (ambient_color, ambient_intensity) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
+            if let Some(ref ms) = ctx.pass_resources.main_scene.get().as_ref() {
                 (ms.ambient_color, ms.ambient_intensity)
             } else {
                 ([0.1, 0.1, 0.15], 0.1)
@@ -428,7 +428,7 @@ impl RenderPass for ForwardLitPass {
         let light_count = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.frame_resources
+            ctx.pass_resources
                 .lights
                 .get()
                 .map(|l| l.light_count)

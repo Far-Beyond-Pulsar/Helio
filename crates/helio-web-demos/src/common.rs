@@ -90,7 +90,7 @@ pub fn insert_object(
         .ok_or(helio::SceneError::InvalidHandle { resource: "mesh" })?;
     let object_actor_id =
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
                 mesh,
                 material,
@@ -189,7 +189,7 @@ pub fn insert_object_with_movability(
 ) -> helio::SceneResult<helio::ObjectId> {
     let object_actor_id =
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
                 mesh,
                 material,

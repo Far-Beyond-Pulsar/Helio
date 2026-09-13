@@ -261,14 +261,14 @@ impl RenderPass for PortalCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx
-            .frame_resources
+            .pass_resources
             .object_batch
             .get()
             .map(|b| b.draw_count)

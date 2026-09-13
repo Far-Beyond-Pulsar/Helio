@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use libhelio::FrameResources;
+use libhelio::PassResources;
 
 use crate::data::BakedData;
 
-/// A render pass that publishes pre-baked GPU resources into `FrameResources` each frame.
+/// A render pass that publishes pre-baked GPU resources into `PassResources` each frame.
 ///
 /// This pass does **zero GPU work** — it purely stores `Arc`-wrapped references and
 /// writes them into the frame resource bus in `publish()`.  
@@ -37,12 +37,12 @@ impl RenderPass for BakeInjectPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
-    fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut PassResources<'a>) {
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO
         if let Some(ref view) = self.data.ao_view {
             frame.baked_ao.write(view.as_ref(), "BakeInject");

@@ -94,7 +94,7 @@ fn bay_centre_z(index: usize) -> f32 {
 
 fn insert_box_mesh(renderer: &mut Renderer, half: Vec3) -> helio::MeshId {
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::mesh(box_mesh(
             [0.0, 0.0, 0.0],
             [half.x, half.y, half.z],
@@ -224,7 +224,7 @@ fn bay_materials(
     let colour = [0.25, 0.85, 1.0];
     let intensity = 7.5;
     let light = renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(point_light(
             position.into(),
             colour,
@@ -243,7 +243,7 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
     for side in [-1.0_f32, 1.0] {
         let x = side * 1.2;
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(spot_light(
                 [x, HALL_HEIGHT - 0.05, z],
                 [0.0, -1.0, 0.0],
@@ -262,7 +262,7 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
         );
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [side * (HALL_HALF_WIDTH - 0.15), 1.6, z],
                 [1.0, 0.65, 0.3],
@@ -284,7 +284,7 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
 /// god-ray overhead light, so the corridor fills with visible volumetric shafts.
 fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) {
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(GpuLight {
             position_range: [0.0, 1.6, z, 9.0],
             direction_outer: [0.0, -1.0, 0.0, 0.0],
@@ -306,11 +306,11 @@ fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) 
     let mut shaft = point_light([0.0, HALL_HEIGHT - 0.15, z], [0.7, 0.8, 1.0], 7.0, 9.0);
     shaft.god_rays_enabled = 1;
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(shaft));
 
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::post_process_volume(
             PostProcessVolumeDescriptor {
                 bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
@@ -354,7 +354,7 @@ fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim
 
     // The water surface sits exactly on the pedestal top (y = 0.9).
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::water_volume(
             helio::WaterVolumeDescriptor {
                 bounds_min: [
@@ -458,7 +458,7 @@ fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, ani
     });
 
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(point_light(
             [0.0, 2.4, z],
             [1.0, 0.5, 0.2],
@@ -559,7 +559,7 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
     let local_centre = (bb_min + bb_max) * 0.5;
 
     let fallback = renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_material(make_material([0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
     let material = section
         .material_index
@@ -568,7 +568,7 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
         .unwrap_or(fallback);
 
     let mesh = renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::mesh(MeshUpload {
             vertices: sm.vertices.clone(),
             indices: section.indices.clone(),
@@ -603,7 +603,7 @@ fn bay_emissive_colour(
         ),
     ];
     for (gpu, x) in targets {
-        let mat = renderer.scene_for_legacy_mut().insert_material(gpu);
+        let mat = renderer.scene().insert_material(gpu);
         place(renderer, meshes.cube, mat, Vec3::new(x, 0.6, z), 0.6);
     }
 
@@ -616,7 +616,7 @@ fn bay_emissive_colour(
         let colour = hsv_to_rgb(i as f32 / 6.0, 0.8, 1.0);
         let base = 3.0;
         let light = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 pos.into(),
                 colour,
@@ -666,7 +666,7 @@ fn bay_voxel(renderer: &mut Renderer, z: f32) {
 /// volume over the whole bay, anchored on a blindingly bright emissive sun.
 fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::post_process_volume(
             PostProcessVolumeDescriptor {
                 bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
@@ -694,7 +694,7 @@ fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
         ));
 
     let sun_mat = renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_material(make_material(
             [1.0, 0.9, 0.7, 1.0],
             0.2,
@@ -704,7 +704,7 @@ fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
         ));
     place(renderer, meshes.cube, sun_mat, Vec3::new(0.0, 1.4, z), 0.6);
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(point_light(
             [0.0, 1.4, z],
             [1.0, 0.9, 0.7],
@@ -722,7 +722,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // the chalk are the two ends; everything else sits between them.
     let mut mat = |c: [f32; 4], rough: f32, metal: f32, em: [f32; 3], strength: f32| {
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(c, rough, metal, em, strength))
     };
 
@@ -804,12 +804,12 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // ── Shared exhibit meshes ────────────────────────────────────────────────
     let meshes = Meshes {
         cube: renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.28)))
             .as_mesh()
             .unwrap(),
         sphere: renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.3)))
             .as_mesh()
             .unwrap(),
@@ -821,7 +821,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // Small bright cubes `main.rs` reparents to the OpenXR grip poses each frame.
     let hand_mesh = insert_box_mesh(renderer, Vec3::new(0.05, 0.05, 0.05));
     let hand_mat = renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_material(make_material(
             [0.05, 0.05, 0.06, 1.0],
             0.4,
@@ -894,7 +894,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // Cool fill at the entrance, so the first bay is not lit solely by its own accent —
     // otherwise the whole corridor reads as one colour from the doorway.
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::light(point_light(
             [0.0, HALL_HEIGHT - 0.6, 1.5],
             [0.6, 0.7, 1.0],
@@ -906,7 +906,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // colour target each frame, so its absence is what made geometry smear over itself.
     // See `Renderer::rebuild_graph_if_sky_changed`.
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(helio::SceneEntity::sky(
             helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
         ));
@@ -928,14 +928,14 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
                 0.0,
             ));
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_object_transform(*id, transform);
     }
 
     for (index, (id, rest)) in animated.bobbers.iter().enumerate() {
         let offset = (time * 1.1 + index as f32 * 0.8).sin() * 0.18;
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_object_transform(*id, Mat4::from_translation(*rest + Vec3::Y * offset));
     }
 
@@ -943,7 +943,7 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
         // Shallow pulse — deep flicker in a headset is unpleasant at best and a migraine
         // trigger at worst, so this stays well inside a gentle band.
         let pulse = 0.85 + 0.15 * (time * 0.9 + index as f32 * 1.3).sin();
-        let _ = renderer.scene_for_legacy_mut().update_light(
+        let _ = renderer.scene().update_light(
             *id,
             point_light((*position).into(), *colour, base * pulse, BAY_LENGTH),
         );
@@ -953,7 +953,7 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
     if let Some((id, rest, pool_xz)) = &mut animated.water_orb {
         let y = rest.y + (time * 1.4).sin() * 0.35;
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_object_transform(*id, Mat4::from_translation(Vec3::new(rest.x, y, rest.z)));
         if y < 0.9 {
             if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
@@ -968,7 +968,7 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
         let hue = (time * 0.4 + index as f32 / count as f32) % 1.0;
         let colour = hsv_to_rgb(hue, 0.8, 1.0);
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_light(*id, point_light((*position).into(), colour, *base, 6.0));
     }
 

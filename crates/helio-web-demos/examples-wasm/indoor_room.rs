@@ -33,7 +33,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let wall_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.68, 0.62, 1.0],
                 0.8,
@@ -42,7 +42,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.55, 0.45, 0.35, 1.0],
                 0.9,
@@ -51,7 +51,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let wood_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.50, 0.35, 0.20, 1.0],
                 0.7,
@@ -64,53 +64,53 @@ impl HelioWasmApp for Demo {
 
         // Room shell
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
         let ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 3.0, 0.0],
                 [5.0, 0.05, 5.0],
             )));
         let wall_n = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.5, -5.0],
                 [5.0, 1.5, 0.1],
             )));
         let wall_s = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 1.5, 5.0],
                 [5.0, 1.5, 0.1],
             )));
         let wall_e = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [5.0, 1.5, 0.0],
                 [0.1, 1.5, 5.0],
             )));
         let wall_w = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [-5.0, 1.5, 0.0],
                 [0.1, 1.5, 5.0],
             )));
         // Furniture
         let table = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.4, 0.0],
                 [1.2, 0.05, 0.7],
             )));
         let bookcase = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [-3.5, 1.0, -4.0],
                 [0.3, 1.0, 1.5],
             )));
         let sofa = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [3.0, 0.45, -2.5],
                 [1.5, 0.45, 0.6],
@@ -132,7 +132,7 @@ impl HelioWasmApp for Demo {
         }
 
         let overhead_light = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 2.85, 0.0],
                 [1.0, 0.85, 0.6],
@@ -183,7 +183,7 @@ impl HelioWasmApp for Demo {
 
         // Subtle flicker
         let flicker = 1.0 + (elapsed * 11.3).sin() * 0.04 + (elapsed * 7.7).cos() * 0.02;
-        let _ = renderer.scene_for_legacy_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.overhead_light,
             point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
         );

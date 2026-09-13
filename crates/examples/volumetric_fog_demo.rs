@@ -221,7 +221,7 @@ impl ApplicationHandler for App {
         );
 
         let stone = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.62, 0.60, 0.58, 1.0],
                 0.85,
@@ -232,7 +232,7 @@ impl ApplicationHandler for App {
 
         // Floor
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
             .as_mesh()
             .unwrap();
@@ -242,7 +242,7 @@ impl ApplicationHandler for App {
         // Roof — without it the sun lights everything and there is nothing to
         // slice the light into shafts.
         let roof = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
@@ -259,7 +259,7 @@ impl ApplicationHandler for App {
 
         // Two rows of pillars. The gaps between them are what the sun cuts through.
         let pillar = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
@@ -290,7 +290,7 @@ impl ApplicationHandler for App {
         let mut sun = directional_light(sun_light_dir(1.0), [1.0, 0.9, 0.75], 4.0);
         sun.god_rays_enabled = 1;
         let sun_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(sun))
             .as_light()
             .unwrap();
@@ -305,7 +305,7 @@ impl ApplicationHandler for App {
         // blend_weight 1.0 lands on exactly t = 0.5, so it cannot flip an enable
         // flag. Floats blend fine, which is what this volume varies.
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::post_process_volume(
                 PostProcessVolumeDescriptor {
                     bounds_min: [-HALL_HALF_X, 0.0, -6.0],
@@ -609,7 +609,7 @@ impl AppState {
         sun.god_rays_enabled = self.shafts_enabled as u32;
         let _ = self
             .renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_light(self.sun_light_id, sun);
 
         if let Err(e) = self.renderer.render(&camera, &view) {

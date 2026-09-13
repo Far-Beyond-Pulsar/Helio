@@ -781,7 +781,7 @@ impl RenderPass for FoliagePlacePass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -874,7 +874,7 @@ impl RenderPass for FoliagePlacePass {
         }
 
         let (terrain_origin, terrain_extent, terrain_valid) = match self.terrain_transform {
-            Some((origin, extent)) if ctx.frame_resources.foliage_terrain.get().is_some() => {
+            Some((origin, extent)) if ctx.pass_resources.foliage_terrain.get().is_some() => {
                 (origin, extent, 1)
             }
             _ => ([0.0, 0.0], 1.0, 0),
@@ -922,7 +922,7 @@ impl RenderPass for FoliagePlacePass {
         // Frame 0 has no pyramid, and an untouched depth texture reads back as 0.0, which
         // the near-is-0.0 convention would treat as "everything is occluded". Same guard
         // as `vg_cull.wgsl`, and the same reason.
-        let hiz_valid = (ctx.frame_num > 0 && ctx.frame_resources.hiz.get().is_some()) as u32;
+        let hiz_valid = (ctx.frame_num > 0 && ctx.pass_resources.hiz.get().is_some()) as u32;
 
         ctx.write_buffer(
             &self.cull_uniforms,

@@ -217,7 +217,7 @@ impl ApplicationHandler for App {
         // ── Materials ─────────────────────────────────────────────────────
         // Dock concrete
         let mat_dock = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.42, 0.40, 0.38, 1.0],
                 0.95,
@@ -227,7 +227,7 @@ impl ApplicationHandler for App {
             ));
         // Road apron
         let mat_road = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.22, 0.22, 0.22, 1.0],
                 0.95,
@@ -237,7 +237,7 @@ impl ApplicationHandler for App {
             ));
         // Safety stripe yellow
         let mat_stripe = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.92, 0.75, 0.05, 1.0],
                 0.7,
@@ -247,7 +247,7 @@ impl ApplicationHandler for App {
             ));
         // Crane steel
         let mat_steel = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.25, 0.26, 0.28, 1.0],
                 0.15,
@@ -257,7 +257,7 @@ impl ApplicationHandler for App {
             ));
         // Crane safety orange
         let mat_orange = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.85, 0.35, 0.05, 1.0],
                 0.3,
@@ -267,7 +267,7 @@ impl ApplicationHandler for App {
             ));
         // Warning beacon emissive red
         let mat_warning = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [1.0, 0.1, 0.05, 1.0],
                 0.4,
@@ -277,7 +277,7 @@ impl ApplicationHandler for App {
             ));
         // Harbour water
         let mat_water = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.04, 0.12, 0.20, 1.0],
                 0.05,
@@ -287,7 +287,7 @@ impl ApplicationHandler for App {
             ));
         // Bollard dark iron
         let mat_bollard = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.18, 0.14, 0.10, 1.0],
                 0.85,
@@ -297,7 +297,7 @@ impl ApplicationHandler for App {
             ));
         // Mast pole lamp housing
         let mat_lamp = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.90, 0.85, 0.50, 1.0],
                 0.3,
@@ -309,7 +309,7 @@ impl ApplicationHandler for App {
         // ── Ground — large dock apron ──────────────────────────────────────
         let dock_upload = plane_mesh([0.0, 0.0, 0.0], 100.0);
         let dock_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(dock_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -327,7 +327,7 @@ impl ApplicationHandler for App {
         // ── Harbour water ──────────────────────────────────────────────────
         let water_upload = plane_mesh([0.0, -0.15, 0.0], 80.0);
         let water_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(water_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -345,7 +345,7 @@ impl ApplicationHandler for App {
         // ── Quay wall ─────────────────────────────────────────────────────
         let quay_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 3.5, 1.2]);
         let quay_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(quay_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -363,7 +363,7 @@ impl ApplicationHandler for App {
         // ── Road apron strip ───────────────────────────────────────────────
         let road_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 0.05, 6.0]);
         let road_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(road_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -381,7 +381,7 @@ impl ApplicationHandler for App {
         // Yellow safety stripes (two parallel lines)
         let stripe_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 0.06, 0.4]);
         let stripe_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(stripe_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -401,7 +401,7 @@ impl ApplicationHandler for App {
         // ── Bollards along the quay edge ───────────────────────────────────
         let bollard_upload = box_mesh([0.0, 0.0, 0.0], [0.28, 0.6, 0.28]);
         let bollard_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(bollard_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -427,7 +427,7 @@ impl ApplicationHandler for App {
             // Leg pair
             let leg_upload = box_mesh([0.0; 3], [1.0, 18.0, 1.0]);
             let leg_mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::mesh(leg_upload.clone()))
                 .as_mesh()
                 .unwrap();
@@ -446,7 +446,7 @@ impl ApplicationHandler for App {
             // Cross-beam
             let beam_upload = box_mesh([0.0; 3], [13.0, 1.0, 1.0]);
             let beam_mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::mesh(beam_upload.clone()))
                 .as_mesh()
                 .unwrap();
@@ -464,7 +464,7 @@ impl ApplicationHandler for App {
             let boom_sign = if crane_i == 0 { -1.0_f32 } else { 1.0_f32 };
             let boom_upload = box_mesh([0.0; 3], [18.0, 0.8, 0.8]);
             let boom_mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::mesh(boom_upload.clone()))
                 .as_mesh()
                 .unwrap();
@@ -481,7 +481,7 @@ impl ApplicationHandler for App {
             // Warning beacon on boom tip
             let beacon_upload = sphere_mesh([0.0; 3], 0.45);
             let beacon_mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::mesh(beacon_upload.clone()))
                 .as_mesh()
                 .unwrap();
@@ -498,7 +498,7 @@ impl ApplicationHandler for App {
             // Operator cab
             let cab_upload = box_mesh([0.0; 3], [3.5, 2.5, 3.0]);
             let cab_mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::mesh(cab_upload.clone()))
                 .as_mesh()
                 .unwrap();
@@ -520,14 +520,14 @@ impl ApplicationHandler for App {
         let mast_zs: &[f32] = &[-32.0, 4.0, 38.0];
         let mast_upload = box_mesh([0.0; 3], [0.35, 12.0, 0.35]);
         let mast_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(mast_upload.clone()))
             .as_mesh()
             .unwrap();
         picker.register_mesh(mast_mesh, &mast_upload);
         let lamp_upload = box_mesh([0.0; 3], [1.2, 0.4, 1.2]);
         let lamp_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(lamp_upload.clone()))
             .as_mesh()
             .unwrap();
@@ -584,7 +584,7 @@ impl ApplicationHandler for App {
                 Ok(scene) => {
                     let fallback_mat =
                         renderer
-                            .scene_for_legacy_mut()
+                            .scene()
                             .insert_material(make_material(
                                 [0.5, 0.5, 0.5, 1.0],
                                 0.8,
@@ -605,7 +605,7 @@ impl ApplicationHandler for App {
                             }
 
                             let vm_id = renderer
-                                .scene_for_legacy_mut()
+                                .scene()
                                 .insert_entity(SceneEntity::virtual_mesh(VirtualMeshUpload {
                                     vertices: sm.vertices.clone(),
                                     indices: sec.indices.clone(),
@@ -721,7 +721,7 @@ impl ApplicationHandler for App {
                                         // regardless of rotation
 
                                         for &(vm_id, mat_slot) in &vg_entries {
-                                            renderer.scene_for_legacy_mut().insert_entity(
+                                            renderer.scene().insert_entity(
                                                 SceneEntity::virtual_object(
                                                     VirtualObjectDescriptor {
                                                         virtual_mesh: vm_id,
@@ -759,7 +759,7 @@ impl ApplicationHandler for App {
         for &mz in mast_zs {
             for &mx in mast_xs {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(SceneEntity::light(point_light(
                         [mx, 14.0, mz],
                         [1.0, 0.80, 0.40],
@@ -771,7 +771,7 @@ impl ApplicationHandler for App {
 
         // Crane work lights — cool white, tight cone, very bright
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [-90.0, 20.0, -38.0],
                 [0.90, 0.96, 1.0],
@@ -779,7 +779,7 @@ impl ApplicationHandler for App {
                 35.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [90.0, 20.0, -38.0],
                 [0.90, 0.96, 1.0],
@@ -789,7 +789,7 @@ impl ApplicationHandler for App {
 
         // Boom tip warning lights (red, matching emissive beacons)
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [-117.5, 17.5, -38.0],
                 [1.0, 0.05, 0.02],
@@ -797,7 +797,7 @@ impl ApplicationHandler for App {
                 7.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [117.5, 17.5, -38.0],
                 [1.0, 0.05, 0.02],
@@ -825,7 +825,7 @@ impl ApplicationHandler for App {
         ];
         for &(fx, fy, fz) in fill_pts {
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::light(point_light(
                     [fx, fy, fz],
                     [1.0, 0.76, 0.38],
@@ -836,7 +836,7 @@ impl ApplicationHandler for App {
 
         // Harbour water sheen — deep teal reflections off the harbour side
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [120.0, 2.0, -20.0],
                 [0.20, 0.55, 0.85],
@@ -844,7 +844,7 @@ impl ApplicationHandler for App {
                 60.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::light(point_light(
                 [130.0, 2.0, 10.0],
                 [0.15, 0.45, 0.75],
@@ -934,7 +934,7 @@ impl ApplicationHandler for App {
                         KeyCode::Delete if !state.right_mouse_held => {
                             if state
                                 .editor
-                                .delete_selected(state.renderer.scene_for_legacy_mut())
+                                .delete_selected(state.renderer.scene())
                             {
                                 state.picker.rebuild_instances(state.renderer.scene());
                             }
@@ -965,7 +965,7 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
                             let pos = state.cam_pos.to_array();
-                            state.renderer.scene_for_legacy_mut().insert_entity(
+                            state.renderer.scene().insert_entity(
                                 SceneEntity::light(point_light(pos, [0.2, 0.5, 1.0], 500.0, 150.0)),
                             );
                         }

@@ -34,7 +34,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::PassResources<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -210,7 +210,7 @@ impl<T: std::any::Any> AsAny for T {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -263,7 +263,7 @@ impl<T: std::any::Any> AsAny for T {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -388,22 +388,23 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Returns `Err` if GPU command recording fails (rare).
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()>;
 
-    /// Publishes outputs into the shared frame-resource contract for later passes.
+    /// Publishes outputs into the shared pass-resource view for later passes.
     ///
     /// Passes should expose only stable resource contracts here (e.g. GBuffer,
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     /// Publishes outputs into the open typed resource registry.
     ///
     /// This is the phase 3 migration path. Existing passes may continue to
-    /// implement [`publish`](Self::publish) against the legacy shim; new
-    /// passes should declare a [`libhelio::ResourceKey`] in their own crate
-    /// and publish through this hook instead.
+    /// Existing passes may continue to implement [`publish`](Self::publish)
+    /// against the typed pass-resource view; new graph-owned outputs should
+    /// declare a [`libhelio::ResourceKey`] in their own crate and publish
+    /// through this hook instead.
     fn publish_registry(&self, _registry: &mut libhelio::ResourceRegistry<'_>) {}
 
     /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
-    /// pass's own compound `FrameResources` field.
+    /// pass's own compound `PassResources` field.
     ///
     /// The executor calls this once per `write_group` this pass declared,
     /// resolved to concrete views in declaration order — both once during
@@ -420,7 +421,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// The core resolves `write_group` declarations generically — it has no
     /// notion of what a given group's views mean, only the owning pass does.
     /// This is how that pass turns them into a named, stable contract (e.g.
-    /// `FrameResources::gbuffer`) for downstream readers, without the core
+    /// `PassResources::gbuffer`) for downstream readers, without the core
     /// ever pattern-matching the group's name. `views` matches the
     /// declaration order of the `write_group` call's `members` array.
     ///
@@ -436,7 +437,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &self,
         _group_name: &'static str,
         _views: &[&'a wgpu::TextureView],
-        _frame: &mut libhelio::FrameResources<'a>,
+        _frame: &mut libhelio::PassResources<'a>,
     ) {
     }
 
@@ -451,7 +452,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     fn build_gpu_render_bundle(
         &mut self,
         _device: &wgpu::Device,
-        _resources: &libhelio::FrameResources<'_>,
+        _resources: &libhelio::PassResources<'_>,
     ) -> Option<wgpu::RenderBundle> {
         None
     }
@@ -469,13 +470,13 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>>;
 
     /// Dynamic-rendering variant of [`render_pass_descriptor`](Self::render_pass_descriptor),
     /// additionally given the executor's texture registry (`pool`) so the
     /// descriptor can resolve arbitrary [`AttachmentSlot::Named`](crate::graph::AttachmentSlot::Named)
-    /// resources — not just the fixed set of fields `FrameResources` routes by
+    /// resources — not just the fixed set of fields `PassResources` routes by
     /// name — before `begin_render_pass` is called.
     ///
     /// The executor calls this instead of `render_pass_descriptor` at every
@@ -491,7 +492,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
         pool: &'a crate::graph::GraphTexturePool,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let _ = pool;
@@ -541,7 +542,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::PassResources<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// #     fn execute(&mut self, _: &mut PassContext) -> Result<()> { Ok(()) }
     /// fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
@@ -587,7 +588,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ///
     /// The graph uses these declarations to:
     /// - Create and own all inter-pass textures (removing per-pass allocation)
-    /// - Route texture views through `FrameResources` automatically
+    /// - Route texture views through `PassResources` automatically
     /// - Alias non-overlapping resources to reduce peak VRAM
     /// - Fuse linear A→B chains into subpasses (zero intermediate storage)
     ///

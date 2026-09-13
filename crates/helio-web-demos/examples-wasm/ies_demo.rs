@@ -33,7 +33,7 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.15, 0.16, 1.0],
                 0.8,
@@ -42,7 +42,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             ));
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
         let _ = insert_object(renderer, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
 
@@ -70,7 +70,7 @@ impl HelioWasmApp for Demo {
                 _ => 0.80,
             };
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(light))
                 .as_light()
                 .unwrap()
@@ -245,7 +245,7 @@ impl HelioWasmApp for Demo {
                 light.light_function_index = 1; // layer 1 = checkerboard gobo
             }
             let _ = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(self.light_ids[i], light);
         }
 

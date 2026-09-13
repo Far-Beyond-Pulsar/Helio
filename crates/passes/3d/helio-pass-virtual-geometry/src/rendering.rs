@@ -754,7 +754,7 @@ impl RenderPass for VirtualGeometryPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_debug_readback(ctx.device);
 
-        let Some(vg) = ctx.frame_resources.vg.get() else {
+        let Some(vg) = ctx.pass_resources.vg.get() else {
             return Ok(());
         };
 
@@ -816,7 +816,7 @@ impl RenderPass for VirtualGeometryPass {
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let materials = ctx
-                .frame_resources
+                .pass_resources
                 .materials
                 .get()
                 .map(|m| m.material_data)
@@ -854,7 +854,7 @@ impl RenderPass for VirtualGeometryPass {
             );
 
             let materials = ctx
-                .frame_resources
+                .pass_resources
                 .materials
                 .get()
                 .map(|m| m.material_data)
@@ -957,10 +957,10 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(main_scene) = ctx.frame_resources.main_scene.read("VirtualGeometry") else {
+        let Some(main_scene) = ctx.pass_resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
-        let Some(materials) = ctx.frame_resources.materials.get() else {
+        let Some(materials) = ctx.pass_resources.materials.get() else {
             return Ok(());
         };
         if self.draw_bg_1.is_none()
@@ -997,7 +997,7 @@ impl RenderPass for VirtualGeometryPass {
             frame: ctx.frame_num as u32,
             delta_time: 0.016,
             light_count: ctx
-                .frame_resources
+                .pass_resources
                 .lights
                 .get()
                 .map(|l| l.light_count)
@@ -1036,7 +1036,7 @@ impl RenderPass for VirtualGeometryPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;

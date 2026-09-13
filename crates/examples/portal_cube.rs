@@ -212,7 +212,7 @@ impl ApplicationHandler for App {
 
         // ── Materials ───────────────────────────────────────────────────────
         let wall_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.75, 0.75, 0.78, 1.0],
                 0.75,
@@ -221,7 +221,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let frame_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.3, 0.9, 1.0, 1.0],
                 0.4,
@@ -234,7 +234,7 @@ impl ApplicationHandler for App {
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
         let unit_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.0, 1.0, 1.0],
@@ -281,7 +281,7 @@ impl ApplicationHandler for App {
             let a = helio::portal_pose_facing(normal * HALF_SIZE, normal, up);
             let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
             let portal = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .add_portal(PortalDescriptor {
                     a,
                     b,
@@ -296,7 +296,7 @@ impl ApplicationHandler for App {
         let mut light_ids = Vec::new();
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::light(point_light(
                     [0.0, HALF_SIZE * 0.85, 0.0],
                     [1.0, 0.98, 0.92],
@@ -312,7 +312,7 @@ impl ApplicationHandler for App {
         for &pos in &[Vec3::new(3.5, 3.0, 3.5), Vec3::new(-3.5, -3.0, -3.5)] {
             light_ids.push(
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(SceneEntity::light(point_light(
                         [pos.x, pos.y, pos.z],
                         [0.85, 0.92, 1.0],
@@ -632,7 +632,7 @@ fn insert_wall_face(
         // overselecting and blowing straight through the cull pass's
         // per-group capacity.
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::object(ObjectDescriptor {
                 mesh: unit_mesh,
                 material,

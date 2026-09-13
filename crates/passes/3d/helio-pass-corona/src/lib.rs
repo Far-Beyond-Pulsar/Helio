@@ -864,7 +864,7 @@ impl RenderPass for CoronaPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let target_view = resources.pre_aa.get().unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =

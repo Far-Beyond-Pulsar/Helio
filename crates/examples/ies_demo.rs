@@ -108,7 +108,7 @@ impl App {
             }
             let _ = state
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_light(state.light_ids[i], light);
         }
     }
@@ -234,7 +234,7 @@ impl ApplicationHandler for App {
 
         // Dark floor
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.15, 0.16, 1.0],
                 0.8,
@@ -243,7 +243,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let ground = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)))
             .as_mesh()
             .unwrap();
@@ -280,7 +280,7 @@ impl ApplicationHandler for App {
                 _ => 0.80,
             };
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(light))
                 .as_light()
                 .unwrap()

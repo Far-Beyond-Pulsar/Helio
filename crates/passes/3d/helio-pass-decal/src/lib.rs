@@ -355,12 +355,12 @@ impl RenderPass for DecalPass {
         builder.read("hiz");
         builder.read("main_scene");
     }
-    fn publish<'a>(&'a self, _: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _: &mut libhelio::PassResources<'a>) {}
     fn render_pass_descriptor<'a>(
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::FrameResources<'a>,
+        _: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

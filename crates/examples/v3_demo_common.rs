@@ -1,7 +1,7 @@
 use glam::{Mat4, Vec3};
 use helio::{
-    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, ObjectDescriptor,
-    PackedVertex, Renderer, SceneDbHandle,
+    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, PackedVertex, Renderer,
+    SceneDbHandle,
 };
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
@@ -123,13 +123,9 @@ pub fn spot_light(
 // of scene content owns its schema and its generated GPU buffer, and a World
 // row is the only authoritative record of "this exists."
 //
-// Resolving those rows into what the renderer actually draws still goes
-// through `Renderer::place_static_object`/`submit_light_frame` each frame —
-// not a shortcut, but the same "one dense per-frame resolve, real SceneDB
-// authority underneath" shape `helio_component::LightComponent` +
-// `HelioRenderer::rebuild_light_frame` already use in production (see
-// `LightComponent`'s own doc for why a per-light scheduling problem, shadow-
-// slot assignment, keeps this a CPU step rather than a raw GPU buffer bind).
+// The renderer consumes the SceneDB GPU projection directly. Asset handles are
+// resolved when the component is authored, while existence and transforms stay
+// exclusively in the World row.
 
 pub use helio_pass_forward_lit::LightComponent;
 pub use helio_pass_gbuffer::StaticObjectComponent;
@@ -160,53 +156,25 @@ pub fn spawn_object_with_movability(
         transform.w_axis.z,
         radius,
     ];
-    // `place_static_object` is the render-facing projection, not the scene
-    // authority; the projected instance's own `movability`/`groups` still
-    // apply to how Helio draws it, they just aren't part of the SceneDB row
-    // (which only needs mesh/material/transform/bounds to be re-derivable).
-    let object_id = renderer.place_static_object(ObjectDescriptor {
-        mesh,
-        material,
-        transform,
-        bounds,
-        flags: 0,
-        groups: helio::GroupMask::NONE,
-        movability,
-        user_tag: 0,
-    })?;
-    // `StaticObjectComponent::new` resolves `mesh`/`material`'s draw
-    // parameters via `renderer.mesh_slice`/`material_batch_key` -- both
-    // handles were just accepted by `place_static_object` above, so they are
-    // live asset-pool entries and this can't fail in practice; still handled
-    // explicitly rather than unwrapped since it's a real `Option`.
+    // `StaticObjectComponent::new` resolves only asset-pool metadata. It does
+    // not place an object or create a renderer-owned scene record.
     let Some(component) = StaticObjectComponent::new(renderer, mesh, material, transform, bounds, 0)
     else {
         return Err(helio::SceneError::InvalidHandle { resource: "mesh_or_material" });
     };
     let entity = world.spawn();
     world.insert(entity, component);
-    world.insert(entity, ObjectRenderHandle(object_id));
+    let _ = movability;
     Ok(entity)
 }
 
-/// The renderer-side presentation handle for a spawned
-/// `StaticObjectComponent`. Kept as its own component (not a field of
-/// `StaticObjectComponent` itself) so the authoritative row stays plain,
-/// re-derivable, `Pod` GPU data with no renderer handle mixed in.
-#[derive(Clone, Copy, Debug)]
-struct ObjectRenderHandle(helio::ObjectId);
-
-/// Move a previously spawned object: updates both the SceneDB row (the
-/// authoritative record) and the renderer's presentation projection.
+/// Move a previously spawned object by updating its authoritative SceneDB row.
 pub fn update_object_transform(
     world: &mut World,
-    renderer: &mut Renderer,
+    _renderer: &mut Renderer,
     entity: Entity,
     transform: Mat4,
 ) -> helio::SceneResult<()> {
-    let Some(handle) = world.get::<ObjectRenderHandle>(entity).copied() else {
-        return Err(helio::SceneError::InvalidHandle { resource: "object" });
-    };
     let Some(mut object) = world.get_mut::<StaticObjectComponent>(entity) else {
         return Err(helio::SceneError::InvalidHandle { resource: "object" });
     };
@@ -217,20 +185,15 @@ pub fn update_object_transform(
         object.bounds[3],
     ];
     *object = object.with_transform(transform, bounds);
-    drop(object);
-    renderer.update_static_object_transform(handle.0, transform)
+    Ok(())
 }
 
-/// Despawn a previously spawned object: removes both the SceneDB rows and
-/// the renderer's presentation projection.
+/// Despawn a previously spawned object from the authoritative SceneDB world.
 pub fn despawn_object(
     world: &mut World,
-    renderer: &mut Renderer,
+    _renderer: &mut Renderer,
     entity: Entity,
 ) -> helio::SceneResult<()> {
-    if let Some(handle) = world.get::<ObjectRenderHandle>(entity).copied() {
-        renderer.remove_static_object(handle.0)?;
-    }
     world.despawn(entity);
     Ok(())
 }

@@ -472,7 +472,7 @@ impl RenderPass for DebugPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let depth_attachment = if self.depth_test_enabled {
             // `full_res_depth` is a dummy: it is allocated so that passes
@@ -747,7 +747,7 @@ impl RenderPass for DebugDrawPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         self.pass.render_pass_descriptor(target, depth, resources)
     }

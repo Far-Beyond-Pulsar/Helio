@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 
@@ -560,7 +560,7 @@ impl RenderPass for HiZBuildPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a FrameResources<'a>,
+        _resources: &'a PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -823,7 +823,7 @@ impl RenderPass for HiZBuildPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut PassResources<'a>) {
         // The graph routes "hiz" texture view via pre_pass_actions before execute().
         // We only need to publish the sampler (not owned by the graph).
         frame.hiz_sampler.write(&*self.hiz_sampler, "HiZBuild");

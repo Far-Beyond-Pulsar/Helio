@@ -175,7 +175,7 @@ impl ApplicationHandler for App {
 
         // Single material for the whole station (cool grey metal)
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.62, 0.63, 0.66, 1.0],
                 0.55,
@@ -188,7 +188,7 @@ impl ApplicationHandler for App {
 
         // Static directional (sunlight)
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.35, -0.65, 0.25],
                 [0.72, 0.82, 1.0],
@@ -197,7 +197,7 @@ impl ApplicationHandler for App {
 
         let hub_light_ids = [
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 14.0, 0.0],
                     [0.82, 0.90, 1.0],
@@ -207,7 +207,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, -9.0, 0.0],
                     [0.70, 0.80, 1.0],
@@ -219,7 +219,7 @@ impl ApplicationHandler for App {
         ];
         let hab_ring_light_ids = [
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [35.0, 6.0, 0.0],
                     [0.78, 0.88, 1.0],
@@ -229,7 +229,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [-35.0, 6.0, 0.0],
                     [0.78, 0.88, 1.0],
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 6.0, 35.0],
                     [0.78, 0.88, 1.0],
@@ -249,7 +249,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 6.0, -35.0],
                     [0.78, 0.88, 1.0],
@@ -261,7 +261,7 @@ impl ApplicationHandler for App {
         ];
         let engine_light_ids = [
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [5.0, 5.0, 58.0],
                     [1.0, 0.42, 0.06],
@@ -271,7 +271,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [-5.0, 5.0, 58.0],
                     [1.0, 0.42, 0.06],
@@ -281,7 +281,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [5.0, -5.0, 58.0],
                     [1.0, 0.42, 0.06],
@@ -291,7 +291,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [-5.0, -5.0, 58.0],
                     [1.0, 0.42, 0.06],
@@ -302,7 +302,7 @@ impl ApplicationHandler for App {
                 .unwrap(),
         ];
         let docking_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0, 0.0, -54.0],
                 [1.0, 1.0, 0.92],
@@ -313,7 +313,7 @@ impl ApplicationHandler for App {
             .unwrap();
         let beacon_light_ids = [
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 6.0, 65.0],
                     [1.0, 0.04, 0.04],
@@ -323,7 +323,7 @@ impl ApplicationHandler for App {
                 .as_light()
                 .unwrap(),
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::light(point_light(
                     [0.0, 6.0, -65.0],
                     [1.0, 0.04, 0.04],
@@ -520,11 +520,11 @@ impl AppState {
         // Red warning beacon (1 Hz strobe)
         let beacon = (0.5 + 0.5 * (time * TAU).sin()).max(0.0_f32);
 
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.hub_light_ids[0],
             point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0),
         );
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.hub_light_ids[1],
             point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0),
         );
@@ -536,7 +536,7 @@ impl AppState {
             [0.0, 6.0, -35.0],
         ];
         for (i, &id) in self.hab_ring_light_ids.iter().enumerate() {
-            let _ = self.renderer.scene_for_legacy_mut().update_light(
+            let _ = self.renderer.scene().update_light(
                 id,
                 point_light(hab_pos[i], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
             );
@@ -549,23 +549,23 @@ impl AppState {
             [-5.0, -5.0, 58.0],
         ];
         for (i, &id) in self.engine_light_ids.iter().enumerate() {
-            let _ = self.renderer.scene_for_legacy_mut().update_light(
+            let _ = self.renderer.scene().update_light(
                 id,
                 point_light(eng_pos[i], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
             );
         }
 
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.beacon_light_ids[0],
             point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.beacon_light_ids[1],
             point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
 
         // docking light steady
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.docking_light_id,
             point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
         );
@@ -584,7 +584,7 @@ fn build_station(renderer: &mut Renderer, mat: MaterialId) {
     macro_rules! add {
         ($cx:expr, $cy:expr, $cz:expr, $hx:expr, $hy:expr, $hz:expr) => {{
             let _mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [$cx, $cy, $cz],
                     [$hx, $hy, $hz],

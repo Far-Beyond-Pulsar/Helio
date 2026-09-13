@@ -538,7 +538,7 @@ impl RenderPass for WaterSimPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -584,7 +584,7 @@ impl RenderPass for WaterSimPass {
         ]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         let view = if self.front_per_layer[0] {
             &self.sim_layer_views_a[0]
         } else {

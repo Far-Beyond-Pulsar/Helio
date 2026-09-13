@@ -205,13 +205,13 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&color| {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_material(make_material(color, 0.5, 0.1, [0.0, 0.0, 0.0], 0.0))
             })
             .collect();
 
         let cube_mesh_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
             .as_mesh()
             .unwrap();
@@ -257,7 +257,7 @@ impl ApplicationHandler for App {
         );
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.5, -0.8, 0.3],
                 [1.0, 0.95, 0.85],
@@ -265,7 +265,7 @@ impl ApplicationHandler for App {
             )));
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-60.0, 40.0, -60.0],
                 [0.3, 0.6, 1.0],
@@ -274,7 +274,7 @@ impl ApplicationHandler for App {
             )));
 
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [60.0, 40.0, 60.0],
                 [1.0, 0.6, 0.3],

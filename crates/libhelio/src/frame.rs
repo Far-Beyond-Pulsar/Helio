@@ -1,13 +1,13 @@
 //! Per-frame transient resource views.
 //!
-//! `FrameResources` holds borrowed references to the transient textures that the
+//! `PassResources` holds borrowed references to the transient textures that the
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
 use crate::material::GpuMaterial;
 use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Per-frame billboard instance data, provided by the high-level `Renderer`.
 ///
@@ -68,7 +68,7 @@ pub struct MaterialTextureBindings<'a> {
 
 /// Frame-local scene inputs for the high-level Helio renderer.
 #[derive(Clone, Copy)]
-pub struct MainSceneResources<'a> {
+pub struct SceneGpuView<'a> {
     pub mesh_buffers: MeshBuffers<'a>,
     pub material_textures: MaterialTextureBindings<'a>,
     pub clear_color: [f32; 4],
@@ -267,12 +267,13 @@ impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
 
 /// Open, typed per-frame resource storage.
 ///
-/// Unlike [`FrameResources`], this registry has no closed list of resource
+/// Unlike [`PassResources`], this registry has no closed list of resource
 /// fields.  Pass crates can declare new [`ResourceKey`] values without
 /// editing `libhelio` or `helio-core`.
 pub struct ResourceRegistry<'a> {
     slots: HashMap<&'static str, Box<dyn ErasedResourceSlot + 'a>>,
     bindings: HashMap<String, wgpu::BindingResource<'a>>,
+    graph_bindings: HashSet<String>,
 }
 
 impl<'a> ResourceRegistry<'a> {
@@ -281,6 +282,7 @@ impl<'a> ResourceRegistry<'a> {
         Self {
             slots: HashMap::new(),
             bindings: HashMap::new(),
+            graph_bindings: HashSet::new(),
         }
     }
 
@@ -292,6 +294,38 @@ impl<'a> ResourceRegistry<'a> {
         _writer: &'static str,
     ) {
         self.bindings.insert(name.into(), resource);
+    }
+
+    /// Publishes a graph-owned texture view into the reflected-binding projection.
+    pub fn write_texture_binding(
+        &mut self,
+        name: impl Into<String>,
+        view: &wgpu::TextureView,
+        writer: &'static str,
+    ) {
+        let name = name.into();
+        let resource = unsafe {
+            std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(
+                wgpu::BindingResource::TextureView(view),
+            )
+        };
+        self.write_binding(name.clone(), resource, writer);
+        self.graph_bindings.insert(name);
+    }
+
+    /// Returns a graph-routed texture view by name.
+    pub fn texture_binding(&self, name: &str) -> Option<&'a wgpu::TextureView> {
+        match self.bindings.get(name)? {
+            wgpu::BindingResource::TextureView(view) => Some(*view),
+            _ => None,
+        }
+    }
+
+    /// Removes graph-generated bindings before the next execution.
+    pub fn clear_graph_bindings(&mut self) {
+        for name in self.graph_bindings.drain() {
+            self.bindings.remove(&name);
+        }
     }
 
     /// Returns a reflected-binding resource by its shader/resource name.
@@ -454,7 +488,7 @@ mod resource_registry_tests {
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
 /// borrowed views through this struct. Zero allocations in the hot path.
 #[derive(Clone, Copy)]
-pub struct FrameResources<'a> {
+pub struct PassResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Tracked<GBufferViews<'a>>,
     /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
@@ -510,7 +544,7 @@ pub struct FrameResources<'a> {
     /// Full-resolution depth texture object for compute passes that need raw texture access.
     pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
     /// High-level Helio scene resources used by wrapper-owned passes.
-    pub main_scene: Tracked<MainSceneResources<'a>>,
+    pub main_scene: Tracked<SceneGpuView<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
@@ -965,7 +999,7 @@ pub struct PortalsFrameData<'a> {
 
 /// Owned CPU-side PVS data stored in [`BakedData`].
 ///
-/// Published as a zero-copy [`BakedPvsRef`] into `FrameResources` each frame.
+/// Published as a zero-copy [`BakedPvsRef`] into `PassResources` each frame.
 pub struct BakedPvsData {
     pub world_min: [f32; 3],
     pub world_max: [f32; 3],
@@ -976,8 +1010,8 @@ pub struct BakedPvsData {
     pub bits: Vec<u64>,
 }
 
-impl<'a> FrameResources<'a> {
-    /// Creates an empty (all-Tracked::empty) frame resources for the start of a frame.
+impl<'a> PassResources<'a> {
+    /// Creates an empty (all-Tracked::empty) pass-resource view for a frame.
     pub fn empty() -> Self {
         Self {
             gbuffer: Tracked::empty(),
@@ -1222,7 +1256,7 @@ pub struct VgFrameData<'a> {
 /// Carried as raw byte slices for the same reason [`VgFrameData`] is: `libhelio` holds the
 /// inter-pass contract and must not depend on the crate that defines `GpuFoliageType` /
 /// `GpuFoliageLayer`, or every pass crate would be forced to link the foliage crate to see
-/// `FrameResources`. The producer and the consuming passes agree on the element type; this
+/// `PassResources`. The producer and the consuming passes agree on the element type; this
 /// struct only carries bytes and counts. Publishing a slice whose length is not
 /// `count * size_of::<element>()` is therefore undetectable here and shows up as garbage
 /// densities and blades placed under the world — bytemuck-cast on the publishing side, do

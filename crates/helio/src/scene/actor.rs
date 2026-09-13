@@ -7,9 +7,7 @@ use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 use glam::{Mat4, Vec3};
 use helio_core::{GpuLight, SkyContext};
-use libhelio::{
-    GpuWaterVolume, ReflectionCaptureMobility, ReflectionCaptureShape, SkyActor,
-};
+use libhelio::{GpuWaterVolume, ReflectionCaptureMobility, ReflectionCaptureShape, SkyActor};
 
 /// Result of inserting a typed scene actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +79,6 @@ impl SceneEntityId {
             None
         }
     }
-
 }
 
 /// Common behavior for scene actors (custom and built-in).

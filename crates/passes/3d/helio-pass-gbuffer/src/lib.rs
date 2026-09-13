@@ -285,13 +285,13 @@ impl RenderPass for GBufferPass {
         );
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn publish_group<'a>(
         &self,
         group_name: &'static str,
         views: &[&'a wgpu::TextureView],
-        frame: &mut libhelio::FrameResources<'a>,
+        frame: &mut libhelio::PassResources<'a>,
     ) {
         // Turns the generically-resolved "gbuffer" write_group into the
         // stable bundled contract downstream passes (DeferredLight, SSAO,
@@ -316,7 +316,7 @@ impl RenderPass for GBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("GBuffer")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("GBuffer")?;
@@ -416,10 +416,10 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from frame_resources so the GBuffer globals match
+        // Read per-scene values from pass_resources so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
+            if let Some(ref ms) = ctx.pass_resources.main_scene.get().as_ref() {
                 (
                     [
                         ms.ambient_color[0],
@@ -451,7 +451,7 @@ impl RenderPass for GBufferPass {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
             light_count: ctx
-                .frame_resources
+                .pass_resources
                 .lights
                 .get()
                 .map(|l| l.light_count)

@@ -52,7 +52,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::PassResources<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -148,7 +148,7 @@ use libhelio::GpuCameraUniforms;
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -231,7 +231,7 @@ pub struct PassContext<'a> {
     /// type -- lights, camera, materials, shadow matrices, coordinate
     /// spaces, voxels, portals -- removed; every such field's replacement
     /// data source, if one exists yet, lives behind a `BufferKey` or a
-    /// `libhelio::FrameResources` slot published by the pass that owns it.)
+    /// `libhelio::PassResources` slot published by the pass that owns it.)
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Profiler (automatic - injected by RenderGraph).
@@ -251,7 +251,7 @@ pub struct PassContext<'a> {
     pub device: &'a wgpu::Device,
 
     /// Per-frame transient resource views.
-    pub resources: &'a libhelio::FrameResources<'a>,
+    pub resources: &'a libhelio::PassResources<'a>,
 
     /// Open typed per-frame resource registry. New passes should prefer this
     /// over the legacy `resources` field when publishing or consuming data.
@@ -406,7 +406,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::PassResources<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -475,7 +475,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::PassResources<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -543,7 +543,7 @@ impl<'a> PassContext<'a> {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -621,7 +621,7 @@ pub struct PrepareContext<'a> {
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Per-frame transient resource views (for passes that need them in prepare).
-    pub frame_resources: &'a libhelio::FrameResources<'a>,
+    pub pass_resources: &'a libhelio::PassResources<'a>,
 
     /// Open typed per-frame resource registry for new passes.
     pub registry: &'a libhelio::ResourceRegistry<'a>,

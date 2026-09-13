@@ -7,7 +7,7 @@
 //! * `tile_light_counts[tile_idx]`  — number of lights that hit this tile
 //! * `tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]` — light index i
 //!
-//! These buffers are published into `FrameResources` so `DeferredLightPass` can
+//! These buffers are published into `PassResources` so `DeferredLightPass` can
 //! skip every light that doesn't touch the current pixel's tile.
 
 use bytemuck::{Pod, Zeroable};
@@ -271,7 +271,7 @@ impl RenderPass for LightCullPass {
         self.cull_cache_key = None;
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         frame
             .tile_light_lists
             .write(&self.tile_light_lists, "LightCull");
@@ -293,7 +293,7 @@ impl RenderPass for LightCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -312,7 +312,7 @@ impl RenderPass for LightCullPass {
         let num_lights = if use_direct_index {
             MAX_LIGHTS
         } else {
-            ctx.frame_resources
+            ctx.pass_resources
                 .lights
                 .get()
                 .map(|l| l.movable_light_count)

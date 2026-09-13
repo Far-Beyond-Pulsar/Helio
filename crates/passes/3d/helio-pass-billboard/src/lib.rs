@@ -528,7 +528,7 @@ impl RenderPass for BillboardPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always returns Some, even with zero instances (execute() then draws
         // nothing) — a pass that conditionally returns None based on per-frame

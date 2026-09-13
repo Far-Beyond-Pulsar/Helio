@@ -928,7 +928,7 @@ impl SkyPass {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        // Intermediate buffers: Quarter-Res Target, History Buffer (ping-pong), Velocity/Depth handled via FrameResources
+        // Intermediate buffers: Quarter-Res Target, History Buffer (ping-pong), Velocity/Depth handled via PassResources
         let (quarter_color_texture, quarter_color_view) = texture_2d(
             device,
             "Cloud Quarter Color",
@@ -1751,13 +1751,13 @@ impl RenderPass for SkyPass {
         &["sky_lut", "pre_aa"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Unified pass drives both sky_lut and pre_aa manually via encoder_ptr
         // to avoid encoder lock (graph would hold an active pre_aa pass while we
@@ -1804,7 +1804,7 @@ impl RenderPass for SkyPass {
         );
         // Velocity is read from gbuffer_velocity (published by GBufferPass)
         builder.read("gbuffer_velocity");
-        // Depth is accessed via ctx.depth / depth_texture from FrameResources
+        // Depth is accessed via ctx.depth / depth_texture from PassResources
         builder.read("pre_aa"); // for final composite read
     }
 
@@ -1882,7 +1882,7 @@ impl RenderPass for SkyPass {
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniform));
         let (cloud_base, cloud_top) = ctx
-            .frame_resources
+            .pass_resources
             .sky
             .clouds
             .map(|clouds| (clouds.base, clouds.top))
@@ -1900,9 +1900,9 @@ impl RenderPass for SkyPass {
         );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
-        if ctx.frame_resources.sky.has_sky {
+        if ctx.pass_resources.sky.has_sky {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
-            if let Some(clouds) = ctx.frame_resources.sky.clouds {
+            if let Some(clouds) = ctx.pass_resources.sky.clouds {
                 sky_uniforms.clouds_enabled = self.config.enabled as u32;
                 sky_uniforms.cloud_coverage = clouds.coverage;
                 sky_uniforms.cloud_density = clouds.density;
@@ -2082,7 +2082,7 @@ impl RenderPass for SkyPass {
 
         // ── High-Performance Pipeline ─────────────────────────────────────────
         // Note: Full implementation would bind weather_map, depth, noise textures
-        // from FrameResources / scene. For portability, we use fallback 1x1
+        // from PassResources / scene. For portability, we use fallback 1x1
         // textures when those resources are not available, ensuring the pipeline
         // never fails validation on minimal graphs.
 

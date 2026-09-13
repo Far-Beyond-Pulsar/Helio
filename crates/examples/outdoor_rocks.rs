@@ -113,7 +113,7 @@ fn scene_light_inputs(world: &World) -> Vec<LightRenderInput> {
 
 fn rebuild_scene_lights(renderer: &mut Renderer, scene_db: &SceneDb) {
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .rebuild_light_instances(&scene_light_inputs(&scene_db.world));
 }
 
@@ -306,7 +306,7 @@ impl ApplicationHandler for App {
 
         // ── Ground plane ──────────────────────────────────────────────────
         let ground_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.28, 0.23, 0.18, 1.0],
                 0.92,
@@ -315,7 +315,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let ground_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(v3_demo_common::plane_mesh(
                 [0.0, 0.0, 0.0],
                 250.0,
@@ -342,7 +342,7 @@ impl ApplicationHandler for App {
 
         // Fallback cube material/mesh for any type that failed to load
         let fallback_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.35, 0.30, 0.25, 1.0],
                 0.85,
@@ -351,7 +351,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let fallback_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
             .as_mesh()
             .unwrap();
@@ -381,7 +381,7 @@ impl ApplicationHandler for App {
                     .iter()
                     .map(|mesh| {
                         let vm_id = renderer
-                            .scene_for_legacy_mut()
+                            .scene()
                             .insert_entity(helio::SceneEntity::virtual_mesh(VirtualMeshUpload {
                                 vertices: mesh.vertices.clone(),
                                 indices: mesh.indices.clone(),
@@ -455,7 +455,7 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(vm_id, mat_slot) in entries {
-                            let _ = renderer.scene_for_legacy_mut().insert_entity(
+                            let _ = renderer.scene().insert_entity(
                                 helio::SceneEntity::virtual_object(VirtualObjectDescriptor {
                                     virtual_mesh: vm_id,
                                     material_id: mat_slot,
@@ -497,7 +497,7 @@ impl ApplicationHandler for App {
                                 .map(|v| Vec3::from_array(v.position).length())
                                 .fold(0.5_f32, f32::max);
                             let mesh_id = renderer
-                                .scene_for_legacy_mut()
+                                .scene()
                                 .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
                                     vertices: mesh.vertices.clone(),
                                     indices: mesh.indices.clone(),
@@ -525,12 +525,12 @@ impl ApplicationHandler for App {
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
                 let ship_mesh = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
                     .as_mesh()
                     .unwrap();
                 let ship_mat = renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_material(make_material(
                         [0.55, 0.70, 0.90, 1.0],
                         0.25,

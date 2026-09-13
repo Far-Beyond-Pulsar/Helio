@@ -79,7 +79,7 @@ fn new_graph(
 }
 
 /// Registers the resource names that every full (non-`simple`) default graph
-/// relies on the host `Renderer` to supply directly into `FrameResources`
+/// relies on the host `Renderer` to supply directly into `PassResources`
 /// every frame, rather than any pass in the graph writing them — see
 /// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
 /// §6. `"main_scene"` is read by nearly every geometry/lighting pass;

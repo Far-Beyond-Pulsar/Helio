@@ -290,20 +290,20 @@ impl RenderPass for ShadowDirtyPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let movable_draw_count = ctx
-            .frame_resources
+            .pass_resources
             .object_batch
             .get()
             .map(|b| b.shadow_movable_draw_count)
             .unwrap_or(0);
         let face_count = ctx
-            .frame_resources
+            .pass_resources
             .shadow_matrices
             .get()
             .map(|s| s.shadow_count)

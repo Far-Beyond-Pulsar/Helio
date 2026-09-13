@@ -179,7 +179,7 @@ impl ApplicationHandler for App {
         );
 
         let mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.68, 0.62, 1.0],
                 0.8,
@@ -189,17 +189,17 @@ impl ApplicationHandler for App {
             ));
 
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 4.0)))
             .as_mesh()
             .unwrap();
         let ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 3.0, 0.0], 4.0)))
             .as_mesh()
             .unwrap();
         let wall_n = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.0, 1.5, 0.05],
@@ -207,7 +207,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_s = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.0, 1.5, 0.05],
@@ -215,7 +215,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_e = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.05, 1.5, 4.0],
@@ -223,7 +223,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_w = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.05, 1.5, 4.0],
@@ -231,7 +231,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let table = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.8, 0.4, 0.5],
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let bookcase = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.3, 1.0, 1.2],
@@ -247,7 +247,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let sofa = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.2, 0.35, 0.5],
@@ -310,7 +310,7 @@ impl ApplicationHandler for App {
 
         let overhead_pos = [0.0f32, 2.85, 0.0];
         let overhead_light_id = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 overhead_pos,
                 [1.0, 0.85, 0.6],
@@ -320,7 +320,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-2.5, 0.9, -2.5],
                 [1.0, 0.55, 0.2],
@@ -328,7 +328,7 @@ impl ApplicationHandler for App {
                 5.0,
             )));
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [2.5, 0.9, 2.5],
                 [1.0, 0.75, 0.35],
@@ -505,7 +505,7 @@ impl AppState {
 
         // Overhead ceiling light pulses very slightly (candle-like flicker)
         let flicker = 1.0 + (time * 11.3).sin() * 0.04 + (time * 7.7).cos() * 0.02;
-        let _ = self.renderer.scene_for_legacy_mut().update_light(
+        let _ = self.renderer.scene().update_light(
             self.overhead_light_id,
             point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
         );

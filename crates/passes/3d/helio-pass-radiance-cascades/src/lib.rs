@@ -455,19 +455,19 @@ impl RenderPass for RadianceCascadesPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let light_count = ctx
-            .frame_resources
+            .pass_resources
             .lights
             .get()
             .map(|l| l.light_count)
             .unwrap_or(0);
-        let sky = ctx.frame_resources.sky.sky_color;
+        let sky = ctx.pass_resources.sky.sky_color;
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],
             world_max: [10.0, 10.0, 10.0, 0.0],

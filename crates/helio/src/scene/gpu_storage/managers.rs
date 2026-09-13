@@ -3,8 +3,8 @@
 //! Each manager wraps a `wgpu::Buffer` with a CPU-side `Vec` mirror.
 //! Dirty tracking ensures `flush()` is a no-op when data hasn't changed.
 
-use helio_core::upload;
 use bytemuck::Zeroable;
+use helio_core::upload;
 use libhelio::{
     DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
     GpuLight, GpuMaterial, GpuShadowMatrix,

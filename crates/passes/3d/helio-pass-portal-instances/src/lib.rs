@@ -345,7 +345,7 @@ impl RenderPass for PortalInstancePass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always `Some` when the G-buffer exists (chain fusion is decided by
         // attachment identity at lock time, not per-frame content — see
@@ -432,7 +432,7 @@ impl RenderPass for PortalInstancePass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx
-            .frame_resources
+            .pass_resources
             .object_batch
             .get()
             .map(|b| b.draw_count)

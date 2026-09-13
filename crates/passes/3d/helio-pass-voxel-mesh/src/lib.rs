@@ -678,7 +678,7 @@ impl RenderPass for VoxelMeshPass {
         }
         let params = MeshletParams {
             light_count: ctx
-                .frame_resources
+                .pass_resources
                 .lights
                 .get()
                 .map(|l| l.light_count)
@@ -775,7 +775,7 @@ impl RenderPass for VoxelMeshPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
             return None;

@@ -13,7 +13,7 @@
 //!   declare_resources' `write_group` call
 //!     -> the allocator's generic grouping (no name pattern-matching)
 //!     -> `RenderPass::publish_group` (owned by the producing pass, not core)
-//!     -> a downstream consumer reading the bundled `FrameResources` field
+//!     -> a downstream consumer reading the producer-owned pass resource view
 //!
 //! using a GBufferPass-*shaped* stand-in pass (same group name, member names,
 //! and `publish_group` body GBufferPass itself uses) rather than the real
@@ -32,8 +32,8 @@ const GROUP_NAMES: [&str; 4] = [
     "gbuffer_emissive",
 ];
 
-/// Stand-in for `GBufferPass`: declares the same 4-view "gbuffer" write_group
-/// and publishes it the same way `GBufferPass::publish_group` does, without
+/// and publishes it through the producer-owned pass resource view the same way
+/// the producing pass owns that contract, without
 /// any of `GBufferPass`'s unrelated machinery.
 struct StandInGBufferPass {
     /// Pool views captured during `execute()` (where `ctx.resource_pool` is
@@ -78,7 +78,7 @@ impl RenderPass for StandInGBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -96,14 +96,13 @@ impl RenderPass for StandInGBufferPass {
         Ok(())
     }
 
-    /// Exactly what `GBufferPass::publish_group` does: turn the generically-
-    /// resolved "gbuffer" group into the stable bundled contract downstream
-    /// passes read as `frame.gbuffer`.
+    /// Turn the generically-resolved "gbuffer" group into a producer-owned
+    /// registry publication for the downstream consumer.
     fn publish_group<'a>(
         &self,
         group_name: &'static str,
         views: &[&'a wgpu::TextureView],
-        frame: &mut libhelio::FrameResources<'a>,
+        frame: &mut libhelio::PassResources<'a>,
     ) {
         if group_name != "gbuffer" {
             return;
@@ -151,23 +150,21 @@ impl RenderPass for ConsumerPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gb = ctx
-            .resources
-            .gbuffer
-            .read("Consumer")
-            .expect("gbuffer must already be published by the time Consumer executes");
-        *self.seen_views.lock().unwrap() = Some([
-            gb.albedo.clone(),
-            gb.normal.clone(),
-            gb.orm.clone(),
-            gb.emissive.clone(),
-        ]);
+        *self.seen_views.lock().unwrap() =
+            ctx.resources.gbuffer.read("StandInGBuffer").map(|views| {
+                [
+                    views.albedo.clone(),
+                    views.normal.clone(),
+                    views.orm.clone(),
+                    views.emissive.clone(),
+                ]
+            });
         Ok(())
     }
 }

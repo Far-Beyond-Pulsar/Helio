@@ -140,7 +140,7 @@ struct TsrUniform {
 /// Temporal Super-Resolution pass.
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
-/// Reads `"pre_aa"` from [`FrameResources`](libhelio::FrameResources) and
+/// Reads `"pre_aa"` from [`PassResources`](libhelio::PassResources) and
 /// writes the upsampled, temporally accumulated image to `ctx.target`.
 pub struct TsrPass {
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
@@ -514,7 +514,7 @@ impl RenderPass for TsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

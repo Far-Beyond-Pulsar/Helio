@@ -377,7 +377,7 @@ impl RenderPass for OcclusionCullPass {
         builder.write_buffer("culled_batch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         // `indirect_dispatch.indirect` is mutated IN PLACE by this pass
         // (its `instance_count` field, refined from frustum-only down to
         // frustum+occlusion survivors) -- there is no separate owned
@@ -399,17 +399,17 @@ impl RenderPass for OcclusionCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let batch = ctx.frame_resources.object_batch.get();
+        let batch = ctx.pass_resources.object_batch.get();
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
-        let static_hiz_available = ctx.frame_resources.static_hiz.is_some();
+        let static_hiz_available = ctx.pass_resources.static_hiz.is_some();
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,

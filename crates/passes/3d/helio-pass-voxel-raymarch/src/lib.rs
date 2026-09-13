@@ -545,7 +545,7 @@ impl RenderPass for VoxelRayMarchPass {
                 time: ctx.frame_num as f32 * 0.016,
                 volume_count: voxel_volume_count,
                 light_count: ctx
-                    .frame_resources
+                    .pass_resources
                     .lights
                     .get()
                     .map(|l| l.light_count)
@@ -615,7 +615,7 @@ impl RenderPass for VoxelRayMarchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("VoxelRayMarch")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =

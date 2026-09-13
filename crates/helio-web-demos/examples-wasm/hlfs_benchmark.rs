@@ -41,16 +41,16 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let mat_white = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
         let mat_red = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material([0.8, 0.1, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
         let mat_green = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material([0.1, 0.7, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
         let mat_cube = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.8, 0.78, 0.72, 1.0],
                 0.85,
@@ -61,7 +61,7 @@ impl HelioWasmApp for Demo {
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let mesh = renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(helio::SceneEntity::mesh(box_mesh(
                     [cx, cy, cz],
                     [hx, hy, hz],
@@ -90,7 +90,7 @@ impl HelioWasmApp for Demo {
             .iter()
             .map(|&(position, color, intensity, range)| {
                 renderer
-                    .scene_for_legacy_mut()
+                    .scene()
                     .insert_entity(helio::SceneEntity::light(point_light(
                         position, color, intensity, range,
                     )))
@@ -165,7 +165,7 @@ impl HelioWasmApp for Demo {
         for (id, &(position, color, intensity, range)) in
             self.light_ids.iter().zip(LIGHT_BASE.iter())
         {
-            let _ = renderer.scene_for_legacy_mut().update_light(
+            let _ = renderer.scene().update_light(
                 *id,
                 point_light(position, color, intensity * self.intensity, range),
             );

@@ -361,7 +361,7 @@ impl RenderPass for VolumetricFogPass {
         &["fog_accum"]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         // The graph's pool is 2D-only, so this texture is pass-owned and handed
         // over here rather than routed by name.
         frame
@@ -373,7 +373,7 @@ impl RenderPass for VolumetricFogPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -389,7 +389,7 @@ impl RenderPass for VolumetricFogPass {
         let globals = FogGlobals {
             csm_splits: libhelio::CSM_SPLITS,
             light_count: ctx
-                .frame_resources
+                .pass_resources
                 .lights
                 .get()
                 .map(|l| l.light_count)

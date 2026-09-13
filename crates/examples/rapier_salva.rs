@@ -499,7 +499,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.08, 0.08, 0.1], 1.0);
 
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [15.0, 25.0, 15.0],
                 [0.9, 0.9, 0.85],
@@ -509,7 +509,7 @@ impl ApplicationHandler for App {
             .as_light()
             .unwrap();
         let _ = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::light(point_light(
                 [-15.0, 20.0, -10.0],
                 [0.7, 0.8, 1.0],
@@ -520,7 +520,7 @@ impl ApplicationHandler for App {
             .unwrap();
 
         let floor_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.3, 0.3, 0.35, 1.0],
                 0.8,
@@ -529,7 +529,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let wall_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.35, 0.3, 0.28, 1.0],
                 0.7,
@@ -538,7 +538,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let water_material = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.4, 0.75, 0.85],
                 0.1,
@@ -547,7 +547,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let faucet_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.6, 0.6, 0.65, 1.0],
                 0.3,
@@ -557,7 +557,7 @@ impl ApplicationHandler for App {
             ));
 
         let sphere_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
             .as_mesh()
             .unwrap();
@@ -585,7 +585,7 @@ impl ApplicationHandler for App {
 
         // Render container floor
         let floor_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [20.0, 0.5, 20.0],
@@ -605,7 +605,7 @@ impl ApplicationHandler for App {
 
         // Right wall
         let wall_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [wall_thickness * 0.5, wall_height * 0.5, container_size],
@@ -626,7 +626,7 @@ impl ApplicationHandler for App {
 
         // Left wall
         let wall_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [wall_thickness * 0.5, wall_height * 0.5, container_size],
@@ -647,7 +647,7 @@ impl ApplicationHandler for App {
 
         // Back wall
         let wall_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [container_size, wall_height * 0.5, wall_thickness * 0.5],
@@ -668,7 +668,7 @@ impl ApplicationHandler for App {
 
         // Front wall
         let wall_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [container_size, wall_height * 0.5, wall_thickness * 0.5],
@@ -689,7 +689,7 @@ impl ApplicationHandler for App {
 
         // Render simple faucet indicator
         let faucet_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.5, 0.5, 0.5],
@@ -894,7 +894,7 @@ impl AppState {
         for particle in self.fluid_particles.drain(..) {
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .remove_object(particle.id);
         }
 
@@ -1039,7 +1039,7 @@ impl AppState {
                 * glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
             let _ = self
                 .renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .update_object_transform(self.fluid_particles[i].id, transform);
         }
 

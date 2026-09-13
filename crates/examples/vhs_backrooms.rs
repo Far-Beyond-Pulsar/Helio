@@ -906,7 +906,7 @@ impl App {
     fn regenerate_map(state: &mut AppState) {
         let map = generate_map();
         let mut renderer = state.renderer.lock().unwrap();
-        let scene = renderer.scene_for_legacy_mut();
+        let scene = renderer.scene();
 
         // Remove previous map resources
         if let Some(res) = &state.map_resources {
@@ -1376,7 +1376,7 @@ impl ApplicationHandler for App {
 
         // ── VHS camcorder post-process volume ─────────────────────────────────
         renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(helio::SceneEntity::post_process_volume(
                 PostProcessVolumeDescriptor {
                     bounds_min: [-1000.0, -1000.0, -1000.0],
@@ -1621,7 +1621,7 @@ impl AppState {
 
         // Advance every flickering light's state machine this frame.
         {
-            let scene = renderer.scene_for_legacy_mut();
+            let scene = renderer.scene();
             for fl in flicker_lights.iter_mut() {
                 fl.update(scene, dt);
             }

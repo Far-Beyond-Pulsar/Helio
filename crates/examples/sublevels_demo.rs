@@ -189,7 +189,7 @@ impl ApplicationHandler for App {
 
         // ── Hub room: 12m x 4m x 12m box shell, walls facing inward ──────────
         let wall_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.85,
@@ -198,7 +198,7 @@ impl ApplicationHandler for App {
                 0.0,
             ));
         let floor = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [6.0, 0.05, 6.0],
@@ -206,7 +206,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let ceiling = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [6.0, 0.05, 6.0],
@@ -214,7 +214,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_n = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [6.0, 2.0, 0.05],
@@ -222,7 +222,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_s = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [6.0, 2.0, 0.05],
@@ -230,7 +230,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_e = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.05, 2.0, 6.0],
@@ -238,7 +238,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let wall_w = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.05, 2.0, 6.0],
@@ -295,7 +295,7 @@ impl ApplicationHandler for App {
         // group is placed and re-placed purely via the sublevel's coordinate
         // space, not by touching these objects again.
         let platform_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.15, 0.55, 0.95, 1.0],
                 0.35,
@@ -304,7 +304,7 @@ impl ApplicationHandler for App {
                 1.2,
             ));
         let deck_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.4, 0.08, 1.4],
@@ -312,7 +312,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let pillar_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.25)))
             .as_mesh()
             .unwrap();
@@ -342,7 +342,7 @@ impl ApplicationHandler for App {
         // so they also batch into a single instanced draw call — this swarm
         // costs one GPU draw, not a thousand.
         let stud_mesh = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_entity(SceneEntity::mesh(box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.022, 0.022, 0.022],
@@ -350,7 +350,7 @@ impl ApplicationHandler for App {
             .as_mesh()
             .unwrap();
         let stud_mat = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .insert_material(make_material(
                 [0.85, 0.9, 1.0, 1.0],
                 0.4,
@@ -382,7 +382,7 @@ impl ApplicationHandler for App {
         // in world space until the first `update_sublevel` call below moves it.
         let start_placement = glam::Mat4::from_translation(glam::Vec3::new(2.5, 1.6, 0.0));
         let sublevel = renderer
-            .scene_for_legacy_mut()
+            .scene()
             .add_sublevel(SublevelDescriptor {
                 group: PLATFORM_GROUP,
                 placement: start_placement,
@@ -394,7 +394,7 @@ impl ApplicationHandler for App {
         let mut light_ids = Vec::new();
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::light(point_light(
                     [0.0, 0.9, 0.0],
                     [0.4, 0.75, 1.0],
@@ -406,7 +406,7 @@ impl ApplicationHandler for App {
         );
         light_ids.push(
             renderer
-                .scene_for_legacy_mut()
+                .scene()
                 .insert_entity(SceneEntity::light(point_light(
                     [0.0, 3.6, 0.0],
                     [1.0, 0.95, 0.85],
@@ -583,7 +583,7 @@ impl AppState {
             orbit_radius * t.sin(),
         )) * glam::Mat4::from_rotation_y(t * 0.8);
         self.renderer
-            .scene_for_legacy_mut()
+            .scene()
             .update_sublevel(self.sublevel, placement)
             .expect("update_sublevel");
 
@@ -626,7 +626,7 @@ fn insert_grouped_object(
     group: GroupId,
 ) -> helio::ObjectId {
     renderer
-        .scene_for_legacy_mut()
+        .scene()
         .insert_entity(SceneEntity::object(ObjectDescriptor {
             mesh,
             material,
