@@ -695,6 +695,12 @@ struct State {
     egui_state: EguiState,
     egui_renderer: EguiRenderer,
     egui_wants_pointer: bool,
+    // Kept alive (rather than dropped at the end of setup, its previous
+    // behavior) specifically so there's a live World for the inspector
+    // agent to re-snapshot every few frames; nothing else in this example
+    // mutates it after setup today.
+    scene_db: pulsar_scenedb::SceneDb,
+    inspector_agent: Option<scenedb_inspector_agent::InlineAgent>,
 }
 
 /// A quiet autonomous counterpart to the mouse brush. It only takes over
@@ -1502,6 +1508,8 @@ impl App {
             egui_state,
             egui_renderer,
             egui_wants_pointer: false,
+            inspector_agent: scenedb_inspector_agent::InlineAgent::maybe_start(),
+            scene_db,
         }
     }
 }
@@ -1846,6 +1854,13 @@ impl State {
     }
 
     fn render(&mut self) {
+        // Cheap enough to call every frame, but the inspector UI doesn't
+        // need it that often -- throttle to ~10 Hz at 60 fps.
+        if let Some(agent) = &mut self.inspector_agent {
+            if self.frame % 6 == 0 {
+                agent.publish(&self.scene_db.world.telemetry_snapshot());
+            }
+        }
         let (run_simulation, dt) = self.update();
         let (forward, _, up) = self.camera_basis();
         let scene_camera = Camera::perspective_look_at(

@@ -48,6 +48,12 @@ egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
 env_logger = "0.11"
 log = "0.4"
+# Required as a *direct* dependency (not just transitively via
+# pulsar_reflection) by any crate using #[derive(Reflectable)] -- its
+# generated code writes `::serde_json::Value`, and `::crate_name` paths
+# resolve against the compiling crate's own direct dependencies (the 2018+
+# extern prelude), not a proc-macro crate's.
+serde_json = "1"
 
 # SolidRS - 3D asset loading library
 solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
@@ -62,7 +68,15 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5", features = ["gpu"] }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40", features = ["gpu"] }
+# Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
+# a different rev is a different SourceId and thus a second,
+# type-incompatible copy of this crate in the build (see helio-wasm's
+# BufferKey mismatch, hit and fixed earlier from exactly this). Every crate
+# that needs the Reflectable derive should depend on this workspace entry,
+# never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
+# of stale per-crate pins fixed in the same session.
+pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
