@@ -338,7 +338,7 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "portal_mask", "object_batch"]
+        &["gbuffer", "portal_mask", "object_batch", "material_textures"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -466,12 +466,12 @@ impl RenderPass for PortalInstancePass {
             );
             return Ok(());
         };
-        let main_scene = ctx.resources.main_scene.read("PortalInstance");
+        let material_textures = ctx.resources.material_textures.read("PortalInstance");
         if ctx.frame_num < 3 {
             log::info!(
-                "[PortalInstance] frame={} main_scene_available={}",
+                "[PortalInstance] frame={} material_textures_available={}",
                 ctx.frame_num,
-                main_scene.is_some()
+                material_textures.is_some()
             );
         }
 
@@ -558,17 +558,28 @@ impl RenderPass for PortalInstancePass {
         }
 
         // ── Bind group 1 (materials) — rebuilt when texture set changes ────
-        let Some(main_scene) = main_scene else {
+        let Some(material_textures) = material_textures else {
             return Ok(());
         };
-        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let needs_rebuild = self.bind_group_1_version != Some(material_textures.version)
             || self.bind_group_1.is_none();
         if needs_rebuild {
             let materials_buf = ctx
-                .resources
-                .materials
-                .get()
-                .map(|m| m.materials)
+                .scene_buffers
+                .get(BufferKey::of("materials"))
+                .map(|handle| &handle.buffer)
                 .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
@@ -577,28 +588,25 @@ impl RenderPass for PortalInstancePass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalInstance BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version);
+            self.bind_group_1_version = Some(material_textures.version);
         }
 
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);

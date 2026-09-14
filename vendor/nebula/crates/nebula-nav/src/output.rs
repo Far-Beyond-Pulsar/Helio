@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::{error::NebulaError, traits::BakeOutput};
 use nebula_serialize::chunk::ChunkTag;
+use serde::{Deserialize, Serialize};
 
 /// Chunk tag for baked navigation mesh data.
 pub const CHUNK_TAG: ChunkTag = ChunkTag::from_bytes(*b"NAVM");
@@ -43,7 +43,9 @@ pub struct NavOutput {
 }
 
 impl BakeOutput for NavOutput {
-    fn kind_name() -> &'static str { "navmesh" }
+    fn kind_name() -> &'static str {
+        "navmesh"
+    }
 }
 
 impl NavOutput {

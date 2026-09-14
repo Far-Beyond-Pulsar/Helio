@@ -268,96 +268,76 @@ impl HelioWasmApp for Demo {
         let mut picker = ScenePicker::new();
 
         // ── Materials ─────────────────────────────────────────────────────
-        let mat_dock = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.42, 0.40, 0.38, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_steel = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.26, 0.28, 1.0],
-                0.15,
-                0.6,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_orange = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.35, 0.05, 1.0],
-                0.3,
-                0.4,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_warning = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.1, 0.05, 1.0],
-                0.4,
-                0.0,
-                [1.0, 0.05, 0.0],
-                1.5,
-            ));
-        let mat_water = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.04, 0.12, 0.20, 1.0],
-                0.05,
-                0.95,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.15, 0.15, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.85, 0.25, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.35, 0.95, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_lamp = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.90, 0.85, 0.50, 1.0],
-                0.3,
-                0.0,
-                [0.6, 0.55, 0.1],
-                0.8,
-            ));
-        let mat_bollard = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.14, 0.10, 1.0],
-                0.85,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_dock = renderer.scene().insert_material(make_material(
+            [0.42, 0.40, 0.38, 1.0],
+            0.95,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_steel = renderer.scene().insert_material(make_material(
+            [0.25, 0.26, 0.28, 1.0],
+            0.15,
+            0.6,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_orange = renderer.scene().insert_material(make_material(
+            [0.85, 0.35, 0.05, 1.0],
+            0.3,
+            0.4,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_warning = renderer.scene().insert_material(make_material(
+            [1.0, 0.1, 0.05, 1.0],
+            0.4,
+            0.0,
+            [1.0, 0.05, 0.0],
+            1.5,
+        ));
+        let mat_water = renderer.scene().insert_material(make_material(
+            [0.04, 0.12, 0.20, 1.0],
+            0.05,
+            0.95,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_red = renderer.scene().insert_material(make_material(
+            [0.9, 0.15, 0.15, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_green = renderer.scene().insert_material(make_material(
+            [0.15, 0.85, 0.25, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_blue = renderer.scene().insert_material(make_material(
+            [0.15, 0.35, 0.95, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_lamp = renderer.scene().insert_material(make_material(
+            [0.90, 0.85, 0.50, 1.0],
+            0.3,
+            0.0,
+            [0.6, 0.55, 0.1],
+            0.8,
+        ));
+        let mat_bollard = renderer.scene().insert_material(make_material(
+            [0.18, 0.14, 0.10, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         // ── Ground — large dock apron ──────────────────────────────────────
         let dock_upload = plane_mesh([0.0, 0.0, 0.0], 100.0);

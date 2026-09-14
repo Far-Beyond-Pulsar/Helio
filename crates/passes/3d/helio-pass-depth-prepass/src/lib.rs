@@ -8,7 +8,7 @@
 //! shared mesh vertex buffer (slot 0) and index buffer **before** this pass
 //! executes, or the GPU draw will read from undefined memory.
 
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
@@ -138,7 +138,7 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "object_batch", "culled_batch"]
+        &["object_batch", "culled_batch"]
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
@@ -187,11 +187,22 @@ impl RenderPass for DepthPrepassPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "DepthPrepass requires main_scene mesh buffers".to_string(),
-            )
-        })?;
+        let vertices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "DepthPrepass requires builtin_mesh_vertex".to_string(),
+                )
+            })?;
+        let indices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "DepthPrepass requires builtin_mesh_index".to_string(),
+                )
+            })?;
 
         // Extract before the mutable encoder borrow.
         let camera_ptr = ctx.camera as *const _ as usize;
@@ -225,9 +236,9 @@ impl RenderPass for DepthPrepassPass {
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         pass.set_index_buffer(
-            main_scene.mesh_buffers.indices.slice(..),
+            indices.buffer.slice(..),
             wgpu::IndexFormat::Uint32,
         );
         #[cfg(not(target_arch = "wasm32"))]

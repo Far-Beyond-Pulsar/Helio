@@ -677,12 +677,14 @@ impl RenderPass for VoxelMeshPass {
             return Ok(());
         }
         let params = MeshletParams {
-            light_count: ctx
-                .pass_resources
-                .lights
-                .get()
-                .map(|l| l.light_count)
-                .unwrap_or(0),
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -718,10 +720,9 @@ impl RenderPass for VoxelMeshPass {
         // Rebuild the bind group when the camera or lights buffer pointer changes
         // (the lights buffer can be reallocated by GrowableBuffer as it grows).
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let camera_ptr = ctx.camera as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;

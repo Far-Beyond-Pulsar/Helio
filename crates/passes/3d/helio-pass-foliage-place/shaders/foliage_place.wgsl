@@ -26,7 +26,7 @@
 //
 // The packing helpers below are hand-rolled rather than using `pack2x16unorm` /
 // `pack4x8unorm` on purpose: the builtins round to nearest even, while
-// `helio_foliage_core::packing` rounds half away from zero (`x * 65535.0 + 0.5` then
+// `crate::packing` rounds half away from zero (`x * 65535.0 + 0.5` then
 // truncate). Those differ on exact ties, and a one-ULP disagreement is enough to fail a
 // byte-for-byte determinism test against the CPU reference. `pack2x16float` *is* used for
 // the f16 height offset because both sides round to nearest even there.
@@ -34,7 +34,7 @@
 const WG_SIZE: u32 = 64u;
 const TAU: f32 = 6.283185307179586;
 
-// Mirrors helio_foliage_core::TileState.
+// Mirrors crate::TileState.
 const TILE_STATE_PLACING: u32 = 1u;
 const TILE_STATE_RESIDENT: u32 = 2u;
 
@@ -72,13 +72,13 @@ struct PlaceUniforms {
     _pad1: u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuFoliageType` (Rust, 96 bytes).
+/// Mirrors `crate::GpuFoliageType` (Rust, 96 bytes).
 ///
 /// **Every field is a scalar.** Not one of them may become a vector type: with this
 /// field order none of them lands on the alignment WGSL requires for `vec2`/`vec3`/
 /// `vec4`, so a single `vec3<f32>` for the wind response would shift every field after
 /// it by 12 bytes and nothing would crash — trees would just render with a random
-/// material. See the struct doc in `helio-foliage-core/src/gpu_types.rs`.
+/// material. See the struct doc in `helio-pass-foliage-place/src/gpu_types.rs`.
 struct FoliageType {
     density:               f32,
     height_min:            f32,
@@ -106,7 +106,7 @@ struct FoliageType {
     _pad2:                 u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuFoliageTile` (Rust, 32 bytes).
+/// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
 struct FoliageTile {
     tile_coord_x:    i32,
     tile_coord_z:    i32,
@@ -118,7 +118,7 @@ struct FoliageTile {
     generation:      u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuFoliageLayer` (Rust, 32 bytes).
+/// Mirrors `crate::GpuFoliageLayer` (Rust, 32 bytes).
 ///
 /// Both members are `vec4<f32>` at offsets 0 and 16, which are vec4-aligned, so unlike
 /// `FoliageType` the vector declarations are the layout-safe choice here. `w` of
@@ -128,7 +128,7 @@ struct FoliageLayer {
     bounds_max: vec4<f32>,
 }
 
-/// Mirrors `helio_foliage_core::GpuBladeInstance` (Rust, 16 bytes).
+/// Mirrors `crate::GpuBladeInstance` (Rust, 16 bytes).
 struct BladeInstance {
     packed_pos:        u32,
     packed_height_yaw: u32,
@@ -150,13 +150,13 @@ var<workgroup> wg_scan: array<u32, WG_SIZE>;
 var<workgroup> wg_base: u32;
 var<workgroup> wg_center_y: f32;
 
-// ── Hash, transcribed from helio_foliage_core::placement ────────────────────────
+// ── Hash, transcribed from crate::placement ────────────────────────
 
 fn rotl(value: u32, amount: u32) -> u32 {
     return (value << amount) | (value >> (32u - amount));
 }
 
-/// Byte-for-byte transcription of `helio_foliage_core::blade_seed`.
+/// Byte-for-byte transcription of `crate::blade_seed`.
 ///
 /// `bitcast<u32>` on the coordinates matches Rust's `i32 as u32`, i.e. two's-complement
 /// reinterpretation. Do not "fix" this with `abs()`: that aliases tiles across the world
@@ -172,7 +172,7 @@ fn blade_seed(coord_x: i32, coord_z: i32, lane: u32, generation: u32) -> u32 {
     return h;
 }
 
-/// Transcription of `helio_foliage_core::hash_to_unit`.
+/// Transcription of `crate::hash_to_unit`.
 ///
 /// Top 24 bits over 2^24, so the result is exactly representable and strictly below 1.0.
 /// Dividing the full u32 by 0xffffffff can return exactly 1.0, which puts
@@ -181,7 +181,7 @@ fn hash_to_unit(hash: u32) -> f32 {
     return f32(hash >> 8u) * (1.0 / 16777216.0);
 }
 
-// ── Packing, matching helio_foliage_core::packing exactly ───────────────────────
+// ── Packing, matching crate::packing exactly ───────────────────────
 
 fn pack_unorm16_u(value: f32) -> u32 {
     return u32(clamp(value, 0.0, 1.0) * 65535.0 + 0.5);

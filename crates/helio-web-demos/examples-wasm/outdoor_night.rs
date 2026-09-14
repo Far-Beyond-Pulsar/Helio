@@ -29,33 +29,27 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.8,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let glass = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.35, 0.4, 0.5],
-                0.1,
-                0.9,
-                [0.0; 3],
-                0.0,
-            ));
-        let pole_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.2, 0.2, 0.22, 1.0],
-                0.3,
-                0.8,
-                [0.0; 3],
-                0.0,
-            ));
+        let concrete = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let glass = renderer.scene().insert_material(make_material(
+            [0.3, 0.35, 0.4, 0.5],
+            0.1,
+            0.9,
+            [0.0; 3],
+            0.0,
+        ));
+        let pole_mat = renderer.scene().insert_material(make_material(
+            [0.2, 0.2, 0.22, 1.0],
+            0.3,
+            0.8,
+            [0.0; 3],
+            0.0,
+        ));
 
         // Ground
         let ground = renderer

@@ -10,11 +10,14 @@
 //!   Mouse drag           — look (click to grab cursor)
 //!   Escape               — release cursor / exit
 
+mod v3_demo_common;
+
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use v3_demo_common::{build_default_renderer, new_scene_db_with_gpu_mirror};
+use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -45,6 +48,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -120,46 +124,8 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
         renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
         renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
         renderer.set_editor_mode(true);
@@ -171,6 +137,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 3.0, 10.0),
             cam_yaw: 0.0,

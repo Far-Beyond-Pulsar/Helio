@@ -34,51 +34,41 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let basalt_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.08, 0.07, 0.07, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let rock_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.14, 0.10, 0.09, 1.0],
-                0.9,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let lava_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.2, 0.05, 0.01, 1.0],
-                1.0,
-                0.0,
-                [1.0, 0.2, 0.0],
-                12.0,
-            ));
-        let lava_hot_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.1, 0.02, 1.0],
-                1.0,
-                0.0,
-                [1.5, 0.5, 0.05],
-                20.0,
-            ));
-        let ash_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.22, 0.20, 0.18, 1.0],
-                0.99,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let basalt_m = renderer.scene().insert_material(make_material(
+            [0.08, 0.07, 0.07, 1.0],
+            0.95,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let rock_m = renderer.scene().insert_material(make_material(
+            [0.14, 0.10, 0.09, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let lava_m = renderer.scene().insert_material(make_material(
+            [0.2, 0.05, 0.01, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.2, 0.0],
+            12.0,
+        ));
+        let lava_hot_m = renderer.scene().insert_material(make_material(
+            [0.3, 0.1, 0.02, 1.0],
+            1.0,
+            0.0,
+            [1.5, 0.5, 0.05],
+            20.0,
+        ));
+        let ash_m = renderer.scene().insert_material(make_material(
+            [0.22, 0.20, 0.18, 1.0],
+            0.99,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         // Lava plain (ground)
         let ground = renderer

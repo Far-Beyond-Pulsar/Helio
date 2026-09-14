@@ -37,10 +37,12 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, RenderMode, Renderer, RendererConfig, Scene,
+    RenderMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_forward_opaque_graph;
+use helio_default_graphs::build_forward_opaque_graph_external;
 use input::FreeCam;
+use pulsar_scenedb::SceneDb;
+use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, update_object_transform};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -190,6 +192,7 @@ struct AppState {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     renderer: Renderer,
+    scene_db: SceneDb,
     input: FreeCam,
     /// True when a live OpenXR session is driving `renderer.render_xr()`.
     xr_active: bool,
@@ -277,12 +280,14 @@ impl AppState {
             return;
         };
         for (i, pose) in poses.into_iter().enumerate() {
-            if let Some(world) = pose {
-                let transform = world * Mat4::from_translation(HAND_OFFSET);
-                let _ = self
-                    .renderer
-                    .scene()
-                    .update_object_transform(self.animated.hand_cubes[i], transform);
+            if let (Some(world_pose), Some(cube)) = (pose, self.animated.hand_cubes[i]) {
+                let transform = world_pose * Mat4::from_translation(HAND_OFFSET);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    cube,
+                    transform,
+                );
             }
         }
     }
@@ -444,47 +449,23 @@ impl ApplicationHandler for App {
             log::error!("[GPU UNCAPTURED ERROR] {e:?}");
         }));
 
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-
-        let graph = build_forward_opaque_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_forward_opaque_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_editor_mode(true);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -518,7 +499,7 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_active = false;
 
-        let animated = scene::build(&mut renderer);
+        let animated = scene::build(&mut scene_db.world, &mut renderer);
 
         let state = AppState {
             window,
@@ -528,6 +509,7 @@ impl ApplicationHandler for App {
             device,
             queue,
             renderer,
+            scene_db,
             input: FreeCam::new(),
             xr_active,
             #[cfg(not(target_arch = "wasm32"))]
@@ -628,7 +610,7 @@ impl ApplicationHandler for App {
                 if state.xr_active {
                     state.update_locomotion(dt);
                     let scene_time = state.start_time.elapsed().as_secs_f32();
-                    scene::animate(&mut state.renderer, &mut state.animated, scene_time);
+                    scene::animate(&mut state.scene_db.world, &mut state.renderer, &mut state.animated, scene_time);
                     state.update_hands();
                     // Headset path: render_xr() polls session events, locates the
                     // per-eye poses, uploads the stereo camera and renders both
@@ -661,7 +643,7 @@ impl ApplicationHandler for App {
                 // Desktop mirror path: WASD + mouse free camera.
                 state.input.update(dt);
                 let scene_time = state.start_time.elapsed().as_secs_f32();
-                scene::animate(&mut state.renderer, &mut state.animated, scene_time);
+                scene::animate(&mut state.scene_db.world, &mut state.renderer, &mut state.animated, scene_time);
                 let size = state.window.inner_size();
                 let aspect = size.width as f32 / size.height.max(1) as f32;
                 let camera = state.input.camera(aspect);

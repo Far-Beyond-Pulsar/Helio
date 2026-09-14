@@ -1,6 +1,6 @@
 //! CPU reference implementation of `cs_place`.
 //!
-//! This is the same relationship `helio_foliage_core::placement` has to the shader math,
+//! This is the same relationship `crate::placement` has to the shader math,
 //! one level up: it is a line-for-line transcription of the placement shader's candidate
 //! loop, and it exists so the determinism contract is enforced by a test that runs in a
 //! headless container rather than by hope.
@@ -22,7 +22,7 @@
 //! capture lands, this function grows a terrain sampler argument; until then a reference
 //! that pretended to sample a texture would be testing nothing.
 
-use helio_foliage_core::{
+use crate::{
     blade_seed, hash_to_unit, pack_blade, BladeParams, GpuBladeInstance, GpuFoliageLayer,
     GpuFoliageType,
 };
@@ -215,7 +215,7 @@ pub fn place_tile_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use helio_foliage_core::{unpack_blade, FOLIAGE_TILE_SIZE_METERS};
+    use crate::{unpack_blade, FOLIAGE_TILE_SIZE_METERS};
 
     fn uniforms(grid: u32, slab: u32, types: &[GpuFoliageType]) -> PlaceUniforms {
         let max_density = types.iter().map(|t| t.density).fold(0.0f32, f32::max);

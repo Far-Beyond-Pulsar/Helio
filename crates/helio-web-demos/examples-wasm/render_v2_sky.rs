@@ -41,15 +41,13 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = renderer.scene().insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let cube1 = renderer
             .scene()

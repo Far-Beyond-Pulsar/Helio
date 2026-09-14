@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    Camera, DebugDrawState, GpuLight, LightType, RenderGraph, Renderer, RendererConfig, Scene,
-    LightRenderInput,
+    Camera, DebugDrawState, GpuLight, LightRenderInput, LightType, RenderGraph, Renderer,
+    RendererConfig, Scene,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
@@ -147,28 +147,28 @@ impl HelioWasmApp for Demo {
         renderer.submit_light_frame(&[
             LightRenderInput {
                 light: GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [0.35, -0.8, 0.25, 0.0],
-                color_intensity: [1.0, 0.96, 0.88, 6.0],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [0.35, -0.8, 0.25, 0.0],
+                    color_intensity: [1.0, 0.96, 0.88, 6.0],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
                 },
                 user_tag: 0,
                 entity_index: 0,
             },
             LightRenderInput {
                 light: GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [-0.4, -0.3, -0.6, 0.0],
-                color_intensity: [0.55, 0.65, 0.85, 2.5],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [-0.4, -0.3, -0.6, 0.0],
+                    color_intensity: [0.55, 0.65, 0.85, 2.5],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
                 },
                 user_tag: 0,
                 entity_index: 1,
@@ -176,14 +176,14 @@ impl HelioWasmApp for Demo {
             // Upward sky-fill so downward-facing faces aren't pitch black.
             LightRenderInput {
                 light: GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [0.1, 0.9, 0.2, 0.0],
-                color_intensity: [0.35, 0.4, 0.5, 1.5],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [0.1, 0.9, 0.2, 0.0],
+                    color_intensity: [0.35, 0.4, 0.5, 1.5],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
                 },
                 user_tag: 0,
                 entity_index: 2,

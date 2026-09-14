@@ -1,6 +1,6 @@
 use crate::Compression;
-use thiserror::Error;
 use std::io::{Read, Write};
+use thiserror::Error;
 
 // ── Chunk tag ─────────────────────────────────────────────────────────────────
 
@@ -39,13 +39,15 @@ impl ChunkTag {
 
     // ── Infrastructure tags (known to nebula-serialize) ────────────────────
     /// File header — always the first chunk.
-    pub const HEADER:   Self = Self::from_bytes(*b"NEBU");
+    pub const HEADER: Self = Self::from_bytes(*b"NEBU");
     /// Per-chunk UTF-8 JSON metadata sidecar.
     pub const METADATA: Self = Self::from_bytes(*b"META");
     /// Sentinel — final chunk in the file.
-    pub const END:      Self = Self::from_bytes(*b"END\0");
+    pub const END: Self = Self::from_bytes(*b"END\0");
 
-    pub fn is_end(self) -> bool { self == Self::END }
+    pub fn is_end(self) -> bool {
+        self == Self::END
+    }
 }
 
 // ── Chunk header on-disk layout ───────────────────────────────────────────────
@@ -58,7 +60,9 @@ impl ChunkTag {
 pub struct ChunkFlags(pub u32);
 impl ChunkFlags {
     pub const COMPRESSED: u32 = 0x01;
-    pub fn is_compressed(self) -> bool { self.0 & Self::COMPRESSED != 0 }
+    pub fn is_compressed(self) -> bool {
+        self.0 & Self::COMPRESSED != 0
+    }
 }
 
 // ── Write ─────────────────────────────────────────────────────────────────────
@@ -75,7 +79,7 @@ pub enum ChunkError {
 
 /// Current file format version.
 pub const FORMAT_VERSION: u32 = 1;
-pub const MAGIC: &[u8; 8]     = b"NEBULA\0\0";
+pub const MAGIC: &[u8; 8] = b"NEBULA\0\0";
 
 pub fn write_file_header<W: Write>(w: &mut W) -> Result<(), ChunkError> {
     w.write_all(MAGIC)?;
@@ -84,9 +88,9 @@ pub fn write_file_header<W: Write>(w: &mut W) -> Result<(), ChunkError> {
 }
 
 pub fn write_chunk<W: Write>(
-    w:           &mut W,
-    tag:         ChunkTag,
-    data:        &[u8],
+    w: &mut W,
+    tag: ChunkTag,
+    data: &[u8],
     compression: Compression,
 ) -> Result<(), ChunkError> {
     let (flags, payload): (u32, Vec<u8>) = if compression == Compression::None {
@@ -97,7 +101,7 @@ pub fn write_chunk<W: Write>(
     };
 
     let uncompressed_len = data.len() as u64;
-    let compressed_len   = payload.len() as u64;
+    let compressed_len = payload.len() as u64;
 
     w.write_all(&tag.to_bytes())?;
     w.write_all(&flags.to_le_bytes())?;
@@ -118,7 +122,7 @@ pub fn write_end_chunk<W: Write>(w: &mut W) -> Result<(), ChunkError> {
 // ── Read ──────────────────────────────────────────────────────────────────────
 
 pub struct RawChunk {
-    pub tag:  ChunkTag,
+    pub tag: ChunkTag,
     pub data: Vec<u8>,
 }
 
@@ -142,32 +146,39 @@ pub fn read_next_chunk<R: Read>(r: &mut R) -> Result<Option<RawChunk>, ChunkErro
     match r.read_exact(&mut tag_bytes) {
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(ChunkError::Io(e)),
-        Ok(_)  => {}
+        Ok(_) => {}
     }
     let tag = ChunkTag(u32::from_be_bytes(tag_bytes));
 
-    if tag.is_end() { return Ok(None); }
+    if tag.is_end() {
+        return Ok(None);
+    }
 
     let mut flags_bytes = [0u8; 4];
     r.read_exact(&mut flags_bytes)?;
     let flags = ChunkFlags(u32::from_le_bytes(flags_bytes));
 
-    let mut ul = [0u8; 8]; r.read_exact(&mut ul)?;
+    let mut ul = [0u8; 8];
+    r.read_exact(&mut ul)?;
     let uncompressed_len = u64::from_le_bytes(ul) as usize;
 
-    let mut cl = [0u8; 8]; r.read_exact(&mut cl)?;
+    let mut cl = [0u8; 8];
+    r.read_exact(&mut cl)?;
     let compressed_len = u64::from_le_bytes(cl) as usize;
 
     let mut payload = vec![0u8; compressed_len];
     r.read_exact(&mut payload)?;
 
     let data = if flags.is_compressed() {
-        zstd::decode_all(std::io::Cursor::new(&payload))
-            .map_err(ChunkError::Io)?
+        zstd::decode_all(std::io::Cursor::new(&payload)).map_err(ChunkError::Io)?
     } else {
         payload
     };
 
-    debug_assert_eq!(data.len(), uncompressed_len, "chunk decompressed size mismatch");
+    debug_assert_eq!(
+        data.len(),
+        uncompressed_len,
+        "chunk decompressed size mismatch"
+    );
     Ok(Some(RawChunk { tag, data }))
 }

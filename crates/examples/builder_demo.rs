@@ -19,7 +19,8 @@ use helio_default_graphs::build_default_graph_external;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_light, spawn_object_with_movability, sphere_mesh,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
+    sphere_mesh,
     update_object_transform, update_point_light,
 };
 
@@ -147,37 +148,38 @@ impl ApplicationHandler for App {
 
         // ── Build renderer with the new builder ─────────────────────────────
         let config = RendererConfig::new(w, h, surface_format);
-        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_editor_mode(true)
-            .with_graph(Box::new(|d, q, s, c, ds, cb, csb| {
-                build_default_graph_external(d, q, s, c, ds, cb, csb, None)
+            .with_graph(Box::new(move |d, q, s, c, ds, cb, csb| {
+                build_default_graph_external(d, q, ds, s, c, cb, csb, None, graph_scene_db.clone())
             }))
             .build(device.clone(), queue.clone(), w, h, surface_format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let gold = renderer.create_material_projection(make_material(
+        let gold = spawn_material(&mut scene_db.world, make_material(
             [0.95, 0.75, 0.25, 1.0],
             0.25,
             0.85,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let marble = renderer.create_material_projection(make_material(
+        let marble = spawn_material(&mut scene_db.world, make_material(
             [0.85, 0.83, 0.80, 1.0],
             0.55,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let crystal = renderer.create_material_projection(make_material(
+        let crystal = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.6, 1.0, 1.0],
             0.05,
             0.1,
             [0.2, 0.4, 1.0],
             2.0,
         ));
-        let floor = renderer.create_material_projection(make_material(
+        let floor = spawn_material(&mut scene_db.world, make_material(
             [0.22, 0.22, 0.25, 1.0],
             0.7,
             0.05,
@@ -186,14 +188,12 @@ impl ApplicationHandler for App {
         ));
 
         // ── Sky ─────────────────────────────────────────────────────────────
-        renderer.configure_default_sky([0.15, 0.25, 0.45]);
+        v3_demo_common::spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);
 
         // ── Ground ──────────────────────────────────────────────────────────
-        let ground_mesh = renderer.create_mesh_asset(plane_mesh([0.0, 0.0, 0.0], 12.0));
-        let mut scene_db = scene_db;
+        let ground_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 12.0));
         let _ = spawn_object_with_movability(
             &mut scene_db.world,
-            &mut renderer,
             ground_mesh,
             floor,
             glam::Mat4::IDENTITY,
@@ -202,8 +202,11 @@ impl ApplicationHandler for App {
         );
 
         // ── Columns (box pillars + sphere tops) ────────────────────────────
-        let pillar_mesh = renderer.create_mesh_asset(box_mesh([0.0, 0.0, 0.0], [0.15, 2.0, 0.15]));
-        let sphere_mesh_id = renderer.create_mesh_asset(sphere_mesh([0.0, 0.0, 0.0], 0.4));
+        let pillar_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.15, 2.0, 0.15]),
+        );
+        let sphere_mesh_id = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 0.4));
 
         let radius = 4.0;
         let positions = [
@@ -217,7 +220,6 @@ impl ApplicationHandler for App {
             // Pillar
             let _ = spawn_object_with_movability(
                 &mut scene_db.world,
-                &mut renderer,
                 pillar_mesh,
                 marble,
                 glam::Mat4::from_translation(glam::vec3(*x, 2.0, *z)),
@@ -227,7 +229,6 @@ impl ApplicationHandler for App {
             // Gold sphere on top
             let _ = spawn_object_with_movability(
                 &mut scene_db.world,
-                &mut renderer,
                 sphere_mesh_id,
                 gold,
                 glam::Mat4::from_translation(glam::vec3(*x, 4.3, *z)),
@@ -249,10 +250,9 @@ impl ApplicationHandler for App {
         }
 
         // ── Floating crystal (centre, rotating) ────────────────────────────
-        let crystal_mesh = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.6));
+        let crystal_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.6));
         let spin_crystal = spawn_object_with_movability(
             &mut scene_db.world,
-            &mut renderer,
             crystal_mesh,
             crystal,
             glam::Mat4::from_translation(glam::vec3(0.0, 2.5, 0.0)),

@@ -16,8 +16,8 @@ pub mod chunk;
 pub mod json_meta;
 
 pub use binary::NebulaBinarySerializer;
+pub use chunk::{ChunkError, ChunkTag};
 pub use json_meta::NebulaJsonSerializer;
-pub use chunk::{ChunkTag, ChunkError};
 
 // ── Compression level ──────────────────────────────────────────────────────────
 
@@ -35,12 +35,16 @@ pub enum Compression {
 impl Compression {
     pub fn zstd_level(self) -> i32 {
         match self {
-            Self::None     => 0,
-            Self::Fast     => 1,
+            Self::None => 0,
+            Self::Fast => 1,
             Self::Balanced => 9,
-            Self::Best     => 19,
+            Self::Best => 19,
         }
     }
 }
 
-impl Default for Compression { fn default() -> Self { Self::Balanced } }
+impl Default for Compression {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}

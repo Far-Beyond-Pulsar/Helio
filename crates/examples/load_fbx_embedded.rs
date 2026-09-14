@@ -10,13 +10,17 @@ use std::time::Instant;
 use glam::Vec3;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{
     load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, directional_light, make_material, plane_mesh, spot_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{SceneDb, World};
+use v3_demo_common::{
+    box_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, spot_light,
+};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -107,35 +111,29 @@ fn look_angles(direction: Vec3) -> (f32, f32) {
     (dir.x.atan2(-dir.z), dir.y.asin())
 }
 
-fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
-    let floor_mesh = renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::mesh(plane_mesh(
+fn add_showcase_stage(world: &mut World, bounds: SceneBounds) {
+    let floor_mesh = spawn_mesh(
+        world,
+        plane_mesh(
             [bounds.center.x, bounds.floor_y(), bounds.center.z],
             bounds.stage_extent(),
-        )))
-        .as_mesh()
-        .unwrap();
-    let floor_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.07, 0.08, 0.10, 1.0],
-            0.16,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-    let _ = v3_demo_common::insert_object(
-        renderer,
+        ),
+    );
+    let floor_material = spawn_material(
+        world,
+        make_material([0.07, 0.08, 0.10, 1.0], 0.16, 0.02, [0.0, 0.0, 0.0], 0.0),
+    );
+    let _ = spawn_object(
+        world,
         floor_mesh,
         floor_material,
         glam::Mat4::IDENTITY,
         bounds.stage_extent(),
     );
 
-    let pedestal_mesh = renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::mesh(box_mesh(
+    let pedestal_mesh = spawn_mesh(
+        world,
+        box_mesh(
             [
                 bounds.center.x,
                 bounds.floor_y() + bounds.radius * 0.05,
@@ -146,29 +144,23 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
                 bounds.radius * 0.05,
                 bounds.radius * 0.62,
             ],
-        )))
-        .as_mesh()
-        .unwrap();
-    let pedestal_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.11, 0.12, 0.15, 1.0],
-            0.28,
-            0.04,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-    let _ = v3_demo_common::insert_object(
-        renderer,
+        ),
+    );
+    let pedestal_material = spawn_material(
+        world,
+        make_material([0.11, 0.12, 0.15, 1.0], 0.28, 0.04, [0.0, 0.0, 0.0], 0.0),
+    );
+    let _ = spawn_object(
+        world,
         pedestal_mesh,
         pedestal_material,
         glam::Mat4::IDENTITY,
         bounds.radius,
     );
 
-    let backdrop_mesh = renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::mesh(box_mesh(
+    let backdrop_mesh = spawn_mesh(
+        world,
+        box_mesh(
             [
                 bounds.center.x,
                 bounds.floor_y() + bounds.radius * 0.62,
@@ -179,20 +171,14 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
                 bounds.radius * 0.62,
                 bounds.radius * 0.05,
             ],
-        )))
-        .as_mesh()
-        .unwrap();
-    let backdrop_material = renderer
-        .scene()
-        .insert_material(make_material(
-            [0.04, 0.05, 0.08, 1.0],
-            0.82,
-            0.0,
-            [0.04, 0.06, 0.12],
-            0.03,
-        ));
-    let _ = v3_demo_common::insert_object(
-        renderer,
+        ),
+    );
+    let backdrop_material = spawn_material(
+        world,
+        make_material([0.04, 0.05, 0.08, 1.0], 0.82, 0.0, [0.04, 0.06, 0.12], 0.03),
+    );
+    let _ = spawn_object(
+        world,
         backdrop_mesh,
         backdrop_material,
         glam::Mat4::IDENTITY,
@@ -200,7 +186,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
     );
 }
 
-fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
+fn add_showcase_lighting(world: &mut World, renderer: &mut Renderer, bounds: SceneBounds) {
     let focus = bounds.focus_point();
     let radius = bounds.radius;
     let elevated_focus = focus + Vec3::new(0.0, radius * 0.08, 0.0);
@@ -208,9 +194,9 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
 
     let key_pos = focus + Vec3::new(radius * 0.22, radius * 0.34, radius * 0.24);
     let key_dir = (elevated_focus - key_pos).normalize_or_zero();
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(spot_light(
+    spawn_light(
+        world,
+        spot_light(
             key_pos.to_array(),
             key_dir.to_array(),
             [1.0, 0.80, 0.62],
@@ -218,13 +204,14 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
             radius * 0.62,
             0.20,
             0.38,
-        )));
+        ),
+    );
 
     let fill_pos = focus + Vec3::new(-radius * 0.26, radius * 0.14, radius * 0.28);
     let fill_dir = (focus - fill_pos).normalize_or_zero();
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(spot_light(
+    spawn_light(
+        world,
+        spot_light(
             fill_pos.to_array(),
             fill_dir.to_array(),
             [0.52, 0.66, 1.0],
@@ -232,13 +219,14 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
             radius * 0.59,
             0.28,
             0.46,
-        )));
+        ),
+    );
 
     let rim_pos = focus + Vec3::new(-radius * 0.30, radius * 0.22, -radius * 0.32);
     let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(spot_light(
+    spawn_light(
+        world,
+        spot_light(
             rim_pos.to_array(),
             rim_dir.to_array(),
             [0.36, 0.55, 1.0],
@@ -246,15 +234,13 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
             radius * 0.57,
             0.22,
             0.40,
-        )));
+        ),
+    );
 
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(directional_light(
-            [0.15, -1.0, 0.1],
-            [0.07, 0.09, 0.14],
-            0.3,
-        )));
+    spawn_light(
+        world,
+        directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3),
+    );
     renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
 }
 
@@ -269,6 +255,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     movement_speed: f32,
     last_frame: Instant,
     cam_pos: Vec3,
@@ -378,46 +365,23 @@ impl ApplicationHandler for App {
             },
         );
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 
         let (scene, bounds) = match load_embedded_scene() {
@@ -430,32 +394,20 @@ impl ApplicationHandler for App {
                     center: Vec3::new(0.0, 0.75, 0.0),
                     radius: 3.0,
                 };
-                let mesh = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                        [0.0, 0.75, 0.0],
-                        [0.75, 0.75, 0.75],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let material = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.65, 0.72, 0.9, 1.0],
-                        0.35,
-                        0.1,
-                        [0.0, 0.0, 0.0],
-                        0.0,
-                    ));
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                let mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]));
+                let material = spawn_material(
+                    &mut scene_db.world,
+                    make_material([0.65, 0.72, 0.9, 1.0], 0.35, 0.1, [0.0, 0.0, 0.0], 0.0),
+                );
+                let _ = spawn_object(
+                    &mut scene_db.world,
                     mesh,
                     material,
                     glam::Mat4::IDENTITY,
                     1.5,
                 );
-                add_showcase_stage(&mut renderer, fallback_bounds);
-                add_showcase_lighting(&mut renderer, fallback_bounds);
+                add_showcase_stage(&mut scene_db.world, fallback_bounds);
+                add_showcase_lighting(&mut scene_db.world, &mut renderer, fallback_bounds);
                 let camera_start = fallback_bounds.camera_start();
                 let focus = fallback_bounds.focus_point();
                 let (cam_yaw, cam_pitch) = look_angles(focus - camera_start);
@@ -466,6 +418,7 @@ impl ApplicationHandler for App {
                     queue,
                     surface_format,
                     renderer,
+                    scene_db,
                     movement_speed: fallback_bounds.movement_speed(),
                     last_frame: Instant::now(),
                     cam_pos: camera_start,
@@ -479,28 +432,26 @@ impl ApplicationHandler for App {
             }
         };
 
-        let material_ids =
-            upload_scene_materials(&mut renderer, &scene).expect("upload scene materials");
+        let material_ids = upload_scene_materials(&mut scene_db.world, &scene);
         for mesh in scene.meshes {
             let radius = mesh
                 .vertices
                 .iter()
                 .map(|v| Vec3::from_array(v.position).distance(bounds.center))
                 .fold(0.5, f32::max);
-            let mesh_id = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
+            let mesh_id = spawn_mesh(
+                &mut scene_db.world,
+                helio::MeshUpload {
                     vertices: mesh.vertices,
                     indices: mesh.indices,
-                }))
-                .as_mesh()
-                .unwrap();
+                },
+            );
             if let Some(material) = mesh
                 .material_index
                 .and_then(|index| material_ids.get(index).copied())
             {
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                let _ = spawn_object(
+                    &mut scene_db.world,
                     mesh_id,
                     material,
                     glam::Mat4::IDENTITY,
@@ -508,8 +459,8 @@ impl ApplicationHandler for App {
                 );
             }
         }
-        add_showcase_stage(&mut renderer, bounds);
-        add_showcase_lighting(&mut renderer, bounds);
+        add_showcase_stage(&mut scene_db.world, bounds);
+        add_showcase_lighting(&mut scene_db.world, &mut renderer, bounds);
         let camera_start = bounds.camera_start();
         let focus = bounds.focus_point();
         let (cam_yaw, cam_pitch) = look_angles(focus - camera_start);
@@ -521,6 +472,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
             movement_speed: bounds.movement_speed(),
             last_frame: Instant::now(),
             cam_pos: camera_start,

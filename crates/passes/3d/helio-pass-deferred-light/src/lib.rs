@@ -870,7 +870,7 @@ impl RenderPass for DeferredLightPass {
             "sky_lut",
             "tile_light_lists",
             "tile_light_counts",
-            "main_scene",
+            "render_environment",
             "water_caustics",
             "pre_aa",
             "rc_view",
@@ -896,16 +896,15 @@ impl RenderPass for DeferredLightPass {
     fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let main_scene_opt = ctx.pass_resources.main_scene.get();
-        let main_scene = main_scene_opt.as_ref();
-        let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
-            (main_scene.ambient_color, main_scene.ambient_intensity)
+        let environment = ctx.pass_resources.render_environment.get();
+        let (ambient_color, ambient_intensity) = if let Some(environment) = environment {
+            (environment.ambient_color, environment.ambient_intensity)
         } else {
             ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
         };
         // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
-        let (rc_min, rc_max) = if let Some(main) = main_scene {
-            (main.rc_world_min, main.rc_world_max)
+        let (rc_min, rc_max) = if let Some(environment) = environment {
+            (environment.rc_world_min, environment.rc_world_max)
         } else {
             ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
         };
@@ -918,12 +917,14 @@ impl RenderPass for DeferredLightPass {
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx
-                .pass_resources
-                .lights
-                .get()
-                .map(|l| l.movable_light_count)
-                .unwrap_or(0), // Only movable lights (static/stationary are baked)
+            light_count: if ctx
+                .scene_buffers
+                .contains(BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            }, // SceneDB owns the fixed-capacity light component buffer.
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
@@ -1175,10 +1176,9 @@ impl RenderPass for DeferredLightPass {
             .unwrap_or(&self.fallback_planar_view);
 
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
             .resources

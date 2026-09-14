@@ -1,12 +1,10 @@
 //! GPU-facing per-portal render data.
 //!
-//! Published by `helio::Scene::flush()` from its private portal registry
-//! (`scene::portals`) into a small storage buffer every frame — there are
-//! never more than a handful of active portals, so republishing the whole
-//! list unconditionally is simpler than dirty-tracking it and costs nothing
-//! measurable. Consumed by `helio-pass-portal-cull` (frustum test to select
-//! which instances get a duplicate draw) and `helio-pass-portal-instances`
-//! (the duplicate draw itself, clipped to the portal's opening).
+//! Authored as SceneDB rows and mirrored into the `portal_views` and
+//! `portal_chains` buffers. Consumed by `helio-pass-portal-cull` (frustum test
+//! to select which instances get a duplicate draw) and
+//! `helio-pass-portal-instances` (the duplicate draw itself, clipped to the
+//! portal's opening).
 
 use bytemuck::{Pod, Zeroable};
 
@@ -21,7 +19,7 @@ use bytemuck::{Pod, Zeroable};
 /// it if a scene's portals are large enough that a 4th bounce is legible.
 pub const MAX_CHAIN_DEPTH: usize = 3;
 
-/// Hard cap on how many chains `helio::scene::portals` will ever generate,
+/// Hard cap on how many chains the SceneDB portal projection can expose,
 /// regardless of `portal_count`/`MAX_CHAIN_DEPTH`. Scenes with more active
 /// portals than this comfortably supports at the configured depth degrade
 /// gracefully (fewer distinct reflection paths get drawn) rather than
@@ -85,10 +83,10 @@ pub struct GpuPortalView {
 /// looks through) and `portals[depth-1]` the innermost/deepest reflection.
 /// 16 bytes at the default `MAX_CHAIN_DEPTH = 3`.
 ///
-/// `helio::scene::portals` generates every such sequence (including repeats
-/// — `[P, P, P]` is exactly "look through this portal at its own reflection,
-/// three times over", the case that makes a single mirror-pair or a
-/// self-facing room read as infinite) whenever the portal set changes. Both
+/// The SceneDB portal projection generates every such sequence (including
+/// repeats — `[P, P, P]` is exactly "look through this portal at its own
+/// reflection, three times over", the case that makes a single mirror-pair or
+/// a self-facing room read as infinite) whenever the portal set changes. Both
 /// `helio-pass-portal-cull` and `helio-pass-portal-instances` iterate this
 /// list instead of `portal_views` directly, treating a depth-1 chain
 /// (`depth == 1`) as exactly the old single-portal behavior — the chain

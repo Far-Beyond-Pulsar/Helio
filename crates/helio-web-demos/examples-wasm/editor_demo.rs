@@ -81,60 +81,48 @@ impl HelioWasmApp for Demo {
         let mut picker = ScenePicker::new();
 
         // ── Materials ─────────────────────────────────────────────────────────
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.55, 0.55, 1.0],
-                0.8,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.15, 0.15, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.85, 0.25, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.35, 0.95, 1.0],
-                0.5,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_gold = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.76, 0.1, 1.0],
-                0.3,
-                0.8,
-                [0.0; 3],
-                0.0,
-            ));
-        let mat_sphere = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.8, 0.5, 0.9, 1.0],
-                0.35,
-                0.15,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_floor = renderer.scene().insert_material(make_material(
+            [0.55, 0.55, 0.55, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_red = renderer.scene().insert_material(make_material(
+            [0.9, 0.15, 0.15, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_green = renderer.scene().insert_material(make_material(
+            [0.15, 0.85, 0.25, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_blue = renderer.scene().insert_material(make_material(
+            [0.15, 0.35, 0.95, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_gold = renderer.scene().insert_material(make_material(
+            [1.0, 0.76, 0.1, 1.0],
+            0.3,
+            0.8,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_sphere = renderer.scene().insert_material(make_material(
+            [0.8, 0.5, 0.9, 1.0],
+            0.35,
+            0.15,
+            [0.0; 3],
+            0.0,
+        ));
 
         // ── Meshes (clone each upload so the picker can keep the BVH data) ──
 

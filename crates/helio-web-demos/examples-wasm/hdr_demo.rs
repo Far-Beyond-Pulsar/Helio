@@ -32,60 +32,48 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let white = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.9, 0.92, 1.0],
-                0.6,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let emissive_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.1, 0.1, 1.0],
-                0.3,
-                0.0,
-                [10.0, 0.5, 0.5],
-                10.0,
-            ));
-        let emissive_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.1, 1.0, 0.1, 1.0],
-                0.3,
-                0.0,
-                [0.5, 10.0, 0.5],
-                10.0,
-            ));
-        let emissive_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.1, 0.1, 1.0, 1.0],
-                0.3,
-                0.0,
-                [0.5, 0.5, 10.0],
-                10.0,
-            ));
-        let emissive_sun = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.9, 0.7, 1.0],
-                0.2,
-                0.0,
-                [50.0, 45.0, 35.0],
-                50.0,
-            ));
-        let metal = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.93, 0.88, 1.0],
-                0.1,
-                1.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let white = renderer.scene().insert_material(make_material(
+            [0.9, 0.9, 0.92, 1.0],
+            0.6,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let emissive_red = renderer.scene().insert_material(make_material(
+            [1.0, 0.1, 0.1, 1.0],
+            0.3,
+            0.0,
+            [10.0, 0.5, 0.5],
+            10.0,
+        ));
+        let emissive_green = renderer.scene().insert_material(make_material(
+            [0.1, 1.0, 0.1, 1.0],
+            0.3,
+            0.0,
+            [0.5, 10.0, 0.5],
+            10.0,
+        ));
+        let emissive_blue = renderer.scene().insert_material(make_material(
+            [0.1, 0.1, 1.0, 1.0],
+            0.3,
+            0.0,
+            [0.5, 0.5, 10.0],
+            10.0,
+        ));
+        let emissive_sun = renderer.scene().insert_material(make_material(
+            [1.0, 0.9, 0.7, 1.0],
+            0.2,
+            0.0,
+            [50.0, 45.0, 35.0],
+            50.0,
+        ));
+        let metal = renderer.scene().insert_material(make_material(
+            [0.95, 0.93, 0.88, 1.0],
+            0.1,
+            1.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let ground = renderer
             .scene()

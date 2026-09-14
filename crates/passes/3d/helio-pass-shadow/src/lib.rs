@@ -47,7 +47,7 @@
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -450,7 +450,7 @@ impl RenderPass for ShadowPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "object_batch"]
+        &["object_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -526,12 +526,22 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let main_scene = ctx.resources.main_scene.read("Shadow").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
-        })?;
-
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
+        let vertices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "ShadowPass requires builtin_mesh_vertex".into(),
+                )
+            })?;
+        let indices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "ShadowPass requires builtin_mesh_index".into(),
+                )
+            })?;
 
         // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
@@ -604,8 +614,8 @@ impl RenderPass for ShadowPass {
                     );
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, bg, &[dyn_offset]);
-                    pass.set_vertex_buffer(0, vertices.slice(..));
-                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                    pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     #[cfg(not(target_arch = "wasm32"))]
                     pass.multi_draw_indexed_indirect(static_indirect, 0, static_draw_count);
                     #[cfg(target_arch = "wasm32")]
@@ -694,8 +704,8 @@ impl RenderPass for ShadowPass {
                     if movable_draw_count > 0 {
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, bg, &[dyn_offset]);
-                        pass.set_vertex_buffer(0, vertices.slice(..));
-                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                        pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                         let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                         #[cfg(not(target_arch = "wasm32"))]
                         if self.supports_multi_draw_count {
@@ -764,8 +774,8 @@ impl RenderPass for ShadowPass {
                             // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.slice(..));
-                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                             let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect_count(
                                 &self.face_cull_indirect,
@@ -799,8 +809,8 @@ impl RenderPass for ShadowPass {
                         if movable_draw_count > 0 {
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.slice(..));
-                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                             let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect(
                                 &self.face_cull_indirect,

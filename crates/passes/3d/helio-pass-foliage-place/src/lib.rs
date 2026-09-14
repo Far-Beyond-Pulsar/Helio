@@ -9,7 +9,7 @@
 //!
 //! Regenerating every visible blade every frame is the common GPU-grass shortcut and
 //! costs about a millisecond at a million blades. Instead the world is a grid of 8 m
-//! tiles ([`helio_foliage_core::FOLIAGE_TILE_SIZE_METERS`]), a ring of them around the
+//! tiles ([`crate::FOLIAGE_TILE_SIZE_METERS`]), a ring of them around the
 //! camera is kept resident in a GPU arena, and placement only runs for tiles *entering*
 //! the ring. Steady-state placement cost is therefore zero, and moving-camera cost is
 //! proportional to the ring's **perimeter** rather than its area.
@@ -61,7 +61,10 @@
 //! `tile_slot = blade_index / blades_per_tile` is exact and O(1).
 
 use bytemuck::{Pod, Zeroable};
-use helio_foliage_core::GpuFoliageType;
+
+mod contract;
+pub use contract::*;
+pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
 
 pub mod components;
 mod pass;

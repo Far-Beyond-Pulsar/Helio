@@ -5,7 +5,7 @@ use std::collections::HashMap;
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Interaction", category_color = "#A78BFA", default_collapsed = true)]
 pub struct InteractionFoliageProps {
-    /// Whether this foliage responds to [`helio::FoliageInteractor`]s.
+    /// Whether this foliage responds to SceneDB foliage interactor rows.
     #[property(category = "Interaction")]
     pub receives_interaction: bool,
     /// Whether the owner object pushes grass aside (registers an interactor at

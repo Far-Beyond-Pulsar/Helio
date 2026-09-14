@@ -10,7 +10,7 @@ pub mod readback;
 pub mod texture;
 
 pub use buffer::{StorageBuffer, UniformBuffer};
-pub use compute::{ComputePipeline, ComputePass};
+pub use compute::{ComputePass, ComputePipeline};
 pub use readback::GpuReadback;
 pub use texture::{BakeTexture, BakeTextureArray, TextureFormat2D};
 

@@ -1,5 +1,4 @@
 use engine_class_derive::{register_runtime_behavior, register_world_component};
-use helio::{FoliageTypeDescriptor, MaterialId};
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, LiveKeySet,
     RuntimeComponentOwner,
@@ -8,8 +7,16 @@ use pulsar_reflection::{
 use super::FoliageComponent;
 use crate::subsystems::PendingWorldWrites;
 
-fn descriptor(component: &FoliageComponent) -> FoliageTypeDescriptor {
-    FoliageTypeDescriptor {
+fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::components::FoliageTypeComponent {
+    use helio_pass_foliage_place::{pack_kind_and_flags, FoliageKind};
+
+    let flags = u32::from(component.rendering.two_sided)
+        * helio_pass_foliage_place::FOLIAGE_FLAG_TWO_SIDED
+        | u32::from(component.rendering.casts_shadow)
+            * helio_pass_foliage_place::FOLIAGE_FLAG_CASTS_SHADOW
+        | u32::from(component.interaction.receives_interaction)
+            * helio_pass_foliage_place::FOLIAGE_FLAG_RECEIVES_INTERACTION;
+    helio_pass_foliage_place::components::FoliageTypeComponent {
         density: component.general.density,
         height_range: [
             component.placement.height_min,
@@ -17,8 +24,8 @@ fn descriptor(component: &FoliageComponent) -> FoliageTypeDescriptor {
         ],
         width_range: [component.placement.width_min, component.placement.width_max],
         slope_range: [
-            component.placement.slope_min_degrees.to_radians(),
-            component.placement.slope_max_degrees.to_radians(),
+            component.placement.slope_max_degrees.to_radians().cos(),
+            component.placement.slope_min_degrees.to_radians().cos(),
         ],
         altitude_range: [
             component.placement.altitude_min,
@@ -38,12 +45,13 @@ fn descriptor(component: &FoliageComponent) -> FoliageTypeDescriptor {
         interaction_stiffness: component.wind.interaction_stiffness,
         // Material projections remain a separate scene domain. Slot zero is the
         // stable default until foliage materials receive their own SceneDB column.
-        material_id: MaterialId::from_raw(0, 0).slot(),
+        // Material slot zero is the stable default until foliage material
+        // references are represented by their own SceneDB component column.
+        material_id: 0,
         density_layer: component.general.density_layer as u32,
-        two_sided: component.rendering.two_sided,
-        casts_shadow: component.rendering.casts_shadow,
-        receives_interaction: component.interaction.receives_interaction,
-        ..Default::default()
+        kind_and_flags: pack_kind_and_flags(FoliageKind::Blade, flags),
+        mesh_or_impostor_id: u32::MAX,
+        _pad: [0; 3],
     }
 }
 
@@ -96,9 +104,7 @@ impl ComponentRuntimeBehavior for FoliageComponent {
             return;
         }
 
-        let gpu_type = helio_pass_foliage_place::components::FoliageTypeComponent::from(
-            descriptor(component).to_gpu(),
-        );
+        let gpu_type = gpu_type(component);
         let half = component.placement.layer_extent;
         let [x, _y, z] = owner.position;
         let gpu_layer = helio_pass_foliage_place::components::FoliageLayerComponent {

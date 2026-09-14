@@ -1,5 +1,5 @@
-use crate::{GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform};
 use crate::{GpuPageMeta, ResidencyConfig, PAGE_CELL_BYTES};
+use crate::{GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanetaryVoxelGpuConfig {

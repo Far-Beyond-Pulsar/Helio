@@ -33,8 +33,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId,
-    Renderer, RendererConfig, Scene, SceneEntity, SublevelDescriptor,
+    DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
+    SceneEntity, SublevelDescriptor,
 };
 use helio_default_graphs::build_default_graph;
 use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
@@ -110,8 +110,8 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    portal_near: PortalId,
-    portal_far: PortalId,
+    portal_near: helio::PortalPair,
+    portal_far: helio::PortalPair,
 
     _light_ids: Vec<LightId>,
 
@@ -238,42 +238,34 @@ impl ApplicationHandler for App {
         );
 
         // ── Shared geometry & materials for every segment ─────────────────────
-        let wall_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.72, 0.72, 0.75, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let strip_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.85, 0.55, 1.0],
-                0.6,
-                0.0,
-                [1.0, 0.7, 0.3],
-                2.5,
-            ));
-        let post_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.35, 0.8, 1.0, 1.0],
-                0.5,
-                0.0,
-                [0.2, 0.7, 1.0],
-                1.5,
-            ));
-        let frame_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.95, 1.0, 1.0],
-                0.4,
-                0.0,
-                [0.2, 0.9, 1.0],
-                3.0,
-            ));
+        let wall_mat = renderer.scene().insert_material(make_material(
+            [0.72, 0.72, 0.75, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let strip_mat = renderer.scene().insert_material(make_material(
+            [0.95, 0.85, 0.55, 1.0],
+            0.6,
+            0.0,
+            [1.0, 0.7, 0.3],
+            2.5,
+        ));
+        let post_mat = renderer.scene().insert_material(make_material(
+            [0.35, 0.8, 1.0, 1.0],
+            0.5,
+            0.0,
+            [0.2, 0.7, 1.0],
+            1.5,
+        ));
+        let frame_mat = renderer.scene().insert_material(make_material(
+            [0.25, 0.95, 1.0, 1.0],
+            0.4,
+            0.0,
+            [0.2, 0.9, 1.0],
+            3.0,
+        ));
 
         // Meshes are inserted once and shared by every copy's instances (the
         // copies batch into the same draw calls by mesh+material).
@@ -342,7 +334,7 @@ impl ApplicationHandler for App {
         // The placement is HIDE_OFFSET below the corridor: from inside the
         // tunnel the main pass culls every copy (below the frustum's far
         // plane), so the corridor looks short. The portal passes pull them
-        // back up into the continuation — see `add_portal` below.
+        // back up into the continuation — see the portal component projection below.
         let mut coord_slots = 2u32; // the two portals below
         for sign in [-1.0f32, 1.0] {
             for copy in 1..=COPIES {
@@ -492,22 +484,14 @@ impl ApplicationHandler for App {
         // The near (+Z) portal pulls the +Z-direction copies up into the
         // tunnel that continues past the near end; the far (-Z) portal does
         // the same for the -Z direction.
-        let portal_near = renderer
-            .scene()
-            .add_portal(PortalDescriptor {
-                a: pose_near,
-                b: pose_near_b,
-                half_extent,
-            })
-            .expect("add_portal (near)");
-        let portal_far = renderer
-            .scene()
-            .add_portal(PortalDescriptor {
-                a: pose_far,
-                b: pose_far_b,
-                half_extent,
-            })
-            .expect("add_portal (far)");
+        let portal_near = helio::PortalPair {
+            a: pose_near,
+            b: pose_near_b,
+        };
+        let portal_far = helio::PortalPair {
+            a: pose_far,
+            b: pose_far_b,
+        };
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -696,7 +680,7 @@ impl AppState {
         let scene = self.renderer.scene();
         let mut teleported = false;
         for portal in [self.portal_near, self.portal_far] {
-            if let Some(pair) = scene.portal_pair(portal) {
+            if let Some(pair) = Some(portal) {
                 if helio::crossing_detected(
                     prev_pos,
                     self.cam_pos,

@@ -186,7 +186,7 @@ impl RenderPass for SsrPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "hiz_min", "pre_aa"]
+        &["gbuffer", "depth", "hiz_min", "pre_aa", "render_environment"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -280,8 +280,8 @@ impl RenderPass for SsrPass {
 
         // ── Decide between default and RT path ──────────────────────────
         if self.use_rt {
-            let main_scene = ctx.resources.main_scene.read("SsrPass");
-            let tlas = main_scene.and_then(|ms| ms.tlas);
+            let environment = ctx.resources.render_environment.read("SsrPass");
+            let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
                 let rc_view = ctx.resources.rc_view.get();

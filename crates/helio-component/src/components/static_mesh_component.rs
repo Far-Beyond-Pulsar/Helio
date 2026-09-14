@@ -359,7 +359,7 @@ pub struct StaticMeshComponent {
     /// site changes -- `..._gpu_handle` accessors keep their exact
     /// signature and now transparently resolve to a range shared with every
     /// other entity referencing the same asset.
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
     /// See [`Self::vertices`] -- same rules, the index half of the same
@@ -367,7 +367,7 @@ pub struct StaticMeshComponent {
     /// pool from `vertices`' own -- see `gpu::interned_pool`'s module doc
     /// on why sharing an id across two pools needs no coordination between
     /// them).
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
 }

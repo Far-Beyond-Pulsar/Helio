@@ -1,10 +1,9 @@
 use glam::{Mat4, Vec3};
-use helio::{
-    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, PackedVertex, Renderer,
-    SceneDbHandle,
-};
+use helio::{GpuLight, LightType, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
+
+pub type SceneResult<T> = Result<T, &'static str>;
 
 /// Creates a fresh SceneDB `SceneDb` with a GPU mirror already attached, and
 /// returns the `SceneDbHandle` to hand to `RendererBuilder::new` -- SceneDB
@@ -42,27 +41,66 @@ pub fn scene_db_handle(scene_db: &pulsar_scenedb::SceneDb) -> SceneDbHandle {
         .expect("new_scene_db_with_gpu_mirror always attaches a mirror")
 }
 
+/// Build the standard renderer against an already-created SceneDB world.
+///
+/// The returned renderer receives only the cloneable GPU mirror; callers retain
+/// the `SceneDb` and author all scene rows through its `World`.
+pub fn build_default_renderer(
+    scene_db: &pulsar_scenedb::SceneDb,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    config: RendererConfig,
+) -> Renderer {
+    let graph_scene_db = scene_db_handle(scene_db);
+    RendererBuilder::new(config, graph_scene_db.clone())
+        .with_external_device()
+        .with_graph(Box::new(move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
+            helio_default_graphs::build_default_graph_external(
+                device,
+                queue,
+                camera,
+                config,
+                debug_state,
+                debug_camera,
+                cull_stats,
+                None,
+                graph_scene_db.clone(),
+            )
+        }))
+        .build(
+            device,
+            queue,
+            config.width,
+            config.height,
+            config.surface_format,
+        )
+}
+
 pub fn make_material(
     base_color: [f32; 4],
     roughness: f32,
     metallic: f32,
     emissive: [f32; 3],
     emissive_strength: f32,
-) -> GpuMaterial {
-    GpuMaterial {
+) -> helio_pass_gbuffer::MaterialComponent {
+    helio_pass_gbuffer::MaterialComponent::new(
         base_color,
-        emissive: [emissive[0], emissive[1], emissive[2], emissive_strength],
-        roughness_metallic: [roughness, metallic, 1.5, 0.5],
-        tex_base_color: GpuMaterial::NO_TEXTURE,
-        tex_normal: GpuMaterial::NO_TEXTURE,
-        tex_roughness: GpuMaterial::NO_TEXTURE,
-        tex_emissive: GpuMaterial::NO_TEXTURE,
-        tex_occlusion: GpuMaterial::NO_TEXTURE,
-        workflow: 0,
-        flags: 0,
-        material_class: 0,
-        class_params: [0.0; 4],
-    }
+        roughness,
+        metallic,
+        emissive,
+        emissive_strength,
+    )
+}
+
+/// Insert a material as a normal SceneDB component row and return its entity
+/// index. The index is the value object rows store in `material_slot`.
+pub fn spawn_material(
+    world: &mut World,
+    material: helio_pass_gbuffer::MaterialComponent,
+) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, material);
+    entity
 }
 
 pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> GpuLight {
@@ -128,42 +166,379 @@ pub fn spot_light(
 // exclusively in the World row.
 
 pub use helio_pass_forward_lit::LightComponent;
-pub use helio_pass_gbuffer::StaticObjectComponent;
+pub use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
+
+/// Insert the environment row consumed by the sky pass. Sky configuration is
+/// scene content too: the renderer only receives the keyed SceneDB buffer.
+pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
+    let mut sky = helio_pass_sky::SkyComponent::default();
+    sky.rayleigh_scatter = tint;
+    let entity = world.spawn();
+    world.insert(entity, sky);
+    entity
+}
+
+/// CPU-friendly description of a water volume's static appearance, packed
+/// into the raw `[f32; 4]` slots `helio_pass_water_sim::WaterVolumeComponent`
+/// stores GPU-side. Field-to-slot mapping mirrors the `WaterVolume` struct
+/// documented in that pass's WGSL shaders (`surface.wgsl`, `caustics.wgsl`,
+/// `underwater_fog.wgsl`, `hitbox.frag.wgsl`) -- this is the removed
+/// `helio::WaterVolumeDescriptor`/`.to_gpu()` pair reconstructed from the
+/// shader-documented layout, since neither survived the SceneDB migration.
+///
+/// The heightfield simulation's own dynamics (wind, spring/damping, wave
+/// scale) are separate pass-owned GPU state, driven at runtime through
+/// `helio_pass_water_sim::WaterSimPass::set_wind`/`set_sim_dynamics`/
+/// `set_wave_scale`/`set_wave_speed` instead -- no shader in the pass reads
+/// this component's `sim_dynamics`/`wind_params` slots, so this descriptor
+/// only covers the fields that actually reach them.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterVolumeDescriptor {
+    pub bounds_min: [f32; 3],
+    pub bounds_max: [f32; 3],
+    pub surface_height: f32,
+    pub wave_amplitude: f32,
+    pub wave_frequency: f32,
+    pub wave_speed: f32,
+    pub wave_direction: [f32; 2],
+    pub wave_steepness: f32,
+    pub water_color: [f32; 3],
+    pub extinction: [f32; 3],
+    pub foam_threshold: f32,
+    pub foam_amount: f32,
+    pub reflection_strength: f32,
+    pub refraction_strength: f32,
+    pub fresnel_power: f32,
+    pub caustics_enabled: bool,
+    pub caustics_intensity: f32,
+    pub caustics_scale: f32,
+    pub caustics_speed: f32,
+    pub fog_density: f32,
+    pub god_rays_intensity: f32,
+    pub ssr_enabled: bool,
+    pub ssr_steps: u32,
+    pub ssr_step_size: f32,
+    pub ssr_thickness: f32,
+    /// Index of refraction; 1.333 for water.
+    pub ior: f32,
+    /// Base (minimum) Fresnel reflectance at normal incidence; water's real
+    /// F0 is ~0.02. `surface.wgsl`'s `sim_params.z`.
+    pub fresnel_min: f32,
+    /// `surface.wgsl`'s `sim_params.w` -- declared there as "density" but not
+    /// yet read by any shader in this pass; carried through for forward
+    /// compatibility.
+    pub density: f32,
+    /// Sun direction used by the underwater fog/caustics shading (points
+    /// *from* the sun, same convention as every other light direction in
+    /// this file). `shader`'s `sun_direction.xyz`.
+    pub sun_direction: [f32; 3],
+    /// `surface.wgsl`'s `shadow_params.x` ("rim"); not yet read by any
+    /// shader in this pass, carried through for forward compatibility.
+    pub shadow_rim: f32,
+    /// `shadow_params.y`; not yet read by any shader in this pass.
+    pub shadow_hitbox: f32,
+    /// `shadow_params.z`; not yet read by any shader in this pass.
+    pub shadow_ao: f32,
+}
+
+impl Default for WaterVolumeDescriptor {
+    fn default() -> Self {
+        Self {
+            bounds_min: [-1.0, -1.0, -1.0],
+            bounds_max: [1.0, 1.0, 1.0],
+            surface_height: 0.0,
+            wave_amplitude: 0.1,
+            wave_frequency: 1.0,
+            wave_speed: 1.0,
+            wave_direction: [1.0, 0.0],
+            wave_steepness: 0.3,
+            water_color: [0.02, 0.08, 0.12],
+            extinction: [0.15, 0.08, 0.04],
+            foam_threshold: 0.5,
+            foam_amount: 0.5,
+            reflection_strength: 0.6,
+            refraction_strength: 1.0,
+            fresnel_power: 5.0,
+            caustics_enabled: false,
+            caustics_intensity: 1.0,
+            caustics_scale: 4.0,
+            caustics_speed: 0.5,
+            fog_density: 0.0,
+            god_rays_intensity: 0.0,
+            ssr_enabled: false,
+            ssr_steps: 32,
+            ssr_step_size: 0.05,
+            ssr_thickness: 0.02,
+            ior: 1.333,
+            fresnel_min: 0.02,
+            density: 0.0,
+            sun_direction: [0.0, -1.0, 0.0],
+            shadow_rim: 0.0,
+            shadow_hitbox: 0.0,
+            shadow_ao: 0.0,
+        }
+    }
+}
+
+impl WaterVolumeDescriptor {
+    pub fn to_component(&self) -> helio_pass_water_sim::WaterVolumeComponent {
+        helio_pass_water_sim::WaterVolumeComponent {
+            bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
+            bounds_max: [
+                self.bounds_max[0],
+                self.bounds_max[1],
+                self.bounds_max[2],
+                self.surface_height,
+            ],
+            wave_params: [
+                self.wave_amplitude,
+                self.wave_frequency,
+                self.wave_speed,
+                self.wave_steepness,
+            ],
+            wave_direction: [self.wave_direction[0], self.wave_direction[1], 0.0, 0.0],
+            water_color: [
+                self.water_color[0],
+                self.water_color[1],
+                self.water_color[2],
+                self.foam_threshold,
+            ],
+            extinction: [
+                self.extinction[0],
+                self.extinction[1],
+                self.extinction[2],
+                self.foam_amount,
+            ],
+            reflection_refraction: [
+                self.reflection_strength,
+                self.refraction_strength,
+                self.fresnel_power,
+                0.0,
+            ],
+            caustics_params: [
+                if self.caustics_enabled { 1.0 } else { 0.0 },
+                self.caustics_intensity,
+                self.caustics_scale,
+                self.caustics_speed,
+            ],
+            fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
+            sim_params: [
+                self.ior,
+                self.caustics_intensity,
+                self.fresnel_min,
+                self.density,
+            ],
+            shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
+            sun_direction: [
+                self.sun_direction[0],
+                self.sun_direction[1],
+                self.sun_direction[2],
+                0.0,
+            ],
+            ssr_params: [
+                if self.ssr_enabled { 1.0 } else { 0.0 },
+                self.ssr_steps as f32,
+                self.ssr_step_size,
+                self.ssr_thickness,
+            ],
+            sim_dynamics: [0.0; 4],
+            wind_params: [0.0; 4],
+            _pad6: [0.0; 4],
+        }
+    }
+}
+
+/// Spawn a water volume row from its CPU-side descriptor.
+pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, descriptor.to_component());
+    entity
+}
+
+/// CPU-friendly description of one AABB water-displacement hitbox; packs into
+/// `helio_pass_water_sim::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
+/// `GpuWaterHitbox` layout. Coordinates are in the water sim's own space: X/Z
+/// normalized to the pool's half-extent, Y relative to the water surface.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterHitboxDescriptor {
+    pub old_min: [f32; 3],
+    pub old_max: [f32; 3],
+    pub new_min: [f32; 3],
+    pub new_max: [f32; 3],
+    pub edge_softness: f32,
+    pub strength: f32,
+}
+
+impl WaterHitboxDescriptor {
+    pub fn to_component(&self) -> helio_pass_water_sim::WaterHitboxComponent {
+        helio_pass_water_sim::WaterHitboxComponent {
+            old_min: [self.old_min[0], self.old_min[1], self.old_min[2], 0.0],
+            old_max: [self.old_max[0], self.old_max[1], self.old_max[2], 0.0],
+            new_min: [self.new_min[0], self.new_min[1], self.new_min[2], 0.0],
+            new_max: [self.new_max[0], self.new_max[1], self.new_max[2], 0.0],
+            params: [self.edge_softness, self.strength, 0.0, 0.0],
+        }
+    }
+}
+
+/// Spawn a water hitbox row from its CPU-side descriptor.
+pub fn spawn_water_hitbox(world: &mut World, descriptor: WaterHitboxDescriptor) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, descriptor.to_component());
+    entity
+}
+
+/// Replace a previously spawned water hitbox's bounds (e.g. each frame, as
+/// the object displacing the water moves).
+pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterHitboxDescriptor) {
+    if let Some(mut existing) = world.get_mut::<helio_pass_water_sim::WaterHitboxComponent>(entity) {
+        *existing = descriptor.to_component();
+    }
+}
+
+/// Spawn a post-process volume record from the CPU-side descriptor
+/// (`PostProcessVolumeDescriptor::to_gpu()` feeds the same
+/// `helio_pass_postprocess::PostProcessVolumeComponent` the pass reads).
+pub fn spawn_post_process_volume(
+    world: &mut World,
+    descriptor: libhelio::PostProcessVolumeDescriptor,
+) -> Entity {
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        helio_pass_postprocess::PostProcessVolumeComponent::from(descriptor.to_gpu()),
+    );
+    entity
+}
+
+/// Spawn a decal record. `helio_pass_decal::DecalComponent` mirrors
+/// `libhelio::GpuDecal` byte-for-byte, so any already-built `GpuDecal` value
+/// (as constructed for the removed `Scene::insert_texture` bindless-table
+/// path) can be spawned directly -- only per-decal *textures* (an
+/// `albedo_texture_index` other than `u32::MAX`) have no SceneDB-authored
+/// replacement yet, since no component owns a bindless texture table.
+pub fn spawn_decal(world: &mut World, decal: libhelio::GpuDecal) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, helio_pass_decal::DecalComponent::from(decal));
+    entity
+}
+
+/// Spawn an oriented-box reflection-capture influence volume, replacing the
+/// removed `Scene::insert_reflection_capture(ReflectionCaptureDescriptor::
+/// boxed(..))` API. `transform`'s translation/rotation places the box (scale
+/// is ignored -- `extents` is the box's own authored half-size, in
+/// capture-local space, same as the old descriptor); `transition_distance`
+/// is how far the capture fades out from each face. `cubemap_index` starts
+/// at -1 (no cubemap resident) -- same as before, it's the probe bake that
+/// assigns a real layer, so an unbaked capture still contributes nothing.
+pub fn spawn_reflection_capture_box(
+    world: &mut World,
+    transform: Mat4,
+    extents: [f32; 3],
+    transition_distance: f32,
+) -> Entity {
+    let position = transform.w_axis.truncate();
+    let gpu = libhelio::GpuReflectionCapture {
+        position_radius: [position.x, position.y, position.z, 0.0],
+        extents_transition: [extents[0], extents[1], extents[2], transition_distance],
+        world_to_local: transform.inverse().to_cols_array_2d(),
+        cubemap_index: -1,
+        shape: libhelio::ReflectionCaptureShape::Box as u32,
+        mobility: libhelio::ReflectionCaptureMobility::Static as u32,
+        brightness: 1.0,
+    };
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        helio_pass_deferred_light::ReflectionCaptureComponent::from(gpu),
+    );
+    entity
+}
+
+/// Spawn the sky/atmosphere row shared by the indoor-cathedral demo family:
+/// no direct sunlight (an indoor ambient tint standing in for the removed
+/// `SkyActor::indoor(..).with_clouds(..)` builder) with a moody volumetric
+/// cloud layer overhead for the radiance-cascades GI bounce to pick up.
+pub fn spawn_indoor_cathedral_sky(world: &mut World) -> Entity {
+    let sky = helio_pass_sky::SkyComponent {
+        rayleigh_scatter: [0.05, 0.05, 0.1],
+        clouds_enabled: 1,
+        cloud_coverage: 0.7,
+        cloud_density: 0.8,
+        cloud_base: 1200.0,
+        cloud_top: 1800.0,
+        cloud_wind_x: 0.8,
+        cloud_wind_z: 0.2,
+        cloud_speed: 1.3,
+        skylight_intensity: 0.25,
+        ..Default::default()
+    };
+    let entity = world.spawn();
+    world.insert(entity, sky);
+    entity
+}
+
+/// Insert a mesh payload into SceneDB's shared geometry pools and return its
+/// entity. The returned entity index is the mesh slot used by object rows;
+/// the generated GPU handles provide the actual vertex/index offsets.
+pub fn spawn_mesh(world: &mut World, upload: MeshUpload) -> Entity {
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        MeshComponent {
+            vertices: upload.vertices,
+            indices: upload.indices,
+        },
+    );
+    entity
+}
 
 pub fn spawn_object(
     world: &mut World,
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
+    mesh: Entity,
+    material: Entity,
     transform: Mat4,
     radius: f32,
-) -> helio::SceneResult<Entity> {
-    spawn_object_with_movability(world, renderer, mesh, material, transform, radius, None)
+) -> SceneResult<Entity> {
+    let mirror = world.gpu_mirror().cloned().ok_or("scene has no GPU mirror")?;
+    let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+        .filter(|handle| handle.count != 0)
+        .ok_or("mesh has no GPU vertex range")?;
+    let indices = MeshComponent::indices_gpu_handle(mirror.store(), mesh.index())
+        .filter(|handle| handle.count != 0)
+        .ok_or("mesh has no GPU index range")?;
+    let material_component = world
+        .get::<helio_pass_gbuffer::MaterialComponent>(material)
+        .ok_or("material entity has no MaterialComponent")?;
+    let bounds = [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius];
+    let component = StaticObjectComponent::new(
+        mesh.index(),
+        mesh.generation(),
+        material.index(),
+        material.generation(),
+        transform,
+        bounds,
+        indices.count,
+        indices.offset,
+        vertices.offset as i32,
+        material_component.material_class,
+        0,
+        0,
+    );
+    let entity = world.spawn();
+    world.insert(entity, component);
+    Ok(entity)
 }
 
 pub fn spawn_object_with_movability(
     world: &mut World,
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
+    mesh: Entity,
+    material: Entity,
     transform: Mat4,
     radius: f32,
     movability: Option<helio::Movability>,
-) -> helio::SceneResult<Entity> {
-    let bounds = [
-        transform.w_axis.x,
-        transform.w_axis.y,
-        transform.w_axis.z,
-        radius,
-    ];
-    // `StaticObjectComponent::new` resolves only asset-pool metadata. It does
-    // not place an object or create a renderer-owned scene record.
-    let Some(component) = StaticObjectComponent::new(renderer, mesh, material, transform, bounds, 0)
-    else {
-        return Err(helio::SceneError::InvalidHandle { resource: "mesh_or_material" });
-    };
-    let entity = world.spawn();
-    world.insert(entity, component);
+) -> SceneResult<Entity> {
+    let entity = spawn_object(world, mesh, material, transform, radius)?;
     let _ = movability;
     Ok(entity)
 }
@@ -174,9 +549,9 @@ pub fn update_object_transform(
     _renderer: &mut Renderer,
     entity: Entity,
     transform: Mat4,
-) -> helio::SceneResult<()> {
+) -> SceneResult<()> {
     let Some(mut object) = world.get_mut::<StaticObjectComponent>(entity) else {
-        return Err(helio::SceneError::InvalidHandle { resource: "object" });
+        return Err("object entity has no StaticObjectComponent");
     };
     let bounds = [
         transform.w_axis.x,
@@ -193,7 +568,7 @@ pub fn despawn_object(
     world: &mut World,
     _renderer: &mut Renderer,
     entity: Entity,
-) -> helio::SceneResult<()> {
+) -> SceneResult<()> {
     world.despawn(entity);
     Ok(())
 }
@@ -246,8 +621,7 @@ pub fn update_corona_emitter(
     slot: u32,
     emitter: libhelio::GpuCoronaEmitter,
 ) {
-    if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity)
-    {
+    if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity) {
         *existing = corona_component_for_slot(slot, emitter);
     }
 }
@@ -256,7 +630,9 @@ fn corona_component_for_slot(
     slot: u32,
     mut emitter: libhelio::GpuCoronaEmitter,
 ) -> helio_pass_corona::CoronaEmitterComponent {
-    emitter.particle_count = emitter.particle_count.min(libhelio::CORONA_MAX_PARTICLES_PER_EMITTER);
+    emitter.particle_count = emitter
+        .particle_count
+        .min(libhelio::CORONA_MAX_PARTICLES_PER_EMITTER);
     emitter.particle_offset = slot * libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
     helio_pass_corona::CoronaEmitterComponent::from(emitter)
 }

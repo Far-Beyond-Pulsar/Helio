@@ -1,7 +1,7 @@
 //! Per-portal-*chain* GPU frustum culling.
 //!
-//! For each active portal chain (a sequence of up to `libhelio::MAX_CHAIN_DEPTH`
-//! portals — see `libhelio::GpuPortalChain`'s docs for why chains, not single
+//! For each active portal chain (a sequence of up to `MAX_CHAIN_DEPTH` portals
+//! — see `GpuPortalChain`'s docs for why chains, not single
 //! portals, are what makes portals reflect each other automatically), tests
 //! every draw-call group's instances — mapped through that chain's *composed*
 //! transform — against the main camera frustum, and compacts survivors into
@@ -52,6 +52,13 @@
 //! ```
 
 use std::sync::Arc;
+
+mod portal_math;
+pub use portal_math::{
+    crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
+};
+mod contract;
+pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -276,11 +283,9 @@ impl RenderPass for PortalCullPass {
         self.chain_count = ctx
             .scene_buffers
             .get(BufferKey::of("portal_chains"))
-            .map(|h| {
-                (h.buffer.size() / std::mem::size_of::<libhelio::GpuPortalChain>() as u64) as u32
-            })
+            .map(|h| (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32)
             .unwrap_or(0)
-            .min(libhelio::MAX_PORTAL_CHAINS as u32);
+            .min(MAX_PORTAL_CHAINS as u32);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {

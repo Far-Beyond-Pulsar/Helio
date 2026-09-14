@@ -1,9 +1,9 @@
 use bytemuck::{Pod, Zeroable};
+use helio_pass_planetary_voxel::GpuPageMeta;
 use helio_pass_planetary_voxel::{
     build_terrain_meshlets, GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTerrainVertex,
     GpuTransvoxelEmissionCounters, TERRAIN_MESHLET_BUILD_WGSL,
 };
-use helio_pass_planetary_voxel::GpuPageMeta;
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 

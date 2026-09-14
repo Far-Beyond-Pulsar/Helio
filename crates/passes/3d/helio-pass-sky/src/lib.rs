@@ -1953,17 +1953,18 @@ impl RenderPass for SkyPass {
             // We use encoder_ptr directly because this pass also owns the subsequent pre_aa pass.
             if let Some(sky_lut_view) = ctx.resources.sky_lut.get() {
                 if self.sky_lut_bg1_key != Some(scene_sky_key) {
-                    self.sky_lut_bg1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Sky LUT BG1 (Unified)"),
-                        layout: &self.sky_lut_bgl1,
-                        entries: &[wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: scene_sky_buf.map_or_else(
-                                || self.sky_uniform_buf.as_entire_binding(),
-                                |b| b.as_entire_binding(),
-                            ),
-                        }],
-                    }));
+                    self.sky_lut_bg1 =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Sky LUT BG1 (Unified)"),
+                            layout: &self.sky_lut_bgl1,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: scene_sky_buf.map_or_else(
+                                    || self.sky_uniform_buf.as_entire_binding(),
+                                    |b| b.as_entire_binding(),
+                                ),
+                            }],
+                        }));
                     self.sky_lut_bg1_key = Some(scene_sky_key);
                 }
                 let encoder = unsafe { &mut *ctx.encoder_ptr };

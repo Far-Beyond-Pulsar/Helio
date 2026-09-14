@@ -221,95 +221,77 @@ impl ApplicationHandler for App {
 
         // ── Materials ─────────────────────────────────────────────────────
         // Dock concrete
-        let mat_dock = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.42, 0.40, 0.38, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_dock = renderer.scene().insert_material(make_material(
+            [0.42, 0.40, 0.38, 1.0],
+            0.95,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
         // Road apron
-        let mat_road = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.22, 0.22, 0.22, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_road = renderer.scene().insert_material(make_material(
+            [0.22, 0.22, 0.22, 1.0],
+            0.95,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
         // Safety stripe yellow
-        let mat_stripe = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.92, 0.75, 0.05, 1.0],
-                0.7,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_stripe = renderer.scene().insert_material(make_material(
+            [0.92, 0.75, 0.05, 1.0],
+            0.7,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
         // Crane steel
-        let mat_steel = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.26, 0.28, 1.0],
-                0.15,
-                0.6,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_steel = renderer.scene().insert_material(make_material(
+            [0.25, 0.26, 0.28, 1.0],
+            0.15,
+            0.6,
+            [0.0; 3],
+            0.0,
+        ));
         // Crane safety orange
-        let mat_orange = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.35, 0.05, 1.0],
-                0.3,
-                0.4,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_orange = renderer.scene().insert_material(make_material(
+            [0.85, 0.35, 0.05, 1.0],
+            0.3,
+            0.4,
+            [0.0; 3],
+            0.0,
+        ));
         // Warning beacon emissive red
-        let mat_warning = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.1, 0.05, 1.0],
-                0.4,
-                0.0,
-                [1.0, 0.05, 0.0],
-                1.5,
-            ));
+        let mat_warning = renderer.scene().insert_material(make_material(
+            [1.0, 0.1, 0.05, 1.0],
+            0.4,
+            0.0,
+            [1.0, 0.05, 0.0],
+            1.5,
+        ));
         // Harbour water
-        let mat_water = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.04, 0.12, 0.20, 1.0],
-                0.05,
-                0.95,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_water = renderer.scene().insert_material(make_material(
+            [0.04, 0.12, 0.20, 1.0],
+            0.05,
+            0.95,
+            [0.0; 3],
+            0.0,
+        ));
         // Bollard dark iron
-        let mat_bollard = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.14, 0.10, 1.0],
-                0.85,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_bollard = renderer.scene().insert_material(make_material(
+            [0.18, 0.14, 0.10, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
         // Mast pole lamp housing
-        let mat_lamp = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.90, 0.85, 0.50, 1.0],
-                0.3,
-                0.0,
-                [0.6, 0.55, 0.1],
-                0.8,
-            ));
+        let mat_lamp = renderer.scene().insert_material(make_material(
+            [0.90, 0.85, 0.50, 1.0],
+            0.3,
+            0.0,
+            [0.6, 0.55, 0.1],
+            0.8,
+        ));
 
         // ── Ground — large dock apron ──────────────────────────────────────
         let dock_upload = plane_mesh([0.0, 0.0, 0.0], 100.0);
@@ -576,9 +558,8 @@ impl ApplicationHandler for App {
                 }))
                 .as_virtual_mesh()
                 .unwrap();
-            let _ = renderer
-                .scene()
-                .insert_entity(SceneEntity::virtual_object(VirtualObjectDescriptor {
+            let _ = renderer.scene().insert_entity(SceneEntity::virtual_object(
+                VirtualObjectDescriptor {
                     virtual_mesh,
                     material_id: mat_steel.slot(),
                     transform: glam::Mat4::from_translation(position),
@@ -586,7 +567,8 @@ impl ApplicationHandler for App {
                     flags: 0,
                     groups: helio::GroupMask::NONE,
                     movability: Some(helio::Movability::Static),
-                }));
+                },
+            ));
         }
 
         // ── Shipping containers — 10 total, using Virtual Geometry ─────
@@ -609,16 +591,13 @@ impl ApplicationHandler for App {
             ) {
                 Ok(scene) => {
                     // Upload textures and materials from the FBX.
-                    let fallback_mat =
-                        renderer
-                            .scene()
-                            .insert_material(make_material(
-                                [0.5, 0.5, 0.5, 1.0],
-                                0.8,
-                                0.0,
-                                [0.0; 3],
-                                0.0,
-                            ));
+                    let fallback_mat = renderer.scene().insert_material(make_material(
+                        [0.5, 0.5, 0.5, 1.0],
+                        0.8,
+                        0.0,
+                        [0.0; 3],
+                        0.0,
+                    ));
                     let mat_ids = upload_scene_materials(&mut renderer, &scene).unwrap_or_default();
 
                     if let Some(sm) = &scene.sectioned_mesh {
@@ -922,123 +901,123 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => match ks {
-                ElementState::Pressed => {
-                    state.keys.insert(code);
-                    match code {
-                        KeyCode::F11 => state.toggle_fullscreen(),
-                        KeyCode::Enter | KeyCode::NumpadEnter
-                            if state.keys.contains(&KeyCode::AltLeft)
-                                || state.keys.contains(&KeyCode::AltRight) =>
-                        {
-                            state.toggle_fullscreen();
-                        }
-                        KeyCode::Escape => {
-                            if state.editor.selected().is_some() {
-                                state.editor.deselect();
-                            } else {
-                                event_loop.exit();
-                            }
-                        }
-                        KeyCode::Delete if !state.right_mouse_held => {
-                            if state
-                                .editor
-                                .delete_selected(state.renderer.scene())
+            } => {
+                match ks {
+                    ElementState::Pressed => {
+                        state.keys.insert(code);
+                        match code {
+                            KeyCode::F11 => state.toggle_fullscreen(),
+                            KeyCode::Enter | KeyCode::NumpadEnter
+                                if state.keys.contains(&KeyCode::AltLeft)
+                                    || state.keys.contains(&KeyCode::AltRight) =>
                             {
-                                state.picker.rebuild_instances(state.renderer.scene());
+                                state.toggle_fullscreen();
                             }
-                        }
-                        KeyCode::KeyG if !state.right_mouse_held => {
-                            state.editor.set_gizmo_mode(GizmoMode::Translate)
-                        }
-                        KeyCode::KeyR if !state.right_mouse_held => {
-                            state.editor.set_gizmo_mode(GizmoMode::Rotate)
-                        }
-                        KeyCode::KeyS if !state.right_mouse_held => {
-                            state.editor.set_gizmo_mode(GizmoMode::Scale)
-                        }
-                        KeyCode::KeyD
-                            if !state.right_mouse_held
-                                && (state.keys.contains(&KeyCode::ControlLeft)
-                                    || state.keys.contains(&KeyCode::ControlRight)) =>
-                        {
-                            if let Some(_new_id) =
-                                state.editor.duplicate_selected(&mut state.renderer)
-                            {
-                                state.picker.rebuild_instances(state.renderer.scene());
-                            }
-                        }
-                        KeyCode::Tab => {
-                            state.grid_enabled = !state.grid_enabled;
-                            state.renderer.set_editor_mode(state.grid_enabled);
-                        }
-                        KeyCode::F3 => {
-                            let views = state.renderer.available_debug_views();
-                            if views.is_empty() {
-                                eprintln!("[debug] No debug views available");
-                            } else {
-                                state.debug_view_index =
-                                    (state.debug_view_index + 1) % (views.len() + 1);
-                                if state.debug_view_index == 0 {
-                                    state.apply_debug_mode(0);
-                                    eprintln!("[debug] Debug view: OFF");
+                            KeyCode::Escape => {
+                                if state.editor.selected().is_some() {
+                                    state.editor.deselect();
                                 } else {
-                                    let view = &views[state.debug_view_index - 1];
-                                    state.apply_debug_mode(view.debug_mode);
-                                    eprintln!(
-                                        "[debug] Debug view: {} — {}",
-                                        view.name, view.description
+                                    event_loop.exit();
+                                }
+                            }
+                            KeyCode::Delete if !state.right_mouse_held => {
+                                if state.editor.delete_selected(state.renderer.scene()) {
+                                    state.picker.rebuild_instances(state.renderer.scene());
+                                }
+                            }
+                            KeyCode::KeyG if !state.right_mouse_held => {
+                                state.editor.set_gizmo_mode(GizmoMode::Translate)
+                            }
+                            KeyCode::KeyR if !state.right_mouse_held => {
+                                state.editor.set_gizmo_mode(GizmoMode::Rotate)
+                            }
+                            KeyCode::KeyS if !state.right_mouse_held => {
+                                state.editor.set_gizmo_mode(GizmoMode::Scale)
+                            }
+                            KeyCode::KeyD
+                                if !state.right_mouse_held
+                                    && (state.keys.contains(&KeyCode::ControlLeft)
+                                        || state.keys.contains(&KeyCode::ControlRight)) =>
+                            {
+                                if let Some(_new_id) =
+                                    state.editor.duplicate_selected(&mut state.renderer)
+                                {
+                                    state.picker.rebuild_instances(state.renderer.scene());
+                                }
+                            }
+                            KeyCode::Tab => {
+                                state.grid_enabled = !state.grid_enabled;
+                                state.renderer.set_editor_mode(state.grid_enabled);
+                            }
+                            KeyCode::F3 => {
+                                let views = state.renderer.available_debug_views();
+                                if views.is_empty() {
+                                    eprintln!("[debug] No debug views available");
+                                } else {
+                                    state.debug_view_index =
+                                        (state.debug_view_index + 1) % (views.len() + 1);
+                                    if state.debug_view_index == 0 {
+                                        state.apply_debug_mode(0);
+                                        eprintln!("[debug] Debug view: OFF");
+                                    } else {
+                                        let view = &views[state.debug_view_index - 1];
+                                        state.apply_debug_mode(view.debug_mode);
+                                        eprintln!(
+                                            "[debug] Debug view: {} — {}",
+                                            view.name, view.description
+                                        );
+                                    }
+                                }
+                            }
+                            KeyCode::F4 => {
+                                let views = state.renderer.available_debug_views();
+                                if views.is_empty() {
+                                    eprintln!("[debug] No debug views available");
+                                } else {
+                                    if state.debug_view_index == 0 {
+                                        state.debug_view_index = views.len();
+                                    } else {
+                                        state.debug_view_index -= 1;
+                                    }
+                                    if state.debug_view_index == 0 {
+                                        state.apply_debug_mode(0);
+                                        eprintln!("[debug] Debug view: OFF");
+                                    } else {
+                                        let view = &views[state.debug_view_index - 1];
+                                        state.apply_debug_mode(view.debug_mode);
+                                        eprintln!(
+                                            "[debug] Debug view: {} — {}",
+                                            view.name, view.description
+                                        );
+                                    }
+                                }
+                            }
+                            KeyCode::F2 | KeyCode::F5 => {
+                                state.debug_overlay_enabled = !state.debug_overlay_enabled;
+                                if let Some(pass) = state
+                                    .renderer
+                                    .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>(
+                                ) {
+                                    pass.set_enabled(
+                                        state.debug_overlay_enabled
+                                            || state.active_debug_mode == 21,
                                     );
                                 }
                             }
-                        }
-                        KeyCode::F4 => {
-                            let views = state.renderer.available_debug_views();
-                            if views.is_empty() {
-                                eprintln!("[debug] No debug views available");
-                            } else {
-                                if state.debug_view_index == 0 {
-                                    state.debug_view_index = views.len();
-                                } else {
-                                    state.debug_view_index -= 1;
-                                }
-                                if state.debug_view_index == 0 {
-                                    state.apply_debug_mode(0);
-                                    eprintln!("[debug] Debug view: OFF");
-                                } else {
-                                    let view = &views[state.debug_view_index - 1];
-                                    state.apply_debug_mode(view.debug_mode);
-                                    eprintln!(
-                                        "[debug] Debug view: {} — {}",
-                                        view.name, view.description
-                                    );
-                                }
+                            KeyCode::KeyL if !state.right_mouse_held => {
+                                let pos = state.cam_pos.to_array();
+                                state.renderer.scene().insert_entity(SceneEntity::light(
+                                    point_light(pos, [0.2, 0.5, 1.0], 500.0, 150.0),
+                                ));
                             }
+                            _ => {}
                         }
-                        KeyCode::F2 | KeyCode::F5 => {
-                            state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                            if let Some(pass) = state
-                                .renderer
-                                .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>(
-                            ) {
-                                pass.set_enabled(
-                                    state.debug_overlay_enabled || state.active_debug_mode == 21,
-                                );
-                            }
-                        }
-                        KeyCode::KeyL if !state.right_mouse_held => {
-                            let pos = state.cam_pos.to_array();
-                            state.renderer.scene().insert_entity(
-                                SceneEntity::light(point_light(pos, [0.2, 0.5, 1.0], 500.0, 150.0)),
-                            );
-                        }
-                        _ => {}
+                    }
+                    ElementState::Released => {
+                        state.keys.remove(&code);
                     }
                 }
-                ElementState::Released => {
-                    state.keys.remove(&code);
-                }
-            },
+            }
 
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,

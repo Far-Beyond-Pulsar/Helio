@@ -2,6 +2,7 @@ mod builder;
 mod config;
 mod debug;
 mod fullscreen;
+mod input;
 mod render;
 mod renderer_impl;
 mod resize;

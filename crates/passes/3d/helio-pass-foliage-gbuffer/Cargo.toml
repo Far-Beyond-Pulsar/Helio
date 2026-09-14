@@ -12,7 +12,7 @@ gpu = []
 [dependencies]
 helio-core         = { workspace = true }
 libhelio           = { workspace = true }
-helio-foliage-core = { workspace = true }
+helio-pass-foliage-place = { workspace = true }
 wgpu               = { workspace = true }
 bytemuck           = { workspace = true, features = ["derive"] }
 log                = { workspace = true }

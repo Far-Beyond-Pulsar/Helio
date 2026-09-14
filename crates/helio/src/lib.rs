@@ -1,53 +1,33 @@
-//! High-level facade over `helio-core`.
+//! High-level renderer facade over `helio-core`.
 //!
-//! This crate restores a stable handle-based scene API on top of the lower-level
-//! GPU-native core. Scene mutations stay O(1) with respect to scene size on the
-//! CPU side by using:
-//!
-//! - generational handles for public resources,
-//! - sparse slots for stable-index resources like materials,
-//! - dense swap-remove arenas for objects and lights,
-//! - partial dirty-range uploads to `helio-core` managers.
+//! Persistent render state is owned by the frontend SceneDB and mirrored into
+//! generic GPU component buffers. This crate owns backend GPU machinery and
+//! transient render products; it does not own a typed scene container.
 
-mod arena;
-mod editor;
-mod groups;
-mod handles;
+mod asset_types;
+mod camera;
 mod material;
-mod mesh;
-mod picking;
 mod quark_commands;
 pub mod radiant;
 mod renderer;
-mod scene;
-mod vg;
+// SceneDB is the sole scene authority; the legacy scene container was removed.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_cpp_alloc;
 
-pub use editor::{EditorState, GizmoAxis, GizmoMode};
-pub use groups::{GroupId, GroupMask};
-pub use handles::{
-    FoliageInteractorId, FoliageLayerId, FoliageTypeId, LightId, MaterialId, MeshId, MultiMeshId,
-    ObjectId, PortalId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId, SublevelId,
-    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
+/// Portal pair math and SceneDB GPU contracts owned by the portal passes.
+pub use helio_pass_portal_cull::{
+    crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalChain, GpuPortalView,
+    PortalPair, PortalPose, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS,
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
-/// Portal pair math (`pair_map`, crossing detection, teleport) — CPU-only,
-/// rendering-architecture-agnostic. See [`scene::portal_pose_facing`] and
-/// [`PortalDescriptor`] for the Helio-side portal API these compose with.
-pub use helio_portal_core::{crossing_detected, plane_signed_distance, PortalPair, PortalPose};
 pub use libhelio::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use material::{
-    MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
-    TextureUpload, MAX_TEXTURES,
-};
-pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
-pub use picking::{PickHit, ScenePicker};
+pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits,
@@ -55,15 +35,7 @@ pub use renderer::{
     GraphRebuilder, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
     RendererBuilder, RendererConfig, SceneDbHandle,
 };
-pub use scene::{
-    portal_pose_facing, Camera, FoliageInteractor, FoliageLayer, FoliageTypeDescriptor,
-    GpuFoliageInteractor, LightRenderInput, ObjectDescriptor, PickableObject, PortalDescriptor,
-    ReflectionCaptureActor, ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneEntity,
-    SceneEntityId, SceneEntityTrait, SceneError, StaticMeshRenderInput, SublevelDescriptor,
-    WaterHitboxDescriptor, WaterVolumeDescriptor,
-};
-pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
-
+pub use camera::Camera;
 #[cfg(feature = "bake")]
 pub use helio_bake::{
     AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,
@@ -74,14 +46,10 @@ pub use helio_core::{
     GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuTimingAvailability,
     RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
-// `GpuScene`/`SceneResources` no longer live in `helio-core` (that crate has
-// zero knowledge of any specific scene-object type now) -- relocated here,
-// into `helio`, as a frontend-owned concern. See `scene::gpu_storage`'s doc.
 pub use libhelio::{
     HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,
     VolumetricClouds,
 };
-pub use scene::gpu_storage::{GpuScene, SceneResources};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].

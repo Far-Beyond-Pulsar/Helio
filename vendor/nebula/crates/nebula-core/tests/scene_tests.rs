@@ -1,7 +1,5 @@
-use nebula_core::scene::{
-    BakeMesh, MaterialDesc, SceneGeometry, Transform,
-};
 use glam::Mat4;
+use nebula_core::scene::{BakeMesh, MaterialDesc, SceneGeometry, Transform};
 
 // ── Transform ─────────────────────────────────────────────────────────────────
 
@@ -20,8 +18,8 @@ fn transform_default_is_identity() {
 #[test]
 fn transform_clone_and_copy() {
     let t = Transform::IDENTITY;
-    let t2 = t;          // Copy
-    let t3 = t.clone();  // Clone
+    let t2 = t; // Copy
+    let t3 = t.clone(); // Clone
     assert_eq!(t.0, t2.0);
     assert_eq!(t.0, t3.0);
 }

@@ -35,78 +35,62 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let hull_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.75, 0.75, 0.78, 1.0],
-                0.4,
-                0.6,
-                [0.0; 3],
-                0.0,
-            ));
-        let panel_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.18, 0.22, 0.35, 1.0],
-                0.5,
-                0.3,
-                [0.02, 0.04, 0.1],
-                0.3,
-            ));
-        let solar_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.08, 0.12, 0.18, 1.0],
-                0.3,
-                0.1,
-                [0.0, 0.02, 0.05],
-                0.5,
-            ));
-        let window_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.5, 0.55, 0.7, 1.0],
-                0.05,
-                0.95,
-                [0.1, 0.15, 0.3],
-                0.8,
-            ));
-        let red_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.0, 0.0, 1.0],
-                1.0,
-                0.0,
-                [1.0, 0.05, 0.05],
-                5.0,
-            ));
-        let green_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.0, 0.15, 0.0, 1.0],
-                1.0,
-                0.0,
-                [0.05, 1.0, 0.1],
-                5.0,
-            ));
-        let truss_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.6, 0.6, 0.62, 1.0],
-                0.5,
-                0.5,
-                [0.0; 3],
-                0.0,
-            ));
-        let thruster_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.3, 0.3, 0.35, 1.0],
-                0.6,
-                0.4,
-                [0.1, 0.15, 0.2],
-                0.5,
-            ));
+        let hull_m = renderer.scene().insert_material(make_material(
+            [0.75, 0.75, 0.78, 1.0],
+            0.4,
+            0.6,
+            [0.0; 3],
+            0.0,
+        ));
+        let panel_m = renderer.scene().insert_material(make_material(
+            [0.18, 0.22, 0.35, 1.0],
+            0.5,
+            0.3,
+            [0.02, 0.04, 0.1],
+            0.3,
+        ));
+        let solar_m = renderer.scene().insert_material(make_material(
+            [0.08, 0.12, 0.18, 1.0],
+            0.3,
+            0.1,
+            [0.0, 0.02, 0.05],
+            0.5,
+        ));
+        let window_m = renderer.scene().insert_material(make_material(
+            [0.5, 0.55, 0.7, 1.0],
+            0.05,
+            0.95,
+            [0.1, 0.15, 0.3],
+            0.8,
+        ));
+        let red_m = renderer.scene().insert_material(make_material(
+            [0.15, 0.0, 0.0, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.05, 0.05],
+            5.0,
+        ));
+        let green_m = renderer.scene().insert_material(make_material(
+            [0.0, 0.15, 0.0, 1.0],
+            1.0,
+            0.0,
+            [0.05, 1.0, 0.1],
+            5.0,
+        ));
+        let truss_m = renderer.scene().insert_material(make_material(
+            [0.6, 0.6, 0.62, 1.0],
+            0.5,
+            0.5,
+            [0.0; 3],
+            0.0,
+        ));
+        let thruster_m = renderer.scene().insert_material(make_material(
+            [0.3, 0.3, 0.35, 1.0],
+            0.6,
+            0.4,
+            [0.1, 0.15, 0.2],
+            0.5,
+        ));
 
         // Central hub
         let hub = renderer
@@ -178,13 +162,12 @@ impl HelioWasmApp for Demo {
                 insert_object(renderer, boom, truss_m, glam::Mat4::IDENTITY, z_off.abs()).unwrap();
                 // Two solar panel rows per wing
                 for py in [-0.9_f32, 0.9] {
-                    let panel =
-                        renderer
-                            .scene()
-                            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                                [sx * 8.0, py, z_off],
-                                [6.0, 0.04, 1.8],
-                            )));
+                    let panel = renderer
+                        .scene()
+                        .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                            [sx * 8.0, py, z_off],
+                            [6.0, 0.04, 1.8],
+                        )));
                     insert_object(renderer, panel, solar_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     let panel2 =
                         renderer
@@ -196,12 +179,13 @@ impl HelioWasmApp for Demo {
                     insert_object(renderer, panel2, solar_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     // Panel grid lines
                     for k in -2..=2 {
-                        let grid = renderer.scene().insert_entity(
-                            helio::SceneEntity::mesh(box_mesh(
-                                [sx * 8.0, py, z_off + k as f32 * 0.35],
-                                [6.0, 0.015, 0.01],
-                            )),
-                        );
+                        let grid =
+                            renderer
+                                .scene()
+                                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                                    [sx * 8.0, py, z_off + k as f32 * 0.35],
+                                    [6.0, 0.015, 0.01],
+                                )));
                         insert_object(renderer, grid, panel_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     }
                 }

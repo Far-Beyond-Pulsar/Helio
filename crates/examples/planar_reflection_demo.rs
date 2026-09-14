@@ -17,12 +17,14 @@ use std::time::Instant;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, ObjectDescriptor, Renderer, RendererConfig, Scene, SceneEntity, SkyActor,
-    VolumetricClouds,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, cube_mesh, directional_light, make_material, plane_mesh, sphere_mesh,
+    box_mesh, cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror,
+    plane_mesh, scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh,
+    spawn_object, spawn_reflection_capture_box, update_object_transform,
 };
 use winit::{
     application::ApplicationHandler,
@@ -48,6 +50,8 @@ struct AppState {
     adapter: wgpu::Adapter,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
+    frame_count: u64,
     last_frame: Instant,
     cam_pos: Vec3,
     yaw: f32,
@@ -56,8 +60,8 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    spinning_cube: helio::ObjectId,
-    orbiting_sphere: helio::ObjectId,
+    spinning_cube: Entity,
+    orbiting_sphere: Entity,
     sphere_angle: f32,
 }
 
@@ -136,237 +140,194 @@ impl ApplicationHandler for App {
             }
         }
 
-        let mut scene = Scene::new(device.clone(), queue.clone());
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
 
         // ── Materials ──────────────────────────────────────────────────────
-        let floor_mat = scene.insert_material(make_material(
-            [0.97, 0.97, 0.97, 1.0], // silver-tinted mirror
-            0.001,                   // near-zero roughness = mirror-sharp
-            1.0,                     // metallic mirror
-            [0.0; 3],
-            0.0,
-        ));
-        let red_mat =
-            scene.insert_material(make_material([1.0, 0.2, 0.2, 1.0], 0.3, 0.0, [0.0; 3], 0.0));
-        let blue_mat =
-            scene.insert_material(make_material([0.2, 0.4, 1.0, 1.0], 0.2, 0.1, [0.0; 3], 0.0));
-        let green_mat =
-            scene.insert_material(make_material([0.2, 0.9, 0.3, 1.0], 0.6, 0.0, [0.0; 3], 0.0));
-        let gold_mat = scene.insert_material(make_material(
-            [1.0, 0.85, 0.4, 1.0],
-            0.15,
-            1.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let white_mat = scene.insert_material(make_material(
-            [0.95, 0.95, 0.98, 1.0],
-            0.4,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
+                [0.97, 0.97, 0.97, 1.0], // silver-tinted mirror
+                0.001,                   // near-zero roughness = mirror-sharp
+                1.0,                     // metallic mirror
+                [0.0; 3],
+                0.0,
+            ),
+        );
+        let red_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.2, 0.2, 1.0], 0.3, 0.0, [0.0; 3], 0.0),
+        );
+        let blue_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.4, 1.0, 1.0], 0.2, 0.1, [0.0; 3], 0.0),
+        );
+        let green_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.9, 0.3, 1.0], 0.6, 0.0, [0.0; 3], 0.0),
+        );
+        let gold_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.85, 0.4, 1.0], 0.15, 1.0, [0.0; 3], 0.0),
+        );
+        let white_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.95, 0.98, 1.0], 0.4, 0.0, [0.0; 3], 0.0),
+        );
 
         // ── Meshes ─────────────────────────────────────────────────────────
-        let cube_mesh = scene
-            .insert_entity(SceneEntity::mesh(cube_mesh([0.0; 3], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let sphere_mesh = scene
-            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0; 3], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let floor_mesh = scene
-            .insert_entity(SceneEntity::mesh(plane_mesh([0.0; 3], 6.0)))
-            .as_mesh()
-            .unwrap();
-        let pillar_mesh = scene
-            .insert_entity(SceneEntity::mesh(box_mesh([0.0; 3], [0.15, 1.5, 0.15])))
-            .as_mesh()
-            .unwrap();
+        let cube_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0; 3], 0.5));
+        let sphere_mesh = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0; 3], 0.5));
+        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0; 3], 6.0));
+        let pillar_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0; 3], [0.15, 1.5, 0.15]));
 
         // ── Floor (mirror) ─────────────────────────────────────────────────
-        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
-            mesh: floor_mesh,
-            material: floor_mat,
-            transform: Mat4::from_translation(Vec3::new(0.0, -1.5, 0.0)),
-            bounds: [0.0, -1.5, 0.0, 6.0],
-            flags: 0,
-            groups: helio::GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+        let _ = spawn_object(
+            &mut scene_db.world,
+            floor_mesh,
+            floor_mat,
+            Mat4::from_translation(Vec3::new(0.0, -1.5, 0.0)),
+            6.0,
+        );
 
         // ── Pillars ────────────────────────────────────────────────────────
         for x in [-2.0_f32, 2.0] {
             for z in [-2.0_f32, 2.0] {
-                scene.insert_entity(SceneEntity::object(ObjectDescriptor {
-                    mesh: pillar_mesh,
-                    material: white_mat,
-                    transform: Mat4::from_translation(Vec3::new(x, -0.75, z)),
-                    bounds: [x, -0.75, z, 0.5],
-                    flags: 0,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+                let _ = spawn_object(
+                    &mut scene_db.world,
+                    pillar_mesh,
+                    white_mat,
+                    Mat4::from_translation(Vec3::new(x, -0.75, z)),
+                    0.5,
+                );
             }
         }
 
         // ── Central objects ────────────────────────────────────────────────
-        let cube_id = scene
-            .insert_entity(SceneEntity::object(ObjectDescriptor {
-                mesh: cube_mesh,
-                material: red_mat,
-                transform: Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0)),
-                bounds: [-1.2, 0.5, 0.0, 0.5],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability: Some(helio::Movability::Movable),
-                user_tag: 0,
-            }))
-            .as_object()
-            .unwrap();
+        let cube_id = spawn_object(
+            &mut scene_db.world,
+            cube_mesh,
+            red_mat,
+            Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0)),
+            0.5,
+        )
+        .unwrap();
 
-        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
-            mesh: sphere_mesh,
-            material: blue_mat,
-            transform: Mat4::from_translation(Vec3::new(1.2, 0.5, -0.8)),
-            bounds: [1.2, 0.5, -0.8, 0.5],
-            flags: 0,
-            groups: helio::GroupMask::NONE,
-            movability: Some(helio::Movability::Movable),
-            user_tag: 0,
-        }));
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh,
+            blue_mat,
+            Mat4::from_translation(Vec3::new(1.2, 0.5, -0.8)),
+            0.5,
+        );
 
-        scene.insert_entity(SceneEntity::object(ObjectDescriptor {
-            mesh: sphere_mesh,
-            material: gold_mat,
-            transform: Mat4::from_translation(Vec3::new(0.0, 0.5, 1.2)),
-            bounds: [0.0, 0.5, 1.2, 0.5],
-            flags: 0,
-            groups: helio::GroupMask::NONE,
-            movability: Some(helio::Movability::Movable),
-            user_tag: 0,
-        }));
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh,
+            gold_mat,
+            Mat4::from_translation(Vec3::new(0.0, 0.5, 1.2)),
+            0.5,
+        );
 
-        let sphere_id = scene
-            .insert_entity(SceneEntity::object(ObjectDescriptor {
-                mesh: sphere_mesh,
-                material: green_mat,
-                transform: Mat4::from_translation(Vec3::new(-1.5, 1.8, 1.5)),
-                bounds: [-1.5, 1.8, 1.5, 0.5],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability: Some(helio::Movability::Movable),
-                user_tag: 0,
-            }))
-            .as_object()
-            .unwrap();
+        let sphere_id = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh,
+            green_mat,
+            Mat4::from_translation(Vec3::new(-1.5, 1.8, 1.5)),
+            0.5,
+        )
+        .unwrap();
 
         // ── Reflection capture ─────────────────────────────────────────────
         // A box capture spanning the room, centred on the box's own centre.
         // Its cubemap layer is assigned by the probe bake, so this contributes
         // nothing until the scene has been baked.
-        scene
-            .insert_reflection_capture(
-                helio::ReflectionCaptureDescriptor::boxed(
-                    Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
-                    [6.0, 3.0, 6.0],
-                )
-                .with_transition_distance(1.0),
-            )
-            .unwrap();
+        spawn_reflection_capture_box(
+            &mut scene_db.world,
+            Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+            [6.0, 3.0, 6.0],
+            1.0,
+        );
 
         // ── Sky ────────────────────────────────────────────────────────────
-        scene.insert_entity(SceneEntity::sky(
-            SkyActor::new()
-                .with_sky_color([0.6, 0.7, 1.0])
-                .with_ambient_color([0.15, 0.18, 0.25])
-                .with_clouds(VolumetricClouds {
-                    coverage: 0.3,
-                    density: 0.4,
-                    base: 500.0,
-                    top: 800.0,
-                    wind_x: 0.3,
-                    wind_z: 0.1,
-                    speed: 2.0,
-                    skylight_intensity: 0.5,
-                    infinite_extent: false,
-                }),
-        ));
+        // `ambient_color` from the removed `SkyActor` builder is now the
+        // renderer's own ambient term (`set_ambient`, below); `sky_color`
+        // maps onto `rayleigh_scatter`, same approximation used by every
+        // other migrated demo's sky.
+        let sky = helio_pass_sky::SkyComponent {
+            rayleigh_scatter: [0.6, 0.7, 1.0],
+            clouds_enabled: 1,
+            cloud_coverage: 0.3,
+            cloud_density: 0.4,
+            cloud_base: 500.0,
+            cloud_top: 800.0,
+            cloud_wind_x: 0.3,
+            cloud_wind_z: 0.1,
+            cloud_speed: 2.0,
+            skylight_intensity: 0.5,
+            ..Default::default()
+        };
+        let sky_entity = scene_db.world.spawn();
+        scene_db.world.insert(sky_entity, sky);
 
         // ── Lights ─────────────────────────────────────────────────────────
-        scene.insert_entity(SceneEntity::light(directional_light(
-            [-0.5, -1.0, -0.3],
-            [1.0, 0.95, 0.9],
-            12.0,
-        )));
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([-0.5, -1.0, -0.3], [1.0, 0.95, 0.9], 12.0),
+        );
 
-        scene.insert_entity(SceneEntity::light(helio::GpuLight {
-            position_range: [3.0, 4.0, 2.0, 10.0],
-            direction_outer: [0.0; 4],
-            color_intensity: [1.0, 0.85, 0.6, 30.0],
-            shadow_index: 0,
-            light_type: helio::LightType::Point as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        }));
+        spawn_light(
+            &mut scene_db.world,
+            helio::GpuLight {
+                position_range: [3.0, 4.0, 2.0, 10.0],
+                direction_outer: [0.0; 4],
+                color_intensity: [1.0, 0.85, 0.6, 30.0],
+                shadow_index: 0,
+                light_type: helio::LightType::Point as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            },
+        );
 
-        scene.insert_entity(SceneEntity::light(helio::GpuLight {
-            position_range: [-3.0, 3.0, -2.0, 10.0],
-            direction_outer: [0.0; 4],
-            color_intensity: [0.4, 0.6, 1.0, 20.0],
-            shadow_index: 0,
-            light_type: helio::LightType::Point as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        }));
+        spawn_light(
+            &mut scene_db.world,
+            helio::GpuLight {
+                position_range: [-3.0, 3.0, -2.0, 10.0],
+                direction_outer: [0.0; 4],
+                color_intensity: [0.4, 0.6, 1.0, 20.0],
+                shadow_index: 0,
+                light_type: helio::LightType::Point as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            },
+        );
 
         // ── Build renderer ─────────────────────────────────────────────────
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(renderer_config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
 
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            renderer_config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-
-        let renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            surface_format,
-            size.width,
-            size.height,
-            renderer_config.render_scale,
-            renderer_config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        renderer.set_ambient([0.15, 0.18, 0.25], 1.0);
 
         self.state = Some(AppState {
             window,
@@ -376,6 +337,8 @@ impl ApplicationHandler for App {
             adapter,
             surface_format,
             renderer,
+            scene_db,
+            frame_count: 0,
             last_frame: Instant::now(),
             cam_pos: Vec3::new(0.0, 2.0, 6.0),
             yaw: 0.0,
@@ -506,31 +469,28 @@ impl ApplicationHandler for App {
                 state.cam_pos += state.velocity * dt;
 
                 // ---- Animate ----
-                let angle = state
-                    .renderer
-                    .scene()
-                    .gpu_scene()
-                    .frame_count as f32
-                    * 0.02;
+                state.frame_count += 1;
+                let angle = state.frame_count as f32 * 0.02;
                 let cube_transform = Mat4::from_axis_angle(Vec3::Y, angle)
                     * Mat4::from_axis_angle(Vec3::X, angle * 0.5)
                     * Mat4::from_translation(Vec3::new(-1.2, 0.5, 0.0));
-                let _ = state
-                    .renderer
-                    .scene()
-                    .update_object_transform(state.spinning_cube, cube_transform);
+                let _ = update_object_transform(
+                    &mut state.scene_db.world,
+                    &mut state.renderer,
+                    state.spinning_cube,
+                    cube_transform,
+                );
 
                 state.sphere_angle += dt * 0.6;
                 let orbit_x = 2.5 * state.sphere_angle.cos();
                 let orbit_z = 2.5 * state.sphere_angle.sin();
                 let sphere_pos = Vec3::new(orbit_x, 1.0 + 0.5 * state.sphere_angle.sin(), orbit_z);
-                let _ = state
-                    .renderer
-                    .scene()
-                    .update_object_transform(
-                        state.orbiting_sphere,
-                        Mat4::from_translation(sphere_pos),
-                    );
+                let _ = update_object_transform(
+                    &mut state.scene_db.world,
+                    &mut state.renderer,
+                    state.orbiting_sphere,
+                    Mat4::from_translation(sphere_pos),
+                );
 
                 // ---- Camera ----
                 let target = state.cam_pos + forward;

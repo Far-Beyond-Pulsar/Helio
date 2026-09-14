@@ -40,24 +40,34 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat_white = renderer
-            .scene()
-            .insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
-        let mat_red = renderer
-            .scene()
-            .insert_material(make_material([0.8, 0.1, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
-        let mat_green = renderer
-            .scene()
-            .insert_material(make_material([0.1, 0.7, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
-        let mat_cube = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.8, 0.78, 0.72, 1.0],
-                0.85,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat_white = renderer.scene().insert_material(make_material(
+            [0.9, 0.9, 0.9, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_red = renderer.scene().insert_material(make_material(
+            [0.8, 0.1, 0.1, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_green = renderer.scene().insert_material(make_material(
+            [0.1, 0.7, 0.1, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_cube = renderer.scene().insert_material(make_material(
+            [0.8, 0.78, 0.72, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let mesh = renderer

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::traits::BakeInput;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for reflection / irradiance probe baking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,12 +35,22 @@ impl Default for ProbeConfig {
 impl ProbeConfig {
     /// Low-quality fast preview preset.
     pub fn fast() -> Self {
-        Self { face_resolution: 64, specular_mip_levels: 4, samples_per_face: 128, ..Default::default() }
+        Self {
+            face_resolution: 64,
+            specular_mip_levels: 4,
+            samples_per_face: 128,
+            ..Default::default()
+        }
     }
 
     /// Production quality preset.
     pub fn ultra() -> Self {
-        Self { face_resolution: 512, specular_mip_levels: 10, samples_per_face: 8192, ..Default::default() }
+        Self {
+            face_resolution: 512,
+            specular_mip_levels: 10,
+            samples_per_face: 8192,
+            ..Default::default()
+        }
     }
 }
 

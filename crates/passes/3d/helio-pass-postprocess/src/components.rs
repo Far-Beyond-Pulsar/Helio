@@ -82,8 +82,14 @@ mod lifecycle_tests {
         let entity = world.spawn();
         let value: PostProcessVolumeComponent = bytemuck::Zeroable::zeroed();
         world.insert(entity, value);
-        assert_eq!(world.get::<PostProcessVolumeComponent>(entity), Some(&value));
-        assert_eq!(world.remove::<PostProcessVolumeComponent>(entity), Some(value));
+        assert_eq!(
+            world.get::<PostProcessVolumeComponent>(entity),
+            Some(&value)
+        );
+        assert_eq!(
+            world.remove::<PostProcessVolumeComponent>(entity),
+            Some(value)
+        );
         assert!(world.get::<PostProcessVolumeComponent>(entity).is_none());
     }
 }

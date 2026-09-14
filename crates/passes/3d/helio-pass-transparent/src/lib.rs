@@ -229,7 +229,12 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth", "cluster_light_grid", "object_batch", "culled_batch"]
+        &[
+            "depth",
+            "cluster_light_grid",
+            "object_batch",
+            "culled_batch",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -248,15 +253,7 @@ impl RenderPass for TransparentPass {
         // actual light count today -- see `ForwardLitPass`'s identical
         // `light_mode_direct_index` doc for the full reasoning.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let light_count = if use_direct_index {
-            MAX_LIGHTS
-        } else {
-            ctx.pass_resources
-                .lights
-                .get()
-                .map(|l| l.movable_light_count)
-                .unwrap_or(0)
-        };
+        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
         ctx.queue.write_buffer(
             &self.globals_buf,
             0,
@@ -333,64 +330,40 @@ impl RenderPass for TransparentPass {
             return Ok(());
         }
 
-        // Sync transparent templates from GpuScene (merge into existing registry,
-        // keeping the transparent base at class 0).
-        if let Some(reg_any) = ctx
-            .resources
-            .materials
-            .get()
-            .and_then(|m| m.transparent_template_registry.as_ref())
-        {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                // Only custom templates (id >= 5) apply here — class 0 is
-                // always the transparent base and must not be overwritten.
-                let new_keys: Vec<u32> = shared
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .into_iter()
-                    .filter(|id| *id >= 5)
-                    .collect();
-                if self.last_shared_keys != new_keys {
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_shared_keys = new_keys;
-                }
-                self.shared_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
-
-        let main_scene = ctx.resources.main_scene.read("Transparent");
-        let ms = main_scene.as_ref().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
-        })?;
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         // Rebuild bind group 1 (lights + transforms + cluster data) when
-        // buffer pointers change. Prefer the SceneDB-direct `"scene_lights"`
-        // buffer when populated; else `ctx.scene.lights` -- production's
-        // real, actively-populated light source (see `ForwardLitPass`'s
-        // identical `light_mode_direct_index` doc).
+        // buffer pointers change. Lights are always read from the SceneDB
+        // component buffer; the camera buffer is a valid binding fallback
+        // when no light component has been authored yet.
         let cluster = ctx.resources.cluster_light_grid.get();
-        let lights_data = ctx.resources.lights.get();
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(batch.instances));
+            .unwrap_or(batch.instances);
         let lights_ptr = lights_buf as *const _ as usize;
-        let light_entity_indices_ptr = lights_data
-            .map(|l| l.light_entity_indices as *const _ as usize)
-            .unwrap_or(0);
+        let light_entity_indices_ptr = 0;
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
         let tile_counts_ptr = cluster
             .map(|c| c.tile_light_counts as *const _ as usize)
             .unwrap_or(0);
-        let transforms_ptr = lights_data
-            .and_then(|l| l.transforms)
-            .map(|b| b as *const _ as usize)
-            .unwrap_or(0);
+        let transforms_ptr = 0;
         let bg1_key = (
             lights_ptr,
             light_entity_indices_ptr,
@@ -406,10 +379,8 @@ impl RenderPass for TransparentPass {
             // yet, so this fallback is never actually dereferenced at a live
             // light's index in practice -- same reasoning as
             // `helio_pass_forward_lit`'s identical fallback.
-            let transforms = lights_data.and_then(|l| l.transforms).unwrap_or(fallback);
-            let light_entity_indices_buf = lights_data
-                .map(|l| l.light_entity_indices)
-                .unwrap_or(fallback);
+            let transforms = fallback;
+            let light_entity_indices_buf = fallback;
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,
@@ -472,8 +443,8 @@ impl RenderPass for TransparentPass {
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        rp.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        rp.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+        rp.set_vertex_buffer(0, vertices.slice(..));
+        rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = batch.transparent_ranges;
         if ranges.is_empty() {
@@ -503,17 +474,7 @@ impl RenderPass for TransparentPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let empty_snippets = std::collections::HashMap::new();
-                let graph_wgsl = ctx
-                    .resources
-                    .materials
-                    .get()
-                    .map(|m| m.graph_wgsl_snippets)
-                    .unwrap_or(&empty_snippets)
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 rp.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);

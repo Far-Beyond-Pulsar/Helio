@@ -212,7 +212,12 @@ impl IndirectDispatchPass {
     /// `MIN_CAPACITY`) if either has grown since the last call. Returns
     /// `true` if anything reallocated (the caller must then rebuild the
     /// bind group).
-    fn ensure_capacity(&mut self, device: &wgpu::Device, draw_count: u32, instance_count: u32) -> bool {
+    fn ensure_capacity(
+        &mut self,
+        device: &wgpu::Device,
+        draw_count: u32,
+        instance_count: u32,
+    ) -> bool {
         let mut grew = false;
         if draw_count > self.draw_capacity {
             self.draw_capacity = draw_count.next_power_of_two().max(MIN_CAPACITY);
@@ -221,7 +226,8 @@ impl IndirectDispatchPass {
         }
         if instance_count > self.instance_capacity {
             self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
-            self.compacted_indices_buf = create_compacted_indices_buf(device, self.instance_capacity);
+            self.compacted_indices_buf =
+                create_compacted_indices_buf(device, self.instance_capacity);
             grew = true;
         }
         grew

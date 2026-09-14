@@ -1,6 +1,6 @@
 use nebula_audio::{
+    config::{FREQ_BAND_CENTRES, FREQ_BAND_COUNT},
     AcousticConfig, AcousticOutput, ImpulseResponse, ReverbZone, CHUNK_TAG,
-    config::{FREQ_BAND_COUNT, FREQ_BAND_CENTRES},
 };
 use nebula_core::traits::BakeOutput;
 
@@ -19,7 +19,10 @@ fn freq_band_centres_has_8_entries() {
 #[test]
 fn freq_band_centres_are_monotonically_increasing() {
     for pair in FREQ_BAND_CENTRES.windows(2) {
-        assert!(pair[0] < pair[1], "band centres must be strictly increasing");
+        assert!(
+            pair[0] < pair[1],
+            "band centres must be strictly increasing"
+        );
     }
 }
 
@@ -62,7 +65,10 @@ fn acoustic_config_default_listener_points_is_empty() {
 
 #[test]
 fn acoustic_config_default_air_absorption_has_8_bands() {
-    assert_eq!(AcousticConfig::default().air_absorption.len(), FREQ_BAND_COUNT);
+    assert_eq!(
+        AcousticConfig::default().air_absorption.len(),
+        FREQ_BAND_COUNT
+    );
 }
 
 #[test]
@@ -76,7 +82,10 @@ fn acoustic_config_default_air_absorption_is_positive() {
 fn acoustic_config_default_air_absorption_increases_with_frequency() {
     let abs = AcousticConfig::default().air_absorption;
     for pair in abs.windows(2) {
-        assert!(pair[0] <= pair[1], "air absorption should increase with frequency");
+        assert!(
+            pair[0] <= pair[1],
+            "air absorption should increase with frequency"
+        );
     }
 }
 
@@ -221,15 +230,17 @@ fn acoustic_config_json_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter"]
 fn acoustic_baker_produces_output_for_empty_scene() {
-    use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_audio::AcousticBaker;
     use nebula_core::traits::BakePass;
+    use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = AcousticConfig::fast();
-        let out = AcousticBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = AcousticBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
         // No listener points configured → impulse_responses should be empty.
         assert!(out.impulse_responses.is_empty());

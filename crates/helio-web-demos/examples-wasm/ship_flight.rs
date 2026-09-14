@@ -119,9 +119,7 @@ impl ShipState {
     fn push_transforms(&self, renderer: &mut Renderer) {
         let t = Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         for &id in &self.ids {
-            let _ = renderer
-                .scene()
-                .update_object_transform(id, t);
+            let _ = renderer.scene().update_object_transform(id, t);
         }
     }
 
@@ -268,26 +266,24 @@ impl HelioWasmApp for Demo {
                         for v in &mut vertices {
                             v.position = (Vec3::from(v.position) - center).to_array();
                         }
-                        let mesh_id = renderer.scene().insert_entity(
-                            helio::SceneEntity::mesh(helio::MeshUpload {
+                        let mesh_id = renderer.scene().insert_entity(helio::SceneEntity::mesh(
+                            helio::MeshUpload {
                                 vertices,
                                 indices: mesh.indices.clone(),
-                            }),
-                        );
+                            },
+                        ));
                         let mat_id = mesh
                             .material_index
                             .and_then(|i| mat_ids.get(i).copied())
                             .or_else(|| mat_ids.first().copied())
                             .unwrap_or_else(|| {
-                                renderer
-                                    .scene()
-                                    .insert_material(make_material(
-                                        [0.25, 0.40, 0.70, 1.0],
-                                        0.25,
-                                        0.85,
-                                        [0.0; 3],
-                                        0.0,
-                                    ))
+                                renderer.scene().insert_material(make_material(
+                                    [0.25, 0.40, 0.70, 1.0],
+                                    0.25,
+                                    0.85,
+                                    [0.0; 3],
+                                    0.0,
+                                ))
                             });
                         insert_object(renderer, mesh_id, mat_id, Mat4::IDENTITY, radius).unwrap()
                     })
@@ -297,15 +293,13 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("ship FBX load failed: {e:?}, using fallback cube");
-                let mat = renderer
-                    .scene()
-                    .insert_material(make_material(
-                        [0.25, 0.40, 0.70, 1.0],
-                        0.25,
-                        0.85,
-                        [0.0; 3],
-                        0.0,
-                    ));
+                let mat = renderer.scene().insert_material(make_material(
+                    [0.25, 0.40, 0.70, 1.0],
+                    0.25,
+                    0.85,
+                    [0.0; 3],
+                    0.0,
+                ));
                 let mesh = renderer
                     .scene()
                     .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0)));
@@ -315,24 +309,20 @@ impl HelioWasmApp for Demo {
         };
 
         // Asteroid field
-        let rocky = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.12, 0.09, 1.0],
-                0.90,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let dark = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.09, 0.09, 0.11, 1.0],
-                0.70,
-                0.25,
-                [0.0; 3],
-                0.0,
-            ));
+        let rocky = renderer.scene().insert_material(make_material(
+            [0.15, 0.12, 0.09, 1.0],
+            0.90,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let dark = renderer.scene().insert_material(make_material(
+            [0.09, 0.09, 0.11, 1.0],
+            0.70,
+            0.25,
+            [0.0; 3],
+            0.0,
+        ));
         let cube = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)));

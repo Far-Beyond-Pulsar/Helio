@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::traits::BakeInput;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for Potentially Visible Set (PVS) baking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,12 +47,22 @@ impl Default for PvsConfig {
 impl PvsConfig {
     /// Coarse fast-preview preset (large cells, few rays).
     pub fn fast() -> Self {
-        Self { cell_size: 8.0, ray_budget: 32, conservative: false, ..Default::default() }
+        Self {
+            cell_size: 8.0,
+            ray_budget: 32,
+            conservative: false,
+            ..Default::default()
+        }
     }
 
     /// High-precision production preset.
     pub fn ultra() -> Self {
-        Self { cell_size: 1.5, ray_budget: 2048, conservative: true, ..Default::default() }
+        Self {
+            cell_size: 1.5,
+            ray_budget: 2048,
+            conservative: true,
+            ..Default::default()
+        }
     }
 }
 

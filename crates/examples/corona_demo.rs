@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    GpuLight, LightType, Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
+    LightType, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph;
 use winit::{
@@ -239,9 +239,10 @@ impl ApplicationHandler for App {
         let mut scene_db = v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let scene_db_handle = v3_demo_common::scene_db_handle(&scene_db);
 
+        let graph_scene_db = scene_db_handle.clone();
         let mut renderer = RendererBuilder::new(config, scene_db_handle)
-            .with_graph(Box::new(|d, q, s, c, ds, cb, csb| {
-                build_default_graph(d, q, s, c, ds, cb, csb, None)
+            .with_graph(Box::new(move |d, q, s, c, ds, cb, csb| {
+                build_default_graph(d, q, ds, s, c, cb, csb, None, graph_scene_db.clone())
             }))
             .build(
                 device.clone(),
@@ -252,7 +253,7 @@ impl ApplicationHandler for App {
             );
 
         // ── Sky + lighting ───────────────────────────────────────────────────
-        renderer.configure_default_sky([0.08, 0.10, 0.20]);
+        v3_demo_common::spawn_sky(&mut scene_db.world, [0.08, 0.10, 0.20]);
         v3_demo_common::spawn_light(
             &mut scene_db.world,
             GpuLight {
@@ -276,20 +277,22 @@ impl ApplicationHandler for App {
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 
         // ── Floor plane ─────────────────────────────────────────────────────
-        let floor_mesh_id = renderer.create_mesh_asset(v3_demo_common::plane_mesh(
-            [0.0, 0.0, 0.0],
-            30.0,
-        ));
-        let floor_mat = renderer.create_material_projection(v3_demo_common::make_material(
+        let floor_mesh_id = v3_demo_common::spawn_mesh(
+            &mut scene_db.world,
+            v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 30.0),
+        );
+        let floor_mat = v3_demo_common::spawn_material(
+            &mut scene_db.world,
+            v3_demo_common::make_material(
             [0.06, 0.06, 0.08, 1.0],
             0.8,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
-        ));
+            ),
+        );
         let _floor_entity = v3_demo_common::spawn_object(
             &mut scene_db.world,
-            &mut renderer,
             floor_mesh_id,
             floor_mat,
             Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),

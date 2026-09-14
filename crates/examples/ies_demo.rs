@@ -17,10 +17,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene, TonemapOperator,
+    Renderer, RendererBuilder, RendererConfig, TonemapOperator,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{make_material, plane_mesh};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle, spawn_light,
+    spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -63,7 +67,8 @@ struct AppState {
     mouse_delta: (f32, f32),
     ies_enabled: [bool; 3],
     gobo_enabled: bool,
-    light_ids: [helio::LightId; 3],
+    scene_db: SceneDb,
+    light_ids: [Entity; 3],
 }
 
 impl App {
@@ -106,10 +111,7 @@ impl App {
             if state.gobo_enabled {
                 light.light_function_index = 1;
             }
-            let _ = state
-                .renderer
-                .scene()
-                .update_light(state.light_ids[i], light);
+            update_light(&mut state.scene_db.world, state.light_ids[i], light);
         }
     }
 }
@@ -190,73 +192,28 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
         renderer.set_editor_mode(true);
 
         // Dark floor
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.15, 0.16, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            ground,
-            floor_mat,
-            glam::Mat4::IDENTITY,
-            6.0,
-        );
+        let floor_mat = spawn_material(&mut scene_db.world, make_material(
+            [0.15, 0.15, 0.16, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 6.0));
+        let _ = spawn_object(&mut scene_db.world, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
 
         // Spot lights
-        let light_ids: [helio::LightId; 3] = std::array::from_fn(|i| {
+        let light_ids: [Entity; 3] = std::array::from_fn(|i| {
             let mut light = helio::GpuLight::default();
             light.light_type = helio::LightType::Spot as u32;
             light.color_intensity = match i {
@@ -279,11 +236,7 @@ impl ApplicationHandler for App {
                 1 => 0.92,
                 _ => 0.80,
             };
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(light))
-                .as_light()
-                .unwrap()
+            spawn_light(&mut scene_db.world, light)
         });
 
         // Upload a 2-layer IES texture array: layer 0 = spotlight gradient, layer 1 = checkerboard gobo
@@ -383,6 +336,7 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             ies_enabled: [false, false, false],
             gobo_enabled: false,
+            scene_db,
             light_ids,
         });
     }

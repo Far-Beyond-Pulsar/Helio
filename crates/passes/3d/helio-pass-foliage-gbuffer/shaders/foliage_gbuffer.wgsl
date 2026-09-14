@@ -46,7 +46,7 @@
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Mirror of `helio_foliage_core::FOLIAGE_TILE_SIZE_METERS`. Blade positions are
+/// Mirror of `helio_pass_foliage_place::FOLIAGE_TILE_SIZE_METERS`. Blade positions are
 /// tile-local unorms, so this is the scale that turns them back into metres.
 const FOLIAGE_TILE_SIZE: f32 = 8.0;
 
@@ -59,7 +59,7 @@ const FOLIAGE_FLAG_INTERACTION_VALID: u32 = 1u;
 /// Mirrors `FLAG_DEBUG_LOD` in `src/lib.rs`. Tints blades by LOD instead of shading them.
 const FOLIAGE_FLAG_DEBUG_LOD: u32 = 2u;
 
-/// Mirror of `helio_foliage_core::FOLIAGE_FLAG_RECEIVES_INTERACTION`.
+/// Mirror of `helio_pass_foliage_place::FOLIAGE_FLAG_RECEIVES_INTERACTION`.
 const FOLIAGE_TYPE_FLAG_RECEIVES_INTERACTION: u32 = 1024u;
 
 /// Shift/mask for the packed `visible_blades[]` entry. See `VISIBLE_TILE_SHIFT` in
@@ -82,7 +82,7 @@ const FOLIAGE_FINAL_FADE_FRACTION: f32 = 0.45;
 const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 
 /// Largest finite f32, for the `is_finite` guards transcribed from
-/// `helio_foliage_core::placement`.
+/// `helio_pass_foliage_place::placement`.
 const FOLIAGE_F32_MAX: f32 = 3.4028235e38;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -127,7 +127,7 @@ struct FoliageLod {
     _pad: u32,
 }
 
-/// Mirror of `helio_foliage_core::GpuFoliageType` (96 bytes).
+/// Mirror of `helio_pass_foliage_place::GpuFoliageType` (96 bytes).
 ///
 /// **Every field is a scalar and none of them may become a vector.** `wind_response`
 /// is the dangerous one: it sits at byte offset 52, and declaring it `vec3<f32>` would
@@ -164,7 +164,7 @@ struct FoliageType {
     pad2: u32,
 }
 
-/// Mirror of `helio_foliage_core::GpuBladeInstance` (16 bytes).
+/// Mirror of `helio_pass_foliage_place::GpuBladeInstance` (16 bytes).
 struct BladeInstance {
     packed_pos: u32,
     packed_height_yaw: u32,
@@ -172,7 +172,7 @@ struct BladeInstance {
     packed_tint_seed: u32,
 }
 
-/// Mirror of `helio_foliage_core::GpuFoliageTile` (32 bytes).
+/// Mirror of `helio_pass_foliage_place::GpuFoliageTile` (32 bytes).
 ///
 /// `vec2<i32>` is safe here and only here: it sits at offset 0, which is already
 /// 8-byte aligned, so WGSL's vector alignment changes nothing.
@@ -199,7 +199,7 @@ struct FoliageTile {
 @group(1) @binding(0) var<uniform> lod_info: FoliageLod;
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Unpacking — bit-for-bit transcriptions of `helio_foliage_core::packing`
+// Unpacking — bit-for-bit transcriptions of `helio_pass_foliage_place::packing`
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // These must match `unpack_blade` exactly. They are all one or two instructions, and
@@ -223,7 +223,7 @@ fn foliage_yaw(bits: u32) -> f32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LOD maths — transcriptions of `helio_foliage_core::placement`
+// LOD maths — transcriptions of `helio_pass_foliage_place::placement`
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // `FoliagePlacePass` reimplements the same functions to classify blades into the four
@@ -238,7 +238,7 @@ fn foliage_is_finite(x: f32) -> bool {
     return x == x && abs(x) <= FOLIAGE_F32_MAX;
 }
 
-/// Transcription of `helio_foliage_core::lod_fade_alpha`.
+/// Transcription of `helio_pass_foliage_place::lod_fade_alpha`.
 ///
 /// Smoothstep rather than a linear ramp: a linear dissolve is continuous in value but
 /// not in slope, and the two slope discontinuities read as faint rings sweeping over the
@@ -254,7 +254,7 @@ fn foliage_lod_fade_alpha(d: f32, band_start: f32, band_end: f32) -> f32 {
     return 1.0 - (t * t * (3.0 - 2.0 * t));
 }
 
-/// Transcription of `helio_foliage_core::scale_in_factor`.
+/// Transcription of `helio_pass_foliage_place::scale_in_factor`.
 ///
 /// `distance_from_edge` is how far *inside* the resident ring the blade sits. Zero at
 /// the edge, so a tile that becomes resident grows its hundreds of blades out of the
@@ -458,7 +458,7 @@ fn vs_main(
     let blade = blade_arena[tile.blade_offset + local_index];
 
     // ── Reconstruct the blade's world root ────────────────────────────────────
-    // Mirror of `helio_foliage_core::blade_world_position`. Positions are tile-local so
+    // Mirror of `helio_pass_foliage_place::blade_world_position`. Positions are tile-local so
     // a blade's encoding does not depend on where in the world its tile sits, which is
     // what lets placement be reproducible across GPUs.
     let tile_origin = vec2<f32>(f32(tile.tile_coord.x), f32(tile.tile_coord.y)) * FOLIAGE_TILE_SIZE;

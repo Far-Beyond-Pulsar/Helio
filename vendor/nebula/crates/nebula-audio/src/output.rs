@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use crate::config::FREQ_BAND_COUNT;
 use nebula_core::{error::NebulaError, traits::BakeOutput};
 use nebula_serialize::chunk::ChunkTag;
-use crate::config::FREQ_BAND_COUNT;
+use serde::{Deserialize, Serialize};
 
 /// Chunk tag for baked acoustic impulse-response data.
 pub const CHUNK_TAG: ChunkTag = ChunkTag::from_bytes(*b"AUIR");
@@ -69,7 +69,9 @@ pub struct AcousticOutput {
 }
 
 impl BakeOutput for AcousticOutput {
-    fn kind_name() -> &'static str { "acoustic" }
+    fn kind_name() -> &'static str {
+        "acoustic"
+    }
 }
 
 impl AcousticOutput {

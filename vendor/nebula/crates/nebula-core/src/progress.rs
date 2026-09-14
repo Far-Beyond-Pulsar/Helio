@@ -15,9 +15,9 @@ pub trait ProgressReporter: Send + Sync {
 pub struct NullReporter;
 
 impl ProgressReporter for NullReporter {
-    fn begin(&self, _: &str, _: u32)               {}
-    fn step(&self, _: &str, _: u32, _: &str)        {}
-    fn finish(&self, _: &str, _: bool, _: &str)     {}
+    fn begin(&self, _: &str, _: u32) {}
+    fn step(&self, _: &str, _: u32, _: &str) {}
+    fn finish(&self, _: &str, _: bool, _: &str) {}
 }
 
 /// A reporter that logs to the `log` crate at INFO level.
@@ -47,26 +47,34 @@ pub struct ChannelReporter {
 
 #[derive(Clone, Debug)]
 pub struct ProgressEvent {
-    pub pass:    String,
-    pub kind:    ProgressEventKind,
+    pub pass: String,
+    pub kind: ProgressEventKind,
 }
 
 #[derive(Clone, Debug)]
 pub enum ProgressEventKind {
-    Begin   { total_steps: u32 },
-    Step    { step: u32, message: String },
-    Finish  { success: bool, message: String },
+    Begin { total_steps: u32 },
+    Step { step: u32, message: String },
+    Finish { success: bool, message: String },
 }
 
 impl ChannelReporter {
     pub fn new() -> (Self, std::sync::mpsc::Receiver<ProgressEvent>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        (Self { tx: std::sync::Mutex::new(tx) }, rx)
+        (
+            Self {
+                tx: std::sync::Mutex::new(tx),
+            },
+            rx,
+        )
     }
 
     fn send(&self, pass: &str, kind: ProgressEventKind) {
         if let Ok(guard) = self.tx.lock() {
-            let _ = guard.send(ProgressEvent { pass: pass.to_owned(), kind });
+            let _ = guard.send(ProgressEvent {
+                pass: pass.to_owned(),
+                kind,
+            });
         }
     }
 }
@@ -76,9 +84,21 @@ impl ProgressReporter for ChannelReporter {
         self.send(pass, ProgressEventKind::Begin { total_steps });
     }
     fn step(&self, pass: &str, step: u32, message: &str) {
-        self.send(pass, ProgressEventKind::Step { step, message: message.to_owned() });
+        self.send(
+            pass,
+            ProgressEventKind::Step {
+                step,
+                message: message.to_owned(),
+            },
+        );
     }
     fn finish(&self, pass: &str, success: bool, message: &str) {
-        self.send(pass, ProgressEventKind::Finish { success, message: message.to_owned() });
+        self.send(
+            pass,
+            ProgressEventKind::Finish {
+                success,
+                message: message.to_owned(),
+            },
+        );
     }
 }

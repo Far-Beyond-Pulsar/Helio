@@ -14,10 +14,13 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, HdrOutputMode, Renderer, RendererConfig, Scene,
+    HdrOutputMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{cube_mesh, directional_light, make_material, plane_mesh, point_light};
+use helio_default_graphs::build_default_graph_external;
+use v3_demo_common::{
+    cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -145,191 +148,84 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
         renderer.set_editor_mode(true);
 
-        let white = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.9, 0.92, 1.0],
-                0.6,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let emissive_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.1, 0.1, 1.0],
-                0.3,
-                0.0,
-                [10.0, 0.5, 0.5],
-                10.0,
-            ));
-        let emissive_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.1, 1.0, 0.1, 1.0],
-                0.3,
-                0.0,
-                [0.5, 10.0, 0.5],
-                10.0,
-            ));
-        let emissive_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.1, 0.1, 1.0, 1.0],
-                0.3,
-                0.0,
-                [0.5, 0.5, 10.0],
-                10.0,
-            ));
-        let emissive_sun = renderer
-            .scene()
-            .insert_material(make_material(
-                [1.0, 0.9, 0.7, 1.0],
-                0.2,
-                0.0,
-                [50.0, 45.0, 35.0],
-                50.0,
-            ));
-        let metal = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.95, 0.93, 0.88, 1.0],
-                0.1,
-                1.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let white = spawn_material(&mut scene_db.world, make_material(
+            [0.9, 0.9, 0.92, 1.0],
+            0.6,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let emissive_red = spawn_material(&mut scene_db.world, make_material(
+            [1.0, 0.1, 0.1, 1.0],
+            0.3,
+            0.0,
+            [10.0, 0.5, 0.5],
+            10.0,
+        ));
+        let emissive_green = spawn_material(&mut scene_db.world, make_material(
+            [0.1, 1.0, 0.1, 1.0],
+            0.3,
+            0.0,
+            [0.5, 10.0, 0.5],
+            10.0,
+        ));
+        let emissive_blue = spawn_material(&mut scene_db.world, make_material(
+            [0.1, 0.1, 1.0, 1.0],
+            0.3,
+            0.0,
+            [0.5, 0.5, 10.0],
+            10.0,
+        ));
+        let emissive_sun = spawn_material(&mut scene_db.world, make_material(
+            [1.0, 0.9, 0.7, 1.0],
+            0.2,
+            0.0,
+            [50.0, 45.0, 35.0],
+            50.0,
+        ));
+        let metal = spawn_material(&mut scene_db.world, make_material(
+            [0.95, 0.93, 0.88, 1.0],
+            0.1,
+            1.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 8.0)))
-            .as_mesh()
-            .unwrap();
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, white, glam::Mat4::IDENTITY, 8.0);
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 8.0));
+        let _ = spawn_object(&mut scene_db.world, ground, white, glam::Mat4::IDENTITY, 8.0);
 
-        let red_cube = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-1.5, 0.5, -1.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            red_cube,
-            emissive_red,
-            glam::Mat4::IDENTITY,
-            0.5,
+        let red_cube = spawn_mesh(&mut scene_db.world, cube_mesh([-1.5, 0.5, -1.0], 0.5));
+        let _ = spawn_object(&mut scene_db.world, red_cube, emissive_red, glam::Mat4::IDENTITY, 0.5);
+
+        let green_cube = spawn_mesh(&mut scene_db.world, cube_mesh([1.5, 0.5, -1.0], 0.5));
+        let _ = spawn_object(&mut scene_db.world, green_cube, emissive_green, glam::Mat4::IDENTITY, 0.5);
+
+        let blue_cube = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.5, 1.5], 0.5));
+        let _ = spawn_object(&mut scene_db.world, blue_cube, emissive_blue, glam::Mat4::IDENTITY, 0.5);
+
+        let metal_cube = spawn_mesh(&mut scene_db.world, cube_mesh([-1.5, 0.5, 2.5], 0.5));
+        let _ = spawn_object(&mut scene_db.world, metal_cube, metal, glam::Mat4::IDENTITY, 0.5);
+
+        let sun_sphere = spawn_mesh(&mut scene_db.world, cube_mesh([3.0, 4.0, -3.0], 0.4));
+        let _ = spawn_object(&mut scene_db.world, sun_sphere, emissive_sun, glam::Mat4::IDENTITY, 0.4);
+
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([0.3, -0.8, 0.5], [1.0, 0.95, 0.85], 15.0),
         );
-
-        let green_cube = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([1.5, 0.5, -1.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            green_cube,
-            emissive_green,
-            glam::Mat4::IDENTITY,
-            0.5,
+        spawn_light(
+            &mut scene_db.world,
+            point_light([3.0, 4.0, -3.0], [1.0, 0.9, 0.7], 20.0, 15.0),
         );
-
-        let blue_cube = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 1.5], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            blue_cube,
-            emissive_blue,
-            glam::Mat4::IDENTITY,
-            0.5,
-        );
-
-        let metal_cube = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-1.5, 0.5, 2.5], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            metal_cube,
-            metal,
-            glam::Mat4::IDENTITY,
-            0.5,
-        );
-
-        let sun_sphere = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([3.0, 4.0, -3.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            sun_sphere,
-            emissive_sun,
-            glam::Mat4::IDENTITY,
-            0.4,
-        );
-
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
-                [0.3, -0.8, 0.5],
-                [1.0, 0.95, 0.85],
-                15.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [3.0, 4.0, -3.0],
-                [1.0, 0.9, 0.7],
-                20.0,
-                15.0,
-            )));
 
         self.state = Some(AppState {
             window,

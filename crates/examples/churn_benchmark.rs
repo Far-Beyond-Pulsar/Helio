@@ -10,15 +10,17 @@
 
 mod v3_demo_common;
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh,
-    point_light,
+    box_mesh, cube_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, update_object_transform,
 };
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, MaterialId, MeshId, ObjectId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use rapier3d::prelude::*;
 
 use crate::nalgebra::UnitQuaternion;
@@ -38,12 +40,12 @@ const MIN_SPAWN_RATE: usize = 1;
 const MAX_SPAWN_RATE: usize = 64;
 
 struct SpawnedObject {
-    id: ObjectId,
+    id: Entity,
     seed: f32,
     speed: f32,
     scale: f32,
-    mesh: MeshId,
-    material: MaterialId,
+    mesh: Entity,
+    material: Entity,
     body_handle: RigidBodyHandle,
     collider_handle: ColliderHandle,
 }
@@ -81,6 +83,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     frame_count: u64,
 
@@ -93,8 +96,8 @@ struct AppState {
 
     spawn_rate: usize,
     dynamic_objects: Vec<SpawnedObject>,
-    meshes: Vec<MeshId>,
-    materials: Vec<MaterialId>,
+    meshes: Vec<Entity>,
+    materials: Vec<Entity>,
     rng: SimpleRng,
     collisions_enabled: bool,
 
@@ -187,101 +190,49 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
 
-        let mat_floor = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.25, 0.25, 0.30, 1.0],
-                0.85,
-                0.03,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_red = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.85, 0.12, 0.12, 1.0],
-                0.65,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_green = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.17, 0.82, 0.28, 1.0],
-                0.60,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_blue = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.16, 0.40, 0.90, 1.0],
-                0.70,
-                0.00,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        let mat_steel = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.75, 1.0],
-                0.15,
-                0.80,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat_floor = spawn_material(
+            &mut scene_db.world,
+            make_material([0.25, 0.25, 0.30, 1.0], 0.85, 0.03, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_red = spawn_material(
+            &mut scene_db.world,
+            make_material([0.85, 0.12, 0.12, 1.0], 0.65, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.17, 0.82, 0.28, 1.0], 0.60, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_blue = spawn_material(
+            &mut scene_db.world,
+            make_material([0.16, 0.40, 0.90, 1.0], 0.70, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_steel = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.75, 1.0], 0.15, 0.80, [0.0, 0.0, 0.0], 0.0),
+        );
 
-        let floor_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor_mesh,
             mat_floor,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.01, 0.0)),
@@ -289,55 +240,25 @@ impl ApplicationHandler for App {
         );
 
         let mut mesh_list = Vec::new();
-        mesh_list.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.35)))
-                .as_mesh()
-                .unwrap(),
-        );
-        mesh_list.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.15, 0.65, 0.15],
-                )))
-                .as_mesh()
-                .unwrap(),
-        );
-        mesh_list.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.60, 0.20, 0.20],
-                )))
-                .as_mesh()
-                .unwrap(),
-        );
+        mesh_list.push(spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.35)));
+        mesh_list.push(spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.15, 0.65, 0.15]),
+        ));
+        mesh_list.push(spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.60, 0.20, 0.20]),
+        ));
 
         let offset = 20.0;
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [-offset, 5.0, -offset],
-                [0.8, 0.7, 0.55],
-                7.0,
-                40.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [offset, 5.0, offset],
-                [0.5, 0.7, 1.0],
-                7.0,
-                40.0,
-            )))
-            .as_light()
-            .unwrap();
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-offset, 5.0, -offset], [0.8, 0.7, 0.55], 7.0, 40.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([offset, 5.0, offset], [0.5, 0.7, 1.0], 7.0, 40.0),
+        );
 
         self.state = Some(AppState {
             window,
@@ -346,6 +267,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: fmt,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             frame_count: 0,
             cam_pos: glam::Vec3::new(0.0, 7.0, 25.0),
@@ -572,8 +494,8 @@ impl AppState {
                 &mut self.physics_bodies,
             );
 
-            if let Ok(obj_id) = insert_object_with_movability(
-                &mut self.renderer,
+            if let Ok(obj_id) = spawn_object_with_movability(
+                &mut self.scene_db.world,
                 mesh,
                 material,
                 transform,
@@ -609,7 +531,7 @@ impl AppState {
 
             if self.dynamic_objects.len() > max_count {
                 if let Some(dead) = self.dynamic_objects.first() {
-                    let _ = self.renderer.scene().remove_object(dead.id);
+                    let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, dead.id);
                     self.physics_colliders.remove(
                         dead.collider_handle,
                         &mut self.physics_forces,
@@ -643,10 +565,12 @@ impl AppState {
             let transform = glam::Mat4::from_translation(pos)
                 * glam::Mat4::from_rotation_y(phase * 1.37)
                 * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
-            let _ = self
-                .renderer
-                .scene()
-                .update_object_transform(variant.id, transform);
+            let _ = update_object_transform(
+                &mut self.scene_db.world,
+                &mut self.renderer,
+                variant.id,
+                transform,
+            );
 
             if let Some(body) = self.physics_bodies.get_mut(variant.body_handle) {
                 body.set_position(
@@ -699,10 +623,12 @@ impl AppState {
                 let transform = glam::Mat4::from_translation(translation)
                     * glam::Mat4::from_quat(rotation)
                     * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
-                let _ = self
-                    .renderer
-                    .scene()
-                    .update_object_transform(variant.id, transform);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    variant.id,
+                    transform,
+                );
             }
         }
     }

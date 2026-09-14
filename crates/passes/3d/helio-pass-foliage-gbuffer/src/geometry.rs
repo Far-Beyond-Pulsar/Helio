@@ -2,13 +2,13 @@
 //!
 //! There is no vertex buffer and no index buffer anywhere in the grass path. Every
 //! vertex of every blade is derived from `@builtin(vertex_index)` and the per-instance
-//! [`GpuBladeInstance`](helio_foliage_core::GpuBladeInstance), which is what makes the
+//! [`GpuBladeInstance`](helio_pass_foliage_place::GpuBladeInstance), which is what makes the
 //! whole world's grass four `draw_indirect` calls (the plan's §6.3). The cost of that is
 //! that the geometry only exists inside a shader, where nothing can look at it — so it is
 //! written twice, here and in WGSL, and the two are pinned against each other by the
 //! tests in `tests/geometry.rs`.
 //!
-//! This is the same arrangement `helio-foliage-core::placement` uses for the LOD maths,
+//! This is the same arrangement `helio-pass-foliage-place::placement` uses for the LOD maths,
 //! and for the same reason: when a blade comes out inside-out or a strip has a fold in
 //! it, the failure is a screenful of flickering polygons with no intermediate state to
 //! inspect. A CPU mirror turns that into an assertion on three floats.
@@ -37,7 +37,7 @@
 
 /// Number of drawable foliage LOD levels.
 ///
-/// Mirrors `helio_foliage_core::FOLIAGE_LOD_COUNT` as a `usize`, so it can size the
+/// Mirrors `helio_pass_foliage_place::FOLIAGE_LOD_COUNT` as a `usize`, so it can size the
 /// tables below without a cast at every use. Named differently on purpose: the two are
 /// the same number in different types, and a glob-importing caller that got the `u32`
 /// where it wanted the `usize` would fail in a way that reads like a borrow error.

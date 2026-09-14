@@ -11,13 +11,13 @@ consuming passes:
 The foliage placement and G-buffer passes, portal cull, portal mask, portal instances,
 and editor overlay resolve these keys from `ctx.scene_buffers` and bind the returned
 GPU buffers. The renderer no longer uploads or publishes foliage/portal data through
-`FrameResources`; the old renderer façade methods and foliage cache were removed.
+`generic transient resource registry`; the old renderer façade methods and foliage cache were removed.
 
 The packed records intentionally retain the established 96/32/32/48-byte foliage and
-144/16-byte portal layouts. The existing frame slots in `libhelio::FrameResources`
+144/16-byte portal layouts. The existing frame slots in `libhelio::generic transient resource registry`
 remain only because this migration is not allowed to edit `libhelio` or `helio-core`.
 They are now unused by these domains and should be deleted in the next core-interface
-change, along with the corresponding `FoliageFrameData`/`PortalsFrameData` types.
+change, along with the corresponding `SceneDB foliage projection`/`SceneDB portal projection` types.
 
 ## Integration follow-up
 

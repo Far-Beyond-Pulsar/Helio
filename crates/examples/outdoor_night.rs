@@ -10,10 +10,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::Entity;
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -53,7 +57,7 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _light_ids: Vec<LightId>,
+    _light_ids: Vec<Entity>,
 }
 
 impl App {
@@ -136,274 +140,155 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
                 [0.7, 0.7, 0.72, 1.0],
                 0.8,
                 0.0,
                 [0.0, 0.0, 0.0],
                 0.0,
-            ));
+            ),
+        );
 
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
-            .as_mesh()
-            .unwrap();
-        let bld_a = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let bld_a = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 7.0, 2.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let bld_b = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let bld_b = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.5, 2.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let bld_c = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let bld_c = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.0, 3.0, 3.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let bld_d = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let bld_d = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.5, 1.5, 2.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let bld_e = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let bld_e = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [4.0, 9.5, 3.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let lamp_pole_a = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let lamp_pole_a = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
-            )))
-            .as_mesh()
-            .unwrap();
-        let lamp_pole_b = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let lamp_pole_b = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
-            )))
-            .as_mesh()
-            .unwrap();
-        let lamp_pole_c = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let lamp_pole_c = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
-            )))
-            .as_mesh()
-            .unwrap();
-        let lamp_pole_d = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            ));
+        let lamp_pole_d = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.08, 2.5, 0.08],
-            )))
-            .as_mesh()
-            .unwrap();
+            ));
 
         let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+            spawn_object(
+            &mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
             bld_a,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(8.0, 7.0, -6.0)),
             7.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             bld_b,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-7.0, 4.5, -5.0)),
             4.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             bld_c,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(6.0, 3.0, 6.0)),
             3.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             bld_d,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-5.0, 1.5, 5.0)),
             3.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             bld_e,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 9.5, -14.0)),
             9.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             lamp_pole_a,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-5.0, 2.5, -5.0)),
             2.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             lamp_pole_b,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(5.0, 2.5, -5.0)),
             2.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             lamp_pole_c,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-5.0, 2.5, 5.0)),
             2.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             lamp_pole_d,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(5.0, 2.5, 5.0)),
             2.5,
         );
 
-        let mut _light_ids: Vec<LightId> = Vec::new();
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [-5.0, 5.1, -5.0],
-                    [1.0, 0.72, 0.3],
-                    6.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [5.0, 5.1, -5.0],
-                    [1.0, 0.72, 0.3],
-                    6.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [-5.0, 5.1, 5.0],
-                    [1.0, 0.72, 0.3],
-                    6.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [5.0, 5.1, 5.0],
-                    [1.0, 0.72, 0.3],
-                    6.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [8.0, 12.0, -5.8],
-                    [1.0, 0.05, 0.8],
-                    5.0,
-                    12.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        _light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 16.5, -14.0],
-                    [0.05, 0.9, 1.0],
-                    4.0,
-                    10.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
+        let mut _light_ids: Vec<Entity> = Vec::new();
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([-5.0, 5.1, -5.0], [1.0, 0.72, 0.3], 6.0, 14.0),
+        ));
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([5.0, 5.1, -5.0], [1.0, 0.72, 0.3], 6.0, 14.0),
+        ));
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([-5.0, 5.1, 5.0], [1.0, 0.72, 0.3], 6.0, 14.0),
+        ));
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([5.0, 5.1, 5.0], [1.0, 0.72, 0.3], 6.0, 14.0),
+        ));
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([8.0, 12.0, -5.8], [1.0, 0.05, 0.8], 5.0, 12.0),
+        ));
+        _light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light([0.0, 16.5, -14.0], [0.05, 0.9, 1.0], 4.0, 10.0),
+        ));
         renderer.set_ambient([0.1, 0.15, 0.3], 0.06);
         renderer.set_clear_color([0.005, 0.005, 0.025, 1.0]);
 

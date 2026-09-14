@@ -57,52 +57,45 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         // Ground plane
-        let ground_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.30, 0.27, 0.22, 1.0],
-                0.85,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(crate::common::box_mesh(
-                [0.0, -1.0, 0.0],
-                [200.0, 0.4, 200.0],
-            )));
+        let ground_mat = renderer.scene().insert_material(make_material(
+            [0.30, 0.27, 0.22, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let ground =
+            renderer
+                .scene()
+                .insert_entity(helio::SceneEntity::mesh(crate::common::box_mesh(
+                    [0.0, -1.0, 0.0],
+                    [200.0, 0.4, 200.0],
+                )));
         let _ = insert_object(renderer, ground, ground_mat, Mat4::IDENTITY, 10.0);
 
         // Rock materials
         let mats = [
-            renderer
-                .scene()
-                .insert_material(make_material(
-                    [0.20, 0.18, 0.14, 1.0],
-                    0.90,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
-            renderer
-                .scene()
-                .insert_material(make_material(
-                    [0.28, 0.24, 0.20, 1.0],
-                    0.80,
-                    0.05,
-                    [0.0; 3],
-                    0.0,
-                )),
-            renderer
-                .scene()
-                .insert_material(make_material(
-                    [0.15, 0.14, 0.12, 1.0],
-                    0.95,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
+            renderer.scene().insert_material(make_material(
+                [0.20, 0.18, 0.14, 1.0],
+                0.90,
+                0.0,
+                [0.0; 3],
+                0.0,
+            )),
+            renderer.scene().insert_material(make_material(
+                [0.28, 0.24, 0.20, 1.0],
+                0.80,
+                0.05,
+                [0.0; 3],
+                0.0,
+            )),
+            renderer.scene().insert_material(make_material(
+                [0.15, 0.14, 0.12, 1.0],
+                0.95,
+                0.0,
+                [0.0; 3],
+                0.0,
+            )),
         ];
         let rock_mesh = renderer
             .scene()
@@ -144,27 +137,24 @@ impl HelioWasmApp for Demo {
             Ok(scene) => {
                 let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
                 for mesh in &scene.meshes {
-                    let mesh_id =
-                        renderer
-                            .scene()
-                            .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
-                                vertices: mesh.vertices.clone(),
-                                indices: mesh.indices.clone(),
-                            }));
+                    let mesh_id = renderer.scene().insert_entity(helio::SceneEntity::mesh(
+                        helio::MeshUpload {
+                            vertices: mesh.vertices.clone(),
+                            indices: mesh.indices.clone(),
+                        },
+                    ));
                     let mat_id = mesh
                         .material_index
                         .and_then(|i| mat_ids.get(i).copied())
                         .or_else(|| mat_ids.first().copied())
                         .unwrap_or_else(|| {
-                            renderer
-                                .scene()
-                                .insert_material(make_material(
-                                    [0.40, 0.40, 0.48, 1.0],
-                                    0.3,
-                                    0.7,
-                                    [0.0; 3],
-                                    0.0,
-                                ))
+                            renderer.scene().insert_material(make_material(
+                                [0.40, 0.40, 0.48, 1.0],
+                                0.3,
+                                0.7,
+                                [0.0; 3],
+                                0.0,
+                            ))
                         });
                     let t = Mat4::from_scale_rotation_translation(
                         Vec3::ONE,

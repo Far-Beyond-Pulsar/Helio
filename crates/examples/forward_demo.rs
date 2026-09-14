@@ -10,10 +10,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, RenderMode, Renderer, RendererConfig, Scene, SceneEntity,
+    RenderMode, Renderer, RendererConfig,
 };
-use helio_default_graphs::build_forward_opaque_graph;
-use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
+use v3_demo_common::{
+    build_default_renderer, cube_mesh, make_material, new_scene_db_with_gpu_mirror,
+    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky,
+    update_light,
+};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use winit::{
     application::ApplicationHandler,
@@ -47,6 +51,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     start_time: std::time::Instant,
 
@@ -59,7 +64,7 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     // Scene state
-    light_p0_id: LightId,
+    light_p0_id: Entity,
 }
 
 impl App {
@@ -145,135 +150,57 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, surface_format)
             .with_render_mode(RenderMode::ForwardOpaque);
-        let mut scene = Scene::new(device.clone(), queue.clone());
-        scene.insert_entity(SceneEntity::sky(
-            helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
-        ));
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_forward_opaque_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
         renderer.set_editor_mode(true);
 
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.7,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let mat = spawn_material(&mut scene_db.world, make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let cube1 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
-            .as_mesh()
-            .unwrap();
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
             0.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
             0.4,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
         let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
+            spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                p0_init,
-                [1.0, 0.55, 0.15],
-                6.0,
-                5.0,
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                p1,
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                p2,
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        let light_p0_id = spawn_light(
+            &mut scene_db.world,
+            point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0),
+        );
+        spawn_light(&mut scene_db.world, point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
+        spawn_light(&mut scene_db.world, point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
         self.state = Some(AppState {
             window,
             surface,
@@ -281,6 +208,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             start_time: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 2.5, 7.0),
@@ -461,7 +389,8 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.scene().update_light(
+        update_light(
+            &mut self.scene_db.world,
             self.light_p0_id,
             point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
         );

@@ -55,7 +55,8 @@ pub struct DecalPass {
 
 impl DecalPass {
     /// Decal textures now come from the scene's bindless table (bound per-frame
-    /// from `main_scene`), so this pass owns no texture state of its own.
+    /// from the explicit material-texture frame binding, so this pass owns no
+    /// texture table state of its own.
     pub fn new(
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
@@ -353,7 +354,7 @@ impl RenderPass for DecalPass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");
         builder.read("hiz");
-        builder.read("main_scene");
+        builder.read("material_textures");
     }
     fn publish<'a>(&'a self, _: &mut libhelio::PassResources<'a>) {}
     fn render_pass_descriptor<'a>(
@@ -401,7 +402,7 @@ impl RenderPass for DecalPass {
         };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
-        let main_scene = match ctx.resources.main_scene.read(self.name()) {
+        let material_textures = match ctx.resources.material_textures.read(self.name()) {
             Some(m) => m,
             None => return Ok(()),
         };
@@ -450,12 +451,12 @@ impl RenderPass for DecalPass {
         }
 
         // Rebuild the texture table only when the scene's texture set changes.
-        let tex_version = main_scene.material_textures.version;
+        let tex_version = material_textures.version;
         if self.bg_textures_version != Some(tex_version) || self.bg_textures.is_none() {
             self.bg_textures = Some(build_texture_bind_group(
                 ctx.device,
                 &self.bgl_textures,
-                &main_scene.material_textures,
+                &material_textures,
                 self.material_binding,
             ));
             self.bg_textures_version = Some(tex_version);
@@ -518,7 +519,7 @@ impl RenderPass for DecalPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "hiz", "main_scene"]
+        &["gbuffer", "hiz", "material_textures"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["gbuffer"]

@@ -6,7 +6,7 @@ use web_time::Instant;
 use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
 
-use crate::scene::Camera;
+use crate::camera::Camera;
 
 use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
 
@@ -139,16 +139,9 @@ impl Renderer {
 
             self.baked_data = Some(baked.clone());
 
-            self.scene
-                .update_lightmap_indices(baked.lightmap_atlas_regions());
-        }
-
-        #[cfg(feature = "bake")]
-        if self.baked_data.is_some() && self.scene.is_bake_invalidated() {
-            log::warn!(
-                "[helio-bake] ⚠️  Static geometry or lights have been added since the last bake!\n\
-                 The baked lighting is now out of date. Call renderer.auto_bake() again to rebake the scene."
-            );
+            // The baked atlas is injected as a frame resource. Persistent
+            // lightmap/component state remains owned by SceneDB.
+            let _ = baked.lightmap_atlas_regions();
         }
 
         let now = Instant::now();
@@ -199,11 +192,7 @@ impl Renderer {
         let mut jittered_camera = camera.clone();
         jittered_camera.proj = jitter_mat * camera.proj;
         jittered_camera.jitter = [jx, jy];
-        self.scene.update_camera(jittered_camera);
-        self.scene.flush();
-
-        // Sync template registry to GpuScene before anything takes &self.scene
-        self.sync_template_registry_to_scene();
+        self.upload_camera(&jittered_camera);
 
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
@@ -291,32 +280,8 @@ impl Renderer {
         // (overwhelming) majority that don't override it.
         self.graph.set_editor_mode(self.editor_mode);
 
-        let mut texture_views =
-            ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
-        let mut samplers = ArrayVec::<&wgpu::Sampler, { crate::material::MAX_TEXTURES }>::new();
-        for slot in 0..self.scene.material_binding_config().max_textures {
-            texture_views.push(self.scene.texture_view_for_slot(slot));
-            samplers.push(self.scene.texture_sampler_for_slot(slot));
-        }
-
-        let mesh_buffers = self.scene.mesh_buffers();
-        let dynamic_mesh_buffers = self.scene.dynamic_mesh_buffers();
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
-            // Volume bounds track whatever the scene currently holds. The
-            // generation only moves when the geometry actually differs, so a
-            // static scene keeps the pass's cached upload instead of re-sending
-            // every frame while the camera moves.
-            if state.editor_enabled {
-                let lines = self.scene.editor_volume_debug_lines();
-                if lines != state.editor_volume_lines {
-                    state.editor_volume_lines = lines;
-                    state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
-                }
-            } else if !state.editor_volume_lines.is_empty() {
-                state.editor_volume_lines = Vec::new();
-                state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
-            }
         }
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [
@@ -379,100 +344,41 @@ impl Renderer {
         let baked_pvs = None;
 
         let mut pass_resources = libhelio::PassResources::empty();
+        let material_texture_views = vec![
+            &self.material_bindings.fallback_view;
+            self.material_bindings.texture_count
+        ];
+        let material_samplers = vec![
+            &self.material_bindings.fallback_sampler;
+            self.material_bindings.texture_count
+        ];
+        pass_resources.material_textures.write(
+            libhelio::MaterialTextureBindings {
+                material_textures: &self.material_bindings.material_textures,
+                texture_views: &material_texture_views,
+                samplers: &material_samplers,
+                version: self.material_bindings.version,
+            },
+            "Renderer",
+        );
+        pass_resources.render_environment.write(
+            libhelio::RenderEnvironment {
+                clear_color: self.clear_color,
+                ambient_color: self.ambient_color,
+                ambient_intensity: self.ambient_intensity,
+                rc_world_min: [-100.0; 3],
+                rc_world_max: [100.0; 3],
+                tlas: None,
+            },
+            "Renderer",
+        );
         // Phase 3 registry. Legacy passes continue to consume
         // `pass_resources`; new passes receive this open typed registry via
         // `PassContext::registry` / `PrepareContext::registry`.
         let mut resource_registry = libhelio::ResourceRegistry::empty();
-        pass_resources.main_scene.write(
-            libhelio::SceneGpuView {
-                mesh_buffers: libhelio::MeshBuffers {
-                    // `mesh_buffers`/`dynamic_mesh_buffers` (locals a few
-                    // lines up, from `self.scene.mesh_buffers()`/
-                    // `dynamic_mesh_buffers()`) now hold `VarLenBufferRef`
-                    // read-lock guards, not bare `&wgpu::Buffer`s (Pulsar-
-                    // Native#561 Phase D: MeshPool's storage moved to
-                    // `pulsar_scenedb::gpu::VarLenGpuPool`). Deref through
-                    // them explicitly -- `libhelio::MeshBuffers<'a>` itself
-                    // is unchanged, still plain `&'a wgpu::Buffer` fields.
-                    // The guards stay alive in their owning locals for the
-                    // rest of this function (never dropped early), so this
-                    // borrow is valid for exactly as long as `pass_resources`
-                    // needs it.
-                    vertices: &*mesh_buffers.vertices,
-                    indices: &*mesh_buffers.indices,
-                    dynamic_vertices: &*dynamic_mesh_buffers.vertices,
-                    dynamic_indices: &*dynamic_mesh_buffers.indices,
-                },
-                material_textures: libhelio::MaterialTextureBindings {
-                    material_textures: self.scene.material_texture_buffer(),
-                    texture_views: texture_views.as_slice(),
-                    samplers: samplers.as_slice(),
-                    version: self.scene.texture_binding_version(),
-                },
-                clear_color: self.clear_color,
-                ambient_color: self.ambient_color,
-                ambient_intensity: self.ambient_intensity,
-                rc_world_min: rc_min,
-                rc_world_max: rc_max,
-                tlas: self.scene.tlas(),
-            },
-            "Renderer",
-        );
-        // Lights and materials are not yet published by an owning pass the
-        // way `object_batch`/etc. are -- see `libhelio::LightsFrameData`/
-        // `MaterialsFrameData`'s own docs for why the `Renderer` seeds these
-        // directly from `self.scene.gpu_scene()` (still-central storage)
-        // instead. `helio-core`/passes see only the generic `PassResources`
-        // slot, never a named `GpuScene` field.
-        {
-            let gpu_scene = self.scene.gpu_scene();
-            pass_resources.lights.write(
-                libhelio::LightsFrameData {
-                    lights: gpu_scene.lights.buffer(),
-                    light_count: gpu_scene.lights.len() as u32,
-                    movable_light_count: gpu_scene.movable_light_count,
-                    light_entity_indices: gpu_scene.light_entity_indices.buffer(),
-                    transforms: gpu_scene.transform_buffer.as_deref(),
-                    movable_lights_generation: gpu_scene.movable_lights_generation,
-                },
-                "Renderer",
-            );
-            pass_resources.materials.write(
-                libhelio::MaterialsFrameData {
-                    materials: gpu_scene.materials.buffer(),
-                    material_data: gpu_scene.materials.as_slice(),
-                    template_registry: &gpu_scene.template_registry,
-                    transparent_template_registry: &gpu_scene.transparent_template_registry,
-                    graph_wgsl_snippets: &gpu_scene.graph_wgsl_snippets,
-                },
-                "Renderer",
-            );
-            pass_resources.shadow_matrices.write(
-                libhelio::ShadowMatricesFrameData {
-                    shadow_matrices: gpu_scene.shadow_matrices.buffer(),
-                    shadow_count: gpu_scene.shadow_matrices.len() as u32,
-                    per_caster_dirty_gen: gpu_scene.per_caster_dirty_gen,
-                    movable_objects_generation: gpu_scene.movable_objects_generation,
-                },
-                "Renderer",
-            );
-            pass_resources.coordinate_spaces.write(
-                libhelio::CoordinateSpacesFrameData {
-                    coordinate_spaces: gpu_scene.coordinate_spaces.buffer(),
-                    coordinate_spaces_prev: gpu_scene.coordinate_spaces.prev_buffer(),
-                },
-                "Renderer",
-            );
-            pass_resources.portals.write(
-                libhelio::PortalsFrameData {
-                    portal_views: gpu_scene.portal_views.buffer(),
-                    portal_view_count: gpu_scene.portal_views.len() as u32,
-                    portal_chains: gpu_scene.portal_chains.buffer(),
-                    portal_chain_count: gpu_scene.portal_chains.len() as u32,
-                },
-                "Renderer",
-            );
-        }
+        // Geometry, materials, lights, shadows, and transforms are SceneDB
+        // component buffers. Passes resolve them by BufferKey from the
+        // read-only SceneInput projection; Renderer owns none of those rows.
         pass_resources
             .postprocess_uniforms
             .write(&self.postprocess_buffer, "Renderer");
@@ -526,10 +432,6 @@ impl Renderer {
         {
             pass_resources.full_res_depth_texture.write(t, "Renderer");
         }
-        if let Some(vg_data) = self.scene.vg_frame_data() {
-            pass_resources.vg.write(vg_data, "Renderer");
-        }
-        pass_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
             pass_resources.baked_ao.write(ao, "Renderer");
         }
@@ -606,8 +508,12 @@ impl Renderer {
         self.queue.submit(std::iter::once(clear_encoder.finish()));
 
         let _graph_start = Instant::now();
-        let scene_input = crate::scene::SceneInputAdapter::from_scene_db(
-            crate::scene::SceneDbProjection::new(&self.scene, &self.scene_db),
+        let scene_input = crate::renderer::input::SceneInputAdapter::from_scene_db(
+            &self.scene_db,
+            &self.camera_buffer,
+            &self.camera_data,
+            self.camera_generation,
+            self.frame_count,
         );
         self.graph.execute_with_resources(
             &scene_input,
@@ -647,21 +553,7 @@ impl Renderer {
             self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
         }
 
-        // Release the texture/sampler view borrows on the scene before advancing
-        // (which mutates it). `mesh_buffers`/`dynamic_mesh_buffers` join this
-        // list as of Pulsar-Native#561 Phase D: they now hold `VarLenBufferRef`
-        // read-lock guards (MeshPool's storage moved to a `pulsar_scenedb::gpu::
-        // VarLenGpuPool`), not plain `&wgpu::Buffer`s -- since the guard type
-        // has a non-trivial `Drop` (unlocking the `RwLock`), the borrow checker
-        // keeps `self.scene`'s immutable borrow alive until they're actually
-        // dropped, not just until their last read. `pass_resources` (which
-        // borrows through them via `libhelio::MeshBuffers`) is done being read
-        // by `execute_with_pass_resources` above, so this is the right place.
-        drop(texture_views);
-        drop(samplers);
-        drop(mesh_buffers);
-        drop(dynamic_mesh_buffers);
-        self.scene.advance_frame();
+        self.frame_count = self.frame_count.wrapping_add(1);
         Ok(())
     }
 
@@ -814,9 +706,7 @@ impl Renderer {
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer
             // valid even though only index 0 is read in this mode.
-            self.scene.update_stereo_cameras(&eye_uniform, &eye_uniform);
-            self.sync_template_registry_to_scene();
-            self.scene.flush();
+            self.upload_stereo_camera(&eye_uniform, &eye_uniform);
 
             // Both of these are per-eye. They used to be computed only for eye 0, which
             // left the right eye drawing with the left eye's camera:

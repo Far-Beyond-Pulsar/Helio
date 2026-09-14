@@ -9,11 +9,15 @@ use std::time::Instant;
 use glam::Vec3;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{point_light, update_point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, spawn_material,
+    spawn_mesh, spawn_object, update_point_light,
+};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -35,7 +39,8 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
-    point_light_id: helio::LightId,
+    scene_db: SceneDb,
+    point_light_id: Entity,
     point_light_pos: Vec3,
     last_frame: Instant,
     cam_pos: Vec3,
@@ -151,46 +156,23 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
         renderer.set_ambient([0.06, 0.06, 0.09], 1.0);
 
@@ -206,27 +188,26 @@ impl ApplicationHandler for App {
                     scene.meshes.len(),
                     scene.materials.len()
                 );
-                let material_ids =
-                    upload_scene_materials(&mut renderer, &scene).expect("upload scene materials");
+                let material_ids = upload_scene_materials(&mut scene_db.world, &scene);
                 for mesh in scene.meshes {
                     let radius = mesh
                         .vertices
                         .iter()
                         .map(|v| Vec3::from_array(v.position).length())
                         .fold(0.5, f32::max);
-                    let mesh_id = renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
+                    let mesh_id = spawn_mesh(
+                        &mut scene_db.world,
+                        helio::MeshUpload {
                             vertices: mesh.vertices,
                             indices: mesh.indices,
-                        }))
-                        .as_mesh()
-                        .unwrap();
+                        },
+                    );
                     let material = mesh
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer.scene().insert_material(
+                            spawn_material(
+                                &mut scene_db.world,
                                 v3_demo_common::make_material(
                                     [0.7, 0.7, 0.75, 1.0],
                                     0.6,
@@ -236,8 +217,8 @@ impl ApplicationHandler for App {
                                 ),
                             )
                         });
-                    let _ = v3_demo_common::insert_object(
-                        &mut renderer,
+                    let _ = spawn_object(
+                        &mut scene_db.world,
                         mesh_id,
                         material,
                         glam::Mat4::IDENTITY,
@@ -251,23 +232,19 @@ impl ApplicationHandler for App {
                     scene_path,
                     error
                 );
-                let mesh = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-                    .as_mesh()
-                    .unwrap();
-                let material =
-                    renderer
-                        .scene()
-                        .insert_material(v3_demo_common::make_material(
-                            [0.55, 0.68, 0.9, 1.0],
-                            0.35,
-                            0.15,
-                            [0.0, 0.0, 0.0],
-                            0.0,
-                        ));
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                let mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+                let material = spawn_material(
+                    &mut scene_db.world,
+                    v3_demo_common::make_material(
+                        [0.55, 0.68, 0.9, 1.0],
+                        0.35,
+                        0.15,
+                        [0.0, 0.0, 0.0],
+                        0.0,
+                    ),
+                );
+                let _ = spawn_object(
+                    &mut scene_db.world,
                     mesh,
                     material,
                     glam::Mat4::IDENTITY,
@@ -277,14 +254,10 @@ impl ApplicationHandler for App {
         }
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
-        let point_light_id = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light_with_movability(
-                point_light(point_light_pos.to_array(), [1.0, 0.95, 0.8], 12.0, 18.0),
-                Some(helio::Movability::Movable),
-            ))
-            .as_light()
-            .unwrap();
+        let point_light_id = spawn_light(
+            &mut scene_db.world,
+            point_light(point_light_pos.to_array(), [1.0, 0.95, 0.8], 12.0, 18.0),
+        );
 
         self.state = Some(AppState {
             window,
@@ -293,6 +266,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
             point_light_id,
             point_light_pos,
             last_frame: Instant::now(),
@@ -402,7 +376,7 @@ impl ApplicationHandler for App {
                     state.point_light_pos.x += LIGHT_SPEED * dt;
                 }
                 update_point_light(
-                    &mut state.renderer,
+                    &mut state.scene_db.world,
                     state.point_light_id,
                     state.point_light_pos,
                     [1.0, 0.95, 0.8],

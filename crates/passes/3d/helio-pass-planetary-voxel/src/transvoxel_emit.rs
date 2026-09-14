@@ -3,8 +3,8 @@ use crate::{
     TransvoxelGpuError, TRANSVOXEL_CLASSIFY_WORKGROUPS, TRANSVOXEL_EMIT_WGSL,
     TRANSVOXEL_SCAN_BLOCKS, TRANSVOXEL_SCAN_WORKGROUP_SIZE,
 };
-use bytemuck::{Pod, Zeroable};
 use crate::{CellWord, PAGE_CELL_COUNT};
+use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 const REGULAR_VERTEX_TABLE_VALUES: usize = 256 * 12;

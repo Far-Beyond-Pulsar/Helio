@@ -9,6 +9,7 @@ use helio_core::{
     Result as HelioResult,
 };
 use libhelio::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
+use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
@@ -815,13 +816,10 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let materials = ctx
-                .pass_resources
-                .materials
-                .get()
-                .map(|m| m.material_data)
-                .unwrap_or(&[]);
-            self.instance_cull_scratch = build_instance_cull_data(instances, materials);
+            // Material classification is authored into the SceneDB material
+            // component and consumed on-GPU. The CPU preparation path must
+            // not resurrect a renderer-owned material mirror.
+            self.instance_cull_scratch = build_instance_cull_data(instances, &[]);
             ctx.write_buffer(
                 &self.instance_cull_buf,
                 0,
@@ -853,14 +851,7 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&instances[start..end]),
             );
 
-            let materials = ctx
-                .pass_resources
-                .materials
-                .get()
-                .map(|m| m.material_data)
-                .unwrap_or(&[]);
-            self.instance_cull_scratch =
-                build_instance_cull_data(&instances[start..end], materials);
+            self.instance_cull_scratch = build_instance_cull_data(&instances[start..end], &[]);
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
             ctx.write_buffer(
                 &self.instance_cull_buf,
@@ -957,68 +948,68 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(main_scene) = ctx.pass_resources.main_scene.read("VirtualGeometry") else {
+        let Some(material_textures) = ctx.pass_resources.material_textures.read("VirtualGeometry") else {
             return Ok(());
         };
-        let Some(materials) = ctx.pass_resources.materials.get() else {
+        let environment = ctx.pass_resources.render_environment.get();
+        let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
         if self.draw_bg_1.is_none()
-            || self.bg1_version != Some(main_scene.material_textures.version)
+            || self.bg1_version != Some(material_textures.version)
         {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: materials.materials.as_entire_binding(),
+                    resource: materials.buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.draw_bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Draw BG1"),
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
-            self.bg1_version = Some(main_scene.material_textures.version);
+            self.bg1_version = Some(material_textures.version ^ materials.epoch);
         }
 
         let globals = VgGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.016,
-            light_count: ctx
-                .pass_resources
-                .lights
-                .get()
-                .map(|l| l.light_count)
-                .unwrap_or(0),
-            ambient_intensity: main_scene.ambient_intensity,
+            light_count: if ctx
+                .scene_buffers
+                .contains(BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
+            ambient_intensity: environment.map(|value| value.ambient_intensity).unwrap_or(0.1),
             ambient_color: [
-                main_scene.ambient_color[0],
-                main_scene.ambient_color[1],
-                main_scene.ambient_color[2],
+                environment.map(|value| value.ambient_color[0]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[1]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[2]).unwrap_or(0.15),
                 0.0,
             ],
             rc_world_min: [
-                main_scene.rc_world_min[0],
-                main_scene.rc_world_min[1],
-                main_scene.rc_world_min[2],
+                environment.map(|value| value.rc_world_min[0]).unwrap_or(-100.0),
+                environment.map(|value| value.rc_world_min[1]).unwrap_or(-100.0),
+                environment.map(|value| value.rc_world_min[2]).unwrap_or(-100.0),
                 0.0,
             ],
             rc_world_max: [
-                main_scene.rc_world_max[0],
-                main_scene.rc_world_max[1],
-                main_scene.rc_world_max[2],
+                environment.map(|value| value.rc_world_max[0]).unwrap_or(100.0),
+                environment.map(|value| value.rc_world_max[1]).unwrap_or(100.0),
+                environment.map(|value| value.rc_world_max[2]).unwrap_or(100.0),
                 0.0,
             ],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
@@ -1215,9 +1206,20 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
             return Ok(());
         };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let max_draw_count = self.last_max_draw_count;
 
@@ -1287,9 +1289,9 @@ impl RenderPass for VirtualGeometryPass {
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
-            rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+            rpass.set_vertex_buffer(0, vertices.slice(..));
             rpass.set_index_buffer(
-                main_scene.mesh_buffers.indices.slice(..),
+                indices.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
 
@@ -1356,7 +1358,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "main_scene", "vg", "hiz"]
+        &["gbuffer", "material_textures", "render_environment", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &[

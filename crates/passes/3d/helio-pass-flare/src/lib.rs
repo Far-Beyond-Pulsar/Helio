@@ -637,12 +637,14 @@ impl RenderPass for LensFlarePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx
-            .pass_resources
-            .lights
-            .get()
-            .map(|l| l.light_count)
-            .unwrap_or(0);
+        let light_count = if ctx
+            .scene_buffers
+            .contains(helio_core::BufferKey::of("scene_lights"))
+        {
+            256
+        } else {
+            0
+        };
         self.active_flare_count = light_count;
 
         let uniforms = FlareUniforms {
@@ -701,10 +703,9 @@ impl RenderPass for LensFlarePass {
 
         // Rebuild bind groups when buffer/depth pointers change
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let lights_ptr = lights_buf as *const _ as usize;
         let camera_ptr = ctx.camera as *const _ as usize;

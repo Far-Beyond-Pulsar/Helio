@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_foliage_core::{
+use crate::{
     FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, TileState,
     DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS,
 };
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 use crate::residency::TileRing;
@@ -770,7 +770,7 @@ impl RenderPass for FoliagePlacePass {
     /// graph containing this pass fail to build. Add it in the same change that adds the
     /// producer.
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "main_scene"]
+        &["hiz"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

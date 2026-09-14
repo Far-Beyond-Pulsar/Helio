@@ -3,7 +3,7 @@
 Helio 3.0 treats the shared `SceneDB` world and its `SceneBufferProjection` as
 the authored CPU/GPU world-state authority. Renderer passes receive pass-local
 resource views and graph-owned transient bindings; the renderer no longer owns
-the retired `FrameResources`/`MainSceneResources` contracts or the legacy static
+the retired `generic transient resource registry`/`renderer-owned asset/projection state` contracts or the legacy static
 object mutation API.
 
 ## Nested-workspace limits

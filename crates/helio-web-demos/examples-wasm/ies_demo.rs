@@ -32,15 +32,13 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let floor_mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.15, 0.15, 0.16, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
+        let floor_mat = renderer.scene().insert_material(make_material(
+            [0.15, 0.15, 0.16, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let ground = renderer
             .scene()
             .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
@@ -244,9 +242,7 @@ impl HelioWasmApp for Demo {
             if self.gobo_enabled {
                 light.light_function_index = 1; // layer 1 = checkerboard gobo
             }
-            let _ = renderer
-                .scene()
-                .update_light(self.light_ids[i], light);
+            let _ = renderer.scene().update_light(self.light_ids[i], light);
         }
 
         let camera = Camera::perspective_look_at(

@@ -4,8 +4,6 @@
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
-use crate::material::GpuMaterial;
-use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
 use std::collections::{HashMap, HashSet};
 
@@ -39,24 +37,6 @@ pub struct GBufferViews<'a> {
     pub emissive: &'a wgpu::TextureView,
 }
 
-/// Borrowed mesh buffers for passes that render scene geometry directly.
-///
-/// Static geometry (terrain, buildings, props) lives in `vertices`/`indices`.
-/// Dynamic geometry (skinned characters, morphed meshes) lives in
-/// `dynamic_vertices`/`dynamic_indices`. Each pair must be bound separately
-/// around the corresponding draw calls.
-#[derive(Clone, Copy)]
-pub struct MeshBuffers<'a> {
-    /// Vertex buffer for upload-once static geometry.
-    pub vertices: &'a wgpu::Buffer,
-    /// Index buffer for upload-once static geometry.
-    pub indices: &'a wgpu::Buffer,
-    /// Vertex buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_vertices: &'a wgpu::Buffer,
-    /// Index buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_indices: &'a wgpu::Buffer,
-}
-
 /// Borrowed material-texture state for passes that sample Helio's texture table.
 #[derive(Clone, Copy)]
 pub struct MaterialTextureBindings<'a> {
@@ -66,11 +46,13 @@ pub struct MaterialTextureBindings<'a> {
     pub version: u64,
 }
 
-/// Frame-local scene inputs for the high-level Helio renderer.
+/// Backend material-texture bindings used by passes that sample material rows.
+///
+/// The material rows themselves are SceneDB component data. This value only
+/// describes the backend descriptor bindings needed to sample any referenced
+/// textures; it is not a scene container or an ownership model for materials.
 #[derive(Clone, Copy)]
-pub struct SceneGpuView<'a> {
-    pub mesh_buffers: MeshBuffers<'a>,
-    pub material_textures: MaterialTextureBindings<'a>,
+pub struct RenderEnvironment<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
@@ -543,8 +525,10 @@ pub struct PassResources<'a> {
 
     /// Full-resolution depth texture object for compute passes that need raw texture access.
     pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
-    /// High-level Helio scene resources used by wrapper-owned passes.
-    pub main_scene: Tracked<SceneGpuView<'a>>,
+    /// Backend bindings for the material component buffer's texture slots.
+    pub material_textures: Tracked<MaterialTextureBindings<'a>>,
+    /// Frame-local environment and optional acceleration structure state.
+    pub render_environment: Tracked<RenderEnvironment<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
@@ -562,17 +546,6 @@ pub struct PassResources<'a> {
 
     /// Linear clamp sampler for water_sim_texture (set by WaterSimPass)
     pub water_sim_sampler: Tracked<&'a wgpu::Sampler>,
-
-    // ── Foliage ──────────────────────────────────────────────────────────────
-    /// Foliage type/layer tables plus the global wind uniform for this frame.
-    ///
-    /// Published by the high-level `Renderer`; read by every foliage pass. Left
-    /// unwritten when no foliage types are registered, which is how the foliage passes
-    /// early-out of `prepare()` and record zero commands — see the zero-overhead
-    /// guarantees in the foliage plan. Do not "helpfully" write an empty
-    /// [`FoliageFrameData`] instead: that turns the free path into a per-frame upload of
-    /// two empty buffers plus four zero-instance indirect draws.
-    pub foliage: Tracked<FoliageFrameData<'a>>,
 
     /// Top-down terrain capture over the active foliage ring, written by
     /// `FoliageTerrainPass` and read by placement, interaction and the far-ring
@@ -597,17 +570,6 @@ pub struct PassResources<'a> {
     /// texel grid, so a repeating address mode wraps trampled grass from one edge of the
     /// field to the opposite edge, 64 m away.
     pub foliage_interaction_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Foliage interactor storage buffer (populated by the Renderer each frame).
-    ///
-    /// Splatted into the interaction field by `FoliageInteractionPass`. Follows the
-    /// `water_hitboxes` contract exactly: the buffer may be over-allocated, and
-    /// [`foliage_interactor_count`](Self::foliage_interactor_count) — not the buffer
-    /// size — is the authority on how many entries are live this frame.
-    pub foliage_interactors: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of interactors in foliage_interactors
-    pub foliage_interactor_count: u32,
 
     /// Radiance Cascades cascade atlas texture view
     pub rc_view: Tracked<&'a wgpu::TextureView>,
@@ -669,27 +631,12 @@ pub struct PassResources<'a> {
     /// see [`ObjectBatchFrameData`]'s own doc.
     pub object_batch: Tracked<ObjectBatchFrameData<'a>>,
 
-    /// Lights, written by the `Renderer` each frame from its still-central
-    /// light storage -- see [`LightsFrameData`]'s own doc for why this is a
-    /// `Renderer`-seeded bridge, not a pass publish.
-    pub lights: Tracked<LightsFrameData<'a>>,
-
-    /// The material table, written by the `Renderer` each frame -- see
-    /// [`MaterialsFrameData`]'s own doc. A known, temporary stepping stone:
-    /// materials are slated for a real SceneDB-native migration (mirroring
-    /// `StaticObjectComponent`/`scene_lights`), not a destination.
-    pub materials: Tracked<MaterialsFrameData<'a>>,
-
     /// Shadow matrices, written by the `Renderer` each frame -- see
     /// [`ShadowMatricesFrameData`]'s own doc.
     pub shadow_matrices: Tracked<ShadowMatricesFrameData<'a>>,
     /// Coordinate-space transforms, written by the `Renderer` each frame --
     /// see [`CoordinateSpacesFrameData`]'s own doc.
     pub coordinate_spaces: Tracked<CoordinateSpacesFrameData<'a>>,
-    /// Active portals, written by the `Renderer` each frame -- see
-    /// [`PortalsFrameData`]'s own doc.
-    pub portals: Tracked<PortalsFrameData<'a>>,
-
     /// Frustum-culled draw args (populated by `IndirectDispatchPass`) --
     /// see [`IndirectDispatchFrameData`]'s own doc.
     pub indirect_dispatch: Tracked<IndirectDispatchFrameData<'a>>,
@@ -897,63 +844,6 @@ pub struct CulledBatchFrameData<'a> {
     pub compacted_indices: &'a wgpu::Buffer,
 }
 
-/// Light data for this frame -- written directly by the `Renderer`
-/// (`helio` crate) each frame from its still-central light storage, NOT
-/// published by a `RenderPass::publish()` the way `ObjectBatchFrameData`
-/// etc. are. Unlike static objects, lights are not yet SceneDB-native in
-/// production (`BufferKey::of("scene_lights")` is the preferred path when
-/// something has populated it, but nothing in `engine_backend` does today --
-/// this is the actual, live fallback, not a legacy dead end). Also carries
-/// real algorithmic state (which lights are static vs. movable, baked
-/// shadow-atlas assignment) that hasn't been relocated to a pass yet -- see
-/// the zero-central-type-knowledge mandate's own recorded precedent on why
-/// that's a deliberately separate, larger migration from simply exposing the
-/// data generically the way this struct does.
-#[derive(Clone, Copy)]
-pub struct LightsFrameData<'a> {
-    /// `GpuLight`-layout buffer, movable lights only (static/stationary are
-    /// baked and excluded from runtime).
-    pub lights: &'a wgpu::Buffer,
-    /// Live entry count in `lights`.
-    pub light_count: u32,
-    /// Same as `light_count` today (both mirror the same buffer's live
-    /// length) -- kept as a separate field because callers historically
-    /// distinguished them; collapse once confirmed redundant.
-    pub movable_light_count: u32,
-    /// Parallel to `lights` -- entry `i` is the SceneDB `Entity` index
-    /// `lights[i]` was built from this frame.
-    pub light_entity_indices: &'a wgpu::Buffer,
-    /// SceneDB's `Transform` buffer, once bound -- `None` until then.
-    pub transforms: Option<&'a wgpu::Buffer>,
-    /// Increments when any movable light moves -- shadow-cache invalidation.
-    pub movable_lights_generation: u64,
-}
-
-/// The material table for this frame -- written directly by the `Renderer`
-/// each frame, NOT published by a pass. A known, temporary stepping stone:
-/// nearly every shading pass reads this, and there is no single natural
-/// owning pass the way there is for lights/shadow-matrices/objects, so it
-/// stays centrally allocated in `helio::Scene` until it gets a real
-/// SceneDB-native `MaterialComponent` (mirroring `StaticObjectComponent`) --
-/// tracked as a dedicated follow-up, not solved by this struct.
-#[derive(Clone, Copy)]
-pub struct MaterialsFrameData<'a> {
-    /// Packed `GpuMaterial` storage buffer, GPU-bindable directly.
-    pub materials: &'a wgpu::Buffer,
-    /// CPU-side mirror of the same data, for passes doing PSO-relevant
-    /// classification without a GPU readback.
-    pub material_data: &'a [GpuMaterial],
-    /// Custom template registrations that survive graph rebuilds --
-    /// `GBufferPass` downcasts this to `RadiantTemplateRegistry` each frame.
-    pub template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
-    /// Separate registry for transparent-material templates (different base
-    /// shader/bind-group layout than gbuffer templates).
-    pub transparent_template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
-    /// Compiled graph WGSL snippets keyed by content hash, looked up by
-    /// shading passes when building a PSO for a given `graph_hash`.
-    pub graph_wgsl_snippets: &'a HashMap<u64, String>,
-}
-
 /// Shadow matrices + per-caster dirty tracking for this frame -- written
 /// directly by the `Renderer`, NOT published by `helio-pass-shadow-matrix`
 /// (that pass computes into this buffer but does not yet own its
@@ -982,17 +872,6 @@ pub struct ShadowMatricesFrameData<'a> {
 pub struct CoordinateSpacesFrameData<'a> {
     pub coordinate_spaces: &'a wgpu::Buffer,
     pub coordinate_spaces_prev: &'a wgpu::Buffer,
-}
-
-/// Active portals' render data for this frame -- written directly by the
-/// `Renderer`. Real ownership belongs with `helio-pass-portal-cull` (still-
-/// pending future work, not solved here).
-#[derive(Clone, Copy)]
-pub struct PortalsFrameData<'a> {
-    pub portal_views: &'a wgpu::Buffer,
-    pub portal_view_count: u32,
-    pub portal_chains: &'a wgpu::Buffer,
-    pub portal_chain_count: u32,
 }
 
 // ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
@@ -1035,19 +914,17 @@ impl<'a> PassResources<'a> {
             tile_light_counts: Tracked::empty(),
             full_res_depth: Tracked::empty(),
             full_res_depth_texture: Tracked::empty(),
-            main_scene: Tracked::empty(),
+            material_textures: Tracked::empty(),
+            render_environment: Tracked::empty(),
             sky: crate::sky::SkyContext::default(),
             billboards: Tracked::empty(),
             vg: Tracked::empty(),
             water_caustics: Tracked::empty(),
             water_sim_texture: Tracked::empty(),
             water_sim_sampler: Tracked::empty(),
-            foliage: Tracked::empty(),
             foliage_terrain: Tracked::empty(),
             foliage_interaction: Tracked::empty(),
             foliage_interaction_sampler: Tracked::empty(),
-            foliage_interactors: Tracked::empty(),
-            foliage_interactor_count: 0,
             depth_texture: Tracked::empty(),
             depth_sampler_view: Tracked::empty(),
             rc_view: Tracked::empty(),
@@ -1061,11 +938,8 @@ impl<'a> PassResources<'a> {
             baked_pvs: Tracked::empty(),
             cluster_light_grid: Tracked::empty(),
             object_batch: Tracked::empty(),
-            lights: Tracked::empty(),
-            materials: Tracked::empty(),
             shadow_matrices: Tracked::empty(),
             coordinate_spaces: Tracked::empty(),
-            portals: Tracked::empty(),
             indirect_dispatch: Tracked::empty(),
             culled_batch: Tracked::empty(),
             corona_emitters: Tracked::empty(),
@@ -1168,19 +1042,16 @@ impl<'a> PassResources<'a> {
             reset_field!(tile_light_counts);
             reset_field!(full_res_depth);
             reset_field!(full_res_depth_texture);
-            reset_field!(main_scene);
+            reset_field!(material_textures);
+            reset_field!(render_environment);
             reset_field!(billboards);
             reset_field!(vg);
             reset_field!(water_caustics);
             reset_field!(water_sim_texture);
             reset_field!(water_sim_sampler);
-            // `foliage_interactor_count` is a plain u32, not a `Tracked` slot, so it gets
-            // no line here.
-            reset_field!(foliage);
             reset_field!(foliage_terrain);
             reset_field!(foliage_interaction);
             reset_field!(foliage_interaction_sampler);
-            reset_field!(foliage_interactors);
             reset_field!(depth_texture);
             reset_field!(depth_sampler_view);
             reset_field!(rc_view);
@@ -1194,11 +1065,8 @@ impl<'a> PassResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(cluster_light_grid);
             reset_field!(object_batch);
-            reset_field!(lights);
-            reset_field!(materials);
             reset_field!(shadow_matrices);
             reset_field!(coordinate_spaces);
-            reset_field!(portals);
             reset_field!(indirect_dispatch);
             reset_field!(culled_batch);
             reset_field!(corona_emitters);
@@ -1249,48 +1117,6 @@ pub struct VgFrameData<'a> {
     pub instance_dirty_start: u32,
     /// Number of dirty instances; zero when `buffer_version` owns the update.
     pub instance_dirty_count: u32,
-}
-
-/// Per-frame foliage data: immutable type/layer tables plus the per-frame wind clock.
-///
-/// Carried as raw byte slices for the same reason [`VgFrameData`] is: `libhelio` holds the
-/// inter-pass contract and must not depend on the crate that defines `GpuFoliageType` /
-/// `GpuFoliageLayer`, or every pass crate would be forced to link the foliage crate to see
-/// `PassResources`. The producer and the consuming passes agree on the element type; this
-/// struct only carries bytes and counts. Publishing a slice whose length is not
-/// `count * size_of::<element>()` is therefore undetectable here and shows up as garbage
-/// densities and blades placed under the world — bytemuck-cast on the publishing side, do
-/// not hand-roll the slice.
-///
-/// The `FoliagePlacePass` uploads the tables on the first frame and whenever `generation`
-/// advances, mirroring `VgFrameData::buffer_version`.
-#[derive(Clone, Copy)]
-pub struct FoliageFrameData<'a> {
-    /// Raw bytes of a `GpuFoliageType` array — one entry per authored foliage type.
-    pub types: &'a [u8],
-    /// Raw bytes of a `GpuFoliageLayer` array — one entry per authored foliage layer.
-    pub layers: &'a [u8],
-    /// Number of valid entries in `types`. Foliage type ids index this array directly, so
-    /// a stale count silently reads past the end of the table on the GPU.
-    pub type_count: u32,
-    /// Number of valid entries in `layers`.
-    pub layer_count: u32,
-
-    /// Global wind state for this frame, including both timestamps.
-    ///
-    /// Lives here rather than in its own `Tracked` slot because wind is only ever
-    /// meaningful when there is foliage to move, and because every foliage pass that
-    /// needs it already reads this struct. See [`GpuWind::time_prev_time`] for why the
-    /// second timestamp cannot be dropped.
-    pub wind: GpuWind,
-
-    /// Version counter incremented when the type or layer tables change.
-    ///
-    /// **Wind must not advance this.** `wind` changes every single frame; if the
-    /// publisher folds it into the generation, the type and layer tables are re-uploaded
-    /// every frame and the residency cache's whole point — that steady-state foliage costs
-    /// nothing on the CPU — is lost. Tables change on authoring edits only.
-    pub generation: u64,
 }
 
 /// Views into the top-down foliage terrain capture.

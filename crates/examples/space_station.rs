@@ -11,10 +11,14 @@
 mod v3_demo_common;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, MaterialId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, directional_light, insert_object, make_material, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb, World};
+use v3_demo_common::{
+    box_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -49,6 +53,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     frame_count: u64,
     // camera
@@ -59,11 +64,11 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
     // animated lights
-    hub_light_ids: [LightId; 2],
-    hab_ring_light_ids: [LightId; 4],
-    engine_light_ids: [LightId; 4],
-    docking_light_id: LightId,
-    beacon_light_ids: [LightId; 2],
+    hub_light_ids: [Entity; 2],
+    hab_ring_light_ids: [Entity; 4],
+    engine_light_ids: [Entity; 4],
+    docking_light_id: Entity,
+    beacon_light_ids: [Entity; 2],
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -130,208 +135,99 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
         renderer.set_ambient([0.08, 0.10, 0.18], 0.035);
 
         // Single material for the whole station (cool grey metal)
-        let mat = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.62, 0.63, 0.66, 1.0],
-                0.55,
-                0.35,
-                [0.0; 3],
-                0.0,
-            ));
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.62, 0.63, 0.66, 1.0], 0.55, 0.35, [0.0; 3], 0.0),
+        );
 
-        build_station(&mut renderer, mat);
+        build_station(&mut scene_db.world, mat);
 
         // Static directional (sunlight)
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
-                [0.35, -0.65, 0.25],
-                [0.72, 0.82, 1.0],
-                0.10,
-            )));
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([0.35, -0.65, 0.25], [0.72, 0.82, 1.0], 0.10),
+        );
 
         let hub_light_ids = [
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 14.0, 0.0],
-                    [0.82, 0.90, 1.0],
-                    8.0,
-                    28.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, -9.0, 0.0],
-                    [0.70, 0.80, 1.0],
-                    6.0,
-                    22.0,
-                )))
-                .as_light()
-                .unwrap(),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0, 28.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0, 22.0),
+            ),
         ];
         let hab_ring_light_ids = [
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [35.0, 6.0, 0.0],
-                    [0.78, 0.88, 1.0],
-                    5.5,
-                    20.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [-35.0, 6.0, 0.0],
-                    [0.78, 0.88, 1.0],
-                    5.5,
-                    20.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 6.0, 35.0],
-                    [0.78, 0.88, 1.0],
-                    5.5,
-                    20.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 6.0, -35.0],
-                    [0.78, 0.88, 1.0],
-                    5.5,
-                    20.0,
-                )))
-                .as_light()
-                .unwrap(),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([-35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 6.0, 35.0], [0.78, 0.88, 1.0], 5.5, 20.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5, 20.0),
+            ),
         ];
         let engine_light_ids = [
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [5.0, 5.0, 58.0],
-                    [1.0, 0.42, 0.06],
-                    10.0,
-                    22.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [-5.0, 5.0, 58.0],
-                    [1.0, 0.42, 0.06],
-                    10.0,
-                    22.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [5.0, -5.0, 58.0],
-                    [1.0, 0.42, 0.06],
-                    10.0,
-                    22.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [-5.0, -5.0, 58.0],
-                    [1.0, 0.42, 0.06],
-                    10.0,
-                    22.0,
-                )))
-                .as_light()
-                .unwrap(),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([5.0, 5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([-5.0, 5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([-5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0),
+            ),
         ];
-        let docking_light_id = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [0.0, 0.0, -54.0],
-                [1.0, 1.0, 0.92],
-                7.5,
-                26.0,
-            )))
-            .as_light()
-            .unwrap();
+        let docking_light_id = spawn_light(
+            &mut scene_db.world,
+            point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
+        );
         let beacon_light_ids = [
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 6.0, 65.0],
-                    [1.0, 0.04, 0.04],
-                    0.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 6.0, -65.0],
-                    [1.0, 0.04, 0.04],
-                    0.0,
-                    14.0,
-                )))
-                .as_light()
-                .unwrap(),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 0.0, 14.0),
+            ),
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 0.0, 14.0),
+            ),
         ];
 
         self.state = Some(AppState {
@@ -341,6 +237,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: fmt,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             frame_count: 0,
             cam_pos: glam::Vec3::new(0.0, 55.0, 175.0),
@@ -520,11 +417,11 @@ impl AppState {
         // Red warning beacon (1 Hz strobe)
         let beacon = (0.5 + 0.5 * (time * TAU).sin()).max(0.0_f32);
 
-        let _ = self.renderer.scene().update_light(
+        let _ = update_light(&mut self.scene_db.world,
             self.hub_light_ids[0],
             point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0),
         );
-        let _ = self.renderer.scene().update_light(
+        let _ = update_light(&mut self.scene_db.world,
             self.hub_light_ids[1],
             point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0),
         );
@@ -536,7 +433,7 @@ impl AppState {
             [0.0, 6.0, -35.0],
         ];
         for (i, &id) in self.hab_ring_light_ids.iter().enumerate() {
-            let _ = self.renderer.scene().update_light(
+            let _ = update_light(&mut self.scene_db.world,
                 id,
                 point_light(hab_pos[i], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
             );
@@ -549,23 +446,23 @@ impl AppState {
             [-5.0, -5.0, 58.0],
         ];
         for (i, &id) in self.engine_light_ids.iter().enumerate() {
-            let _ = self.renderer.scene().update_light(
+            let _ = update_light(&mut self.scene_db.world,
                 id,
                 point_light(eng_pos[i], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
             );
         }
 
-        let _ = self.renderer.scene().update_light(
+        let _ = update_light(&mut self.scene_db.world,
             self.beacon_light_ids[0],
             point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
-        let _ = self.renderer.scene().update_light(
+        let _ = update_light(&mut self.scene_db.world,
             self.beacon_light_ids[1],
             point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
 
         // docking light steady
-        let _ = self.renderer.scene().update_light(
+        let _ = update_light(&mut self.scene_db.world,
             self.docking_light_id,
             point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
         );
@@ -580,19 +477,12 @@ impl AppState {
 
 // ── Station geometry builder ──────────────────────────────────────────────────
 
-fn build_station(renderer: &mut Renderer, mat: MaterialId) {
+fn build_station(world: &mut World, mat: Entity) {
     macro_rules! add {
         ($cx:expr, $cy:expr, $cz:expr, $hx:expr, $hy:expr, $hz:expr) => {{
-            let _mesh = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [$cx, $cy, $cz],
-                    [$hx, $hy, $hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                renderer,
+            let _mesh = spawn_mesh(world, box_mesh([$cx, $cy, $cz], [$hx, $hy, $hz]));
+            let _ = spawn_object(
+                world,
                 _mesh,
                 mat,
                 glam::Mat4::IDENTITY,

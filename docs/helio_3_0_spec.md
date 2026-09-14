@@ -41,7 +41,7 @@ CI check that fails the build if a banned pattern reappears.
 | Crate | Role | May contain pass-specific code? |
 |---|---|---|
 | `helio-core` | Trait definitions, executor, graph scheduling, resource pool, caches | **Never** |
-| `libhelio` | Cross-cutting shared types (`FrameResources`, `SceneResources`, sky/wind data shapes) | **Never** |
+| `libhelio` | Cross-cutting shared types (`generic transient resource registry`, `SceneResources`, sky/wind data shapes) | **Never** |
 | `helio-pass-*` (one crate per pass) | One pass's implementation | Yes — this *is* the pass-specific code, and it is the only place it is allowed to live |
 | `helio-default-graphs` | Composes predefined graphs (forward, deferred, editor, …) out of pass crates | Only pass *construction and ordering* — never a pass's internal resource names, types, or behavior |
 | `helio` | Host-facing `Renderer`, config, public API surface | Only what the host needs to drive the graph generically (camera, resize, editor-mode) — never a specific pass's resource names |
@@ -73,7 +73,7 @@ against.
 
 The audit behind this spec (see §2) found the core already violates the rule in three
 independent places, all for the same underlying reason: the core's resource contract
-(`FrameResources`) is a **closed struct**, and a closed struct can only grow by someone editing
+(`generic transient resource registry`) is a **closed struct**, and a closed struct can only grow by someone editing
 the crate that owns it. As long as the resource contract is closed, "add a pass with a new
 resource" and "edit a core crate" are the same action. §4 replaces the closed struct with an
 **open registry**, which is what actually makes the rule possible to satisfy, not just
@@ -85,10 +85,10 @@ desirable.
 
 | # | Violation | Location | Why it exists |
 |---|---|---|---|
-| V1 | `FrameResources` has one hand-declared field per resource across the entire engine (50+ fields: `gbuffer`, `ssao`, `hiz`, `billboards`, `vg`, `corona_emitters`, `foliage_*`, `baked_*`, `hlfs_*`, …), each requiring 4 synchronized edits (struct field, `empty()`, `reset_tracking()`'s `reset_field!` list, and — for pool-routed ones — `route_named_texture`'s match arm) | [libhelio/src/frame.rs:188](../crates/libhelio/src/frame.rs) | No generic "named slot" abstraction existed when the struct was first grown; each pass's author added a field the same way the last one did |
+| V1 | `generic transient resource registry` has one hand-declared field per resource across the entire engine (50+ fields: `gbuffer`, `ssao`, `hiz`, `billboards`, `vg`, `corona_emitters`, `foliage_*`, `baked_*`, `hlfs_*`, …), each requiring 4 synchronized edits (struct field, `empty()`, `reset_tracking()`'s `reset_field!` list, and — for pool-routed ones — `route_named_texture`'s match arm) | [libhelio/src/frame.rs:188](../crates/libhelio/src/frame.rs) | No generic "named slot" abstraction existed when the struct was first grown; each pass's author added a field the same way the last one did |
 | V2 | GBuffer's 4-view bundle is special-cased three separate times: exact-string-name detection in the generic texture allocator, a no-op match arm in the router, and a bespoke `Tracked<GBufferViews>` type distinct from every other slot | [resource_lifetime.rs:176-227](../crates/helio-core/src/graph/resource_lifetime.rs), [execution.rs:996](../crates/helio-core/src/graph/execution.rs) | No declarable "compound resource" shape existed; the one pass that needed one got a hand-rolled exception in the generic allocator |
 | V3 | `validate_dependencies()` hardcodes the literal pass-name-adjacent strings `"main_scene"`, `"vg"`, `"billboards"`, `"corona_emitters"`, `"depth_texture"` as always-available, with no registered link to where they're actually supplied | [execution.rs:229-233](../crates/helio-core/src/graph/execution.rs) | No API existed for a host to declare "I supply this externally"; the validator's author hardcoded the known cases instead |
-| V4 | Three parallel, undocumented mechanisms for "how does a pass receive data" coexist with no single answer for a new pass author: pool-routed named resources, ad hoc host `.write()` calls into `FrameResources`, and (as of this session) `AttachmentSlot`/pool lookups for dynamic attachments | [render.rs:471-598](../crates/helio/src/renderer/render.rs), [execution.rs](../crates/helio-core/src/graph/execution.rs), [attachments.rs](../crates/helio-core/src/graph/attachments.rs) | Each mechanism was added to solve one problem in isolation, without unifying with what came before |
+| V4 | Three parallel, undocumented mechanisms for "how does a pass receive data" coexist with no single answer for a new pass author: pool-routed named resources, ad hoc host `.write()` calls into `generic transient resource registry`, and (as of this session) `AttachmentSlot`/pool lookups for dynamic attachments | [render.rs:471-598](../crates/helio/src/renderer/render.rs), [execution.rs](../crates/helio-core/src/graph/execution.rs), [attachments.rs](../crates/helio-core/src/graph/attachments.rs) | Each mechanism was added to solve one problem in isolation, without unifying with what came before |
 
 V1–V3 are the ones this spec's rule (§1) makes structurally illegal going forward. V4 is
 resolved by this spec having exactly one mechanism (§4–§6) rather than three.
@@ -105,14 +105,14 @@ in `helio-core` or `libhelio`.
 
 Four shapes cover every case found in the audit:
 
-1. **Single view** — one `wgpu::TextureView` or `wgpu::Buffer`, tracked and routed by a typed key. Covers the ~45 simple `FrameResources` fields today.
+1. **Single view** — one `wgpu::TextureView` or `wgpu::Buffer`, tracked and routed by a typed key. Covers the ~45 simple `generic transient resource registry` fields today.
 2. **View group** — a fixed-size named bundle of views produced and consumed together. Covers GBuffer (4), HLFS's clip stack (4), foliage terrain (2).
 3. **External input** — a resource no pass in the graph writes; the host supplies it before `execute()`. Covers `billboards`, `vg`, `corona_emitters`, `main_scene`.
 4. **Pipeline recipe** — a format-keyed, executor-cached GPU pipeline (from the dynamic-rendering work already merged; formalized here as a first-class shape rather than a bolt-on).
 
 ---
 
-## 4. The resource registry (replaces `FrameResources`' field list)
+## 4. The resource registry (replaces `generic transient resource registry`' field list)
 
 ### 4.1 `ResourceKey<T>`
 
@@ -147,7 +147,7 @@ No core crate ever writes the string `"billboards"` again.
 
 ### 4.2 `ResourceRegistry`
 
-Replaces `FrameResources` as the type threaded through `PassContext`/`PrepareContext`.
+Replaces `generic transient resource registry` as the type threaded through `PassContext`/`PrepareContext`.
 Keeps every behavior `Tracked<T>` already provides (debug-mode "who wrote this" tracking,
 `was_written()`, panic-on-unwritten-read in debug builds) but through an open map instead of a
 closed struct:
@@ -172,7 +172,7 @@ impl<'a> ResourceRegistry<'a> {
     pub fn was_written<T>(&self, key: ResourceKey<T>) -> bool;
 
     /// Resets debug-tracking markers for the next frame (mirrors
-    /// `FrameResources::reset_tracking`) — generic over every stored slot,
+    /// `generic transient resource registry::reset_tracking`) — generic over every stored slot,
     /// no per-field macro invocation list to maintain.
     pub fn reset_tracking(&mut self, writer: &'static str);
 }
@@ -187,11 +187,11 @@ is no closed field list left to hardcode against.
 
 ### 4.3 Migration shim
 
-`libhelio::FrameResources` is kept for one deprecation window as a thin wrapper generating its
+`libhelio::generic transient resource registry` is kept for one deprecation window as a thin wrapper generating its
 existing fields from a single table (a macro or build-script-generated list, not four
 hand-synced call sites) and internally backed by a `ResourceRegistry`. Existing passes reading
 `ctx.resources.billboards.read(...)` keep compiling unchanged; new passes are written directly
-against `ResourceRegistry` and `ResourceKey`. `FrameResources` is removed once every in-tree pass
+against `ResourceRegistry` and `ResourceKey`. `generic transient resource registry` is removed once every in-tree pass
 has migrated (tracked as its own follow-up, not blocking this spec).
 
 ---
@@ -251,7 +251,7 @@ impl RenderGraph {
 
 **Staging note.** This is deliberately `&'static str`, matching the string-keyed convention
 `ResourceBuilder`/`reads()`/`writes()` already use — Phase 1 ships against today's
-`libhelio::FrameResources`, before `ResourceKey<T>`/`ResourceRegistry` (§4) exist. Once Phase 3
+`libhelio::generic transient resource registry`, before `ResourceKey<T>`/`ResourceRegistry` (§4) exist. Once Phase 3
 lands, `declare_external_input` gains a second, typed overload (or is renamed and this one
 deprecated — implementer's call at that point) that takes a `ResourceKey<T>` directly; the
 string-keyed form is not removed until every caller has migrated, per §4.3's shim policy.
@@ -341,7 +341,7 @@ pass-specific edit outside the pass's own crate to add a new pass.
 | `fn build_gpu_render_bundle(&mut self, device, resources) -> Option<wgpu::RenderBundle>` | Current | Optional (default `None`) | Pre-recorded bundle for passes with zero per-frame CPU work |
 | `fn chain_transparent(&self) -> bool` | Current | Optional (default `false`) | Opts into being bridged across a fused render-pass chain without touching the encoder |
 | `fn execute(&mut self, ctx: &mut PassContext) -> Result<()>` | Current | **Required** (no default) | Records GPU commands. **This signature never changes, in any phase.** |
-| `fn publish<'a>(&'a self, registry: &mut ResourceRegistry<'a>)` | Current (signature updates from `libhelio::FrameResources` to `ResourceRegistry` under §4.3's migration) | Optional (default no-op) | Publishes this pass's outputs for downstream passes to read |
+| `fn publish<'a>(&'a self, registry: &mut ResourceRegistry<'a>)` | Current (signature updates from `libhelio::generic transient resource registry` to `ResourceRegistry` under §4.3's migration) | Optional (default no-op) | Publishes this pass's outputs for downstream passes to read |
 
 ### 8.1 Supporting traits and types (current, unchanged by this spec)
 
@@ -361,7 +361,7 @@ pass-specific edit outside the pass's own crate to add a new pass.
 | `frame_num` | `u64` | Monotonic frame counter |
 | `width`, `height` | `u32` | Internal render resolution |
 | `device` | `&'a wgpu::Device` | For rare in-`execute()` bind-group creation |
-| `resources` | `&'a libhelio::FrameResources<'a>` (→ `&'a ResourceRegistry<'a>` post-§4.3) | Per-frame resource registry |
+| `resources` | `&'a libhelio::generic transient resource registry<'a>` (→ `&'a ResourceRegistry<'a>` post-§4.3) | Per-frame resource registry |
 | `subpass_index`, `subpass_count` | `u32` | Position within a fused render-pass chain |
 | `owns_device` | `bool` | Whether Helio owns the wgpu device |
 | `resource_pool` | `&'a GraphTexturePool` | The executor's texture registry |
@@ -377,7 +377,7 @@ Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>
 ### 8.3 `PrepareContext<'a>` fields (current)
 
 `device: &'a wgpu::Device`, `queue: &'a wgpu::Queue`, `frame_num: u64`, `scene: &'a GpuScene`,
-`frame_resources: &'a libhelio::FrameResources<'a>` (→ `ResourceRegistry`), `resize: bool`
+`transient_resources: &'a libhelio::generic transient resource registry<'a>` (→ `ResourceRegistry`), `resize: bool`
 (one-frame pulse after `set_render_size`), `width: u32`, `height: u32`, `delta_time: f32`.
 
 ### 8.4 `ResourceBuilder` methods (current + proposed)
@@ -402,7 +402,7 @@ Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>
 `iter_passes_mut`, `collect_debug_views`, `set_debug_mode`, `validate_dependencies`,
 `dump_dependency_graph`, `profiler`, `collect_frame_debug_data`, `collect_graph_timeline`,
 `execute`,
-`execute_with_frame_resources`, `lock` — all current, all unchanged by this spec.
+`execute_with_transient_resources`, `lock` — all current, all unchanged by this spec.
 **`declare_external_input` (§6)** is the one addition.
 
 ---
@@ -412,7 +412,7 @@ Plus methods: `active_render_pass_ptr() -> Option<*mut wgpu::RenderPass<'static>
 The rule in §1 is satisfied two ways, and both are required — policy alone has already failed
 once (V1–V3 accreted gradually under a rule that was implicit, not written down):
 
-1. **Structural (primary).** Once `FrameResources`' closed field list is replaced by
+1. **Structural (primary).** Once `generic transient resource registry`' closed field list is replaced by
    `ResourceRegistry` (§4) and the GBuffer-shaped special case is replaced by `write_group`
    (§5), there is no longer a closed enum, struct, or match statement in `helio-core`/`libhelio`
    that a new pass's resource could be added to. "Add a pass" and "edit the core" stop being the
@@ -433,7 +433,7 @@ Reusing the numbering from the prior planning discussion so the two documents tr
 | 0 | Attachment slot resolution + pipeline format cache + resize propagation (§7.1) | **Done** (verified in the audited working tree) |
 | 1 | `declare_external_input`, removes V3/V4's hardcoded list | **Done** — validation uses the graph-owned external-input registry and has contract coverage |
 | 2 | `write_group`, removes V2 (GBuffer's 3-way special case) | **Done** — generic group allocation/routing is covered by the write-group bundle contract |
-| 3 | `ResourceRegistry`, removes V1 (the `FrameResources` field list); `FrameResources` becomes a deprecated shim per §4.3 | **Done** — registry is exposed through `PassContext`/`PrepareContext`, `RenderGraph::execute_with_resources`, and `RenderPass::publish_registry`; legacy passes remain source-compatible during the migration window |
+| 3 | `ResourceRegistry`, removes V1 (the `generic transient resource registry` field list); `generic transient resource registry` becomes a deprecated shim per §4.3 | **Done** — registry is exposed through `PassContext`/`PrepareContext`, `RenderGraph::execute_with_resources`, and `RenderPass::publish_registry`; legacy passes remain source-compatible during the migration window |
 | 4 | `PipelineRecipe` + `declare_pipelines()`, executor-owned pipeline lifecycle (§7.2) | **Done** — pass-local `PipelineHandle` recipes are resolved before execution, cached by `PipelineFormatKey`, and exposed through `PassContext::pipelines`; duplicate handles are rejected |
 | 5 | naga-reflected bind groups + directive-driven fixed-function state (§7.3), starting with compute passes | **Done for the supported shape** — lock-time reflection owns layouts and pipeline layouts; per-frame groups reuse them; resource population/application is automatic; directive-derived fixed-function state is exposed through `PassContext`. Bindless/array bindings, indirect draw semantics, and multi-variant shader authoring remain explicit unsupported cases with acceptance criteria in §11. |
 | 6 | `PassBuildContext`, shrinks `helio-default-graphs`'s per-pass constructor wiring | **Done** — all eight default-graph context entry points satisfy the public `PassGraphBuilderFn` ABI; `cargo test -p helio-default-graphs --test pass_build_context --no-run` passed in the audit. |
@@ -442,7 +442,7 @@ Reusing the numbering from the prior planning discussion so the two documents tr
 Each phase ships and is tested independently; no phase requires any other phase to be in flight
 simultaneously, and every phase preserves every currently-shipped pass unchanged (per §1.3's
 "required = zero core edits" rule applying retroactively to existing passes too — none of them
-are forced to migrate off `FrameResources`/`reads()`/`writes()` on any timeline this spec sets).
+are forced to migrate off `generic transient resource registry`/`reads()`/`writes()` on any timeline this spec sets).
 
 ---
 
@@ -501,7 +501,7 @@ it, once Phases 1–3 are complete:
    from `declare_resources(builder) { builder.read("pre_aa"); builder.write_color("pre_aa", ...); }`.
 2. **If and only if** it's meant to run by default: one new `graph.add_pass(Box::new(VignettePass::new(...)))` line in `helio-default-graphs/src/lib.rs`, at the point in the pass order it belongs.
 
-That's it. No edit to `helio-core`, no edit to `libhelio`, no new `FrameResources` field, no new
+That's it. No edit to `helio-core`, no edit to `libhelio`, no new `generic transient resource registry` field, no new
 `route_named_texture` arm, no new `validate_dependencies` literal — because none of those exist
 in a form a new pass could need to extend. A pass a host application wires up itself, outside
 any default graph, requires change *nowhere in this repository* — it's a new crate, full stop.
@@ -740,7 +740,7 @@ APIs are gone.
 Contrast with `helio-component`, which already has typed, GPU-mirrored, SceneDB-registered
 components for eleven other scene domains (light, static mesh, foliage, water volume, portal,
 reflection capture, post-process volume, planet terrain, LOD, material override, script) — and
-with `MainSceneResources`'s mesh/material buffers, which *are* already correct under §1.2: plain
+with `renderer-owned asset/projection state`'s mesh/material buffers, which *are* already correct under §1.2: plain
 borrowed handles into SceneDB's own `VarLenGpuPool`, not a second copy.
 
 Billboards, corona emitters, and virtual-geometry instance data were the three scene-content

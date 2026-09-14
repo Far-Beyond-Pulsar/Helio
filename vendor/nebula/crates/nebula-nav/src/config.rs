@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::traits::BakeInput;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for navigation mesh baking.
 ///
@@ -53,25 +53,25 @@ pub struct NavConfig {
     pub detail_sample_max_error: f32,
 
     /// Optional world-space AABB to bake.  `None` uses the full scene AABB.
-    pub bake_aabb: Option<([f32;3], [f32;3])>,
+    pub bake_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 impl Default for NavConfig {
     fn default() -> Self {
         Self {
-            agent_radius:          0.4,
-            agent_height:          1.8,
-            max_step_height:       0.4,
-            max_slope_deg:         45.0,
-            cell_size:             0.3,
-            cell_height:           0.2,
-            min_region_area:       8,
-            merge_region_area:     20,
-            max_edge_length:       12.0,
-            max_edge_error:        1.3,
-            detail_sample_dist:    6.0,
+            agent_radius: 0.4,
+            agent_height: 1.8,
+            max_step_height: 0.4,
+            max_slope_deg: 45.0,
+            cell_size: 0.3,
+            cell_height: 0.2,
+            min_region_area: 8,
+            merge_region_area: 20,
+            max_edge_length: 12.0,
+            max_edge_error: 1.3,
+            detail_sample_dist: 6.0,
             detail_sample_max_error: 1.0,
-            bake_aabb:             None,
+            bake_aabb: None,
         }
     }
 }
@@ -79,12 +79,25 @@ impl Default for NavConfig {
 impl NavConfig {
     /// Coarse fast-preview preset.
     pub fn fast() -> Self {
-        Self { cell_size: 1.0, cell_height: 0.5, min_region_area: 4, max_edge_length: 24.0, ..Default::default() }
+        Self {
+            cell_size: 1.0,
+            cell_height: 0.5,
+            min_region_area: 4,
+            max_edge_length: 24.0,
+            ..Default::default()
+        }
     }
 
     /// High-precision production preset.
     pub fn ultra() -> Self {
-        Self { cell_size: 0.15, cell_height: 0.1, min_region_area: 16, max_edge_length: 6.0, max_edge_error: 0.5, ..Default::default() }
+        Self {
+            cell_size: 0.15,
+            cell_height: 0.1,
+            min_region_area: 16,
+            max_edge_length: 6.0,
+            max_edge_error: 0.5,
+            ..Default::default()
+        }
     }
 }
 

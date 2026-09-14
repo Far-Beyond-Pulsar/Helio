@@ -14,7 +14,7 @@ and planetary voxel paths:
   layout text live under `helio-pass-planetary-voxel`.
 
 The frame infrastructure in `libhelio` was intentionally left untouched. Its
-`FrameResources::voxels` slot and `VoxelsFrameData` type are now unused by the
+`generic transient resource registry::voxels` slot and `VoxelsFrameData` type are now unused by the
 renderer and remain only as a required follow-up interface deletion. Removing
 them must be coordinated with any external graph/pass consumers of the frozen
 frame ABI; this migration deliberately does not edit `crates/libhelio`.

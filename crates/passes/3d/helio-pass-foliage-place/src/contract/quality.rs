@@ -213,18 +213,18 @@ mod tests {
     #[test]
     fn low_honours_the_platform_matrix_caps() {
         // Both numbers are stated in the plan's §13 as the mobile storage-limit answer.
-        assert_eq!(FoliageQuality::Low.blade_arena_bytes(), 4 * 1024 * 1024);
+        assert_eq!(FoliageQuality::Low.blade_arena_bytes(), 8 * 1024 * 1024);
         assert_eq!(FoliageQuality::Low.ring_radius(), 48.0);
-        assert_eq!(FoliageQuality::Medium.blade_arena_bytes(), 24 * 1024 * 1024);
+        assert_eq!(FoliageQuality::Medium.blade_arena_bytes(), 64 * 1024 * 1024);
     }
 
     #[test]
     fn blade_capacity_follows_the_sixteen_byte_record() {
         assert_eq!(
             FoliageQuality::Medium.blade_capacity(),
-            24 * 1024 * 1024 / 16
+            64 * 1024 * 1024 / 16
         );
-        assert_eq!(FoliageQuality::Medium.blade_capacity(), 1_572_864);
+        assert_eq!(FoliageQuality::Medium.blade_capacity(), 4_194_304);
         assert!(
             FoliageQuality::Medium.blade_capacity() >= 1_000_000,
             "the reference tier must hold the 1 M blades the perf gate targets"

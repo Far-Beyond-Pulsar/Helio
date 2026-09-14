@@ -34,54 +34,48 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let road_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.11, 0.11, 0.12, 1.0],
-                0.9,
-                0.1,
-                [0.0; 3],
-                0.0,
-            ));
-        let concrete_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.55, 0.55, 0.56, 1.0],
-                0.8,
-                0.0,
-                [0.0; 3],
-                0.0,
-            ));
-        let glass_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.1, 0.12, 0.2, 1.0],
-                0.1,
-                0.9,
-                [0.08, 0.1, 0.15],
-                0.5,
-            ));
-        let lit_window_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.6, 0.55, 0.35, 1.0],
-                0.5,
-                0.0,
-                [0.9, 0.8, 0.5],
-                4.0,
-            ));
-        let street_pole_m = renderer
-            .scene()
-            .insert_material(make_material([0.3, 0.3, 0.3, 1.0], 0.4, 0.4, [0.0; 3], 0.0));
-        let lamp_m = renderer
-            .scene()
-            .insert_material(make_material(
-                [0.9, 0.85, 0.7, 1.0],
-                0.2,
-                0.0,
-                [1.0, 0.95, 0.75],
-                6.0,
-            ));
+        let road_m = renderer.scene().insert_material(make_material(
+            [0.11, 0.11, 0.12, 1.0],
+            0.9,
+            0.1,
+            [0.0; 3],
+            0.0,
+        ));
+        let concrete_m = renderer.scene().insert_material(make_material(
+            [0.55, 0.55, 0.56, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let glass_m = renderer.scene().insert_material(make_material(
+            [0.1, 0.12, 0.2, 1.0],
+            0.1,
+            0.9,
+            [0.08, 0.1, 0.15],
+            0.5,
+        ));
+        let lit_window_m = renderer.scene().insert_material(make_material(
+            [0.6, 0.55, 0.35, 1.0],
+            0.5,
+            0.0,
+            [0.9, 0.8, 0.5],
+            4.0,
+        ));
+        let street_pole_m = renderer.scene().insert_material(make_material(
+            [0.3, 0.3, 0.3, 1.0],
+            0.4,
+            0.4,
+            [0.0; 3],
+            0.0,
+        ));
+        let lamp_m = renderer.scene().insert_material(make_material(
+            [0.9, 0.85, 0.7, 1.0],
+            0.2,
+            0.0,
+            [1.0, 0.95, 0.75],
+            6.0,
+        ));
 
         // City ground plane
         let ground = renderer

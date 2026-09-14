@@ -18,10 +18,13 @@ use egui_winit::State as EguiState;
 use glam::Vec3;
 use microfont::{stamp_text, FHEIGHT};
 mod v3_demo_common;
-use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_controls::{FlyCamera, FlyCameraConfig, WinitFlyInput};
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{cube_mesh, directional_light, insert_object_with_movability, make_material};
+use helio_default_graphs::build_default_graph_external;
+use v3_demo_common::{
+    cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
+};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -1011,73 +1014,40 @@ impl App {
         // Render regular Helio content first. The cloud pass below samples this
         // target, so meshes and future voxel content retain Helio's normal
         // material, lighting, culling, and instancing path.
-        let mut scene_config =
+        let scene_config =
             RendererConfig::new(config.width, config.height, format).with_render_scale(1.0);
-        let scene = Scene::new(device.clone(), queue.clone());
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         // The background is composed in the cloud shader. In particular, do
         // not attach Helio's SkyActor here: its analytic sun disc would show
         // through the authored moon textures as an unwanted white rim.
-        let debug_camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cloud Engine scene debug camera"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cloud Engine scene cull stats"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            scene_config,
-            debug_state.clone(),
-            &debug_camera_buffer,
-            &cull_stats_buffer,
-            None,
-        );
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut scene_renderer = RendererBuilder::new(scene_config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                scene_config.width,
+                scene_config.height,
+                scene_config.surface_format,
+            );
         eprintln!("[CE] default graph built");
-        let mut scene_renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            scene_config.surface_format,
-            scene_config.width,
-            scene_config.height,
-            scene_config.render_scale,
-            scene_config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        );
         // The cloud shader supplies the sky; this target contains only the
         // regular mesh/debug scene to be composited over it.
         scene_renderer.set_clear_color([0.0, 0.0, 0.0, 0.0]);
         eprintln!("[CE] scene renderer configured");
-        let cube_material = scene_renderer
-            .scene()
-            .insert_material(make_material(
+        let cube_material = spawn_material(
+            &mut scene_db.world,
+            make_material(
                 [0.74, 0.80, 0.92, 1.0],
                 0.58,
                 0.0,
                 [0.0, 0.0, 0.0],
                 0.0,
-            ));
-        let cube_mesh = scene_renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh(
-                [0.0, 0.0, 0.0],
-                CUBE_HALF_EXTENT,
-            )))
-            .as_mesh()
-            .expect("Cloud Engine cube mesh");
+            ),
+        );
+        let cube_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], CUBE_HALF_EXTENT));
         let grid_half = (CUBE_GRID_SIZE - 1) as f32 * CUBE_SPACING * 0.5;
         for x in 0..CUBE_GRID_SIZE {
             for z in 0..CUBE_GRID_SIZE {
@@ -1086,8 +1056,8 @@ impl App {
                     CUBE_HALF_EXTENT,
                     z as f32 * CUBE_SPACING - grid_half,
                 ));
-                insert_object_with_movability(
-                    &mut scene_renderer,
+                spawn_object_with_movability(
+                    &mut scene_db.world,
                     cube_mesh,
                     cube_material,
                     transform,
@@ -1100,13 +1070,10 @@ impl App {
         add_world_axes(&mut scene_renderer);
         // Luna is a real directional scene light, independent of the cloud
         // shader's decorative moon, so it will also light later voxel content.
-        scene_renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
-                [0.32, -0.76, 0.57],
-                [0.67, 0.76, 1.0],
-                3.2,
-            )));
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([0.32, -0.76, 0.57], [0.67, 0.76, 1.0], 3.2),
+        );
         let (scene_color_texture, scene_color_view) =
             State::create_scene_color_target(&device, &config);
         let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
