@@ -402,6 +402,19 @@ impl<'a> DebugBatch<'a> {
 }
 
 impl Renderer {
+    /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
+    /// external debug capture (e.g. an example dumping it to a PNG to
+    /// answer "is anything actually being rasterized"). Every other
+    /// render-graph buffer (G-buffer, shadow atlas, etc.) is privately
+    /// owned inside its own pass crate and only reachable as a
+    /// `wgpu::TextureView` via `PassResources` -- no path back to the
+    /// owning `Texture` a GPU readback needs -- so this is deliberately
+    /// the one buffer `Renderer` itself still owns directly, not a general
+    /// "every buffer" debug API.
+    pub fn debug_depth_texture(&self) -> &wgpu::Texture {
+        &self.depth_texture
+    }
+
     pub(crate) fn upload_camera(&mut self, camera: &Camera) {
         let uniforms = helio_core::GpuCameraUniforms::new(
             camera.view,

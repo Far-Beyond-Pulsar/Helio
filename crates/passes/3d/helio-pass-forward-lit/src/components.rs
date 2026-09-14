@@ -25,6 +25,7 @@
 //! dynamic shadow-caster selection; author them with `shadow_index =
 //! u32::MAX` until that system is made SceneDB-aware.
 
+use pulsar_reflection::Reflectable;
 use pulsar_scenedb_derive::SceneStore;
 
 /// Fixed capacity of the `"scene_lights"` buffer. Passes/frontends binding
@@ -41,7 +42,7 @@ pub const MAX_LIGHTS: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGI
 /// identical to [`libhelio::GpuLight`] (enforced by the size/align test
 /// below) so conversion is a zero-cost `bytemuck::cast`, matching
 /// `CoronaEmitterComponent`'s relationship to `GpuCoronaEmitter`.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "scene_lights")]
 pub struct LightComponent {

@@ -1731,8 +1731,10 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "serde_json",
  "wgpu",
 ]
 
@@ -3758,12 +3760,12 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40#bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
  "pulsar_reflection",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40)",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
  "serde",
  "serde_json",
  "socket2",
@@ -3785,6 +3787,16 @@ dependencies = [
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
 source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40#bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pulsar_scenedb_derive"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
 dependencies = [
  "proc-macro2",
  "quote",

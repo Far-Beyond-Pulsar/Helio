@@ -1861,6 +1861,14 @@ impl State {
                 agent.publish(&self.scene_db.world.telemetry_snapshot());
             }
         }
+        // Uploads every row queued since last frame into the GPU-mirrored
+        // buffers the renderer actually reads. Without this, CPU-side
+        // SceneDB writes are authoritative but invisible to the GPU
+        // forever -- a fully black render despite correct scene data. Every
+        // v3_demo_common-based example needs this call once per frame; see
+        // World::flush_gpu_mirror's own doc.
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
+
         let (run_simulation, dt) = self.update();
         let (forward, _, up) = self.camera_basis();
         let scene_camera = Camera::perspective_look_at(
