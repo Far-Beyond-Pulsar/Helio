@@ -2223,6 +2223,7 @@ dependencies = [
  "js-sys",
  "log",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

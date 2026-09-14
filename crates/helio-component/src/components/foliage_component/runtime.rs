@@ -1,5 +1,4 @@
 use engine_class_derive::{register_runtime_behavior, register_world_component};
-use helio::MaterialId;
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, LiveKeySet,
     RuntimeComponentOwner,
@@ -46,7 +45,7 @@ fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::component
         interaction_stiffness: component.wind.interaction_stiffness,
         // Material projections remain a separate scene domain. Slot zero is the
         // stable default until foliage materials receive their own SceneDB column.
-        material_id: MaterialId::from_raw(0, 0).slot(),
+        material_id: 0u32,
         density_layer: component.general.density_layer as u32,
         kind_and_flags: pack_kind_and_flags(FoliageKind::Blade, flags),
         mesh_or_impostor_id: u32::MAX,

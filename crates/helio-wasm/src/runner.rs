@@ -88,6 +88,10 @@ struct RunnerState<T: HelioWasmApp> {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    // Kept alive alongside the renderer: the GPU mirror it hands to
+    // `RendererBuilder` is only a projection of this `World`'s authored rows.
+    #[allow(dead_code)]
+    scene_db: pulsar_scenedb::SceneDb,
     demo: T,
 
     // Input
@@ -397,15 +401,54 @@ async fn init_wgpu<T: HelioWasmApp>(
     let render_scale = T::render_scale();
     let config = RendererConfig::new(width, height, surface_format).with_render_scale(render_scale);
 
-    let mut renderer = helio::RendererBuilder::new(config)
-        .with_graph(Box::new(|d, q, s, cfg, ds, cb, csb| {
-            T::build_graph(d, q, s, cfg, ds.clone(), cb, csb).unwrap_or_else(|| {
-                helio_default_graphs::build_default_graph(d, q, s, cfg, ds, cb, csb, None)
-            })
-        }))
-        .build(device.clone(), queue.clone(), width, height, surface_format);
+    // SceneDB is the sole scene authority: create the frontend-owned World,
+    // attach its GPU mirror, and hand the renderer only the cloneable mirror
+    // handle. `demo` authors rows through `scene_db.world` in `init`.
+    let mut scene_db = pulsar_scenedb::SceneDb::new();
+    let gpu_ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
+    let gpu_cfg = pulsar_scenedb::gpu::SceneGpuConfig {
+        classes: Vec::new(),
+        tombstone_headroom: 0,
+        max_cells_metadata: 0,
+    };
+    let gpu_store = Arc::new(pulsar_scenedb::gpu::SceneGpuStore::new(&gpu_ctx, gpu_cfg));
+    let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
+    scene_db.world.attach_gpu_mirror(mirror);
+    let scene_db_handle = scene_db
+        .world
+        .gpu_mirror()
+        .cloned()
+        .expect("gpu mirror was just attached above");
 
-    let demo = T::init(&mut renderer, device.clone(), queue.clone(), width, height);
+    let mut renderer = {
+        let scene_db_handle = scene_db_handle.clone();
+        helio::RendererBuilder::new(config, scene_db_handle.clone())
+            .with_graph(Box::new(move |d, q, cfg, ds, cam, dcam, csb| {
+                T::build_graph(d, q, cfg, ds.clone(), cam, dcam, csb).unwrap_or_else(|| {
+                    helio_default_graphs::build_default_graph_external(
+                        d,
+                        q,
+                        cam,
+                        cfg,
+                        ds,
+                        dcam,
+                        csb,
+                        None,
+                        scene_db_handle.clone(),
+                    )
+                })
+            }))
+            .build(device.clone(), queue.clone(), width, height, surface_format)
+    };
+
+    let demo = T::init(
+        &mut renderer,
+        &mut scene_db,
+        device.clone(),
+        queue.clone(),
+        width,
+        height,
+    );
 
     let now = now_secs();
     *state_cell.borrow_mut() = Some(RunnerState {
@@ -415,6 +458,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         queue,
         surface_format,
         renderer,
+        scene_db,
         demo,
         keys: HashSet::new(),
         mouse_delta: (0.0, 0.0),
