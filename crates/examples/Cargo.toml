@@ -274,6 +274,7 @@ helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
@@ -281,6 +282,7 @@ helio-default-graphs = { path = "../helio-default-graphs" }
 helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5", features = ["gpu"] }
 rapier3d = "0.24"
 image = { workspace = true, features = ["png"] }

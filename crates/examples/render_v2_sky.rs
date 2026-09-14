@@ -14,12 +14,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
 use v3_demo_common::{
-    box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light,
+    box_mesh, build_default_renderer, cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror,
+    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh,
+    spawn_object, spawn_sky, update_light,
 };
+use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -67,7 +69,8 @@ struct AppState {
     sun_angle: f32,
 
     // Scene state
-    sun_light_id: LightId,
+    scene_db: SceneDb,
+    sun_light_id: pulsar_scenedb::Entity,
 }
 
 impl App {
@@ -152,48 +155,10 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
 
-        let mat = renderer.scene().insert_material(make_material(
+        let mat = spawn_material(&mut scene_db.world, make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -201,60 +166,40 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
-            .as_mesh()
-            .unwrap();
-        let roof = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [4.5, 0.15, 4.5],
-            )))
-            .as_mesh()
-            .unwrap();
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let roof = spawn_mesh(&mut scene_db.world, box_mesh(
+            [0.0, 0.0, 0.0],
+            [4.5, 0.15, 4.5],
+        ));
 
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
             0.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
             0.4,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
         let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+            spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
             roof,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.85, 0.0)),
@@ -266,54 +211,30 @@ impl ApplicationHandler for App {
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
-                init_light_dir,
-                [1.0, 0.85, 0.7],
-                (init_lux * 0.35).max(0.01),
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+        let sun_light_id = spawn_light(&mut scene_db.world, directional_light(
+            init_light_dir,
+            [1.0, 0.85, 0.7],
+            (init_lux * 0.35).max(0.01),
+        ));
+        spawn_light(&mut scene_db.world, point_light(
                 [0.0, 2.5, 0.0],
                 [1.0, 0.85, 0.6],
                 4.0,
                 8.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        spawn_light(&mut scene_db.world, point_light(
                 [-2.5, 2.0, -1.5],
                 [0.4, 0.6, 1.0],
                 3.5,
                 7.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        spawn_light(&mut scene_db.world, point_light(
                 [2.5, 1.8, 1.5],
                 [1.0, 0.3, 0.3],
                 3.0,
                 6.0,
-            )));
-        renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
-
-        renderer.scene().insert_entity(helio::SceneEntity::Sky(
-            helio::SkyActor::new().with_clouds(helio::VolumetricClouds {
-                coverage: 0.7,
-                density: 0.8,
-                base: 1200.0,
-                top: 1800.0,
-                wind_x: 0.8,
-                wind_z: 0.2,
-                speed: 1.3,
-                skylight_intensity: 0.25,
-                infinite_extent: true,
-            }),
-        ));
+            ));
+        spawn_sky(&mut scene_db.world, [0.15, 0.18, 0.25]);
 
         self.state = Some(AppState {
             window,
@@ -322,6 +243,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 2.5, 7.0),
             cam_yaw: 0.0,
@@ -521,7 +443,8 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update dynamic sun light
-        let _ = self.renderer.scene().update_light(
+        update_light(
+            &mut self.scene_db.world,
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );

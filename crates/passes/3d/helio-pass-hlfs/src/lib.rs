@@ -494,7 +494,7 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa"]
+        &["gbuffer", "pre_aa", "render_environment"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
@@ -515,12 +515,10 @@ impl RenderPass for HlfsPass {
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         let camera = *ctx.camera_data;
-        let light_count = ctx
-            .pass_resources
-            .lights
-            .get()
-            .map(|l| l.movable_light_count)
-            .unwrap_or(0);
+        let scene_lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"));
+        let light_count = if scene_lights.is_some() { 256 } else { 0 };
         let continuity = self
             .previous_frame
             .is_some_and(|f| f.wrapping_add(1) == ctx.frame_num);
@@ -538,9 +536,9 @@ impl RenderPass for HlfsPass {
             && self.previous_light_count == Some(light_count)
             && !ctx.resize;
         let mut ambient = [0.03, 0.03, 0.03, self.config.screen_trace_distance];
-        if let Some(scene) = ctx.pass_resources.main_scene.get() {
+        if let Some(environment) = ctx.pass_resources.render_environment.get() {
             for (i, v) in ambient[..3].iter_mut().enumerate() {
-                *v = scene.ambient_color[i] * scene.ambient_intensity;
+                *v = environment.ambient_color[i] * environment.ambient_intensity;
             }
         }
         let g = Globals {
@@ -558,11 +556,7 @@ impl RenderPass for HlfsPass {
                 as u32
                 | (u32::from(
                     self.previous_light_generation
-                        == ctx
-                            .pass_resources
-                            .lights
-                            .get()
-                            .map(|l| l.movable_lights_generation),
+                        == scene_lights.map(|l| l.epoch),
                 ) << 1),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
@@ -577,10 +571,9 @@ impl RenderPass for HlfsPass {
         self.previous_frame = Some(ctx.frame_num);
         self.previous_light_count = Some(light_count);
         self.previous_light_generation = ctx
-            .pass_resources
-            .lights
-            .get()
-            .map(|l| l.movable_lights_generation);
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|l| l.epoch);
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
@@ -593,10 +586,9 @@ impl RenderPass for HlfsPass {
             })?;
         let f = &self.fallbacks;
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
             .resources

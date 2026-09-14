@@ -9,13 +9,17 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light};
+use pulsar_scenedb::{Entity, SceneDb, World};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -96,7 +100,8 @@ struct AppState {
     last_frame: std::time::Instant,
     frame_count: u64,
 
-    light_ids: Vec<LightId>,
+    scene_db: SceneDb,
+    light_ids: Vec<Entity>,
     base_lights: Vec<([f32; 3], [f32; 3], f32, f32)>,
 
     cam_pos: glam::Vec3,
@@ -180,64 +185,31 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
 
         // Materials
-        let mat_floor = renderer.scene().insert_material(make_material(
+        let mat_floor = spawn_material(&mut scene_db.world, make_material(
             [0.55, 0.52, 0.45, 1.0],
             0.85,
             0.00,
             [0.0; 3],
             0.0,
         ));
-        let mat_pillar = renderer.scene().insert_material(make_material(
+        let mat_pillar = spawn_material(&mut scene_db.world, make_material(
             [0.60, 0.60, 0.62, 1.0],
             0.50,
             0.30,
             [0.0; 3],
             0.0,
         ));
-        let mat_crate = renderer.scene().insert_material(make_material(
+        let mat_crate = spawn_material(&mut scene_db.world, make_material(
             [0.50, 0.38, 0.25, 1.0],
             0.70,
             0.00,
@@ -245,17 +217,10 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = r
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [hx, hy, hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                r,
+        let add = |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+            let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+            let _ = spawn_object(
+                w,
                 m,
                 mat,
                 glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
@@ -263,12 +228,12 @@ impl ApplicationHandler for App {
             );
         };
 
-        add(&mut renderer, 0.0, -0.05, 0.0, 20.0, 0.05, 20.0, mat_floor);
+        add(&mut scene_db.world, 0.0, -0.05, 0.0, 20.0, 0.05, 20.0, mat_floor);
 
         for ix in -2..=3_i32 {
             for iz in -2..=3_i32 {
                 add(
-                    &mut renderer,
+                    &mut scene_db.world,
                     ix as f32 * 4.0,
                     2.0,
                     iz as f32 * 4.0,
@@ -298,20 +263,14 @@ impl ApplicationHandler for App {
             ([6.0, 0.3, 17.0], 0.25),
             ([-6.0, 0.3, -17.0], 0.25),
         ] {
-            add(&mut renderer, pos[0], pos[1], pos[2], hs, hs, hs, mat_crate);
+            add(&mut scene_db.world, pos[0], pos[1], pos[2], hs, hs, hs, mat_crate);
         }
 
         let base_lights = build_light_params();
-        let light_ids: Vec<LightId> = base_lights
+        let light_ids: Vec<Entity> = base_lights
             .iter()
             .map(|&(pos, col, intensity, range)| {
-                renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::light(point_light(
-                        pos, col, intensity, range,
-                    )))
-                    .as_light()
-                    .unwrap()
+                spawn_light(&mut scene_db.world, point_light(pos, col, intensity, range))
             })
             .collect();
 
@@ -324,6 +283,7 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             frame_count: 0,
+            scene_db,
             light_ids,
             base_lights,
             cam_pos: glam::Vec3::new(0.0, 4.0, 22.0),
@@ -593,10 +553,11 @@ impl AppState {
         let multiplier = self.light_intensity_multiplier * time_fade;
         for (i, &id) in self.light_ids.iter().enumerate() {
             let (pos, col, intensity, range) = self.base_lights[i];
-            let _ = self
-                .renderer
-                .scene()
-                .update_light(id, point_light(pos, col, intensity * multiplier, range));
+            update_light(
+                &mut self.scene_db.world,
+                id,
+                point_light(pos, col, intensity * multiplier, range),
+            );
         }
 
         let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;

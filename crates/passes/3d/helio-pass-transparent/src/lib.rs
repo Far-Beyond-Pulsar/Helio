@@ -230,7 +230,6 @@ impl RenderPass for TransparentPass {
 
     fn reads(&self) -> &'static [&'static str] {
         &[
-            "main_scene",
             "depth",
             "cluster_light_grid",
             "object_batch",
@@ -254,15 +253,7 @@ impl RenderPass for TransparentPass {
         // actual light count today -- see `ForwardLitPass`'s identical
         // `light_mode_direct_index` doc for the full reasoning.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let light_count = if use_direct_index {
-            MAX_LIGHTS
-        } else {
-            ctx.pass_resources
-                .lights
-                .get()
-                .map(|l| l.movable_light_count)
-                .unwrap_or(0)
-        };
+        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
         ctx.queue.write_buffer(
             &self.globals_buf,
             0,
@@ -339,10 +330,6 @@ impl RenderPass for TransparentPass {
             return Ok(());
         }
 
-        let main_scene = ctx.resources.main_scene.read("Transparent");
-        let ms = main_scene.as_ref().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
-        })?;
         let Some(vertices_handle) = ctx
             .scene_buffers
             .get(BufferKey::of("builtin_mesh_vertex"))
@@ -359,31 +346,24 @@ impl RenderPass for TransparentPass {
         let indices = &indices_handle.buffer;
 
         // Rebuild bind group 1 (lights + transforms + cluster data) when
-        // buffer pointers change. Prefer the SceneDB-direct `"scene_lights"`
-        // buffer when populated; else `ctx.scene.lights` -- production's
-        // real, actively-populated light source (see `ForwardLitPass`'s
-        // identical `light_mode_direct_index` doc).
+        // buffer pointers change. Lights are always read from the SceneDB
+        // component buffer; the camera buffer is a valid binding fallback
+        // when no light component has been authored yet.
         let cluster = ctx.resources.cluster_light_grid.get();
-        let lights_data = ctx.resources.lights.get();
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(batch.instances));
+            .unwrap_or(batch.instances);
         let lights_ptr = lights_buf as *const _ as usize;
-        let light_entity_indices_ptr = lights_data
-            .map(|l| l.light_entity_indices as *const _ as usize)
-            .unwrap_or(0);
+        let light_entity_indices_ptr = 0;
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
         let tile_counts_ptr = cluster
             .map(|c| c.tile_light_counts as *const _ as usize)
             .unwrap_or(0);
-        let transforms_ptr = lights_data
-            .and_then(|l| l.transforms)
-            .map(|b| b as *const _ as usize)
-            .unwrap_or(0);
+        let transforms_ptr = 0;
         let bg1_key = (
             lights_ptr,
             light_entity_indices_ptr,
@@ -399,10 +379,8 @@ impl RenderPass for TransparentPass {
             // yet, so this fallback is never actually dereferenced at a live
             // light's index in practice -- same reasoning as
             // `helio_pass_forward_lit`'s identical fallback.
-            let transforms = lights_data.and_then(|l| l.transforms).unwrap_or(fallback);
-            let light_entity_indices_buf = lights_data
-                .map(|l| l.light_entity_indices)
-                .unwrap_or(fallback);
+            let transforms = fallback;
+            let light_entity_indices_buf = fallback;
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,

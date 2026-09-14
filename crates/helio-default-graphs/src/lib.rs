@@ -100,7 +100,8 @@ fn new_graph(
 /// relies on the host `Renderer` to supply directly into `PassResources`
 /// every frame, rather than any pass in the graph writing them — see
 /// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
-/// §6. `"main_scene"` is read by nearly every geometry/lighting pass;
+/// §6. `"material_textures"` and `"render_environment"` are read by the
+/// geometry/lighting passes that need those backend values;
 /// `"vg"` is read only by `VirtualGeometryPass` (`add_geometry_passes`/
 /// `add_forward_geometry_passes`); `"billboards"`/`"corona_emitters"` are
 /// read only by `BillboardPass`/`CoronaPass` (`add_late_passes`). Every
@@ -108,7 +109,8 @@ fn new_graph(
 /// all four names; `build_simple_graph` uses none of this and is the one
 /// entry point that legitimately calls none of these.
 fn declare_common_external_inputs(graph: &mut RenderGraph) {
-    graph.declare_external_input("main_scene");
+    graph.declare_external_input("material_textures");
+    graph.declare_external_input("render_environment");
     graph.declare_external_input("vg");
     graph.declare_external_input("billboards");
     graph.declare_external_input("corona_emitters");

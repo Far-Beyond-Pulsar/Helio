@@ -20,15 +20,18 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, insert_object, insert_object_with_movability, make_material, point_light, sphere_mesh,
+    box_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, update_object_transform,
 };
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, MaterialId, MeshId, ObjectId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
 use salva3d::{
     kernel::CubicSplineKernel,
     object::{Boundary, Fluid},
@@ -48,7 +51,7 @@ use winit::{
 };
 
 struct FluidParticle {
-    id: ObjectId,
+    id: Entity,
 }
 
 // Direct shared state (no message passing!)
@@ -155,10 +158,11 @@ struct AppState {
     particle_radius: f32,
     fluid_density: f32,
 
+    scene_db: SceneDb,
     fluid_particles: Vec<FluidParticle>,
     pending_spawn_count: usize,
-    water_material: MaterialId,
-    sphere_mesh: MeshId,
+    water_material: Entity,
+    sphere_mesh: Entity,
 
     spawn_timer: f32,
     spawn_interval: f32,
@@ -456,91 +460,46 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.08, 0.08, 0.1], 1.0);
 
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [15.0, 25.0, 15.0],
-                [0.9, 0.9, 0.85],
-                20.0,
-                80.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [-15.0, 20.0, -10.0],
-                [0.7, 0.8, 1.0],
-                15.0,
-                70.0,
-            )))
-            .as_light()
-            .unwrap();
+        spawn_light(
+            &mut scene_db.world,
+            point_light([15.0, 25.0, 15.0], [0.9, 0.9, 0.85], 20.0, 80.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-15.0, 20.0, -10.0], [0.7, 0.8, 1.0], 15.0, 70.0),
+        );
 
-        let floor_mat = renderer.scene().insert_material(make_material(
+        let floor_mat = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.3, 0.35, 1.0],
             0.8,
             0.05,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let wall_mat = renderer.scene().insert_material(make_material(
+        let wall_mat = spawn_material(&mut scene_db.world, make_material(
             [0.35, 0.3, 0.28, 1.0],
             0.7,
             0.02,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let water_material = renderer.scene().insert_material(make_material(
+        let water_material = spawn_material(&mut scene_db.world, make_material(
             [0.15, 0.4, 0.75, 0.85],
             0.1,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let faucet_mat = renderer.scene().insert_material(make_material(
+        let faucet_mat = spawn_material(&mut scene_db.world, make_material(
             [0.6, 0.6, 0.65, 1.0],
             0.3,
             0.6,
@@ -548,11 +507,7 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let sphere_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
-            .as_mesh()
-            .unwrap();
+        let sphere_mesh = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 1.0));
 
         let particle_radius = 0.2;
         let fluid_density = 1000.0;
@@ -576,16 +531,9 @@ impl ApplicationHandler for App {
         let wall_thickness = 0.5;
 
         // Render container floor
-        let floor_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [20.0, 0.5, 20.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [20.0, 0.5, 20.0]));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor_mesh,
             floor_mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
@@ -596,16 +544,12 @@ impl ApplicationHandler for App {
         let wall_thickness = 0.5;
 
         // Right wall
-        let wall_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [wall_thickness * 0.5, wall_height * 0.5, container_size],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let wall_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_mesh,
             wall_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -617,16 +561,12 @@ impl ApplicationHandler for App {
         );
 
         // Left wall
-        let wall_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [wall_thickness * 0.5, wall_height * 0.5, container_size],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let wall_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_mesh,
             wall_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -638,16 +578,12 @@ impl ApplicationHandler for App {
         );
 
         // Back wall
-        let wall_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [container_size, wall_height * 0.5, wall_thickness * 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let wall_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_mesh,
             wall_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -659,16 +595,12 @@ impl ApplicationHandler for App {
         );
 
         // Front wall
-        let wall_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [container_size, wall_height * 0.5, wall_thickness * 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let wall_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_mesh,
             wall_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -680,16 +612,9 @@ impl ApplicationHandler for App {
         );
 
         // Render simple faucet indicator
-        let faucet_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.5, 0.5, 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let faucet_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]));
+        let _ = spawn_object(
+            &mut scene_db.world,
             faucet_mesh,
             faucet_mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.0, 0.0)),
@@ -715,6 +640,7 @@ impl ApplicationHandler for App {
             physics_state,
             particle_radius,
             fluid_density,
+            scene_db,
             fluid_particles: Vec::new(),
             pending_spawn_count: 0,
             water_material,
@@ -884,7 +810,7 @@ impl AppState {
 
         // Clear all fluid particles
         for particle in self.fluid_particles.drain(..) {
-            let _ = self.renderer.scene().remove_object(particle.id);
+            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, particle.id);
         }
 
         // Request reset (direct state access)
@@ -988,8 +914,8 @@ impl AppState {
         let initial_visual_count = self.fluid_particles.len();
         while self.fluid_particles.len() < physics_particle_count {
             let transform = glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let obj = insert_object_with_movability(
-                &mut self.renderer,
+            let obj = spawn_object_with_movability(
+                &mut self.scene_db.world,
                 self.sphere_mesh,
                 self.water_material,
                 transform,
@@ -1026,10 +952,12 @@ impl AppState {
 
             let transform = glam::Mat4::from_translation(glam::Vec3::new(pos.x, pos.y, pos.z))
                 * glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let _ = self
-                .renderer
-                .scene()
-                .update_object_transform(self.fluid_particles[i].id, transform);
+            let _ = update_object_transform(
+                &mut self.scene_db.world,
+                &mut self.renderer,
+                self.fluid_particles[i].id,
+                transform,
+            );
         }
 
         if self.frame_count % 60 == 0 {

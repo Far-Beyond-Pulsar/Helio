@@ -344,6 +344,34 @@ impl Renderer {
         let baked_pvs = None;
 
         let mut pass_resources = libhelio::PassResources::empty();
+        let material_texture_views = vec![
+            &self.material_bindings.fallback_view;
+            self.material_bindings.texture_count
+        ];
+        let material_samplers = vec![
+            &self.material_bindings.fallback_sampler;
+            self.material_bindings.texture_count
+        ];
+        pass_resources.material_textures.write(
+            libhelio::MaterialTextureBindings {
+                material_textures: &self.material_bindings.material_textures,
+                texture_views: &material_texture_views,
+                samplers: &material_samplers,
+                version: self.material_bindings.version,
+            },
+            "Renderer",
+        );
+        pass_resources.render_environment.write(
+            libhelio::RenderEnvironment {
+                clear_color: self.clear_color,
+                ambient_color: self.ambient_color,
+                ambient_intensity: self.ambient_intensity,
+                rc_world_min: [-100.0; 3],
+                rc_world_max: [100.0; 3],
+                tlas: None,
+            },
+            "Renderer",
+        );
         // Phase 3 registry. Legacy passes continue to consume
         // `pass_resources`; new passes receive this open typed registry via
         // `PassContext::registry` / `PrepareContext::registry`.

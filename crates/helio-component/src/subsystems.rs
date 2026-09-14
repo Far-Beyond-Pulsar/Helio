@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use helio::{MaterialId, MeshId, MeshUpload};
+use helio::MeshUpload;
 
 /// SceneDB writes a component's `sync_component` wants to make, queued
 /// instead of applied inline.
@@ -44,30 +44,6 @@ impl PendingWorldWrites {
         for write in self.writes.drain(..) {
             write(world);
         }
-    }
-}
-
-/// Cache of GPU-uploaded mesh geometry, keyed by the resolved asset path.
-///
-/// Registered as a subsystem by both the game loader and editor contexts.
-/// Components check this cache before loading and uploading mesh files.
-pub struct MeshCache {
-    pub upload_cache: HashMap<String, (MeshId, MaterialId)>,
-}
-
-impl MeshCache {
-    pub fn new() -> Self {
-        Self {
-            upload_cache: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, key: &str) -> Option<(MeshId, MaterialId)> {
-        self.upload_cache.get(key).copied()
-    }
-
-    pub fn insert(&mut self, key: String, ids: (MeshId, MaterialId)) {
-        self.upload_cache.insert(key, ids);
     }
 }
 

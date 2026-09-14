@@ -17,10 +17,14 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity,
+    LightType, RenderGraph, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+
+#[path = "../v3_demo_common.rs"]
+mod v3_demo_common;
+use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, spawn_light};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -260,27 +264,13 @@ impl ApplicationHandler for App {
         // full-res color attachment, so pin it to 1.0.
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let mut scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
 
-        // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
-        // directly (see voxel_raymarch.wgsl), the same infrastructure the default
-        // render graphs feed their deferred lighting pass with.
-        scene.insert_entity(SceneEntity::light(GpuLight {
+        // Real scene lighting — VoxelRayMarchPass sums the SceneDB
+        // `"scene_lights"` buffer directly (see voxel_raymarch.wgsl), the same
+        // infrastructure the default render graphs feed their deferred
+        // lighting pass with.
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        spawn_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [0.35, -0.8, 0.25, 0.0],
             color_intensity: [1.0, 0.95, 0.85, 3.0],
@@ -289,8 +279,8 @@ impl ApplicationHandler for App {
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        }));
-        scene.insert_entity(SceneEntity::light(GpuLight {
+        });
+        spawn_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [-0.4, -0.2, -0.6, 0.0],
             color_intensity: [0.5, 0.6, 0.8, 0.6],
@@ -299,7 +289,7 @@ impl ApplicationHandler for App {
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        }));
+        });
 
         // Procedurally generate the world on the CPU; baked into VoxelMeshPass's
         // buffers and mark_dirty()'d below, once the pass exists.
@@ -313,29 +303,15 @@ impl ApplicationHandler for App {
         // PostProcessPass would instead clear+rewrite the target straight from
         // "pre_aa" and discard FXAA's result if chained after it, see how
         // build_fxaa_graph_internal in helio-default-graphs composes them).
-        let mut graph = RenderGraph::new(&device, &queue);
-        graph.add_pass(Box::new(VoxelMeshPass::new(
-            &device,
-            &queue,
-            surface_format,
-        )));
-        graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
-        graph.lock(size.width, size.height);
-
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
+                let mut graph = RenderGraph::new(d, q);
+                graph.add_pass(Box::new(VoxelMeshPass::new(d, q, surface_format)));
+                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
+                graph.lock(graph_config.width, graph_config.height);
+                graph
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
         // Renderer applies TAA-style subpixel camera jitter every frame
         // unconditionally; without a TaaPass to resolve it (we only have
         // FXAA, which is spatial-only), that jitter just makes the image

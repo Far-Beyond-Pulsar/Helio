@@ -31,8 +31,9 @@ use bytemuck::{Pod, Zeroable};
 
 pub mod components;
 pub use components::{
-    MaterialComponent, RenderGroupComponent, RenderGroupSceneBinding, SectionedObjectComponent,
-    SectionedObjectSceneBinding, StaticObjectComponent, SublevelComponent, SublevelSceneBinding,
+    MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
+    SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
+    SublevelComponent, SublevelSceneBinding,
 };
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
@@ -420,25 +421,25 @@ impl RenderPass for GBufferPass {
         // Read per-scene values from pass_resources so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref ms) = ctx.pass_resources.main_scene.get().as_ref() {
+            if let Some(ref environment) = ctx.pass_resources.render_environment.get().as_ref() {
                 (
                     [
-                        ms.ambient_color[0],
-                        ms.ambient_color[1],
-                        ms.ambient_color[2],
+                        environment.ambient_color[0],
+                        environment.ambient_color[1],
+                        environment.ambient_color[2],
                         1.0,
                     ],
-                    ms.ambient_intensity,
+                    environment.ambient_intensity,
                     [
-                        ms.rc_world_min[0],
-                        ms.rc_world_min[1],
-                        ms.rc_world_min[2],
+                        environment.rc_world_min[0],
+                        environment.rc_world_min[1],
+                        environment.rc_world_min[2],
                         0.0,
                     ],
                     [
-                        ms.rc_world_max[0],
-                        ms.rc_world_max[1],
-                        ms.rc_world_max[2],
+                        environment.rc_world_max[0],
+                        environment.rc_world_max[1],
+                        environment.rc_world_max[2],
                         0.0,
                     ],
                 )
@@ -451,12 +452,14 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx
-                .pass_resources
-                .lights
-                .get()
-                .map(|l| l.light_count)
-                .unwrap_or(0),
+            light_count: if ctx
+                .scene_buffers
+                .contains(pulsar_scenedb::gpu::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             ambient_intensity,
             ambient_color,
             rc_world_min,
@@ -482,7 +485,7 @@ impl RenderPass for GBufferPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(main_scene) = ctx.resources.main_scene.read("GBuffer") else {
+        let Some(material_textures) = ctx.resources.material_textures.read("GBuffer") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -568,7 +571,7 @@ impl RenderPass for GBufferPass {
 
         // Rebuild bind group 1 when material textures version changes.
         let needs_rebuild = self.bind_group_1_version != Some(
-            main_scene.material_textures.version ^ materials_epoch,
+            material_textures.version ^ materials_epoch,
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -580,24 +583,21 @@ impl RenderPass for GBufferPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
         }
 
         let indirect = culled.indirect;
@@ -678,7 +678,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "object_batch", "culled_batch"]
+        &["material_textures", "render_environment", "object_batch", "culled_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

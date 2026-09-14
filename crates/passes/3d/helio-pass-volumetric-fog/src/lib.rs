@@ -388,12 +388,14 @@ impl RenderPass for VolumetricFogPass {
 
         let globals = FogGlobals {
             csm_splits: libhelio::CSM_SPLITS,
-            light_count: ctx
-                .pass_resources
-                .lights
-                .get()
-                .map(|l| l.light_count)
-                .unwrap_or(0),
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
@@ -413,10 +415,9 @@ impl RenderPass for VolumetricFogPass {
 
         let camera_buf = ctx.camera;
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices = ctx
             .resources

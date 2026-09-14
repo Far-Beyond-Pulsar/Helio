@@ -15,9 +15,12 @@
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, RenderGraph, Renderer, RendererConfig, Scene,
+    RenderGraph, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_fxaa::FxaaPass;
+
+mod v3_demo_common;
+use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle};
 use helio_pass_planetary_voxel::{
     EvictOutcome, PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey,
     PlanetPosition, SourceGeneration, VisibilityOutcome, VisiblePage, VisiblePageSet,
@@ -1463,48 +1466,24 @@ impl ApplicationHandler for App {
 
         let renderer_config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Planet Demo Debug Camera"),
-            size: core::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Planet Demo Cull Stats"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let planet_config = if self.auto_benchmark {
             PlanetaryVoxelRenderConfig::benchmark_demo()
         } else {
             PlanetaryVoxelRenderConfig::horizon_demo()
         };
-        let planet_pass =
-            PlanetaryVoxelRenderPass::new(&device, &queue, surface_format, planet_config)
-                .expect("bounded planetary render pass");
-        let mut graph = RenderGraph::new(&device, &queue);
-        graph.add_pass(Box::new(planet_pass));
-        graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
-        graph.lock(size.width, size.height);
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            renderer_config.surface_format,
-            renderer_config.width,
-            renderer_config.height,
-            renderer_config.render_scale,
-            renderer_config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        );
+        let mut renderer = RendererBuilder::new(renderer_config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, _config, _debug_state, _cb, _dcb, _csb| {
+                let planet_pass =
+                    PlanetaryVoxelRenderPass::new(d, q, surface_format, planet_config)
+                        .expect("bounded planetary render pass");
+                let mut graph = RenderGraph::new(d, q);
+                graph.add_pass(Box::new(planet_pass));
+                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
+                graph.lock(size.width, size.height);
+                graph
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
         renderer.set_jitter_enabled(false);
 
         let planet = PlanetId(*b"HELIO-EARTH-DEMO");

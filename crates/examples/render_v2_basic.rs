@@ -13,10 +13,10 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_with_context;
-use pulsar_scenedb::{SceneDb, World};
+use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_light, spawn_object,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
 };
 
 use winit::{
@@ -180,7 +180,7 @@ impl ApplicationHandler for App {
                 surface_format,
             );
 
-        let mat = renderer.create_material_projection(make_material(
+        let mat = spawn_material(&mut scene_db.world, make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -188,14 +188,13 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.5));
-        let cube2 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.4));
-        let cube3 = renderer.create_mesh_asset(cube_mesh([0.0, 0.0, 0.0], 0.3));
-        let ground = renderer.create_mesh_asset(plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 5.0));
 
         let _ = spawn_object(
             &mut scene_db.world,
-            &mut renderer,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
@@ -203,7 +202,6 @@ impl ApplicationHandler for App {
         );
         let _ = spawn_object(
             &mut scene_db.world,
-            &mut renderer,
             cube2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
@@ -211,7 +209,6 @@ impl ApplicationHandler for App {
         );
         let _ = spawn_object(
             &mut scene_db.world,
-            &mut renderer,
             cube3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
@@ -219,7 +216,6 @@ impl ApplicationHandler for App {
         );
         let _ = spawn_object(
             &mut scene_db.world,
-            &mut renderer,
             ground,
             mat,
             glam::Mat4::IDENTITY,

@@ -770,7 +770,7 @@ impl RenderPass for FoliagePlacePass {
     /// graph containing this pass fail to build. Add it in the same change that adds the
     /// producer.
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "main_scene"]
+        &["hiz"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

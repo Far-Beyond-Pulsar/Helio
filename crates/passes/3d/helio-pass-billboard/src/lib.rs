@@ -459,7 +459,6 @@ impl RenderPass for BillboardPass {
             "full_res_depth",
             "billboards",
             "depth",
-            "main_scene",
         ]
     }
 

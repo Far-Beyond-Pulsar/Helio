@@ -29,11 +29,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
-    SceneEntity,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, point_light, sphere_mesh};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb, World};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -104,6 +107,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: Vec3,
@@ -114,7 +118,7 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     _portal_pairs: Vec<helio::PortalPair>,
-    _light_ids: Vec<LightId>,
+    _light_ids: Vec<Entity>,
 
     /// Debug-only: when `ROOMS_SCREENSHOT` is set, counts frames so a single
     /// PNG can be captured after the scene has settled, then the process exits.
@@ -197,83 +201,43 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
         // Two shared unit meshes (half-extent/radius 1) — every side room's
         // shell panel, piece of furniture, and accent prop in this scene is
         // one of these two, scaled/positioned per instance via its own
         // transform (see `insert_room_shell`/`furnish_room` below). The hub
         // itself has no geometry — see the module doc.
-        let unit_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [1.0, 1.0, 1.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let unit_sphere = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
-            .as_mesh()
-            .unwrap();
+        let unit_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+        let unit_sphere = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 1.0));
 
         // Shared furniture materials, reused across every room so the six
         // spaces read as built from the same "kit" — only each room's own
         // wall/accent colors (below) tell them apart.
-        let wood_mat = renderer.scene().insert_material(make_material(
-            [0.32, 0.2, 0.11, 1.0],
-            0.75,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let metal_mat = renderer.scene().insert_material(make_material(
-            [0.5, 0.51, 0.54, 1.0],
-            0.4,
-            0.6,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let wood_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.32, 0.2, 0.11, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let metal_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.5, 0.51, 0.54, 1.0], 0.4, 0.6, [0.0, 0.0, 0.0], 0.0),
+        );
 
         // ── The hub: one full-face portal per axis direction, no wall, no
         // doorway cutout, no frame. `up_hint` just needs to not be parallel
@@ -366,26 +330,26 @@ impl ApplicationHandler for App {
             // position has nothing to do with `normal` at all; only the
             // *portal* (`a`, below) needs to know which cube face it's on.
             let room_center = Vec3::new(ROOM_LINE_START_X + i as f32 * ROOM_LINE_SPACING, 0.0, 0.0);
-            let room_wall_mat = renderer.scene().insert_material(make_material(
-                theme.wall_color,
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-            let room_accent_mat = renderer.scene().insert_material(make_material(
-                [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
-                0.3,
-                0.0,
-                theme.accent,
-                3.0,
-            ));
+            let room_wall_mat = spawn_material(
+                &mut scene_db.world,
+                make_material(theme.wall_color, 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
+            );
+            let room_accent_mat = spawn_material(
+                &mut scene_db.world,
+                make_material(
+                    [theme.accent[0], theme.accent[1], theme.accent[2], 1.0],
+                    0.3,
+                    0.0,
+                    theme.accent,
+                    3.0,
+                ),
+            );
             // Leave the entrance wall (`-ROOM_FORWARD`) open — that's the
             // room's real entrance, the same real surface the portal's far
             // pose sits at, so there's real geometry (floor, ceiling, far
             // wall, side walls) waiting right where the doorway leads.
             insert_room_shell(
-                &mut renderer,
+                &mut scene_db.world,
                 unit_mesh,
                 room_wall_mat,
                 room_center,
@@ -405,7 +369,7 @@ impl ApplicationHandler for App {
                 half_size: ROOM_HALF_SIZE,
             };
             furnish_room(
-                &mut renderer,
+                &mut scene_db.world,
                 unit_mesh,
                 unit_sphere,
                 wood_mat,
@@ -415,18 +379,10 @@ impl ApplicationHandler for App {
                 theme.name,
                 &frame,
             );
-            light_ids.push(
-                renderer
-                    .scene()
-                    .insert_entity(SceneEntity::light(point_light(
-                        room_center.into(),
-                        theme.accent,
-                        3.5,
-                        ROOM_HALF_SIZE * 1.8,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light(room_center.into(), theme.accent, 3.5, ROOM_HALF_SIZE * 1.8),
+            ));
             log::info!(
                 "[portal_rooms] {} room centered at {:?}",
                 theme.name,
@@ -458,18 +414,15 @@ impl ApplicationHandler for App {
         }
 
         // ── A light near the hub's center so its own walls read clearly.
-        light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(SceneEntity::light(point_light(
-                    [0.0, HUB_HALF_SIZE * 0.85, 0.0],
-                    [1.0, 0.98, 0.92],
-                    4.0,
-                    HUB_HALF_SIZE * 1.8,
-                )))
-                .as_light()
-                .unwrap(),
-        );
+        light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light(
+                [0.0, HUB_HALF_SIZE * 0.85, 0.0],
+                [1.0, 0.98, 0.92],
+                4.0,
+                HUB_HALF_SIZE * 1.8,
+            ),
+        ));
 
         // Deferred lighting shades every pixel — including portal
         // duplicates — by real distance to the scene's real lights. Each
@@ -492,6 +445,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             // Off the centerline of every doorway, near a corner, so
             // several different faces are all in view — and none of them is
@@ -745,9 +699,9 @@ impl AppState {
 /// `half_extent` and moved to `center`) — the shared building block for
 /// every side room's shell walls plus its floating accent prop.
 fn insert_box_panel(
-    renderer: &mut Renderer,
-    unit_mesh: helio::MeshId,
-    material: helio::MaterialId,
+    world: &mut World,
+    unit_mesh: Entity,
+    material: Entity,
     center: Vec3,
     half_extent: Vec3,
 ) {
@@ -758,21 +712,7 @@ fn insert_box_panel(
         center.extend(1.0),
     );
     let radius = half_extent.length();
-    let _ = renderer
-        .scene()
-        .insert_entity(SceneEntity::object(ObjectDescriptor {
-            mesh: unit_mesh,
-            material,
-            transform,
-            bounds: [center.x, center.y, center.z, radius],
-            // Not ALWAYS_VISIBLE for the same reason as `insert_wall_face`: this
-            // content is only ever seen mapped through the portal that pairs
-            // with this room, and the cull pass needs to actually test it.
-            flags: 0,
-            groups: GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+    let _ = spawn_object(world, unit_mesh, material, transform, radius);
 }
 
 /// Inserts a side room's shell: a `half_size`-cube built from 6 axis-aligned
@@ -785,9 +725,9 @@ fn insert_box_panel(
 /// here since — unlike `portal_cube` — nothing needs to recurse back out of
 /// these terminal, single-destination rooms.
 fn insert_room_shell(
-    renderer: &mut Renderer,
-    unit_mesh: helio::MeshId,
-    wall_mat: helio::MaterialId,
+    world: &mut World,
+    unit_mesh: Entity,
+    wall_mat: Entity,
     center: Vec3,
     half_size: f32,
     wall_t: f32,
@@ -806,7 +746,7 @@ fn insert_room_shell(
             continue;
         }
         insert_box_panel(
-            renderer,
+            world,
             unit_mesh,
             wall_mat,
             center + dir * half_size,
@@ -857,9 +797,9 @@ impl RoomFrame {
 /// `(rx, height, depth)`) in `frame`'s local coordinates. See `RoomFrame`.
 #[allow(clippy::too_many_arguments)]
 fn place(
-    renderer: &mut Renderer,
-    mesh: helio::MeshId,
-    material: helio::MaterialId,
+    world: &mut World,
+    mesh: Entity,
+    material: Entity,
     frame: &RoomFrame,
     rx: f32,
     height: f32,
@@ -869,7 +809,7 @@ fn place(
     hn: f32,
 ) {
     insert_box_panel(
-        renderer,
+        world,
         mesh,
         material,
         frame.point(rx, height, depth),
@@ -888,88 +828,88 @@ fn place(
 /// portal actually points along.
 #[allow(clippy::too_many_arguments)]
 fn furnish_room(
-    renderer: &mut Renderer,
-    unit_mesh: helio::MeshId,
-    unit_sphere: helio::MeshId,
-    wood_mat: helio::MaterialId,
-    metal_mat: helio::MaterialId,
-    base_mat: helio::MaterialId,
-    accent_mat: helio::MaterialId,
+    world: &mut World,
+    unit_mesh: Entity,
+    unit_sphere: Entity,
+    wood_mat: Entity,
+    metal_mat: Entity,
+    base_mat: Entity,
+    accent_mat: Entity,
     name: &str,
     frame: &RoomFrame,
 ) {
-    let b = |r: &mut Renderer, mat, rx, h, d, hr, hu, hn| {
-        place(r, unit_mesh, mat, frame, rx, h, d, hr, hu, hn)
+    let b = |w: &mut World, mat, rx, h, d, hr, hu, hn| {
+        place(w, unit_mesh, mat, frame, rx, h, d, hr, hu, hn)
     };
-    let s = |r: &mut Renderer, mat, rx, h, d, radius: f32| {
-        place(r, unit_sphere, mat, frame, rx, h, d, radius, radius, radius)
+    let s = |w: &mut World, mat, rx, h, d, radius: f32| {
+        place(w, unit_sphere, mat, frame, rx, h, d, radius, radius, radius)
     };
 
     match name {
         "Ember" => {
             // Bedroom: bed against the back wall, nightstand + lamp beside
             // it, a wardrobe near the entrance, a rug underfoot.
-            b(renderer, wood_mat, -1.5, 0.7, 8.5, 2.4, 0.7, 3.0); // bed frame
-            b(renderer, base_mat, -1.5, 1.5, 8.5, 2.2, 0.3, 2.8); // mattress
-            b(renderer, base_mat, -1.5, 1.9, 10.3, 1.0, 0.25, 0.7); // pillow
-            b(renderer, wood_mat, 1.5, 0.5, 9.5, 0.6, 0.5, 0.6); // nightstand
-            s(renderer, accent_mat, 1.5, 1.4, 9.5, 0.4); // lamp
-            b(renderer, wood_mat, -4.8, 1.8, 2.2, 0.8, 1.8, 1.0); // wardrobe
-            b(renderer, base_mat, -1.0, 0.04, 6.0, 2.6, 0.04, 3.2); // rug
+            b(world, wood_mat, -1.5, 0.7, 8.5, 2.4, 0.7, 3.0); // bed frame
+            b(world, base_mat, -1.5, 1.5, 8.5, 2.2, 0.3, 2.8); // mattress
+            b(world, base_mat, -1.5, 1.9, 10.3, 1.0, 0.25, 0.7); // pillow
+            b(world, wood_mat, 1.5, 0.5, 9.5, 0.6, 0.5, 0.6); // nightstand
+            s(world, accent_mat, 1.5, 1.4, 9.5, 0.4); // lamp
+            b(world, wood_mat, -4.8, 1.8, 2.2, 0.8, 1.8, 1.0); // wardrobe
+            b(world, base_mat, -1.0, 0.04, 6.0, 2.6, 0.04, 3.2); // rug
         }
         "Verdant" => {
             // Greenhouse: a potting table, three planters with plants along
             // the back wall, a bench near the entrance.
-            b(renderer, wood_mat, 0.0, 0.5, 5.0, 1.8, 0.5, 0.9); // potting table
+            b(world, wood_mat, 0.0, 0.5, 5.0, 1.8, 0.5, 0.9); // potting table
             for rx in [-2.5, 0.0, 2.5] {
-                b(renderer, wood_mat, rx, 0.5, 10.5, 0.6, 0.5, 0.6); // planter
-                s(renderer, accent_mat, rx, 1.4, 10.5, 0.55); // plant
+                b(world, wood_mat, rx, 0.5, 10.5, 0.6, 0.5, 0.6); // planter
+                s(world, accent_mat, rx, 1.4, 10.5, 0.55); // plant
             }
-            b(renderer, wood_mat, -4.5, 0.4, 2.0, 0.5, 0.4, 1.8); // bench
+            b(world, wood_mat, -4.5, 0.4, 2.0, 0.5, 0.4, 1.8); // bench
         }
         "Solar" => {
             // Kitchen: counter + stove along the back wall, a small table
             // and two chairs, a light fixture overhead.
-            b(renderer, metal_mat, 0.0, 0.7, 10.5, 4.5, 0.7, 0.8); // counter
-            b(renderer, metal_mat, -1.5, 1.55, 10.5, 0.8, 0.15, 0.6); // stove
-            s(renderer, accent_mat, -1.8, 1.72, 10.5, 0.16); // burner
-            s(renderer, accent_mat, -1.2, 1.72, 10.5, 0.16); // burner
-            b(renderer, wood_mat, 0.0, 0.75, 5.0, 1.5, 0.1, 1.5); // table
-            b(renderer, wood_mat, -2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
-            b(renderer, wood_mat, 2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
-            s(renderer, accent_mat, 0.0, 11.0, 6.0, 0.5); // light fixture
+            b(world, metal_mat, 0.0, 0.7, 10.5, 4.5, 0.7, 0.8); // counter
+            b(world, metal_mat, -1.5, 1.55, 10.5, 0.8, 0.15, 0.6); // stove
+            s(world, accent_mat, -1.8, 1.72, 10.5, 0.16); // burner
+            s(world, accent_mat, -1.2, 1.72, 10.5, 0.16); // burner
+            b(world, wood_mat, 0.0, 0.75, 5.0, 1.5, 0.1, 1.5); // table
+            b(world, wood_mat, -2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
+            b(world, wood_mat, 2.0, 0.4, 5.0, 0.45, 0.4, 0.45); // chair
+            s(world, accent_mat, 0.0, 11.0, 6.0, 0.5); // light fixture
         }
         "Abyssal" => {
             // Library: a full bookshelf on the back wall with a row of
             // colored "books", a desk, a chair, a reading lamp.
-            b(renderer, wood_mat, 0.0, 3.0, 11.3, 4.5, 3.0, 0.5); // bookshelf
+            b(world, wood_mat, 0.0, 3.0, 11.3, 4.5, 3.0, 0.5); // bookshelf
             for (i, rx) in [-3.0, -1.5, 0.0, 1.5, 3.0].into_iter().enumerate() {
                 let mat = if i % 2 == 0 { accent_mat } else { base_mat };
-                b(renderer, mat, rx, 4.2, 11.0, 0.4, 0.9, 0.15); // books
+                b(world, mat, rx, 4.2, 11.0, 0.4, 0.9, 0.15); // books
             }
-            b(renderer, wood_mat, 0.0, 0.75, 4.5, 1.6, 0.1, 0.9); // desk
-            b(renderer, base_mat, 0.0, 0.45, 3.0, 0.5, 0.45, 0.5); // chair
-            s(renderer, accent_mat, 1.2, 1.5, 4.5, 0.3); // desk lamp
+            b(world, wood_mat, 0.0, 0.75, 4.5, 1.6, 0.1, 0.9); // desk
+            b(world, base_mat, 0.0, 0.45, 3.0, 0.5, 0.45, 0.5); // chair
+            s(world, accent_mat, 1.2, 1.5, 4.5, 0.3); // desk lamp
         }
         "Orchid" => {
             // Lounge: sofa facing a glowing "screen" on the back wall, a
             // coffee table, a floor lamp.
-            b(renderer, base_mat, 0.0, 0.45, 9.5, 2.6, 0.45, 1.0); // sofa base
-            b(renderer, base_mat, 0.0, 1.2, 10.4, 2.6, 0.5, 0.25); // sofa back
-            b(renderer, accent_mat, 0.0, 3.4, 11.7, 1.8, 1.0, 0.12); // screen
-            b(renderer, wood_mat, 0.0, 0.4, 6.5, 1.2, 0.15, 0.7); // coffee table
-            b(renderer, metal_mat, -4.5, 1.9, 4.5, 0.1, 1.9, 0.1); // lamp pole
-            s(renderer, accent_mat, -4.5, 4.0, 4.5, 0.5); // lamp shade
+            b(world, base_mat, 0.0, 0.45, 9.5, 2.6, 0.45, 1.0); // sofa base
+            b(world, base_mat, 0.0, 1.2, 10.4, 2.6, 0.5, 0.25); // sofa back
+            b(world, accent_mat, 0.0, 3.4, 11.7, 1.8, 1.0, 0.12); // screen
+            b(world, wood_mat, 0.0, 0.4, 6.5, 1.2, 0.15, 0.7); // coffee table
+            b(world, metal_mat, -4.5, 1.9, 4.5, 0.1, 1.9, 0.1); // lamp pole
+            s(world, accent_mat, -4.5, 4.0, 4.5, 0.5); // lamp shade
         }
         "Glacier" => {
             // Spa: a tub, a sink counter with a glowing mirror above it, a
             // stool, a couple of loose accent "ice" pieces.
-            b(renderer, metal_mat, 0.0, 0.55, 8.5, 1.8, 0.55, 1.3); // tub
-            b(renderer, metal_mat, -4.0, 0.75, 2.5, 1.0, 0.1, 0.7); // sink counter
-            b(renderer, accent_mat, -4.0, 2.0, 11.7, 0.8, 0.9, 0.12); // mirror
-            b(renderer, wood_mat, 3.0, 0.35, 3.5, 0.4, 0.35, 0.4); // stool
-            s(renderer, accent_mat, 3.5, 1.1, 7.0, 0.4); // accent
-            s(renderer, accent_mat, -3.5, 1.1, 8.0, 0.35); // accent
+            b(world, metal_mat, 0.0, 0.55, 8.5, 1.8, 0.55, 1.3); // tub
+            b(world, metal_mat, -4.0, 0.75, 2.5, 1.0, 0.1, 0.7); // sink counter
+            b(world, accent_mat, -4.0, 2.0, 11.7, 0.8, 0.9, 0.12); // mirror
+            b(world, wood_mat, 3.0, 0.35, 3.5, 0.4, 0.35, 0.4); // stool
+            s(world, accent_mat, 3.5, 1.1, 7.0, 0.4); // accent
+            s(world, accent_mat, -3.5, 1.1, 8.0, 0.35); // accent
         }
         _ => {}
     }

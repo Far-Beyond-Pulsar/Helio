@@ -25,9 +25,9 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
 use helio_pass_foliage_place::components::{
     FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
 };
@@ -36,7 +36,10 @@ use helio_pass_foliage_place::{
     FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
 };
 use pulsar_scenedb::{Entity, SceneDb};
-use v3_demo_common::{directional_light, make_material, plane_mesh, sphere_mesh};
+use v3_demo_common::{
+    directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
+    sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -186,9 +189,9 @@ struct AppState {
     interactor_entity: Entity,
     wind_entity: Entity,
     interactor_prev_pos: glam::Vec3,
-    marker_object: helio::ObjectId,
+    marker_object: Entity,
 
-    _sun_light_id: LightId,
+    _sun_light_id: Entity,
 
     /// True when a live OpenXR session is driving `renderer.render_xr()`.
     xr_active: bool,
@@ -423,46 +426,32 @@ impl ApplicationHandler for App {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
 
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        // Foliage authoring lives in SceneDB rows, same as every other kind of
+        // scene content -- the pass owns these schemas and its GPU mirror
+        // publishes insert/mutate/remove through the World.
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         #[cfg(not(target_arch = "wasm32"))]
         let mut xr_input = None;
@@ -498,90 +487,58 @@ impl ApplicationHandler for App {
         // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
         // colour target each frame, so its absence is what made geometry smear over itself.
         // See `Renderer::rebuild_graph_if_sky_changed`.
-        renderer.scene().insert_entity(helio::SceneEntity::sky(
-            helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
-        ));
+        spawn_sky(&mut scene_db.world, [0.05, 0.07, 0.11]);
 
         // ── Ground ───────────────────────────────────────────────────────────
         // Flat for now: `FoliageTerrainPass` (the top-down height/slope capture the
         // placement shader samples) is a later phase, and until it exists placement falls
         // back to a plane at y=0. This mesh is what that fallback is pretending to be, so
         // the two agree and the grass sits on the ground rather than floating.
-        let ground_mat = renderer.scene().insert_material(make_material(
-            [0.16, 0.22, 0.10, 1.0],
-            0.95,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let ground_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh(
-                [0.0, 0.0, 0.0],
-                FIELD_HALF_EXTENT,
-            )))
-            .as_mesh()
-            .unwrap();
-        // Culling is opted out of for the ground, via `INSTANCE_FLAG_ALWAYS_VISIBLE`.
-        //
+        let ground_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.16, 0.22, 0.10, 1.0], 0.95, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let ground_mesh = spawn_mesh(
+            &mut scene_db.world,
+            plane_mesh([0.0, 0.0, 0.0], FIELD_HALF_EXTENT),
+        );
         // A 240 m plane is the case a single bounding sphere describes worst: the sphere's
         // radius is set by the diagonal, so it is enormous next to the geometry actually
         // inside it. It culls essentially nothing useful, and getting the radius even
         // slightly wrong deletes the entire ground the moment a corner leaves the frustum.
         // One object always being submitted costs a single draw; the alternative is a
-        // whole-screen artefact.
-        let _ =
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
-                    mesh: ground_mesh,
-                    material: ground_mat,
-                    transform: glam::Mat4::IDENTITY,
-                    bounds: [0.0, 0.0, 0.0, FIELD_HALF_EXTENT * std::f32::consts::SQRT_2],
-                    flags: libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+        // whole-screen artefact -- bounds-based culling (a real radius covering the whole
+        // plane) stands in for the removed `INSTANCE_FLAG_ALWAYS_VISIBLE` flag, same as
+        // every other migrated demo's always-visible geometry.
+        let _ = spawn_object(
+            &mut scene_db.world,
+            ground_mesh,
+            ground_mat,
+            glam::Mat4::IDENTITY,
+            FIELD_HALF_EXTENT * std::f32::consts::SQRT_2,
+        );
 
         // A visible marker for the roaming interactor, so the grass displacement has
         // something obviously attached to it.
-        let marker_mat = renderer.scene().insert_material(make_material(
-            [0.8, 0.2, 0.15, 1.0],
-            0.4,
-            0.0,
-            [0.5, 0.05, 0.0],
-            2.0,
-        ));
-        let marker_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.6)))
-            .as_mesh()
-            .unwrap();
-        let marker_object = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::object(helio::ObjectDescriptor {
-                mesh: marker_mesh,
-                material: marker_mat,
-                transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.6, 0.0)),
-                bounds: [0.0, 0.6, 0.0, 0.6],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }))
-            .expect("marker object")
-            .as_object()
-            .expect("marker object id");
+        let marker_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.8, 0.2, 0.15, 1.0], 0.4, 0.0, [0.5, 0.05, 0.0], 2.0),
+        );
+        let marker_mesh = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 0.6));
+        let marker_object = spawn_object(
+            &mut scene_db.world,
+            marker_mesh,
+            marker_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.6, 0.0)),
+            0.6,
+        )
+        .expect("marker object");
 
         // ── Foliage ──────────────────────────────────────────────────────────
-        let grass_mat = renderer.scene().insert_material(make_material(
-            [0.28, 0.46, 0.14, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let grass_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.28, 0.46, 0.14, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let grass = GpuFoliageType {
             density: blades_per_m2,
@@ -595,7 +552,7 @@ impl ApplicationHandler for App {
             // body of the motion and jitter the tips.
             wind_response: [0.0, 0.35, 1.0],
             interaction_stiffness: 6.0,
-            material_id: grass_mat.slot(),
+            material_id: grass_mat.index(),
             altitude_range: [f32::MIN, f32::MAX],
             density_layer: 0,
             kind_and_flags: pack_kind_and_flags(
@@ -612,9 +569,6 @@ impl ApplicationHandler for App {
         }
         .into();
 
-        // Foliage authoring lives in SceneDB rows. The pass owns these schemas
-        // and its GPU mirror publishes insert/mutate/remove through the World.
-        let mut scene_db = v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let grass_entity = scene_db.world.spawn();
         scene_db.world.insert(grass_entity, grass);
         let layer_entity = scene_db.world.spawn();
@@ -641,13 +595,10 @@ impl ApplicationHandler for App {
         );
 
         // ── Lighting ─────────────────────────────────────────────────────────
-        let sun_light_id = renderer.scene().insert_light(directional_light(
-            [-0.35, -0.8, -0.5],
-            [1.0, 0.96, 0.88],
-            3.0,
-        ));
-
-        renderer.scene().flush();
+        let sun_light_id = spawn_light(
+            &mut scene_db.world,
+            directional_light([-0.35, -0.8, -0.5], [1.0, 0.96, 0.88], 3.0),
+        );
 
         let state = AppState {
             window,

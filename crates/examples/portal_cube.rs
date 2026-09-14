@@ -27,11 +27,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
-    SceneEntity,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -85,8 +88,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    scene_db: SceneDb,
     _portal_pairs: Vec<helio::PortalPair>,
-    _light_ids: Vec<LightId>,
+    _light_ids: Vec<Entity>,
 
     /// Debug-only: when `CUBE_SCREENSHOT` is set, counts frames so a single
     /// PNG can be captured after the scene has settled, then the process exits.
@@ -169,56 +173,20 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let wall_mat = renderer.scene().insert_material(make_material(
-            [0.75, 0.75, 0.78, 1.0],
-            0.75,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let frame_mat = renderer.scene().insert_material(make_material(
+        let wall_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.75, 0.75, 0.78, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let frame_mat = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.9, 1.0, 1.0],
             0.4,
             0.0,
@@ -229,14 +197,7 @@ impl ApplicationHandler for App {
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
-        let unit_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [1.0, 1.0, 1.0],
-            )))
-            .as_mesh()
-            .unwrap();
+        let unit_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
 
         // ── The room: one wall per axis direction, each with a centered
         // doorway. `up_hint` just needs to not be parallel to `normal` — Y
@@ -259,7 +220,7 @@ impl ApplicationHandler for App {
             let up = normal.cross(right).normalize();
 
             insert_wall_face(
-                &mut renderer,
+                &mut scene_db.world,
                 unit_mesh,
                 wall_mat,
                 frame_mat,
@@ -283,34 +244,23 @@ impl ApplicationHandler for App {
         // ── A light near the center so every wall reads, plus one per
         // doorway direction so the receding reflections don't go flat black.
         let mut light_ids = Vec::new();
-        light_ids.push(
-            renderer
-                .scene()
-                .insert_entity(SceneEntity::light(point_light(
-                    [0.0, HALF_SIZE * 0.85, 0.0],
-                    [1.0, 0.98, 0.92],
-                    4.0,
-                    HALF_SIZE * 1.8,
-                )))
-                .as_light()
-                .unwrap(),
-        );
+        light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light(
+                [0.0, HALF_SIZE * 0.85, 0.0],
+                [1.0, 0.98, 0.92],
+                4.0,
+                HALF_SIZE * 1.8,
+            ),
+        ));
         // Just 2 more (not one per face — 7 overlapping light-range gizmos
         // in editor mode turned into unreadable clutter) at opposite
         // corners, enough to break up the single center light's flatness.
         for &pos in &[Vec3::new(3.5, 3.0, 3.5), Vec3::new(-3.5, -3.0, -3.5)] {
-            light_ids.push(
-                renderer
-                    .scene()
-                    .insert_entity(SceneEntity::light(point_light(
-                        [pos.x, pos.y, pos.z],
-                        [0.85, 0.92, 1.0],
-                        2.0,
-                        HALF_SIZE,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([pos.x, pos.y, pos.z], [0.85, 0.92, 1.0], 2.0, HALF_SIZE),
+            ));
         }
 
         // Deferred lighting shades every pixel — including portal
@@ -364,6 +314,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
@@ -586,16 +537,16 @@ impl AppState {
 /// up, normal)` must be orthonormal — see the call site for how that's
 /// built from each face's `up_hint`.
 fn insert_wall_face(
-    renderer: &mut Renderer,
-    unit_mesh: helio::MeshId,
-    wall_mat: helio::MaterialId,
-    frame_mat: helio::MaterialId,
+    world: &mut pulsar_scenedb::World,
+    unit_mesh: Entity,
+    wall_mat: Entity,
+    frame_mat: Entity,
     normal: Vec3,
     right: Vec3,
     up: Vec3,
 ) {
     let face_center = normal * HALF_SIZE;
-    let mut insert_box = |material: helio::MaterialId,
+    let mut insert_box = |material: Entity,
                           center_right: f32,
                           center_up: f32,
                           center_normal: f32,
@@ -620,18 +571,7 @@ fn insert_wall_face(
         // view regardless of where it actually maps to — wildly
         // overselecting and blowing straight through the cull pass's
         // per-group capacity.
-        let _ = renderer
-            .scene()
-            .insert_entity(SceneEntity::object(ObjectDescriptor {
-                mesh: unit_mesh,
-                material,
-                transform,
-                bounds: [center.x, center.y, center.z, radius],
-                flags: 0,
-                groups: GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        let _ = spawn_object(world, unit_mesh, material, transform, radius);
     };
 
     // Top / bottom panels span the full width; left / right panels fill the

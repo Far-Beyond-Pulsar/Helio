@@ -10,10 +10,13 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GpuLight, LightType, Renderer, RendererConfig, Scene,
+    GpuLight, LightType, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, plane_mesh};
+use helio_default_graphs::build_default_graph_external;
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -135,56 +138,23 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
 
         // ── Scene objects ──────────────────────────────────────────────────────
-        let mat_wall = renderer.scene().insert_material(make_material(
+        let mat_wall = spawn_material(&mut scene_db.world, make_material(
             [0.6, 0.58, 0.55, 1.0],
             0.7,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let mat_floor = renderer.scene().insert_material(make_material(
+        let mat_floor = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.28, 0.25, 1.0],
             0.4,
             0.0,
@@ -192,61 +162,23 @@ impl ApplicationHandler for App {
             0.0,
         ));
         // Ground plane
-        let floor = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, -0.5, 0.0], 6.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            floor,
-            mat_floor,
-            glam::Mat4::IDENTITY,
-            6.0,
-        );
+        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, -0.5, 0.0], 6.0));
+        let _ = spawn_object(&mut scene_db.world, floor, mat_floor, glam::Mat4::IDENTITY, 6.0);
 
         // Back wall — catches the light
-        let back_wall = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.5, -5.0],
-                [6.0, 3.0, 0.1],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            back_wall,
-            mat_wall,
-            glam::Mat4::IDENTITY,
-            6.0,
-        );
+        let back_wall = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 1.5, -5.0], [6.0, 3.0, 0.1]));
+        let _ = spawn_object(&mut scene_db.world, back_wall, mat_wall, glam::Mat4::IDENTITY, 6.0);
 
         // Some pillars / columns to create depth
         for (x, z) in &[(-2.5, -2.0), (2.5, -2.0), (-2.5, 2.0), (2.5, 2.0)] {
-            let pillar = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [*x, 0.5, *z],
-                    [0.3, 1.5, 0.3],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
-                pillar,
-                mat_wall,
-                glam::Mat4::IDENTITY,
-                1.0,
-            );
+            let pillar = spawn_mesh(&mut scene_db.world, box_mesh([*x, 0.5, *z], [0.3, 1.5, 0.3]));
+            let _ = spawn_object(&mut scene_db.world, pillar, mat_wall, glam::Mat4::IDENTITY, 1.0);
         }
 
         // ── Lighting ───────────────────────────────────────────────────────────
         // Bright directional light shining toward the scene from above-right-front
         let sun_dir = glam::Vec3::new(-0.4, -0.6, 0.7).normalize();
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(GpuLight {
+        spawn_light(&mut scene_db.world, GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
                 color_intensity: [1.0, 0.95, 0.85, 6.0],
@@ -270,13 +202,11 @@ impl ApplicationHandler for App {
                 light_function_index: 0,
                 ies_angle_scale: 0.0,
                 ies_angle_offset: 0.0,
-            }));
+            });
 
         // A few fill point lights
         // Bright point light with lens flare — placed off-centre so the ghosts spread diagonally
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(GpuLight {
+        spawn_light(&mut scene_db.world, GpuLight {
                 position_range: [-1.5, 2.0, -1.0, 8.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],
                 color_intensity: [1.0, 0.85, 0.55, 8.0],
@@ -300,11 +230,9 @@ impl ApplicationHandler for App {
                 light_function_index: 0,
                 ies_angle_scale: 0.0,
                 ies_angle_offset: 0.0,
-            }));
+            });
 
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(GpuLight {
+        spawn_light(&mut scene_db.world, GpuLight {
                 position_range: [-3.0, 1.0, -3.0, 5.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],
                 color_intensity: [0.3, 0.4, 0.6, 2.0],
@@ -313,10 +241,8 @@ impl ApplicationHandler for App {
                 inner_angle: 0.0,
                 _pad: 0,
                 ..Default::default()
-            }));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(GpuLight {
+            });
+        spawn_light(&mut scene_db.world, GpuLight {
                 position_range: [3.0, 1.0, 2.0, 4.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.0],
                 color_intensity: [0.6, 0.3, 0.2, 1.5],
@@ -325,7 +251,7 @@ impl ApplicationHandler for App {
                 inner_angle: 0.0,
                 _pad: 0,
                 ..Default::default()
-            }));
+            });
 
         renderer.set_ambient([0.05, 0.05, 0.08], 0.02);
         renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);

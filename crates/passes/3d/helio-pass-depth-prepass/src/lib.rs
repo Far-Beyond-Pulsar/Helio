@@ -138,7 +138,7 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "object_batch", "culled_batch"]
+        &["object_batch", "culled_batch"]
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {

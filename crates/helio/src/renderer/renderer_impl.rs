@@ -47,6 +47,21 @@ pub struct DebugVertex {
     pub color: [f32; 4],
 }
 
+/// Backend-only fallback bindings for the material sampling contract.
+///
+/// Material parameters and texture references are authored in SceneDB. The
+/// renderer keeps only the descriptor objects required by the passes to bind
+/// that data. Until a frontend publishes texture components, the arrays point
+/// at one white texture so untextured material rows remain valid.
+pub(crate) struct MaterialBindingResources {
+    pub(crate) material_textures: wgpu::Buffer,
+    pub(crate) _fallback_texture: wgpu::Texture,
+    pub(crate) fallback_view: wgpu::TextureView,
+    pub(crate) fallback_sampler: wgpu::Sampler,
+    pub(crate) texture_count: usize,
+    pub(crate) version: u64,
+}
+
 pub use helio_pass_billboard::BillboardInstance;
 
 pub(crate) enum CullStatsReadbackState {
@@ -74,6 +89,7 @@ pub struct Renderer {
     pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) debug_camera_buffer: wgpu::Buffer,
     pub(crate) cull_stats_buffer: wgpu::Buffer,
+    pub(crate) material_bindings: MaterialBindingResources,
     pub(crate) ambient_color: [f32; 3],
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],

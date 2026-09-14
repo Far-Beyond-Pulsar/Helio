@@ -820,7 +820,6 @@ impl RenderPass for CoronaPass {
             "full_res_depth",
             "corona_emitters",
             "depth",
-            "main_scene",
         ]
     }
 

@@ -14,10 +14,16 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, HelioAction, HelioCommandBridge, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+use helio_default_graphs::build_default_graph_external;
+use helio_pass_water_sim::WaterSimPass;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, spawn_water_volume,
+    WaterVolumeDescriptor,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -57,7 +63,8 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _light_ids: Vec<LightId>,
+    scene_db: SceneDb,
+    _light_ids: Vec<Entity>,
 }
 
 impl App {
@@ -141,52 +148,31 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, format)
             .with_shadow_quality(helio::ShadowQuality::High);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
-        let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
-        renderer.scene().insert_entity(helio::SceneEntity::Sky(sky));
+        spawn_sky(&mut scene_db.world, [0.02, 0.03, 0.08]);
 
-        // Ocean water volume — mid-ocean night, Beaufort 4 (~25 km/h)
-        let ocean = helio::WaterVolumeDescriptor {
+        // Ocean water volume — mid-ocean night, Beaufort 4 (~25 km/h). Static
+        // appearance goes in the SceneDB descriptor; the heightfield sim's own
+        // wind/wave dynamics are pass-owned runtime state, set below via
+        // `WaterSimPass` (see `WaterVolumeDescriptor`'s own doc for why).
+        let ocean = WaterVolumeDescriptor {
             bounds_min: [-120.0, -20.0, -120.0],
             bounds_max: [120.0, 40.0, 120.0],
             surface_height: 0.0,
@@ -218,52 +204,40 @@ impl ApplicationHandler for App {
             fog_density: 0.016,
             god_rays_intensity: 0.15,
 
-            // SWE propagation: sqrt(0.04) * 112.5 m/s = ~22 m/s -- realistic ocean swell
-            wave_spring: 0.04,
-            // Moderate decay: waves persist ~2 s before damping out
-            wave_damping: 0.990,
-
-            // NNE wind, Beaufort 4.
-            // wave_scale=0.45 => primary swell wavelength ~28m in the 240m domain.
-            // wave_speed=1.0 => phase velocity ~15 m/s for the primary swell.
-            // wind_strength=1.5 drives ~0.4m significant wave height.
-            wind_direction: [0.97, 0.14],
-            wind_strength: 1.5,
-            wave_scale: 0.45,
-
             ..Default::default()
         };
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::water_volume(ocean));
+        spawn_water_volume(&mut scene_db.world, ocean);
 
-        let mat_platform = renderer.scene().insert_material(make_material(
-            [0.2, 0.2, 0.2, 1.0],
-            0.35,
-            1.0,
-            [0.1, 0.1, 0.1],
-            0.3,
-        ));
+        // NNE wind, Beaufort 4.
+        // wave_scale=0.45 => primary swell wavelength ~28m in the 240m domain.
+        // wave_speed=1.0 => phase velocity ~15 m/s for the primary swell.
+        // wind_strength=1.5 drives ~0.4m significant wave height.
+        // wave_spring=0.04 => sqrt(0.04) * 112.5 m/s = ~22 m/s -- realistic ocean swell.
+        // wave_damping=0.990 => moderate decay: waves persist ~2 s before damping out.
+        if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
+            sim.set_wind([0.97, 0.14], 1.5);
+            sim.set_wave_scale(0.45);
+            sim.set_wave_speed(1.0);
+            sim.set_sim_dynamics(0.04, 0.990);
+        }
 
-        let mat_leg = renderer.scene().insert_material(make_material(
-            [0.25, 0.25, 0.25, 1.0],
-            0.6,
-            1.0,
-            [0.02, 0.02, 0.02],
-            0.15,
-        ));
+        let mat_platform = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.2, 0.2, 1.0], 0.35, 1.0, [0.1, 0.1, 0.1], 0.3),
+        );
+
+        let mat_leg = spawn_material(
+            &mut scene_db.world,
+            make_material([0.25, 0.25, 0.25, 1.0], 0.6, 1.0, [0.02, 0.02, 0.02], 0.15),
+        );
 
         // Platform base
-        let platform_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [14.0, 0.8, 20.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let platform_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [14.0, 0.8, 20.0]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             platform_mesh,
             mat_platform,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 8.4, 0.0)),
@@ -278,16 +252,9 @@ impl ApplicationHandler for App {
             (12.0, 4.0, 16.0),
         ];
         for (x, y, z) in leg_positions {
-            let leg_mesh = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.9, 4.2, 0.9],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = v3_demo_common::insert_object(
-                &mut renderer,
+            let leg_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.9, 4.2, 0.9]));
+            let _ = spawn_object(
+                &mut scene_db.world,
                 leg_mesh,
                 mat_leg,
                 glam::Mat4::from_translation(glam::Vec3::new(x, y, z)),
@@ -296,16 +263,12 @@ impl ApplicationHandler for App {
         }
 
         // Central tower
-        let tower_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.5, 5.5, 2.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let tower_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.5, 5.5, 2.5]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
             tower_mesh,
             mat_platform,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 12.0, 0.0)),
@@ -313,7 +276,7 @@ impl ApplicationHandler for App {
         );
 
         // Under-platform accent lights (lots of bright colored lights beneath rig)
-        let mut _light_ids: Vec<LightId> = Vec::new();
+        let mut _light_ids: Vec<Entity> = Vec::new();
         let grid_x = (-10..=10).step_by(5).collect::<Vec<i32>>();
         let grid_z = (-14..=14).step_by(5).collect::<Vec<i32>>();
         for gx in grid_x.iter() {
@@ -328,15 +291,10 @@ impl ApplicationHandler for App {
                     h if h < 0.83 => [1.0, 0.9, 0.25],
                     _ => [0.8, 0.3, 0.6],
                 };
-                _light_ids.push(
-                    renderer
-                        .scene()
-                        .insert_entity(helio::SceneEntity::light(point_light(
-                            pos, color, 40.0, 10.5,
-                        )))
-                        .as_light()
-                        .unwrap(),
-                );
+                _light_ids.push(spawn_light(
+                    &mut scene_db.world,
+                    point_light(pos, color, 40.0, 10.5),
+                ));
             }
         }
 
@@ -345,18 +303,10 @@ impl ApplicationHandler for App {
             let angle = i as f32 * std::f32::consts::TAU / 12.0;
             let x = angle.cos() * 11.0;
             let z = angle.sin() * 14.5;
-            _light_ids.push(
-                renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::light(point_light(
-                        [x, 6.5, z],
-                        [1.0, 0.9, 0.75],
-                        25.0,
-                        15.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            _light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([x, 6.5, z], [1.0, 0.9, 0.75], 25.0, 15.0),
+            ));
         }
 
         // Optional faint moon as directional component-like sky bloom (general ambient control)
@@ -377,6 +327,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             _light_ids,
         });
     }

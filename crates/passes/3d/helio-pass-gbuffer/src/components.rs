@@ -6,6 +6,19 @@ use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 use std::marker::PhantomData;
 
+/// Mesh payload authored as a SceneDB component.
+///
+/// The two variable-length fields share SceneDB's keyed geometry pools. Their
+/// generated `*_gpu_handle` accessors expose the allocated ranges needed by
+/// `StaticObjectComponent`; the renderer never owns or resolves a mesh asset.
+#[derive(SceneStore, Clone, Debug)]
+pub struct MeshComponent {
+    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once)]
+    pub vertices: Vec<helio::PackedVertex>,
+    #[gpu(buffer = "builtin_mesh_index", mirror = Once)]
+    pub indices: Vec<u32>,
+}
+
 /// A material authored as a SceneDB component.
 ///
 /// The row deliberately keeps the existing G-buffer shader ABI for this

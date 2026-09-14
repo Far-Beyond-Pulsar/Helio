@@ -352,7 +352,8 @@ impl RenderPass for ForwardLitPass {
 
     fn reads(&self) -> &'static [&'static str] {
         &[
-            "main_scene",
+            "material_textures",
+            "render_environment",
             "depth",
             "pre_aa",
             "cluster_light_grid",
@@ -415,8 +416,8 @@ impl RenderPass for ForwardLitPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let (ambient_color, ambient_intensity) =
-            if let Some(ref ms) = ctx.pass_resources.main_scene.get().as_ref() {
-                (ms.ambient_color, ms.ambient_intensity)
+            if let Some(ref environment) = ctx.pass_resources.render_environment.get().as_ref() {
+                (environment.ambient_color, environment.ambient_intensity)
             } else {
                 ([0.1, 0.1, 0.15], 0.1)
             };
@@ -432,15 +433,7 @@ impl RenderPass for ForwardLitPass {
         // `light_count`/`lights` bridge -- see that struct's own doc), so
         // that CPU-resolved count is the fallback, not a legacy dead end.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let light_count = if use_direct_index {
-            MAX_LIGHTS
-        } else {
-            ctx.pass_resources
-                .lights
-                .get()
-                .map(|l| l.light_count)
-                .unwrap_or(0)
-        };
+        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
 
         let globals = ForwardLitGlobals {
             frame: ctx.frame_num as u32,
@@ -473,7 +466,7 @@ impl RenderPass for ForwardLitPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(ms) = ctx.resources.main_scene.read("ForwardLit") else {
+        let Some(material_textures) = ctx.resources.material_textures.read("ForwardLit") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -491,13 +484,6 @@ impl RenderPass for ForwardLitPass {
         let vertices = &vertices_handle.buffer;
         let indices = &indices_handle.buffer;
 
-        // `LightsFrameData` remains a compatibility bridge for light
-        // algorithm state. Material rows are resolved from SceneDB below.
-        // Fall back to
-        // `batch.instances` (any valid, never-actually-dereferenced buffer)
-        // if the `Renderer` hasn't published them yet, matching the fallback
-        // idiom already used for `tile_lists`/`tile_counts`/`transforms`.
-        let lights_data = ctx.resources.lights.get();
         // Material rows are SceneDB component data.  Resolve the column by
         // key so the renderer never becomes the material authority again.
         let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
@@ -506,30 +492,22 @@ impl RenderPass for ForwardLitPass {
             .unwrap_or(batch.instances);
         let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
 
-        // Same preference as `prepare()`: SceneDB-direct when present, else
-        // the CPU-resolved bridge -- production's real, actively-populated
-        // light source (see `light_mode_direct_index`'s doc).
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or_else(|| lights_data.map(|l| l.lights).unwrap_or(batch.instances));
+            .unwrap_or(batch.instances);
 
         let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
-        let light_entity_indices_ptr = lights_data
-            .map(|l| l.light_entity_indices as *const _ as usize)
-            .unwrap_or(0);
+        let light_entity_indices_ptr = 0;
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
-        let transforms_ptr = lights_data
-            .and_then(|l| l.transforms)
-            .map(|b| b as *const _ as usize)
-            .unwrap_or(0);
+        let transforms_ptr = 0;
 
         let cluster = ctx.resources.cluster_light_grid.get();
         let tile_lists_ptr = cluster
@@ -564,12 +542,8 @@ impl RenderPass for ForwardLitPass {
             // creation can't fail -- `light_count` is 0 whenever no real
             // `Transform` buffer exists yet, so this fallback is never
             // actually dereferenced at a live light's index in practice.
-            let transforms = lights_data
-                .and_then(|l| l.transforms)
-                .unwrap_or(fallback_buf);
-            let light_entity_indices_buf = lights_data
-                .map(|l| l.light_entity_indices)
-                .unwrap_or(fallback_buf);
+            let transforms = fallback_buf;
+            let light_entity_indices_buf = fallback_buf;
 
             log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -618,7 +592,7 @@ impl RenderPass for ForwardLitPass {
         }
 
         let needs_rebuild = self.bind_group_1_version != Some(
-            ms.material_textures.version ^ materials_epoch,
+            material_textures.version ^ materials_epoch,
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -630,21 +604,21 @@ impl RenderPass for ForwardLitPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: ms.material_textures.material_textures.as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                ms.material_textures.texture_views,
-                ms.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ForwardLit BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(ms.material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
         }
 
         let indirect = culled.indirect;

@@ -37,24 +37,6 @@ pub struct GBufferViews<'a> {
     pub emissive: &'a wgpu::TextureView,
 }
 
-/// Borrowed mesh buffers for passes that render scene geometry directly.
-///
-/// Static geometry (terrain, buildings, props) lives in `vertices`/`indices`.
-/// Dynamic geometry (skinned characters, morphed meshes) lives in
-/// `dynamic_vertices`/`dynamic_indices`. Each pair must be bound separately
-/// around the corresponding draw calls.
-#[derive(Clone, Copy)]
-pub struct MeshBuffers<'a> {
-    /// Vertex buffer for upload-once static geometry.
-    pub vertices: &'a wgpu::Buffer,
-    /// Index buffer for upload-once static geometry.
-    pub indices: &'a wgpu::Buffer,
-    /// Vertex buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_vertices: &'a wgpu::Buffer,
-    /// Index buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_indices: &'a wgpu::Buffer,
-}
-
 /// Borrowed material-texture state for passes that sample Helio's texture table.
 #[derive(Clone, Copy)]
 pub struct MaterialTextureBindings<'a> {
@@ -64,11 +46,13 @@ pub struct MaterialTextureBindings<'a> {
     pub version: u64,
 }
 
-/// Frame-local scene inputs for the high-level Helio renderer.
+/// Backend material-texture bindings used by passes that sample material rows.
+///
+/// The material rows themselves are SceneDB component data. This value only
+/// describes the backend descriptor bindings needed to sample any referenced
+/// textures; it is not a scene container or an ownership model for materials.
 #[derive(Clone, Copy)]
-pub struct SceneGpuView<'a> {
-    pub mesh_buffers: MeshBuffers<'a>,
-    pub material_textures: MaterialTextureBindings<'a>,
+pub struct RenderEnvironment<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
@@ -541,8 +525,10 @@ pub struct PassResources<'a> {
 
     /// Full-resolution depth texture object for compute passes that need raw texture access.
     pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
-    /// High-level Helio scene resources used by wrapper-owned passes.
-    pub main_scene: Tracked<SceneGpuView<'a>>,
+    /// Backend bindings for the material component buffer's texture slots.
+    pub material_textures: Tracked<MaterialTextureBindings<'a>>,
+    /// Frame-local environment and optional acceleration structure state.
+    pub render_environment: Tracked<RenderEnvironment<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
@@ -644,11 +630,6 @@ pub struct PassResources<'a> {
     /// GPU-driven static-object batch (populated by `ObjectBatchPass`) --
     /// see [`ObjectBatchFrameData`]'s own doc.
     pub object_batch: Tracked<ObjectBatchFrameData<'a>>,
-
-    /// Lights, written by the `Renderer` each frame from its still-central
-    /// light storage -- see [`LightsFrameData`]'s own doc for why this is a
-    /// `Renderer`-seeded bridge, not a pass publish.
-    pub lights: Tracked<LightsFrameData<'a>>,
 
     /// Shadow matrices, written by the `Renderer` each frame -- see
     /// [`ShadowMatricesFrameData`]'s own doc.
@@ -863,38 +844,6 @@ pub struct CulledBatchFrameData<'a> {
     pub compacted_indices: &'a wgpu::Buffer,
 }
 
-/// Light data for this frame -- written directly by the `Renderer`
-/// (`helio` crate) each frame from its still-central light storage, NOT
-/// published by a `RenderPass::publish()` the way `ObjectBatchFrameData`
-/// etc. are. Unlike static objects, lights are not yet SceneDB-native in
-/// production (`BufferKey::of("scene_lights")` is the preferred path when
-/// something has populated it, but nothing in `engine_backend` does today --
-/// this is the actual, live fallback, not a legacy dead end). Also carries
-/// real algorithmic state (which lights are static vs. movable, baked
-/// shadow-atlas assignment) that hasn't been relocated to a pass yet -- see
-/// the zero-central-type-knowledge mandate's own recorded precedent on why
-/// that's a deliberately separate, larger migration from simply exposing the
-/// data generically the way this struct does.
-#[derive(Clone, Copy)]
-pub struct LightsFrameData<'a> {
-    /// `GpuLight`-layout buffer, movable lights only (static/stationary are
-    /// baked and excluded from runtime).
-    pub lights: &'a wgpu::Buffer,
-    /// Live entry count in `lights`.
-    pub light_count: u32,
-    /// Same as `light_count` today (both mirror the same buffer's live
-    /// length) -- kept as a separate field because callers historically
-    /// distinguished them; collapse once confirmed redundant.
-    pub movable_light_count: u32,
-    /// Parallel to `lights` -- entry `i` is the SceneDB `Entity` index
-    /// `lights[i]` was built from this frame.
-    pub light_entity_indices: &'a wgpu::Buffer,
-    /// SceneDB's `Transform` buffer, once bound -- `None` until then.
-    pub transforms: Option<&'a wgpu::Buffer>,
-    /// Increments when any movable light moves -- shadow-cache invalidation.
-    pub movable_lights_generation: u64,
-}
-
 /// Shadow matrices + per-caster dirty tracking for this frame -- written
 /// directly by the `Renderer`, NOT published by `helio-pass-shadow-matrix`
 /// (that pass computes into this buffer but does not yet own its
@@ -965,7 +914,8 @@ impl<'a> PassResources<'a> {
             tile_light_counts: Tracked::empty(),
             full_res_depth: Tracked::empty(),
             full_res_depth_texture: Tracked::empty(),
-            main_scene: Tracked::empty(),
+            material_textures: Tracked::empty(),
+            render_environment: Tracked::empty(),
             sky: crate::sky::SkyContext::default(),
             billboards: Tracked::empty(),
             vg: Tracked::empty(),
@@ -988,7 +938,6 @@ impl<'a> PassResources<'a> {
             baked_pvs: Tracked::empty(),
             cluster_light_grid: Tracked::empty(),
             object_batch: Tracked::empty(),
-            lights: Tracked::empty(),
             shadow_matrices: Tracked::empty(),
             coordinate_spaces: Tracked::empty(),
             indirect_dispatch: Tracked::empty(),
@@ -1093,7 +1042,8 @@ impl<'a> PassResources<'a> {
             reset_field!(tile_light_counts);
             reset_field!(full_res_depth);
             reset_field!(full_res_depth_texture);
-            reset_field!(main_scene);
+            reset_field!(material_textures);
+            reset_field!(render_environment);
             reset_field!(billboards);
             reset_field!(vg);
             reset_field!(water_caustics);
@@ -1115,7 +1065,6 @@ impl<'a> PassResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(cluster_light_grid);
             reset_field!(object_batch);
-            reset_field!(lights);
             reset_field!(shadow_matrices);
             reset_field!(coordinate_spaces);
             reset_field!(indirect_dispatch);

@@ -4,25 +4,17 @@
 //! generic GPU component buffers. This crate owns backend GPU machinery and
 //! transient render products; it does not own a typed scene container.
 
-mod arena;
+mod asset_types;
 mod camera;
-mod handles;
-mod groups;
 mod material;
-mod mesh;
 mod quark_commands;
 pub mod radiant;
 mod renderer;
 // SceneDB is the sole scene authority; the legacy scene container was removed.
-mod vg;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_cpp_alloc;
 
-pub use handles::{
-    LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
-    SectionedInstanceId, SublevelId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
-};
 /// Portal pair math and SceneDB GPU contracts owned by the portal passes.
 pub use helio_pass_portal_cull::{
     crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalChain, GpuPortalView,
@@ -34,11 +26,8 @@ pub use libhelio::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use material::{
-    MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
-    TextureUpload, MAX_TEXTURES,
-};
-pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits,
@@ -47,8 +36,6 @@ pub use renderer::{
     RendererBuilder, RendererConfig, SceneDbHandle,
 };
 pub use camera::Camera;
-pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
-
 #[cfg(feature = "bake")]
 pub use helio_bake::{
     AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,

@@ -32,14 +32,18 @@
 //! crate stack.
 
 use glam::{Mat4, Quat, Vec3};
-use helio::{GpuLight, LightId, LightType, MaterialId, MeshId, MeshUpload, ObjectId, Renderer};
+use helio::{GpuLight, LightType, MeshUpload, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_pass_water_sim::WaterSimPass;
 use libhelio::{CoronaEmitterDescriptor, PostProcessSettings, PostProcessVolumeDescriptor};
+use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
-    box_mesh, cube_mesh, insert_object, make_material, point_light, sphere_mesh, spot_light,
+    box_mesh, cube_mesh, make_material, point_light, spawn_corona_emitter, spawn_light,
+    spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume, spawn_sky,
+    spawn_water_volume, sphere_mesh, spot_light, update_corona_emitter, update_light,
+    update_object_transform, WaterVolumeDescriptor,
 };
 
 /// Interior half-width of the corridor, in metres.
@@ -58,24 +62,27 @@ pub const BAY_COUNT: usize = 9;
 /// them to the OpenXR grip poses every frame.
 pub struct Animated {
     /// Rotating cubes, with the centre each rotates about (materials bay).
-    pub spinners: Vec<(ObjectId, Vec3)>,
+    pub spinners: Vec<(Entity, Vec3)>,
     /// Vertically bobbing orbs, with their rest positions (materials bay).
-    pub bobbers: Vec<(ObjectId, Vec3)>,
+    pub bobbers: Vec<(Entity, Vec3)>,
     /// Per-bay accent lights, pulsed in sympathy with the emissive strips.
-    pub pulse_lights: Vec<(LightId, Vec3, [f32; 3], f32)>,
-    /// Cubes attached to the player's left and right controllers.
-    pub hand_cubes: [ObjectId; 2],
+    pub pulse_lights: Vec<(Entity, Vec3, [f32; 3], f32)>,
+    /// Cubes attached to the player's left and right controllers. `None`
+    /// only if the corresponding `spawn_object` call failed.
+    pub hand_cubes: [Option<Entity>; 2],
     /// Water-bay orb: (object, rest position, pool x/z centre). It dips into the pool
     /// and splashes (`WaterSimPass::add_drop`) on every impact.
-    pub water_orb: Option<(ObjectId, Vec3, [f32; 2])>,
+    pub water_orb: Option<(Entity, Vec3, [f32; 2])>,
     /// Hue-cycling accent lights (emissive / light-count bay).
-    pub colour_lights: Vec<(LightId, Vec3, [f32; 3], f32)>,
+    pub colour_lights: Vec<(Entity, Vec3, [f32; 3], f32)>,
     /// Corona emitter, re-uploaded each frame with an orbiting position.
     pub corona: Option<CoronaAnim>,
 }
 
 /// An orbiting corona emitter, re-uploaded every frame.
 pub struct CoronaAnim {
+    /// The entity carrying its `CoronaEmitterComponent` row.
+    pub entity: Entity,
     /// Base emitter; `position` is overwritten each frame from `centre`/`radius`.
     pub emitter: CoronaEmitterDescriptor,
     /// Orbit centre in world space.
@@ -90,26 +97,13 @@ fn bay_centre_z(index: usize) -> f32 {
     -(index as f32 + 0.5) * BAY_LENGTH
 }
 
-fn insert_box_mesh(renderer: &mut Renderer, half: Vec3) -> helio::MeshId {
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::mesh(box_mesh(
-            [0.0, 0.0, 0.0],
-            [half.x, half.y, half.z],
-        )))
-        .as_mesh()
-        .unwrap()
+fn insert_box_mesh(world: &mut World, half: Vec3) -> Entity {
+    spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [half.x, half.y, half.z]))
 }
 
 /// Insert an object at a world-space position, ignoring errors.
-fn place(renderer: &mut Renderer, mesh: MeshId, material: MaterialId, pos: Vec3, radius: f32) {
-    let _ = insert_object(
-        renderer,
-        mesh,
-        material,
-        Mat4::from_translation(pos),
-        radius,
-    );
+fn place(world: &mut World, mesh: Entity, material: Entity, pos: Vec3, radius: f32) {
+    let _ = spawn_object(world, mesh, material, Mat4::from_translation(pos), radius);
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -131,23 +125,23 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 // ── Shared scene resources ────────────────────────────────────────────────────
 
 struct Mats {
-    dark_trim: MaterialId,
-    mirror: MaterialId,
-    gold: MaterialId,
-    copper: MaterialId,
-    chalk: MaterialId,
-    glossy_red: MaterialId,
-    emissive_cyan: MaterialId,
-    emissive_warm: MaterialId,
-    emissive_white: MaterialId,
-    steel: MaterialId,
+    dark_trim: Entity,
+    mirror: Entity,
+    gold: Entity,
+    copper: Entity,
+    chalk: Entity,
+    glossy_red: Entity,
+    emissive_cyan: Entity,
+    emissive_warm: Entity,
+    emissive_white: Entity,
+    steel: Entity,
 }
 
 struct Meshes {
-    cube: MeshId,
-    sphere: MeshId,
-    plinth: MeshId,
-    panel: MeshId,
+    cube: Entity,
+    sphere: Entity,
+    plinth: Entity,
+    panel: Entity,
 }
 
 // ── Per-bay exhibits ──────────────────────────────────────────────────────────
@@ -155,18 +149,12 @@ struct Meshes {
 /// Bay 0 — the PBR material space: a rotating metal cube, a bobbing orb, an
 /// emissive strip paired with a real light. Everything else is built from the
 /// same `make_material` parameters, just spread across roughness/metallic.
-fn bay_materials(
-    renderer: &mut Renderer,
-    z: f32,
-    meshes: &Meshes,
-    mats: &Mats,
-    anim: &mut Animated,
-) {
+fn bay_materials(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
     let plinth_left = Vec3::new(-1.4, 0.45, z);
-    place(renderer, meshes.plinth, mats.dark_trim, plinth_left, 0.6);
+    place(world, meshes.plinth, mats.dark_trim, plinth_left, 0.6);
     let spin_centre = plinth_left + Vec3::new(0.0, 0.75, 0.0);
-    if let Ok(id) = insert_object(
-        renderer,
+    if let Ok(id) = spawn_object(
+        world,
         meshes.cube,
         mats.glossy_red,
         Mat4::from_translation(spin_centre),
@@ -177,10 +165,10 @@ fn bay_materials(
     }
 
     let plinth_right = Vec3::new(1.4, 0.45, z);
-    place(renderer, meshes.plinth, mats.dark_trim, plinth_right, 0.6);
+    place(world, meshes.plinth, mats.dark_trim, plinth_right, 0.6);
     let orb_rest = plinth_right + Vec3::new(0.0, 0.85, 0.0);
-    if let Ok(id) = insert_object(
-        renderer,
+    if let Ok(id) = spawn_object(
+        world,
         meshes.sphere,
         mats.gold,
         Mat4::from_translation(orb_rest),
@@ -191,7 +179,7 @@ fn bay_materials(
 
     for side in [-1.0_f32, 1.0] {
         place(
-            renderer,
+            world,
             meshes.panel,
             mats.emissive_cyan,
             Vec3::new(side * (HALL_HALF_WIDTH - 0.08), HALL_HEIGHT - 0.7, z),
@@ -211,7 +199,7 @@ fn bay_materials(
     for (i, material) in shelf.into_iter().enumerate() {
         let x = -1.9 + i as f32 * 0.6;
         place(
-            renderer,
+            world,
             meshes.sphere,
             material,
             Vec3::new(x, 0.3, z + 3.2),
@@ -221,28 +209,22 @@ fn bay_materials(
     let position = Vec3::new(0.0, HALL_HEIGHT - 0.5, z);
     let colour = [0.25, 0.85, 1.0];
     let intensity = 7.5;
-    let light = renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(point_light(
-            position.into(),
-            colour,
-            intensity,
-            BAY_LENGTH,
-        )))
-        .as_light()
-        .unwrap();
+    let light = spawn_light(
+        world,
+        point_light(position.into(), colour, intensity, BAY_LENGTH),
+    );
     anim.pulse_lights.push((light, position, colour, intensity));
 }
 
 /// Bay 1 — light forms: downward fluorescent spot cones and warm wall sconces,
 /// each with a visible emissive fixture, demonstrating `LightType::Spot` and
 /// per-light shadows.
-fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) {
+fn bay_spotlights(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     for side in [-1.0_f32, 1.0] {
         let x = side * 1.2;
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(spot_light(
+        spawn_light(
+            world,
+            spot_light(
                 [x, HALL_HEIGHT - 0.05, z],
                 [0.0, -1.0, 0.0],
                 [0.9, 0.95, 1.0],
@@ -250,26 +232,28 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
                 6.5,
                 1.22,
                 1.48,
-            )));
+            ),
+        );
         place(
-            renderer,
+            world,
             meshes.panel,
             mats.emissive_warm,
             Vec3::new(x, HALL_HEIGHT - 0.16, z),
             0.7,
         );
 
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+        spawn_light(
+            world,
+            point_light(
                 [side * (HALL_HALF_WIDTH - 0.15), 1.6, z],
                 [1.0, 0.65, 0.3],
                 2.2,
                 4.5,
-            )));
-        let sconce = insert_box_mesh(renderer, Vec3::new(0.06, 0.12, 0.25));
+            ),
+        );
+        let sconce = insert_box_mesh(world, Vec3::new(0.06, 0.12, 0.25));
         place(
-            renderer,
+            world,
             sconce,
             mats.dark_trim,
             Vec3::new(side * (HALL_HALF_WIDTH - 0.06), 1.6, z),
@@ -280,10 +264,10 @@ fn bay_spotlights(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats)
 
 /// Bay 2 — a bright flare light (ghost lens flare) plus a fog volume lit by a
 /// god-ray overhead light, so the corridor fills with visible volumetric shafts.
-fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) {
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(GpuLight {
+fn bay_flare_fog(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
+    spawn_light(
+        world,
+        GpuLight {
             position_range: [0.0, 1.6, z, 9.0],
             direction_outer: [0.0, -1.0, 0.0, 0.0],
             color_intensity: [1.0, 0.85, 0.5, 12.0],
@@ -299,36 +283,34 @@ fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) 
             flare_tint_g: 0.7,
             flare_tint_b: 0.35,
             ..Default::default()
-        }));
+        },
+    );
 
     let mut shaft = point_light([0.0, HALL_HEIGHT - 0.15, z], [0.7, 0.8, 1.0], 7.0, 9.0);
     shaft.god_rays_enabled = 1;
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(shaft));
+    spawn_light(world, shaft);
 
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-                bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-                priority: 10.0,
-                blend_radius: 1.5,
-                blend_weight: 1.0,
-                unbound: false,
-                settings: PostProcessSettings {
-                    fog_enabled: true,
-                    fog_density: 0.08,
-                    fog_color: [0.7, 0.76, 0.92],
-                    fog_scattering_anisotropy: 0.6,
-                    ..PostProcessSettings::default()
-                },
+    spawn_post_process_volume(
+        world,
+        PostProcessVolumeDescriptor {
+            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
+            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
+            priority: 10.0,
+            blend_radius: 1.5,
+            blend_weight: 1.0,
+            unbound: false,
+            settings: PostProcessSettings {
+                fog_enabled: true,
+                fog_density: 0.08,
+                fog_color: [0.7, 0.76, 0.92],
+                fog_scattering_anisotropy: 0.6,
+                ..PostProcessSettings::default()
             },
-        ));
+        },
+    );
 
     place(
-        renderer,
+        world,
         meshes.cube,
         mats.emissive_warm,
         Vec3::new(0.0, 1.6, z),
@@ -338,12 +320,19 @@ fn bay_flare_fog(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats) 
 
 /// Bay 3 — water simulation: a raised pool with a sphere that bobs in and out
 /// of the surface, splashing `WaterSimPass` ripples on every dip.
-fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+fn bay_water(
+    world: &mut World,
+    renderer: &mut Renderer,
+    z: f32,
+    meshes: &Meshes,
+    mats: &Mats,
+    anim: &mut Animated,
+) {
     let pool_centre = Vec3::new(-1.5, 0.45, z);
     let pool_half = Vec3::new(0.95, 0.45, 3.4);
-    let pool_mesh = insert_box_mesh(renderer, pool_half);
+    let pool_mesh = insert_box_mesh(world, pool_half);
     place(
-        renderer,
+        world,
         pool_mesh,
         mats.dark_trim,
         pool_centre,
@@ -351,65 +340,62 @@ fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim
     );
 
     // The water surface sits exactly on the pedestal top (y = 0.9).
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::water_volume(
-            helio::WaterVolumeDescriptor {
-                bounds_min: [
-                    pool_centre.x - pool_half.x + 0.05,
-                    0.9,
-                    pool_centre.z - pool_half.z + 0.05,
-                ],
-                bounds_max: [
-                    pool_centre.x + pool_half.x - 0.05,
-                    1.8,
-                    pool_centre.z + pool_half.z - 0.05,
-                ],
-                surface_height: 0.0,
-                wave_amplitude: 0.15,
-                wave_frequency: 0.5,
-                wave_speed: 6.0,
-                wave_direction: [0.6, 0.3],
-                wave_steepness: 0.5,
-                water_color: [0.03, 0.25, 0.4],
-                extinction: [0.2, 0.08, 0.05],
-                foam_threshold: 0.5,
-                foam_amount: 0.6,
-                reflection_strength: 0.9,
-                refraction_strength: 1.0,
-                fresnel_power: 5.0,
-                caustics_enabled: true,
-                caustics_intensity: 1.5,
-                caustics_scale: 6.0,
-                caustics_speed: 0.0,
-                fog_density: 0.0,
-                god_rays_intensity: 0.3,
-                ssr_enabled: true,
-                ssr_steps: 32,
-                ssr_step_size: 0.05,
-                ssr_thickness: 0.02,
-                ior: 1.333,
-                fresnel_min: 0.1,
-                density: 0.03,
-                shadow_rim: 1.0,
-                shadow_hitbox: 0.0,
-                shadow_ao: 1.0,
-                sun_direction: [0.0, 1.0, 0.0],
-                wave_spring: 1.2,
-                wave_damping: 0.98,
-                wind_direction: [0.6, 0.4],
-                wind_strength: 1.5,
-                wave_scale: 0.4,
-            },
-        ));
+    // Wind/wave-scale dynamics are pass-owned runtime state, applied below
+    // via `WaterSimPass` (see `WaterVolumeDescriptor`'s own doc for why).
+    spawn_water_volume(
+        world,
+        WaterVolumeDescriptor {
+            bounds_min: [
+                pool_centre.x - pool_half.x + 0.05,
+                0.9,
+                pool_centre.z - pool_half.z + 0.05,
+            ],
+            bounds_max: [
+                pool_centre.x + pool_half.x - 0.05,
+                1.8,
+                pool_centre.z + pool_half.z - 0.05,
+            ],
+            surface_height: 0.0,
+            wave_amplitude: 0.15,
+            wave_frequency: 0.5,
+            wave_speed: 6.0,
+            wave_direction: [0.6, 0.3],
+            wave_steepness: 0.5,
+            water_color: [0.03, 0.25, 0.4],
+            extinction: [0.2, 0.08, 0.05],
+            foam_threshold: 0.5,
+            foam_amount: 0.6,
+            reflection_strength: 0.9,
+            refraction_strength: 1.0,
+            fresnel_power: 5.0,
+            caustics_enabled: true,
+            caustics_intensity: 1.5,
+            caustics_scale: 6.0,
+            caustics_speed: 0.0,
+            fog_density: 0.0,
+            god_rays_intensity: 0.3,
+            ssr_enabled: true,
+            ssr_steps: 32,
+            ssr_step_size: 0.05,
+            ssr_thickness: 0.02,
+            ior: 1.333,
+            fresnel_min: 0.1,
+            density: 0.03,
+            shadow_rim: 1.0,
+            shadow_hitbox: 0.0,
+            shadow_ao: 1.0,
+            sun_direction: [0.0, 1.0, 0.0],
+        },
+    );
     if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
         sim.set_wind([0.6, 0.4], 1.5);
         sim.set_wave_scale(0.4);
+        sim.set_sim_dynamics(1.2, 0.98);
     }
 
     let orb_rest = pool_centre + Vec3::new(0.0, 0.55, 0.0);
-    if let Ok(id) = insert_object(
-        renderer,
+    if let Ok(id) = spawn_object(
+        world,
         meshes.sphere,
         mats.glossy_red,
         Mat4::from_translation(orb_rest),
@@ -421,9 +407,9 @@ fn bay_water(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim
 
 /// Bay 4 — GPU particles: a corona ember fountain, with the emitter re-uploaded
 /// every frame so the source drifts on a slow orbit.
-fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+fn bay_corona(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
     place(
-        renderer,
+        world,
         meshes.plinth,
         mats.emissive_warm,
         Vec3::new(0.0, 0.05, z),
@@ -446,32 +432,26 @@ fn bay_corona(renderer: &mut Renderer, z: f32, meshes: &Meshes, mats: &Mats, ani
         texture_index: -1,
         position: [0.0, 0.35, z],
     };
-    renderer.set_corona_emitters(&[emitter.to_gpu()]);
+    let entity = spawn_corona_emitter(world, 0, emitter.to_gpu());
 
     anim.corona = Some(CoronaAnim {
+        entity,
         emitter,
         centre: Vec3::new(0.0, 0.35, z),
         radius: 0.5,
         speed: 0.7,
     });
 
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(point_light(
-            [0.0, 2.4, z],
-            [1.0, 0.5, 0.2],
-            3.0,
-            5.0,
-        )));
+    spawn_light(world, point_light([0.0, 2.4, z], [1.0, 0.5, 0.2], 3.0, 5.0));
 }
 
 /// Bay 5 — instancing: a crate stack and tile floor of identical objects that
 /// the renderer auto-batches into a handful of instanced draws, a condensed
 /// one_million_cubes. The left side is kept clear for the shipping container
 /// parked there by `build`.
-fn bay_instancing(renderer: &mut Renderer, z: f32, mats: &Mats) {
+fn bay_instancing(world: &mut World, z: f32, mats: &Mats) {
     let crate_half = Vec3::new(0.3, 0.3, 0.3);
-    let crate_mesh = insert_box_mesh(renderer, crate_half);
+    let crate_mesh = insert_box_mesh(world, crate_half);
     for x in 0..3 {
         for d in 0..2 {
             for y in 0..4 {
@@ -485,16 +465,16 @@ fn bay_instancing(renderer: &mut Renderer, z: f32, mats: &Mats) {
                 } else {
                     mats.chalk
                 };
-                place(renderer, crate_mesh, material, pos, crate_half.length());
+                place(world, crate_mesh, material, pos, crate_half.length());
             }
         }
     }
 
-    let tile_mesh = insert_box_mesh(renderer, Vec3::new(0.12, 0.05, 0.12));
+    let tile_mesh = insert_box_mesh(world, Vec3::new(0.12, 0.05, 0.12));
     for x in 0..5 {
         for d in 0..4 {
             place(
-                renderer,
+                world,
                 tile_mesh,
                 mats.steel,
                 Vec3::new(0.5 + x as f32 * 0.5, 0.05, z - 3.0 + d as f32 * 0.5),
@@ -511,7 +491,7 @@ fn bay_instancing(renderer: &mut Renderer, z: f32, mats: &Mats) {
 /// Returns `(mesh, material, local_centre, local_size)` so the caller can place
 /// the container on the floor regardless of the FBX's origin. `None` if the
 /// asset cannot be loaded, so a missing model never crashes the demo.
-fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, Vec3)> {
+fn load_container(world: &mut World) -> Option<(Entity, Entity, Vec3, Vec3)> {
     const CONTAINER_FBX: &[u8] =
         include_bytes!("../../../models/source/container with textures.fbx");
     let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -534,7 +514,7 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
         }
     };
 
-    let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
+    let mat_ids = upload_scene_materials(world, &scene);
     let sm = match scene.sectioned_mesh {
         Some(sm) => sm,
         None => {
@@ -556,40 +536,30 @@ fn load_container(renderer: &mut Renderer) -> Option<(MeshId, MaterialId, Vec3, 
     }
     let local_centre = (bb_min + bb_max) * 0.5;
 
-    let fallback = renderer.scene().insert_material(make_material(
-        [0.5, 0.5, 0.5, 1.0],
-        0.8,
-        0.0,
-        [0.0; 3],
-        0.0,
-    ));
+    let fallback = spawn_material(
+        world,
+        make_material([0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0),
+    );
     let material = section
         .material_index
         .and_then(|i| mat_ids.get(i))
         .copied()
         .unwrap_or(fallback);
 
-    let mesh = renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::mesh(MeshUpload {
+    let mesh = spawn_mesh(
+        world,
+        MeshUpload {
             vertices: sm.vertices.clone(),
             indices: section.indices.clone(),
-        }))
-        .as_mesh()
-        .unwrap();
+        },
+    );
 
     Some((mesh, material, local_centre, bb_max - bb_min))
 }
 
 /// Bay 6 — emissive/HDR colour targets plus a grid of hue-cycling lights, a
 /// condensed take on the HDR/colour-grading and light-benchmark demos.
-fn bay_emissive_colour(
-    renderer: &mut Renderer,
-    z: f32,
-    meshes: &Meshes,
-    mats: &Mats,
-    anim: &mut Animated,
-) {
+fn bay_emissive_colour(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
     let targets = [
         (
             make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0),
@@ -605,8 +575,8 @@ fn bay_emissive_colour(
         ),
     ];
     for (gpu, x) in targets {
-        let mat = renderer.scene().insert_material(gpu);
-        place(renderer, meshes.cube, mat, Vec3::new(x, 0.6, z), 0.6);
+        let mat = spawn_material(world, gpu);
+        place(world, meshes.cube, mat, Vec3::new(x, 0.6, z), 0.6);
     }
 
     for i in 0..6 {
@@ -617,20 +587,11 @@ fn bay_emissive_colour(
         );
         let colour = hsv_to_rgb(i as f32 / 6.0, 0.8, 1.0);
         let base = 3.0;
-        let light = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                pos.into(),
-                colour,
-                base,
-                6.0,
-            )))
-            .as_light()
-            .unwrap();
+        let light = spawn_light(world, point_light(pos.into(), colour, base, 6.0));
         anim.colour_lights.push((light, pos, colour, base));
     }
     place(
-        renderer,
+        world,
         meshes.plinth,
         mats.emissive_white,
         Vec3::new(0.0, 0.05, z),
@@ -666,64 +627,54 @@ fn bay_voxel(renderer: &mut Renderer, z: f32) {
 
 /// Bay 8 — post-process colour grading: a warm vignette + saturation + bloom
 /// volume over the whole bay, anchored on a blindingly bright emissive sun.
-fn bay_colour_grade(renderer: &mut Renderer, z: f32, meshes: &Meshes) {
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-                bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-                priority: 10.0,
-                blend_radius: 2.0,
-                blend_weight: 1.0,
-                unbound: false,
-                settings: PostProcessSettings {
-                    vignette_intensity: 0.5,
-                    vignette_smoothness: 2.0,
-                    vignette_roundness: 1.2,
-                    vignette_color: [1.0, 0.6, 0.2],
-                    vignette_enabled: true,
-                    color_saturation: [1.2, 1.05, 0.85],
-                    color_contrast: [1.05, 1.05, 1.05],
-                    bloom_intensity: 0.7,
-                    bloom_threshold: 1.2,
-                    bloom_knee: 0.5,
-                    bloom_enabled: true,
-                    bloom_tint: [1.0, 0.9, 0.7],
-                    ..PostProcessSettings::default()
-                },
+fn bay_colour_grade(world: &mut World, z: f32, meshes: &Meshes) {
+    spawn_post_process_volume(
+        world,
+        PostProcessVolumeDescriptor {
+            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
+            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
+            priority: 10.0,
+            blend_radius: 2.0,
+            blend_weight: 1.0,
+            unbound: false,
+            settings: PostProcessSettings {
+                vignette_intensity: 0.5,
+                vignette_smoothness: 2.0,
+                vignette_roundness: 1.2,
+                vignette_color: [1.0, 0.6, 0.2],
+                vignette_enabled: true,
+                color_saturation: [1.2, 1.05, 0.85],
+                color_contrast: [1.05, 1.05, 1.05],
+                bloom_intensity: 0.7,
+                bloom_threshold: 1.2,
+                bloom_knee: 0.5,
+                bloom_enabled: true,
+                bloom_tint: [1.0, 0.9, 0.7],
+                ..PostProcessSettings::default()
             },
-        ));
+        },
+    );
 
-    let sun_mat = renderer.scene().insert_material(make_material(
-        [1.0, 0.9, 0.7, 1.0],
-        0.2,
-        0.0,
-        [50.0, 45.0, 35.0],
-        50.0,
-    ));
-    place(renderer, meshes.cube, sun_mat, Vec3::new(0.0, 1.4, z), 0.6);
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(point_light(
-            [0.0, 1.4, z],
-            [1.0, 0.9, 0.7],
-            12.0,
-            8.0,
-        )));
+    let sun_mat = spawn_material(
+        world,
+        make_material([1.0, 0.9, 0.7, 1.0], 0.2, 0.0, [50.0, 45.0, 35.0], 50.0),
+    );
+    place(world, meshes.cube, sun_mat, Vec3::new(0.0, 1.4, z), 0.6);
+    spawn_light(
+        world,
+        point_light([0.0, 1.4, z], [1.0, 0.9, 0.7], 12.0, 8.0),
+    );
 }
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
-pub fn build(renderer: &mut Renderer) -> Animated {
+pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
     // ── Materials ────────────────────────────────────────────────────────────
     // Deliberately spread across the roughness/metallic space: a showcase that is all
     // mid-roughness dielectric demonstrates almost nothing about the BRDF. The mirror and
     // the chalk are the two ends; everything else sits between them.
     let mut mat = |c: [f32; 4], rough: f32, metal: f32, em: [f32; 3], strength: f32| {
-        renderer
-            .scene()
-            .insert_material(make_material(c, rough, metal, em, strength))
+        spawn_material(world, make_material(c, rough, metal, em, strength))
     };
 
     let concrete = mat([0.38, 0.38, 0.40, 1.0], 0.92, 0.0, [0.0; 3], 0.0);
@@ -755,20 +706,20 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     let floor_half = Vec3::new(HALL_HALF_WIDTH, 0.1, BAY_LENGTH * 0.5);
     let wall_half = Vec3::new(0.1, HALL_HEIGHT * 0.5, BAY_LENGTH * 0.5);
 
-    let floor_mesh = insert_box_mesh(renderer, floor_half);
-    let wall_mesh = insert_box_mesh(renderer, wall_half);
+    let floor_mesh = insert_box_mesh(world, floor_half);
+    let wall_mesh = insert_box_mesh(world, wall_half);
 
     for bay in 0..BAY_COUNT {
         let z = bay_centre_z(bay);
         place(
-            renderer,
+            world,
             floor_mesh,
             concrete,
             Vec3::new(0.0, -0.1, z),
             floor_half.length(),
         );
         place(
-            renderer,
+            world,
             floor_mesh,
             dark_trim,
             Vec3::new(0.0, HALL_HEIGHT + 0.1, z),
@@ -776,7 +727,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
         );
         for side in [-1.0_f32, 1.0] {
             place(
-                renderer,
+                world,
                 wall_mesh,
                 if bay % 2 == 0 { concrete } else { dark_trim },
                 Vec3::new(side * (HALL_HALF_WIDTH + 0.1), HALL_HEIGHT * 0.5, z),
@@ -788,9 +739,9 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // Mirrored end cap, so the corridor terminates in geometry rather than in the void
     // and the far end shows the whole hall back at you.
     let end_half = Vec3::new(HALL_HALF_WIDTH + 0.2, HALL_HEIGHT * 0.5, 0.15);
-    let end_mesh = insert_box_mesh(renderer, end_half);
+    let end_mesh = insert_box_mesh(world, end_half);
     place(
-        renderer,
+        world,
         end_mesh,
         mirror,
         Vec3::new(
@@ -803,41 +754,30 @@ pub fn build(renderer: &mut Renderer) -> Animated {
 
     // ── Shared exhibit meshes ────────────────────────────────────────────────
     let meshes = Meshes {
-        cube: renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.28)))
-            .as_mesh()
-            .unwrap(),
-        sphere: renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap(),
-        plinth: insert_box_mesh(renderer, Vec3::new(0.35, 0.45, 0.35)),
-        panel: insert_box_mesh(renderer, Vec3::new(0.06, 0.5, 1.6)),
+        cube: spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 0.28)),
+        sphere: spawn_mesh(world, sphere_mesh([0.0, 0.0, 0.0], 0.3)),
+        plinth: insert_box_mesh(world, Vec3::new(0.35, 0.45, 0.35)),
+        panel: insert_box_mesh(world, Vec3::new(0.06, 0.5, 1.6)),
     };
 
     // ── Controller cubes ─────────────────────────────────────────────────────
     // Small bright cubes `main.rs` reparents to the OpenXR grip poses each frame.
-    let hand_mesh = insert_box_mesh(renderer, Vec3::new(0.05, 0.05, 0.05));
-    let hand_mat = renderer.scene().insert_material(make_material(
-        [0.05, 0.05, 0.06, 1.0],
-        0.4,
-        0.0,
-        [0.2, 1.0, 0.9],
-        8.0,
-    ));
-    let mut hand_cubes = [ObjectId::from_raw(0, 0); 2];
+    let hand_mesh = insert_box_mesh(world, Vec3::new(0.05, 0.05, 0.05));
+    let hand_mat = spawn_material(
+        world,
+        make_material([0.05, 0.05, 0.06, 1.0], 0.4, 0.0, [0.2, 1.0, 0.9], 8.0),
+    );
+    let mut hand_cubes = [None; 2];
     for (i, side) in [1.0_f32, -1.0].into_iter().enumerate() {
         let start = Vec3::new(side * 0.2, 1.4, -0.4);
-        if let Ok(id) = insert_object(
-            renderer,
+        if let Ok(id) = spawn_object(
+            world,
             hand_mesh,
             hand_mat,
             Mat4::from_translation(start),
             0.15,
         ) {
-            hand_cubes[i] = id;
+            hand_cubes[i] = Some(id);
         }
     }
 
@@ -855,15 +795,15 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     for bay in 0..BAY_COUNT {
         let z = bay_centre_z(bay);
         match bay {
-            0 => bay_materials(renderer, z, &meshes, &mats, &mut anim),
-            1 => bay_spotlights(renderer, z, &meshes, &mats),
-            2 => bay_flare_fog(renderer, z, &meshes, &mats),
-            3 => bay_water(renderer, z, &meshes, &mats, &mut anim),
-            4 => bay_corona(renderer, z, &meshes, &mats, &mut anim),
-            5 => bay_instancing(renderer, z, &mats),
-            6 => bay_emissive_colour(renderer, z, &meshes, &mats, &mut anim),
+            0 => bay_materials(world, z, &meshes, &mats, &mut anim),
+            1 => bay_spotlights(world, z, &meshes, &mats),
+            2 => bay_flare_fog(world, z, &meshes, &mats),
+            3 => bay_water(world, renderer, z, &meshes, &mats, &mut anim),
+            4 => bay_corona(world, z, &meshes, &mats, &mut anim),
+            5 => bay_instancing(world, z, &mats),
+            6 => bay_emissive_colour(world, z, &meshes, &mats, &mut anim),
             7 => bay_voxel(renderer, z),
-            8 => bay_colour_grade(renderer, z, &meshes),
+            8 => bay_colour_grade(world, z, &meshes),
             _ => unreachable!(),
         }
     }
@@ -873,8 +813,7 @@ pub fn build(renderer: &mut Renderer) -> Animated {
     // corridor. Rotating about Y maps the FBX's long (X) axis onto the
     // corridor's Z axis; the height axis is unchanged so the bottom sits on
     // the floor.
-    if let Some((container_mesh, container_mat, local_centre, local_size)) =
-        load_container(renderer)
+    if let Some((container_mesh, container_mat, local_centre, local_size)) = load_container(world)
     {
         let z = bay_centre_z(5);
         let centre = Vec3::new(
@@ -886,32 +825,26 @@ pub fn build(renderer: &mut Renderer) -> Animated {
             * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
             * Mat4::from_translation(-local_centre);
         let radius = (local_size * 0.5).length().max(0.5);
-        let _ = insert_object(renderer, container_mesh, container_mat, transform, radius);
+        let _ = spawn_object(world, container_mesh, container_mat, transform, radius);
     }
 
     // Cool fill at the entrance, so the first bay is not lit solely by its own accent —
     // otherwise the whole corridor reads as one colour from the doorway.
-    renderer
-        .scene()
-        .insert_entity(helio::SceneEntity::light(point_light(
-            [0.0, HALL_HEIGHT - 0.6, 1.5],
-            [0.6, 0.7, 1.0],
-            6.0,
-            8.0,
-        )));
+    spawn_light(
+        world,
+        point_light([0.0, HALL_HEIGHT - 0.6, 1.5], [0.6, 0.7, 1.0], 6.0, 8.0),
+    );
 
     // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
     // colour target each frame, so its absence is what made geometry smear over itself.
     // See `Renderer::rebuild_graph_if_sky_changed`.
-    renderer.scene().insert_entity(helio::SceneEntity::sky(
-        helio::SkyActor::new().with_sky_color([0.05, 0.07, 0.11]),
-    ));
+    spawn_sky(world, [0.05, 0.07, 0.11]);
 
     anim
 }
 
 /// Advance the animated exhibits. Called once per frame with the scene time.
-pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
+pub fn animate(world: &mut World, renderer: &mut Renderer, animated: &mut Animated, time: f32) {
     for (index, (id, centre)) in animated.spinners.iter().enumerate() {
         // Staggered rates: a corridor rotating in unison reads as one mechanism rather
         // than as separate exhibits.
@@ -923,21 +856,25 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
                 time * rate * 0.6,
                 0.0,
             ));
-        let _ = renderer.scene().update_object_transform(*id, transform);
+        let _ = update_object_transform(world, renderer, *id, transform);
     }
 
     for (index, (id, rest)) in animated.bobbers.iter().enumerate() {
         let offset = (time * 1.1 + index as f32 * 0.8).sin() * 0.18;
-        let _ = renderer
-            .scene()
-            .update_object_transform(*id, Mat4::from_translation(*rest + Vec3::Y * offset));
+        let _ = update_object_transform(
+            world,
+            renderer,
+            *id,
+            Mat4::from_translation(*rest + Vec3::Y * offset),
+        );
     }
 
     for (index, (id, position, colour, base)) in animated.pulse_lights.iter().enumerate() {
         // Shallow pulse — deep flicker in a headset is unpleasant at best and a migraine
         // trigger at worst, so this stays well inside a gentle band.
         let pulse = 0.85 + 0.15 * (time * 0.9 + index as f32 * 1.3).sin();
-        let _ = renderer.scene().update_light(
+        update_light(
+            world,
             *id,
             point_light((*position).into(), *colour, base * pulse, BAY_LENGTH),
         );
@@ -946,9 +883,12 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
     // Water orb: bob up and down, splashing ripples when it pierces the surface.
     if let Some((id, rest, pool_xz)) = &mut animated.water_orb {
         let y = rest.y + (time * 1.4).sin() * 0.35;
-        let _ = renderer
-            .scene()
-            .update_object_transform(*id, Mat4::from_translation(Vec3::new(rest.x, y, rest.z)));
+        let _ = update_object_transform(
+            world,
+            renderer,
+            *id,
+            Mat4::from_translation(Vec3::new(rest.x, y, rest.z)),
+        );
         if y < 0.9 {
             if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
                 sim.add_drop(pool_xz[0], pool_xz[1], 0.5, 0.9);
@@ -961,9 +901,7 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
     for (index, (id, position, _colour, base)) in animated.colour_lights.iter().enumerate() {
         let hue = (time * 0.4 + index as f32 / count as f32) % 1.0;
         let colour = hsv_to_rgb(hue, 0.8, 1.0);
-        let _ = renderer
-            .scene()
-            .update_light(*id, point_light((*position).into(), colour, *base, 6.0));
+        update_light(world, *id, point_light((*position).into(), colour, *base, 6.0));
     }
 
     // Corona emitter: drift the source on a slow orbit so the particles visibly follow.
@@ -974,6 +912,6 @@ pub fn animate(renderer: &mut Renderer, animated: &mut Animated, time: f32) {
             c.centre.y + (a * 2.0).sin() * 0.35,
             c.centre.z + a.sin() * c.radius,
         ];
-        renderer.set_corona_emitters(&[c.emitter.to_gpu()]);
+        update_corona_emitter(world, c.entity, 0, c.emitter.to_gpu());
     }
 }

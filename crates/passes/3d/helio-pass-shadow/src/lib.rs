@@ -450,7 +450,7 @@ impl RenderPass for ShadowPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "object_batch"]
+        &["object_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

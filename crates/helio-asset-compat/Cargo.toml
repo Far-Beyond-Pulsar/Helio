@@ -10,6 +10,11 @@ description = "SolidRS integration layer for Helio renderer - asset loading and 
 helio = { workspace = true }
 libhelio = { workspace = true }
 
+# SceneDB: material rows spawned by `upload_scene_materials` are plain
+# `helio_pass_gbuffer::MaterialComponent` rows now, same as everywhere else.
+pulsar_scenedb = { workspace = true }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+
 # SolidRS - 3D asset loading
 solid-rs = { workspace = true, features = ["configurator"] }
 solid-gltf = { workspace = true, features = ["configurator"] }

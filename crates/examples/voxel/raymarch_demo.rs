@@ -24,11 +24,15 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, RenderGraph, RenderPass, Renderer, RendererConfig, Scene, SceneEntity,
+    LightType, RenderGraph, RenderPass, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_pass_voxel_raymarch::{GpuVoxelVolume, VoxelRayMarchPass};
+
+#[path = "../v3_demo_common.rs"]
+mod v3_demo_common;
+use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, spawn_light};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -262,27 +266,13 @@ impl ApplicationHandler for App {
         // full-res color attachment, so pin it to 1.0.
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let mut scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
 
-        // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
-        // directly (see voxel_raymarch.wgsl), the same infrastructure the default
-        // render graphs feed their deferred lighting pass with.
-        scene.insert_entity(SceneEntity::light(GpuLight {
+        // Real scene lighting — VoxelRayMarchPass sums the SceneDB
+        // `"scene_lights"` buffer directly (see voxel_raymarch.wgsl), the same
+        // infrastructure the default render graphs feed their deferred
+        // lighting pass with.
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        spawn_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [0.35, -0.8, 0.25, 0.0],
             color_intensity: [1.0, 0.95, 0.85, 3.0],
@@ -291,8 +281,8 @@ impl ApplicationHandler for App {
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        }));
-        scene.insert_entity(SceneEntity::light(GpuLight {
+        });
+        spawn_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [-0.4, -0.2, -0.6, 0.0],
             color_intensity: [0.5, 0.6, 0.8, 0.6],
@@ -301,7 +291,7 @@ impl ApplicationHandler for App {
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        }));
+        });
 
         // Procedurally generate the authored input, then publish it through the
         // raymarch pass's explicit delta/upload boundary.
@@ -314,50 +304,43 @@ impl ApplicationHandler for App {
         // doing double duty as anti-aliasing and the terminal blit;
         // PostProcessPass would instead clear+rewrite the target straight from
         // "pre_aa" and discard FXAA's result if chained after it).
-        let mut graph = RenderGraph::new(&device, &queue);
-        let mut voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
-        voxel_rm_pass.upload_volume(
-            &queue,
-            0,
-            &GpuVoxelVolume {
-                local_to_world: glam::Mat4::IDENTITY.to_cols_array(),
-                world_to_local: glam::Mat4::IDENTITY.to_cols_array(),
-                dimensions: [VOXEL_TERRAIN_GRID_DIM; 3],
-                brick_grid_dim: 8,
-                voxel_size: VOXEL_SIZE,
-                palette_offset: 0,
-                volume_id: 0,
-                _pad: [0; 2],
-            },
-        );
-        world.upload_all_raymarch(
-            &queue,
-            voxel_rm_pass.voxel_brick_pool(),
-            voxel_rm_pass.voxel_data_pool(),
-        );
-        // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
-        // only resizes them in on_resize(), which the engine normally calls from a
-        // window-resize event. Since RenderGraph::lock() never calls it, we have to
-        // size the pass explicitly here or it ray marches into a 1x1 texture forever.
-        voxel_rm_pass.on_resize(&device, size.width, size.height);
-        graph.add_pass(Box::new(voxel_rm_pass));
-        graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
-        graph.lock(size.width, size.height);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
+                let mut graph = RenderGraph::new(d, q);
+                let mut voxel_rm_pass = VoxelRayMarchPass::new(d, surface_format);
+                voxel_rm_pass.upload_volume(
+                    q,
+                    0,
+                    &GpuVoxelVolume {
+                        local_to_world: glam::Mat4::IDENTITY.to_cols_array(),
+                        world_to_local: glam::Mat4::IDENTITY.to_cols_array(),
+                        dimensions: [VOXEL_TERRAIN_GRID_DIM; 3],
+                        brick_grid_dim: 8,
+                        voxel_size: VOXEL_SIZE,
+                        palette_offset: 0,
+                        volume_id: 0,
+                        _pad: [0; 2],
+                    },
+                );
+                // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
+                // only resizes them in on_resize(), which the engine normally calls from a
+                // window-resize event. Since RenderGraph::lock() never calls it, we have to
+                // size the pass explicitly here or it ray marches into a 1x1 texture forever.
+                voxel_rm_pass.on_resize(d, graph_config.width, graph_config.height);
+                graph.add_pass(Box::new(voxel_rm_pass));
+                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
+                graph.lock(graph_config.width, graph_config.height);
+                graph
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
 
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        {
+            let pass = renderer
+                .find_pass_mut::<VoxelRayMarchPass>()
+                .expect("VoxelRayMarchPass missing from graph");
+            world.upload_all_raymarch(&queue, pass.voxel_brick_pool(), pass.voxel_data_pool());
+        }
+
         // Renderer applies TAA-style subpixel camera jitter every frame
         // unconditionally; without a TaaPass to resolve it (we only have
         // FXAA, which is spatial-only), that jitter just makes the image

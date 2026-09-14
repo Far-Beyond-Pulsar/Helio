@@ -370,10 +370,9 @@ impl VoxelRayMarchPass {
 
     fn rebuild_compute_bg(&mut self, ctx: &PassContext) {
         let lights_buf = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VoxelRayMarch Compute BG"),
@@ -544,12 +543,14 @@ impl RenderPass for VoxelRayMarchPass {
                 height: self.height as f32,
                 time: ctx.frame_num as f32 * 0.016,
                 volume_count: voxel_volume_count,
-                light_count: ctx
-                    .pass_resources
-                    .lights
-                    .get()
-                    .map(|l| l.light_count)
-                    .unwrap_or(0),
+                light_count: if ctx
+                    .scene_buffers
+                    .contains(helio_core::BufferKey::of("scene_lights"))
+                {
+                    256
+                } else {
+                    0
+                },
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -569,10 +570,9 @@ impl RenderPass for VoxelRayMarchPass {
 
         let gen = ctx.camera_generation as usize;
         let lights_ptr = ctx
-            .resources
-            .lights
-            .get()
-            .map(|l| l.lights as *const _ as usize)
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer as *const _ as usize)
             .unwrap_or(0);
         if self.compute_bg_key != Some((gen, lights_ptr)) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);

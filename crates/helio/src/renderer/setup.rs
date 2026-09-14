@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use bytemuck::Zeroable;
+use wgpu::util::DeviceExt;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -171,6 +172,51 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Keep the material binding ABI valid even before a frontend publishes
+        // texture components. Material rows and their indices come from
+        // SceneDB; this is only the backend descriptor fallback for an
+        // untextured scene.
+        let material_binding = libhelio::MaterialBindingConfig::for_device(&device);
+        let material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SceneDB Material Texture Slots"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fallback_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Default Material Texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Default Material Sampler"),
+            ..Default::default()
+        });
+        let material_bindings = super::renderer_impl::MaterialBindingResources {
+            material_textures,
+            _fallback_texture: fallback_texture,
+            fallback_view,
+            fallback_sampler,
+            texture_count: material_binding.max_textures,
+            version: 0,
+        };
+
         // Camera jitter is only valid when a temporal pass reconstructs it.
         // Applying it to FXAA/non-temporal graphs shifts the final image every
         // frame and presents as whole-scene shimmer.
@@ -219,6 +265,7 @@ impl Renderer {
             color_grading_lut_view: None,
             ies_texture_view: None,
             cull_stats_staging,
+            material_bindings,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
