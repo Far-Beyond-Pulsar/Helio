@@ -108,7 +108,16 @@ pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -
         position_range: [0.0, 0.0, 0.0, f32::MAX],
         direction_outer: [direction[0], direction[1], direction[2], 0.0],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: 0, // Enable shadows
+        // u32::MAX = "no shadow" (see deferred_lighting.wgsl's sentinel
+        // check). NOT 0: SceneDB-authored lights never get a real
+        // shadow-atlas slot assigned -- the CPU-side importance-scoring
+        // loop that would allocate one predates SceneDB and doesn't run
+        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // doc comment). shadow_index: 0 silently samples atlas layer 0's
+        // stale/unrelated contents as if it belonged to this light, which
+        // reads as "fully shadowed" -- an entirely black scene, not merely
+        // a light without shadows.
+        shadow_index: u32::MAX,
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
@@ -121,7 +130,16 @@ pub fn point_light(position: [f32; 3], color: [f32; 3], intensity: f32, range: f
         position_range: [position[0], position[1], position[2], range],
         direction_outer: [0.0, 0.0, -1.0, 0.0],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: 0, // Enable shadows
+        // u32::MAX = "no shadow" (see deferred_lighting.wgsl's sentinel
+        // check). NOT 0: SceneDB-authored lights never get a real
+        // shadow-atlas slot assigned -- the CPU-side importance-scoring
+        // loop that would allocate one predates SceneDB and doesn't run
+        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // doc comment). shadow_index: 0 silently samples atlas layer 0's
+        // stale/unrelated contents as if it belonged to this light, which
+        // reads as "fully shadowed" -- an entirely black scene, not merely
+        // a light without shadows.
+        shadow_index: u32::MAX,
         light_type: LightType::Point as u32,
         inner_angle: 0.0,
         _pad: 0,
@@ -142,7 +160,16 @@ pub fn spot_light(
         position_range: [position[0], position[1], position[2], range],
         direction_outer: [direction[0], direction[1], direction[2], outer_angle.cos()],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: 0, // Enable shadows
+        // u32::MAX = "no shadow" (see deferred_lighting.wgsl's sentinel
+        // check). NOT 0: SceneDB-authored lights never get a real
+        // shadow-atlas slot assigned -- the CPU-side importance-scoring
+        // loop that would allocate one predates SceneDB and doesn't run
+        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // doc comment). shadow_index: 0 silently samples atlas layer 0's
+        // stale/unrelated contents as if it belonged to this light, which
+        // reads as "fully shadowed" -- an entirely black scene, not merely
+        // a light without shadows.
+        shadow_index: u32::MAX,
         light_type: LightType::Spot as u32,
         inner_angle: inner_angle.cos(),
         _pad: 0,
@@ -511,11 +538,23 @@ pub fn spawn_object(
         .get::<helio_pass_gbuffer::MaterialComponent>(material)
         .ok_or("material entity has no MaterialComponent")?;
     let bounds = [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius];
+    // `+ 1`, not the raw SceneDB entity generation: `Entity::generation()`
+    // legitimately starts at 0 for any slot's first use (see
+    // `World::spawn_inner`) and only increments on despawn-then-reuse, but
+    // the object-batch gather shader treats `mesh_generation == 0u` as
+    // "this StaticObjectComponent row was never written" (its Zeroable
+    // default) and silently skips it -- so every object referencing a
+    // freshly-spawned, never-despawned mesh (the overwhelmingly common
+    // case: nearly every demo spawns its meshes once and never touches
+    // them again) was being dropped from every draw, unconditionally. The
+    // `+1` keeps 0 as a true "never written" sentinel while staying
+    // trivially recoverable (`stored - 1 == real generation`) if anything
+    // ever needs the raw value back.
     let component = StaticObjectComponent::new(
         mesh.index(),
-        mesh.generation(),
+        mesh.generation().wrapping_add(1),
         material.index(),
-        material.generation(),
+        material.generation().wrapping_add(1),
         transform,
         bounds,
         indices.count,

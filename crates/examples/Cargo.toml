@@ -283,7 +283,8 @@ helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "72291d0f211dc8826eb70339aeb0409be4270ad5", features = ["gpu"] }
+pulsar_scenedb = { workspace = true }
+scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 rapier3d = "0.24"
 image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }

@@ -45,9 +45,7 @@ fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::component
         interaction_stiffness: component.wind.interaction_stiffness,
         // Material projections remain a separate scene domain. Slot zero is the
         // stable default until foliage materials receive their own SceneDB column.
-        // Material slot zero is the stable default until foliage material
-        // references are represented by their own SceneDB component column.
-        material_id: 0,
+        material_id: 0u32,
         density_layer: component.general.density_layer as u32,
         kind_and_flags: pack_kind_and_flags(FoliageKind::Blade, flags),
         mesh_or_impostor_id: u32::MAX,

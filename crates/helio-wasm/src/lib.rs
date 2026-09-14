@@ -14,9 +14,10 @@
 //! impl HelioWasmApp for MyDemo {
 //!     fn title() -> &'static str { "My Demo" }
 //!
-//!     fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-//!             _queue: Arc<wgpu::Queue>, width: u32, height: u32) -> Self {
-//!         /* build scene */
+//!     fn init(renderer: &mut Renderer, scene_db: &mut pulsar_scenedb::SceneDb,
+//!             _device: Arc<wgpu::Device>, _queue: Arc<wgpu::Queue>,
+//!             width: u32, height: u32) -> Self {
+//!         /* spawn meshes/materials/lights into scene_db.world */
 //!         MyDemo { /* ... */ }
 //!     }
 //!
@@ -110,19 +111,22 @@ pub trait HelioWasmApp: Sized + 'static {
     /// Return `None` (the default) to use helio's standard deferred graph.
     /// Override to insert custom passes — voxel meshing, injected post-process
     /// effects, etc. Called once, before [`init`](HelioWasmApp::init); the
-    /// scene is still empty at this point, so populate meshes/lights/volumes in
-    /// `init` (passes bind scene resources at render time) and only assemble
-    /// the pass pipeline here.
+    /// SceneDB is still empty at this point, so populate meshes/lights/volumes
+    /// in `init` (passes bind scene resources at render time) and only
+    /// assemble the pass pipeline here.
     ///
-    /// `config` already carries this demo's [`render_scale`](HelioWasmApp::render_scale)
-    /// and the current `width`/`height`; use `config.width` / `config.height`
-    /// when locking the graph.
+    /// Arguments mirror [`helio::GraphBuilderFn`]: `config` already carries
+    /// this demo's [`render_scale`](HelioWasmApp::render_scale) and the
+    /// current `width`/`height`; use `config.width` / `config.height` when
+    /// locking the graph. There is no scene parameter -- SceneDB access for a
+    /// custom graph goes through `helio::PassBuildContext`/
+    /// `RendererBuilder::with_pass_build_context` instead of this closure ABI.
     fn build_graph(
         _device: &std::sync::Arc<wgpu::Device>,
         _queue: &std::sync::Arc<wgpu::Queue>,
-        _scene: &helio::Scene,
         _config: helio::RendererConfig,
         _debug_state: std::sync::Arc<std::sync::Mutex<helio::DebugDrawState>>,
+        _camera_buf: &wgpu::Buffer,
         _debug_camera_buf: &wgpu::Buffer,
         _cull_stats_buf: &wgpu::Buffer,
     ) -> Option<helio::RenderGraph> {
@@ -130,9 +134,12 @@ pub trait HelioWasmApp: Sized + 'static {
     }
 
     /// Called once after the wgpu device and renderer are ready.
-    /// Build your scene (meshes, materials, lights) here.
+    /// Build your scene (meshes, materials, lights) here by spawning rows
+    /// directly into `scene_db.world` -- SceneDB is the sole scene authority,
+    /// there is no typed scene container to populate instead.
     fn init(
         renderer: &mut helio::Renderer,
+        scene_db: &mut pulsar_scenedb::SceneDb,
         device: std::sync::Arc<wgpu::Device>,
         queue: std::sync::Arc<wgpu::Queue>,
         width: u32,
