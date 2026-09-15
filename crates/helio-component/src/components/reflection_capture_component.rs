@@ -29,11 +29,6 @@
 use crate::subsystems::PendingWorldWrites;
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::ReflectionCaptureDescriptor;
-use libhelio::{
-    ReflectionCaptureMobility as HelioReflectionCaptureMobility,
-    ReflectionCaptureShape as HelioReflectionCaptureShape,
-};
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable,
     RuntimeComponentOwner,
@@ -43,7 +38,6 @@ use std::marker::PhantomData;
 use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 
-use crate::subsystems::ReflectionCaptureCache;
 
 pub const REFLECTION_CAPTURE_CLASS_NAME: &str = "ReflectionCaptureComponent";
 
@@ -209,25 +203,24 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
         );
         let transform = Mat4::from_rotation_translation(rotation, Vec3::from_array(owner.position));
 
-        let descriptor = ReflectionCaptureDescriptor {
+        let packed = helio_pass_deferred_light::ReflectionCaptureComponent {
+            position_radius: [owner.position[0], owner.position[1], owner.position[2], component.influence_radius],
+            extents_transition: [component.extents[0], component.extents[1], component.extents[2], component.transition_distance],
+            world_to_local: match component.shape {
+                ReflectionCaptureShape::Sphere => Mat4::IDENTITY.to_cols_array_2d(),
+                ReflectionCaptureShape::Box => transform.inverse().to_cols_array_2d(),
+            },
+            cubemap_index: -1,
             shape: match component.shape {
-                ReflectionCaptureShape::Sphere => HelioReflectionCaptureShape::Sphere,
-                ReflectionCaptureShape::Box => HelioReflectionCaptureShape::Box,
+                ReflectionCaptureShape::Sphere => 0,
+                ReflectionCaptureShape::Box => 1,
             },
             mobility: match component.mobility {
-                ReflectionCaptureMobility::Static => HelioReflectionCaptureMobility::Static,
-                ReflectionCaptureMobility::Dynamic => HelioReflectionCaptureMobility::Dynamic,
+                ReflectionCaptureMobility::Static => 0,
+                ReflectionCaptureMobility::Dynamic => 1,
             },
-            transform,
-            influence_radius: component.influence_radius,
-            extents: component.extents,
-            transition_distance: component.transition_distance,
             brightness: component.brightness,
         };
-        // -1: no cubemap resident yet -- baking (or a future dynamic-capture
-        // pass) is what assigns a real layer, same as it always has been.
-        let gpu = descriptor.to_gpu(-1);
-        let packed = helio_pass_deferred_light::ReflectionCaptureComponent::from(gpu);
         writes.push(move |world| {
             world.insert(entity, packed);
         });
@@ -281,7 +274,6 @@ mod tests {
     #[test]
     fn disabling_a_never_inserted_capture_is_a_quiet_no_op() {
         let mut subsystems = Subsystems::new();
-        subsystems.register(ReflectionCaptureCache::new());
         let mut context = TestRuntimeContext {
             project_root: PathBuf::from("."),
             subsystems,

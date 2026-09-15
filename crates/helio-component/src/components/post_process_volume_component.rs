@@ -37,7 +37,6 @@ use pulsar_reflection::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::subsystems::PostProcessVolumeCache;
 
 pub const POST_PROCESS_VOLUME_CLASS_NAME: &str = "PostProcessVolumeComponent";
 
@@ -654,7 +653,6 @@ mod tests {
     #[test]
     fn disabling_a_never_inserted_volume_is_a_quiet_no_op() {
         let mut subsystems = Subsystems::new();
-        subsystems.register(PostProcessVolumeCache::new());
         let mut context = TestRuntimeContext {
             project_root: PathBuf::from("."),
             subsystems,

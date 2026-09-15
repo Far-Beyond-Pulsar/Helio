@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use helio::MeshUpload;
@@ -44,99 +43,6 @@ impl PendingWorldWrites {
         for write in self.writes.drain(..) {
             write(world);
         }
-    }
-}
-
-/// Per-object reflection-capture handle, keyed by scene-object ID
-/// (Phase D, Pulsar-Native#558). Unlike objects/lights, `helio::Scene` has
-/// no `reflection_capture_by_tag` lookup at all -- there's no tag-based
-/// mechanism to ask Helio "do I already have one of these for this scene
-/// object", so every `ReflectionCaptureComponent` sync pass needs this
-/// editor-side cache to know whether to `insert_reflection_capture` or
-/// `update_reflection_capture`.
-///
-/// (Pulsar-Native#561: this crate used to also have `SceneObjectCache` and
-/// `LightCache`, same shape as this one -- both confirmed fully dead, never
-/// actually populated anywhere, since `StaticMeshComponent`/`LightComponent`
-/// resolve their Helio-side identity via `scene.object_by_tag`/
-/// `light_by_tag` instead. Deleted rather than left as unused scaffolding.
-/// This cache is different: `helio::Scene` genuinely has no `*_by_tag`
-/// equivalent for reflection captures, so it's load-bearing, not dead.)
-pub struct ReflectionCaptureCache {
-    pub map: HashMap<String, helio::ReflectionCaptureId>,
-}
-
-impl ReflectionCaptureCache {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, scene_id: &str) -> Option<helio::ReflectionCaptureId> {
-        self.map.get(scene_id).copied()
-    }
-
-    pub fn insert(&mut self, scene_id: String, id: helio::ReflectionCaptureId) {
-        self.map.insert(scene_id, id);
-    }
-
-    pub fn remove(&mut self, scene_id: &str) -> Option<helio::ReflectionCaptureId> {
-        self.map.remove(scene_id)
-    }
-}
-
-/// Same shape as [`ReflectionCaptureCache`], for water volumes (Phase D,
-/// Pulsar-Native#558). `helio::Scene` has no `water_volume_by_tag` lookup
-/// either.
-pub struct WaterVolumeCache {
-    pub map: HashMap<String, helio::WaterVolumeId>,
-}
-
-impl WaterVolumeCache {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, scene_id: &str) -> Option<helio::WaterVolumeId> {
-        self.map.get(scene_id).copied()
-    }
-
-    pub fn insert(&mut self, scene_id: String, id: helio::WaterVolumeId) {
-        self.map.insert(scene_id, id);
-    }
-
-    pub fn remove(&mut self, scene_id: &str) -> Option<helio::WaterVolumeId> {
-        self.map.remove(scene_id)
-    }
-}
-
-/// Same shape as [`WaterVolumeCache`], for post-process volumes (Phase D,
-/// Pulsar-Native#558). `helio::Scene` has no `post_process_volume_by_tag`
-/// lookup either.
-pub struct PostProcessVolumeCache {
-    pub map: HashMap<String, helio::PostProcessVolumeId>,
-}
-
-impl PostProcessVolumeCache {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn get(&self, scene_id: &str) -> Option<helio::PostProcessVolumeId> {
-        self.map.get(scene_id).copied()
-    }
-
-    pub fn insert(&mut self, scene_id: String, id: helio::PostProcessVolumeId) {
-        self.map.insert(scene_id, id);
-    }
-
-    pub fn remove(&mut self, scene_id: &str) -> Option<helio::PostProcessVolumeId> {
-        self.map.remove(scene_id)
     }
 }
 
