@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::traits::BakeInput;
+use serde::{Deserialize, Serialize};
 
 /// Controls how the lightmap baker runs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,25 +36,36 @@ pub struct LightmapConfig {
 impl Default for LightmapConfig {
     fn default() -> Self {
         Self {
-            resolution:          1024,
-            samples_per_texel:   64,
-            bounce_count:        2,
-            max_ray_distance:    1000.0,
-            denoise:             true,
-            hdr_output:          true,
-            area_light_samples:  16,
-            debug_normals:       false,
+            resolution: 1024,
+            samples_per_texel: 64,
+            bounce_count: 2,
+            max_ray_distance: 1000.0,
+            denoise: true,
+            hdr_output: true,
+            area_light_samples: 16,
+            debug_normals: false,
         }
     }
 }
 
 impl LightmapConfig {
     pub fn fast() -> Self {
-        Self { resolution: 512, samples_per_texel: 8, bounce_count: 1, denoise: false, ..Default::default() }
+        Self {
+            resolution: 512,
+            samples_per_texel: 8,
+            bounce_count: 1,
+            denoise: false,
+            ..Default::default()
+        }
     }
 
     pub fn ultra() -> Self {
-        Self { resolution: 4096, samples_per_texel: 512, bounce_count: 4, ..Default::default() }
+        Self {
+            resolution: 4096,
+            samples_per_texel: 512,
+            bounce_count: 4,
+            ..Default::default()
+        }
     }
 }
 

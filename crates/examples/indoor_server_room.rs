@@ -11,13 +11,17 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light, spot_light};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spot_light,
+};
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupId, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb, World};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -80,7 +84,8 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    _light_ids: Vec<LightId>,
+    scene_db: SceneDb,
+    _light_ids: Vec<Entity>,
 }
 
 impl ApplicationHandler for App {
@@ -149,119 +154,65 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, format)
             .with_shadow_quality(helio::ShadowQuality::Ultra);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
         renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
 
         // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_floor = renderer.scene_mut().insert_material(make_material(
-            [0.18, 0.20, 0.18, 1.0],
-            0.90,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_ceiling = renderer.scene_mut().insert_material(make_material(
-            [0.85, 0.90, 0.95, 1.0],
-            0.80,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_wall = renderer.scene_mut().insert_material(make_material(
-            [0.82, 0.86, 0.90, 1.0],
-            0.85,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_rack = renderer.scene_mut().insert_material(make_material(
-            [0.10, 0.10, 0.12, 1.0],
-            0.40,
-            0.70,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_panel = renderer.scene_mut().insert_material(make_material(
-            [0.88, 0.93, 1.00, 1.0],
-            0.90,
-            0.00,
-            [0.5, 0.6, 0.8],
-            3.0,
-        ));
-        let mat_cooling = renderer.scene_mut().insert_material(make_material(
-            [0.40, 0.50, 0.60, 1.0],
-            0.50,
-            0.60,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_door = renderer.scene_mut().insert_material(make_material(
-            [0.40, 0.45, 0.50, 1.0],
-            0.60,
-            0.30,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_tray = renderer.scene_mut().insert_material(make_material(
-            [0.30, 0.30, 0.35, 1.0],
-            0.40,
-            0.80,
-            [0.0; 3],
-            0.0,
-        ));
+        let mat_floor = spawn_material(
+            &mut scene_db.world,
+            make_material([0.18, 0.20, 0.18, 1.0], 0.90, 0.00, [0.0; 3], 0.0),
+        );
+        let mat_ceiling = spawn_material(
+            &mut scene_db.world,
+            make_material([0.85, 0.90, 0.95, 1.0], 0.80, 0.00, [0.0; 3], 0.0),
+        );
+        let mat_wall = spawn_material(
+            &mut scene_db.world,
+            make_material([0.82, 0.86, 0.90, 1.0], 0.85, 0.00, [0.0; 3], 0.0),
+        );
+        let mat_rack = spawn_material(
+            &mut scene_db.world,
+            make_material([0.10, 0.10, 0.12, 1.0], 0.40, 0.70, [0.0; 3], 0.0),
+        );
+        let mat_panel = spawn_material(
+            &mut scene_db.world,
+            make_material([0.88, 0.93, 1.00, 1.0], 0.90, 0.00, [0.5, 0.6, 0.8], 3.0),
+        );
+        let mat_cooling = spawn_material(
+            &mut scene_db.world,
+            make_material([0.40, 0.50, 0.60, 1.0], 0.50, 0.60, [0.0; 3], 0.0),
+        );
+        let mat_door = spawn_material(
+            &mut scene_db.world,
+            make_material([0.40, 0.45, 0.50, 1.0], 0.60, 0.30, [0.0; 3], 0.0),
+        );
+        let mat_tray = spawn_material(
+            &mut scene_db.world,
+            make_material([0.30, 0.30, 0.35, 1.0], 0.40, 0.80, [0.0; 3], 0.0),
+        );
 
         // ── Geometry ───────────────────────────────────────────────────────────────
-        let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = r
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [hx, hy, hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                r,
+        let add = |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+            let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+            let _ = spawn_object(
+                w,
                 m,
                 mat,
                 glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
@@ -270,18 +221,18 @@ impl ApplicationHandler for App {
         };
 
         // Room shell: 24 m × 4 m × 12 m
-        add(&mut renderer, 0.0, -0.05, 0.0, 12.0, 0.05, 6.0, mat_floor);
-        add(&mut renderer, 0.0, 4.05, 0.0, 12.0, 0.05, 6.0, mat_ceiling);
-        add(&mut renderer, 0.0, 2.0, -6.0, 12.0, 2.0, 0.05, mat_wall);
-        add(&mut renderer, 0.0, 2.0, 6.0, 12.0, 2.0, 0.05, mat_wall);
-        add(&mut renderer, 12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
-        add(&mut renderer, -12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
+        add(&mut scene_db.world, 0.0, -0.05, 0.0, 12.0, 0.05, 6.0, mat_floor);
+        add(&mut scene_db.world, 0.0, 4.05, 0.0, 12.0, 0.05, 6.0, mat_ceiling);
+        add(&mut scene_db.world, 0.0, 2.0, -6.0, 12.0, 2.0, 0.05, mat_wall);
+        add(&mut scene_db.world, 0.0, 2.0, 6.0, 12.0, 2.0, 0.05, mat_wall);
+        add(&mut scene_db.world, 12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
+        add(&mut scene_db.world, -12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
 
         // Raised floor tiles (5x3 grid)
         for xi in -2_i32..=2 {
             for zi in -1_i32..=1 {
                 add(
-                    &mut renderer,
+                    &mut scene_db.world,
                     xi as f32 * 4.0,
                     0.03,
                     zi as f32 * 3.5,
@@ -296,94 +247,67 @@ impl ApplicationHandler for App {
         // Server racks (4 rows x 8 each)
         for &(rx, _) in RACK_ROWS {
             for &rz in RACK_Z_OFFSETS {
-                add(&mut renderer, rx, 1.0, rz, 0.3, 1.0, 0.45, mat_rack);
+                add(&mut scene_db.world, rx, 1.0, rz, 0.3, 1.0, 0.45, mat_rack);
             }
         }
 
         // Hot-aisle containment walls
-        add(&mut renderer, -5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
-        add(&mut renderer, 5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
+        add(&mut scene_db.world, -5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
+        add(&mut scene_db.world, 5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
 
         // Cable trays overhead
         for &(rx, _) in RACK_ROWS {
-            add(&mut renderer, rx, 3.55, 0.0, 0.25, 0.08, 5.5, mat_tray);
+            add(&mut scene_db.world, rx, 3.55, 0.0, 0.25, 0.08, 5.5, mat_tray);
         }
 
         // Ceiling fluorescent panel bodies
         for &(px, pz) in CEILING_PANEL_XZ {
-            add(&mut renderer, px, 3.92, pz, 0.3, 0.04, 0.8, mat_panel);
+            add(&mut scene_db.world, px, 3.92, pz, 0.3, 0.04, 0.8, mat_panel);
         }
 
         // Rear cooling units
         for &cx in &[-9.0_f32, -3.0, 3.0, 9.0] {
-            add(&mut renderer, cx, 1.5, -5.75, 1.1, 1.5, 0.25, mat_cooling);
+            add(&mut scene_db.world, cx, 1.5, -5.75, 1.1, 1.5, 0.25, mat_cooling);
         }
 
         // Entry door
-        add(&mut renderer, 0.0, 1.2, 5.90, 0.70, 1.2, 0.08, mat_door);
-        add(&mut renderer, 0.0, 1.0, 5.95, 0.55, 1.0, 0.04, mat_door);
+        add(&mut scene_db.world, 0.0, 1.2, 5.90, 0.70, 1.2, 0.08, mat_door);
+        add(&mut scene_db.world, 0.0, 1.0, 5.95, 0.55, 1.0, 0.04, mat_door);
 
         // ── Lights ───────────────────────────────────────────────────────────────
-        let mut light_ids: Vec<LightId> = Vec::new();
+        let mut light_ids: Vec<Entity> = Vec::new();
 
         // Overhead fluorescent panel spots (8)
         for &(px, pz) in CEILING_PANEL_XZ {
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(spot_light(
-                        [px, 3.78, pz],
-                        [0.0, -1.0, 0.0],
-                        [0.88, 0.93, 1.0],
-                        4.5,
-                        7.0,
-                        1.22,
-                        1.48,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                spot_light(
+                    [px, 3.78, pz],
+                    [0.0, -1.0, 0.0],
+                    [0.88, 0.93, 1.0],
+                    4.5,
+                    7.0,
+                    1.22,
+                    1.48,
+                ),
+            ));
         }
 
         // Per-row status LED strips
         for &(rx, tag) in RACK_ROWS {
             let col = row_color(tag);
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, 0.0],
-                        col,
-                        2.5,
-                        6.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, -4.5],
-                        col,
-                        1.0,
-                        3.5,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, 4.5],
-                        col,
-                        1.0,
-                        3.5,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([rx, 2.1, 0.0], col, 2.5, 6.0),
+            ));
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([rx, 2.1, -4.5], col, 1.0, 3.5),
+            ));
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([rx, 2.1, 4.5], col, 1.0, 3.5),
+            ));
         }
 
         // Cooling unit indicators
@@ -393,18 +317,10 @@ impl ApplicationHandler for App {
             } else {
                 [0.0, 0.6, 1.0]
             };
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [cx, 2.8, -5.6],
-                        col,
-                        0.8,
-                        3.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([cx, 2.8, -5.6], col, 0.8, 3.0),
+            ));
         }
 
         self.state = Some(AppState {
@@ -421,6 +337,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             _light_ids: light_ids,
         });
     }
@@ -455,13 +372,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                if ks == ElementState::Pressed && key == KeyCode::KeyE {
-                    if state.renderer.scene_mut().is_group_hidden(GroupId::EDITOR) {
-                        state.renderer.scene_mut().show_group(GroupId::EDITOR);
-                    } else {
-                        state.renderer.scene_mut().hide_group(GroupId::EDITOR);
-                    }
-                }
+                // The "E" editor-icon toggle (module doc) predates this file's
+                // SceneDB migration and was never actually wired to any group
+                // tag on the geometry above (`add` never assigned one) --
+                // dead even before `Scene`/`GroupId` were removed. Left out
+                // rather than reimplemented, same call as `portal_cube.rs`'s
+                // unused `_portal_pairs`.
                 match ks {
                     ElementState::Pressed => {
                         state.keys.insert(key);

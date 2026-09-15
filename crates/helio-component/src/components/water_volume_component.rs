@@ -27,13 +27,13 @@
 //! placement. Deferred, not overlooked.
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use helio::{Renderer, WaterVolumeDescriptor};
+use helio::WaterVolumeDescriptor;
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::subsystems::WaterVolumeCache;
+use crate::subsystems::PendingWorldWrites;
 
 pub const WATER_VOLUME_CLASS_NAME: &str = "WaterVolumeComponent";
 
@@ -291,34 +291,30 @@ impl ComponentRuntimeBehavior for WaterVolumeComponent {
         component: &Self,
         context: &mut dyn ComponentRuntimeContext,
     ) {
-        let cached_id = get_subsystem!(context, WaterVolumeCache).get(owner.scene_object_id);
-
+        // SceneDB-only: `helio_pass_water_sim::WaterVolumeComponent` is the
+        // only thing `WaterSimPass`/`DeferredLightPass` read. Queued via
+        // `PendingWorldWrites` -- see that type's doc for why `sync_component`
+        // can't `World::insert` directly (it runs under the sync pass's read
+        // lock).
+        let Some(entity) = context
+            .subsystems_mut()
+            .get_mut::<pulsar_scenedb::Entity>()
+            .copied()
+        else {
+            return;
+        };
+        let writes = get_subsystem!(context, PendingWorldWrites);
         if !component.enabled {
-            if let Some(id) = cached_id {
-                let removed = get_subsystem!(context, Renderer).scene_mut().remove_water_volume(id);
-                if removed.is_ok() {
-                    get_subsystem!(context, WaterVolumeCache).remove(owner.scene_object_id);
-                }
-            }
+            writes.push(move |world| {
+                world.remove::<helio_pass_water_sim::WaterVolumeComponent>(entity);
+            });
             return;
         }
-
-        let descriptor = component.to_descriptor(owner);
-
-        match cached_id {
-            Some(id) => {
-                let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .update_water_volume(id, descriptor);
-            }
-            None => {
-                let inserted = get_subsystem!(context, Renderer).scene_mut().insert_water_volume(descriptor);
-                if let Ok(id) = inserted {
-                    get_subsystem!(context, WaterVolumeCache)
-                        .insert(owner.scene_object_id.to_string(), id);
-                }
-            }
-        }
+        let gpu = component.to_descriptor(owner).to_gpu();
+        let packed = helio_pass_water_sim::WaterVolumeComponent::from(gpu);
+        writes.push(move |world| {
+            world.insert(entity, packed);
+        });
     }
 }
 

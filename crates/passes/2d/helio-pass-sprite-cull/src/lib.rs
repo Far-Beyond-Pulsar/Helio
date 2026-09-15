@@ -71,8 +71,8 @@ struct CullUniforms {
     view_max: [f32; 2],
     slot_count: u32,
     max_visible: u32,
+    scene_mode: u32,
     _pad0: u32,
-    _pad1: u32,
 }
 
 const SORT_BITS: usize = 32;
@@ -99,7 +99,14 @@ pub struct SpriteCullPass {
     max_blocks: u32,
 
     cull_pipeline: wgpu::ComputePipeline,
-    cull_uniform_buf: wgpu::Buffer,
+    cull_bgl: wgpu::BindGroupLayout,
+    legacy_instances_buf: Arc<wgpu::Buffer>,
+    legacy_alive_buf: Arc<wgpu::Buffer>,
+    visible_indices_buf: Arc<wgpu::Buffer>,
+    sort_keys_buf: wgpu::Buffer,
+    scene_instances_epoch: Option<u64>,
+    active_slot_count: u32,
+    scene_mode: u32,    cull_uniform_buf: wgpu::Buffer,
     cull_bind_group: wgpu::BindGroup,
     view_min: [f32; 2],
     view_max: [f32; 2],
@@ -507,8 +514,16 @@ impl SpriteCullPass {
             max_visible,
             max_blocks,
             cull_pipeline,
+            cull_bgl,
             cull_uniform_buf,
             cull_bind_group,
+            legacy_instances_buf: instances_buf,
+            legacy_alive_buf: alive_buf,
+            visible_indices_buf: indices_a.clone(),
+            sort_keys_buf: keys_a,
+            scene_instances_epoch: None,
+            active_slot_count: slot_capacity,
+            scene_mode: 0,
             view_min: [0.0, 0.0],
             view_max: [0.0, 0.0],
             view_dirty: true,
@@ -525,6 +540,21 @@ impl SpriteCullPass {
             draw_order_buf: indices_a,
             indirect_buf,
         }
+    }
+
+    fn make_cull_bind_group(&self, device: &wgpu::Device, instances: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Sprite Cull BG"),
+            layout: &self.cull_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.cull_uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: instances.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.legacy_alive_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.visible_indices_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.sort_keys_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.indirect_buf.as_entire_binding() },
+            ],
+        })
     }
 
     /// Sets the world-space view rect sprites are culled against — must
@@ -590,21 +620,36 @@ impl RenderPass for SpriteCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None // compute-only pass
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
+        let scene = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"));
+        let epoch = scene.map(|handle| handle.epoch);
+        if self.scene_instances_epoch != epoch {
+            self.scene_instances_epoch = epoch;
+            self.scene_mode = u32::from(scene.is_some());
+            self.active_slot_count = scene.map(|handle| (handle.buffer.size() / 80) as u32).unwrap_or(self.active_slot_count);
+            if let Some(handle) = scene {
+                self.cull_bind_group = self.make_cull_bind_group(ctx.device, &handle.buffer);
+            } else {
+                let legacy = self.legacy_instances_buf.clone();
+                self.cull_bind_group = self.make_cull_bind_group(ctx.device, &legacy);
+            }
+            self.view_dirty = true;
+        }
+
         if self.view_dirty {
             self.view_dirty = false;
             let u = CullUniforms {
                 view_min: self.view_min,
                 view_max: self.view_max,
-                slot_count: self.slot_capacity,
+                slot_count: self.active_slot_count,
                 max_visible: self.max_visible,
+                scene_mode: self.scene_mode,
                 _pad0: 0,
-                _pad1: 0,
             };
             ctx.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&u));
         }
@@ -636,7 +681,7 @@ impl SpriteCullPass {
             });
             pass.set_pipeline(&self.cull_pipeline);
             pass.set_bind_group(0, &self.cull_bind_group, &[]);
-            pass.dispatch_workgroups(self.slot_capacity.div_ceil(WG_SIZE), 1, 1);
+            pass.dispatch_workgroups(self.active_slot_count.div_ceil(WG_SIZE), 1, 1);
         }
 
         // Turns the GPU-computed visible count into `frame_uniform_buf`
@@ -696,10 +741,10 @@ impl SpriteCullPass {
             let u = CullUniforms {
                 view_min: self.view_min,
                 view_max: self.view_max,
-                slot_count: self.slot_capacity,
+                slot_count: self.active_slot_count,
                 max_visible: self.max_visible,
+                scene_mode: self.scene_mode,
                 _pad0: 0,
-                _pad1: 0,
             };
             queue.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&u));
         }

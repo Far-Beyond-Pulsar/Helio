@@ -61,7 +61,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
-        wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE;
+        wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE |
+        wgpu::Features::PIPELINE_CACHE; // persistent driver-validated pipeline cache
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
         optional |= BINDLESS_MATERIAL_FEATURES;
@@ -244,7 +245,7 @@ pub struct RendererConfig {
     /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
     ///
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
-    /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
+    /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
     pub enable_foliage: bool,
     /// Foliage density budget in blades per square metre, or `None` for the quality
     /// preset default.
@@ -311,7 +312,7 @@ pub struct RendererConfig {
     /// mechanism with real fixed GPU allocations (~10 MB, see
     /// `helio-pass-portal-cull`'s module docs) and a per-frame dispatch, so
     /// unlike sublevels they get an actual off switch: a scene that never
-    /// calls `Scene::add_portal` can skip paying for it by setting this `false`.
+    /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
 }
 

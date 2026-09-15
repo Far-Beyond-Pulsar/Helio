@@ -1,4 +1,6 @@
 use std::sync::{Arc, Mutex};
+use bytemuck::Zeroable;
+use wgpu::util::DeviceExt;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -6,8 +8,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use crate::radiant::RadiantTemplateRegistry;
-use crate::scene::Scene;
-use helio_core::RenderGraph;
+use helio_core::{PipelineFormatSet, RenderGraph};
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -99,15 +100,21 @@ impl Renderer {
         height: u32,
         render_scale: f32,
         config: RendererConfig,
-        mut scene: Scene,
         mut graph: RenderGraph,
         debug_state: Arc<Mutex<DebugDrawState>>,
+        camera_buffer: wgpu::Buffer,
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
+        scene_db: super::builder::SceneDbHandle,
     ) -> Self {
-        scene.set_shadow_face_capacity(config.shadow_face_capacity);
-        scene.set_render_size(width, height);
-
+        // The renderer is the host of the graph's presentation format. Feed
+        // it back into the graph even when a custom builder locked the graph
+        // before handing it to us; the cache will schedule any new variants
+        // without blocking the frame thread.
+        graph.add_pipeline_format(PipelineFormatSet::new(
+            [surface_format],
+            Some(wgpu::TextureFormat::Depth32Float),
+        ));
         assert!(
             device
                 .features()
@@ -146,38 +153,6 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let water_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Water Volumes Buffer"),
-            size: 256 * 256,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let water_hitboxes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Water Hitboxes Buffer"),
-            size: 256 * 80,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Fixed 256-interactor ceiling, matching the water-hitbox buffer above. The
-        // interaction field is 64 m across; more than a couple of hundred bodies inside it
-        // at once is a gameplay problem, not a rendering one, and a fixed size keeps this
-        // off the per-frame allocation path entirely.
-        let foliage_interactors_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Foliage Interactors Buffer"),
-            size: 256 * std::mem::size_of::<crate::scene::GpuFoliageInteractor>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let pp_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PostProcess Volumes Buffer"),
-            size: 256 * std::mem::size_of::<libhelio::GpuPostProcessVolume>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
@@ -197,20 +172,63 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Keep the material binding ABI valid even before a frontend publishes
+        // texture components. Material rows and their indices come from
+        // SceneDB; this is only the backend descriptor fallback for an
+        // untextured scene.
+        let material_binding = libhelio::MaterialBindingConfig::for_device(&device);
+        let material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SceneDB Material Texture Slots"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fallback_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Default Material Texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Default Material Sampler"),
+            ..Default::default()
+        });
+        let material_bindings = super::renderer_impl::MaterialBindingResources {
+            material_textures,
+            _fallback_texture: fallback_texture,
+            fallback_view,
+            fallback_sampler,
+            texture_count: material_binding.max_textures,
+            version: 0,
+        };
+
         // Camera jitter is only valid when a temporal pass reconstructs it.
         // Applying it to FXAA/non-temporal graphs shifts the final image every
         // frame and presents as whole-scene shimmer.
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        // Captured before `scene` is moved into `Self`.
-        let scene_has_sky = scene.sky_context().has_sky;
+        let scene_has_sky = false;
 
-        Self {
+        let mut renderer = Self {
             device,
             queue,
             graph,
-            scene,
             depth_texture,
             depth_view,
             output_width: width,
@@ -219,6 +237,11 @@ impl Renderer {
             full_res_depth_texture,
             full_res_depth_view,
             surface_format,
+            camera_buffer,
+            camera_data: helio_core::GpuCameraUniforms::zeroed(),
+            camera_generation: 0,
+            frame_count: 0,
+            prev_view_proj: glam::Mat4::IDENTITY,
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
@@ -236,26 +259,13 @@ impl Renderer {
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
-            billboard_instances: Vec::new(),
-            billboard_scratch: Vec::new(),
-            billboard_dirty: true,
-            billboard_cached_light_count: usize::MAX,
-            billboard_cached_light_gen: u64::MAX,
-            billboard_cached_editor_hidden: false,
-            billboard_cached_corona_gen: u64::MAX,
-            billboard_generation: 0,
-            corona_emitters: Vec::new(),
-            corona_emitter_generation: 0,
-            water_volumes_buffer,
-            water_hitboxes_buffer,
-            foliage_interactors_buffer,
-            pp_volumes_buffer,
             postprocess_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
             color_grading_lut_view: None,
             ies_texture_view: None,
             cull_stats_staging,
+            material_bindings,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
@@ -268,6 +278,8 @@ impl Renderer {
             bake_pending: None,
             #[cfg(feature = "bake")]
             baked_data: None,
+            #[cfg(feature = "bake")]
+            bake_scene: None,
             clear_target_next_frame: true,
             graph_has_sky: scene_has_sky,
             xr_stage_transform: glam::Mat4::IDENTITY,
@@ -277,6 +289,7 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            scene_db,
             tsr_quality: config.tsr_quality,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 RadiantTemplateRegistry::new(),
@@ -312,79 +325,8 @@ impl Renderer {
             xr_mirror_bind_group: None,
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_format: None,
-        }
-    }
+        };
 
-    /// Create a [`Renderer`] that owns its device and queue.
-    ///
-    /// This is the original full-signature constructor kept for backward
-    /// compatibility.  Prefer [`RendererBuilder`](super::builder::RendererBuilder)
-    /// for new code — it creates the scene, debug state, and internal buffers
-    /// automatically.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
-    pub fn new(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        render_scale: f32,
-        config: RendererConfig,
-        scene: Scene,
-        graph: RenderGraph,
-        debug_state: Arc<Mutex<DebugDrawState>>,
-        debug_camera_buffer: wgpu::Buffer,
-        cull_stats_buffer: wgpu::Buffer,
-    ) -> Self {
-        Self::construct(
-            device,
-            queue,
-            surface_format,
-            width,
-            height,
-            render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        )
-    }
-
-    /// Create a [`Renderer`] that shares a device/queue owned externally.
-    ///
-    /// Equivalent to [`new()`] with `owns_device = false`.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
-    pub fn new_with_external_device(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        render_scale: f32,
-        config: RendererConfig,
-        scene: Scene,
-        graph: RenderGraph,
-        debug_state: Arc<Mutex<DebugDrawState>>,
-        debug_camera_buffer: wgpu::Buffer,
-        cull_stats_buffer: wgpu::Buffer,
-    ) -> Self {
-        let mut renderer = Self::construct(
-            device,
-            queue,
-            surface_format,
-            width,
-            height,
-            render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buffer,
-            cull_stats_buffer,
-        );
-        renderer.owns_device = false;
         renderer
     }
 }

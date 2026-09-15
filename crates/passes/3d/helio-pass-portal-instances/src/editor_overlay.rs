@@ -9,6 +9,7 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
@@ -164,7 +165,7 @@ impl RenderPass for PortalEditorOverlayPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always structurally participates in the pre_aa fusion chain,
         // regardless of `editor_mode` — that flag is runtime, mutable state,
@@ -202,7 +203,15 @@ impl RenderPass for PortalEditorOverlayPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx.scene.portal_views.len() as u32;
+        self.portal_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("portal_views"))
+            .map(|h| {
+                (h.buffer.size()
+                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                    as u32
+            })
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -213,10 +222,13 @@ impl RenderPass for PortalEditorOverlayPass {
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
             return Ok(());
         };
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
 
         let key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -225,11 +237,11 @@ impl RenderPass for PortalEditorOverlayPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                 ],
             }));

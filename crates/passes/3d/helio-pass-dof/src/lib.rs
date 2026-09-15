@@ -596,7 +596,7 @@ impl RenderPass for DofPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -694,7 +694,7 @@ impl RenderPass for DofPass {
             return Ok(());
         };
         let depth_view = ctx.depth;
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         let half_w = (self.width + 1) / 2;
         let half_h = (self.height + 1) / 2;

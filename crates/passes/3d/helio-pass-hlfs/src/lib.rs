@@ -494,19 +494,19 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa"]
+        &["gbuffer", "pre_aa", "render_environment"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         frame.pre_aa.write(&self.targets.output.view, "HLFS");
     }
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -514,8 +514,11 @@ impl RenderPass for HlfsPass {
         builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        let camera = *ctx.scene.camera.data();
-        let light_count = ctx.scene.movable_light_count;
+        let camera = *ctx.camera_data;
+        let scene_lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"));
+        let light_count = if scene_lights.is_some() { 256 } else { 0 };
         let continuity = self
             .previous_frame
             .is_some_and(|f| f.wrapping_add(1) == ctx.frame_num);
@@ -533,9 +536,9 @@ impl RenderPass for HlfsPass {
             && self.previous_light_count == Some(light_count)
             && !ctx.resize;
         let mut ambient = [0.03, 0.03, 0.03, self.config.screen_trace_distance];
-        if let Some(scene) = ctx.frame_resources.main_scene.get() {
+        if let Some(environment) = ctx.pass_resources.render_environment.get() {
             for (i, v) in ambient[..3].iter_mut().enumerate() {
-                *v = scene.ambient_color[i] * scene.ambient_intensity;
+                *v = environment.ambient_color[i] * environment.ambient_intensity;
             }
         }
         let g = Globals {
@@ -547,12 +550,13 @@ impl RenderPass for HlfsPass {
             sample_size: [self.targets.sample_width, self.targets.sample_height],
             sample_scale: self.config.sample_scale,
             candidate_count: self.config.candidates_per_sample,
-            has_velocity: ctx.frame_resources.gbuffer_velocity.get().is_some() as u32,
-            surface_flags: (ctx.frame_resources.baked_lightmap.get().is_some()
-                && ctx.frame_resources.gbuffer_lightmap_uv.get().is_some())
+            has_velocity: ctx.pass_resources.gbuffer_velocity.get().is_some() as u32,
+            surface_flags: (ctx.pass_resources.baked_lightmap.get().is_some()
+                && ctx.pass_resources.gbuffer_lightmap_uv.get().is_some())
                 as u32
                 | (u32::from(
-                    self.previous_light_generation == Some(ctx.scene.movable_lights_generation),
+                    self.previous_light_generation
+                        == scene_lights.map(|l| l.epoch),
                 ) << 1),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
@@ -566,7 +570,10 @@ impl RenderPass for HlfsPass {
         self.previous_camera = Some(camera);
         self.previous_frame = Some(ctx.frame_num);
         self.previous_light_count = Some(light_count);
-        self.previous_light_generation = Some(ctx.scene.movable_lights_generation);
+        self.previous_light_generation = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|l| l.epoch);
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
@@ -578,10 +585,21 @@ impl RenderPass for HlfsPass {
                 helio_core::Error::InvalidPassConfig("HLFS requires pre_aa".into())
             })?;
         let f = &self.fallbacks;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices_buf = ctx
+            .resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
         let inputs = Inputs {
-            camera: ctx.scene.camera,
-            lights: ctx.scene.lights,
-            shadow_matrices: ctx.scene.shadow_matrices,
+            camera: ctx.camera,
+            lights: lights_buf,
+            shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx.resources.shadow_atlas.get().unwrap_or(&f.shadow_view),
             shadow_sampler: ctx
                 .resources

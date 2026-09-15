@@ -1,8 +1,8 @@
-use nebula_probe::{
-    ProbeConfig, ReflectionOutput, IrradianceOutput, ShCoeff,
-    REFLECTION_CHUNK_TAG, IRRADIANCE_CHUNK_TAG,
-};
 use nebula_core::traits::BakeOutput;
+use nebula_probe::{
+    IrradianceOutput, ProbeConfig, ReflectionOutput, ShCoeff, IRRADIANCE_CHUNK_TAG,
+    REFLECTION_CHUNK_TAG,
+};
 
 // ── Chunk tags ────────────────────────────────────────────────────────────────
 
@@ -160,7 +160,14 @@ fn make_irradiance_output(order: u32) -> IrradianceOutput {
     let coeff_count = ((order + 1) * (order + 1)) as usize;
     IrradianceOutput {
         sh_order: order,
-        coefficients: vec![ShCoeff { r: 0.5, g: 0.5, b: 0.5 }; coeff_count],
+        coefficients: vec![
+            ShCoeff {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5
+            };
+            coeff_count
+        ],
         config_json: "{}".to_string(),
     }
 }
@@ -203,7 +210,11 @@ fn irradiance_output_corrupt_bytes_returns_error() {
 
 #[test]
 fn sh_coeff_fields_are_accessible() {
-    let c = ShCoeff { r: 0.1, g: 0.2, b: 0.3 };
+    let c = ShCoeff {
+        r: 0.1,
+        g: 0.2,
+        b: 0.3,
+    };
     assert!((c.r - 0.1).abs() < 1e-7);
     assert!((c.g - 0.2).abs() < 1e-7);
     assert!((c.b - 0.3).abs() < 1e-7);
@@ -211,7 +222,11 @@ fn sh_coeff_fields_are_accessible() {
 
 #[test]
 fn sh_coeff_clone_is_equal() {
-    let c = ShCoeff { r: 1.0, g: 2.0, b: 3.0 };
+    let c = ShCoeff {
+        r: 1.0,
+        g: 2.0,
+        b: 3.0,
+    };
     let d = c;
     assert!((d.r - 1.0).abs() < 1e-7);
 }
@@ -233,15 +248,17 @@ fn probe_config_json_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter"]
 fn probe_baker_produces_reflection_output() {
+    use nebula_core::traits::BakePass;
     use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_probe::ProbeBaker;
-    use nebula_core::traits::BakePass;
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = ProbeConfig::fast();
-        let out = ProbeBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = ProbeBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
         assert_eq!(out.face_resolution, cfg.face_resolution);
     });

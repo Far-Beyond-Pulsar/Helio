@@ -179,14 +179,21 @@ impl RenderPass for ShadowMatrixPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = ShadowMatrixUniforms {
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256u32
+            } else {
+                0
+            },
             shadow_atlas_size: self.shadow_atlas_size,
             _pad: [0; 2],
         };
@@ -196,7 +203,14 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = ctx.scene.movable_light_count; // Only movable lights (static/stationary shadows are baked)
+        let count = if ctx
+            .scene_buffers
+            .contains(helio_core::BufferKey::of("scene_lights"))
+        {
+            256u32
+        } else {
+            0
+        }; // SceneDB owns the fixed-capacity light component buffer.
         if count == 0 {
             return Ok(());
         }

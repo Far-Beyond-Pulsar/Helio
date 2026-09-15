@@ -10,6 +10,9 @@ use helio_core::{
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 
+mod voxel_contract;
+pub use voxel_contract::*;
+
 // ── GPU uniforms ──────────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -51,7 +54,7 @@ pub struct VoxelRayMarchPass {
     ray_march_pipeline: wgpu::ComputePipeline,
     compute_bgl: wgpu::BindGroupLayout,
     compute_bg: Option<wgpu::BindGroup>,
-    compute_bg_key: Option<usize>,
+    compute_bg_key: Option<(usize, usize)>,
 
     // Shade pipeline (fullscreen tri)
     shade_pipeline: wgpu::RenderPipeline,
@@ -67,6 +70,15 @@ pub struct VoxelRayMarchPass {
 
     // Params
     params_buf: wgpu::Buffer,
+    /// Pass-owned voxel storage. Hosts publish explicit volume/brick deltas
+    /// through the upload methods below; `GpuScene` is never voxel authority.
+    voxel_volumes_buf: wgpu::Buffer,
+    voxel_brick_pool_buf: wgpu::Buffer,
+    voxel_data_pool_buf: wgpu::Buffer,
+    voxel_edit_ring_buf: wgpu::Buffer,
+    edit_ring_write_index: u32,
+    volume_count: u32,
+    volumes_generation: u64,
     width: u32,
     height: u32,
     surface_format: wgpu::TextureFormat,
@@ -99,6 +111,30 @@ impl VoxelRayMarchPass {
             label: Some("VoxelRayMarch Params"),
             size: std::mem::size_of::<RayMarchParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_volumes_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelRayMarch Volumes"),
+            size: MAX_VOLUMES as u64 * std::mem::size_of::<GpuVoxelVolume>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_brick_pool_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelRayMarch Brick Pool"),
+            size: 8192_u64 * 2 * std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_data_pool_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelRayMarch Data Pool"),
+            size: 8192_u64 * 128 * std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_edit_ring_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelRayMarch Edit Ring"),
+            size: EDIT_RING_CAPACITY as u64 * std::mem::size_of::<GpuVoxelEdit>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -292,6 +328,13 @@ impl VoxelRayMarchPass {
             normal_tex,
             normal_view,
             params_buf,
+            voxel_volumes_buf,
+            voxel_brick_pool_buf,
+            voxel_data_pool_buf,
+            voxel_edit_ring_buf,
+            edit_ring_write_index: 0,
+            volume_count: 0,
+            volumes_generation: 0,
             width: 1,
             height: 1,
             surface_format,
@@ -326,13 +369,18 @@ impl VoxelRayMarchPass {
     }
 
     fn rebuild_compute_bg(&mut self, ctx: &PassContext) {
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
         let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VoxelRayMarch Compute BG"),
             layout: &self.compute_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.camera.as_entire_binding(),
+                    resource: ctx.camera.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -340,15 +388,15 @@ impl VoxelRayMarchPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: ctx.scene.voxel_volumes.as_entire_binding(),
+                    resource: self.voxel_volumes_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: ctx.scene.voxel_brick_pool.as_entire_binding(),
+                    resource: self.voxel_brick_pool_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: ctx.scene.voxel_data_pool.as_entire_binding(),
+                    resource: self.voxel_data_pool_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -360,12 +408,15 @@ impl VoxelRayMarchPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: ctx.scene.lights.as_entire_binding(),
+                    resource: lights_buf.as_entire_binding(),
                 },
             ],
         });
         self.compute_bg = Some(bg);
-        self.compute_bg_key = Some(ctx.scene.camera_generation as usize);
+        self.compute_bg_key = Some((
+            ctx.camera_generation as usize,
+            lights_buf as *const _ as usize,
+        ));
     }
 
     fn rebuild_shade_bg(&mut self, ctx: &PassContext) {
@@ -387,8 +438,77 @@ impl VoxelRayMarchPass {
         self.shade_bg_size = Some((self.width, self.height));
     }
 
-    pub fn set_params(&mut self, _width: u32, _height: u32, _volume_count: u32) {
-        // Will be picked up in prepare()
+    pub fn voxel_volume_buffer(&self) -> &wgpu::Buffer {
+        &self.voxel_volumes_buf
+    }
+
+    pub fn voxel_brick_pool(&self) -> &wgpu::Buffer {
+        &self.voxel_brick_pool_buf
+    }
+
+    pub fn voxel_data_pool(&self) -> &wgpu::Buffer {
+        &self.voxel_data_pool_buf
+    }
+
+    /// Publish one volume descriptor and make it visible to the next frame.
+    pub fn upload_volume(&mut self, queue: &wgpu::Queue, slot: u32, volume: &GpuVoxelVolume) {
+        if slot >= MAX_VOLUMES {
+            log::warn!("VoxelRayMarchPass: volume slot {slot} exceeds capacity {MAX_VOLUMES}");
+            return;
+        }
+        queue.write_buffer(
+            &self.voxel_volumes_buf,
+            slot as u64 * std::mem::size_of::<GpuVoxelVolume>() as u64,
+            bytemuck::bytes_of(volume),
+        );
+        self.volume_count = self.volume_count.max(slot + 1);
+        self.volumes_generation = self.volumes_generation.wrapping_add(1);
+    }
+
+    /// Publish a packed brick metadata word and its raw 8x8x8 payload.
+    pub fn upload_brick(
+        &mut self,
+        queue: &wgpu::Queue,
+        brick_slot: u32,
+        occupied: bool,
+        data: &[u32],
+    ) {
+        if brick_slot >= 8192 || data.len() != 128 {
+            log::warn!("VoxelRayMarchPass: rejected brick delta at slot {brick_slot}");
+            return;
+        }
+        let meta = if occupied {
+            (1_u32 << 24) | brick_slot * 128
+        } else {
+            0
+        };
+        queue.write_buffer(
+            &self.voxel_brick_pool_buf,
+            brick_slot as u64 * 8,
+            bytemuck::bytes_of(&meta),
+        );
+        queue.write_buffer(
+            &self.voxel_data_pool_buf,
+            brick_slot as u64 * 128 * 4,
+            bytemuck::cast_slice(data),
+        );
+        self.volumes_generation = self.volumes_generation.wrapping_add(1);
+    }
+
+    /// Queue an authored edit as an explicit pass input. The current shader
+    /// consumes baked brick deltas; retaining the bounded edit ring preserves
+    /// ordering for a future GPU edit consumer without putting it in SceneDB.
+    pub fn submit_edit(&mut self, queue: &wgpu::Queue, volume_id: u32, edit: &VoxelEdit) {
+        let mut gpu = GpuVoxelEdit::from(edit);
+        gpu.volume_id = volume_id;
+        let slot = self.edit_ring_write_index % EDIT_RING_CAPACITY;
+        queue.write_buffer(
+            &self.voxel_edit_ring_buf,
+            slot as u64 * std::mem::size_of::<GpuVoxelEdit>() as u64,
+            bytemuck::bytes_of(&gpu),
+        );
+        self.edit_ring_write_index = self.edit_ring_write_index.wrapping_add(1);
+        self.volumes_generation = self.volumes_generation.wrapping_add(1);
     }
 }
 
@@ -414,17 +534,23 @@ impl RenderPass for VoxelRayMarchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        if ctx.scene.voxel_volume_count != self.last_volume_count
-            || ctx.frame_num != self.params_frame
-        {
-            self.last_volume_count = ctx.scene.voxel_volume_count;
+        let voxel_volume_count = self.volume_count;
+        if voxel_volume_count != self.last_volume_count || ctx.frame_num != self.params_frame {
+            self.last_volume_count = voxel_volume_count;
 
             let params = RayMarchParams {
                 width: self.width as f32,
                 height: self.height as f32,
                 time: ctx.frame_num as f32 * 0.016,
-                volume_count: ctx.scene.voxel_volume_count,
-                light_count: ctx.scene.lights.len() as u32,
+                volume_count: voxel_volume_count,
+                light_count: if ctx
+                    .scene_buffers
+                    .contains(helio_core::BufferKey::of("scene_lights"))
+                {
+                    256
+                } else {
+                    0
+                },
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -437,12 +563,18 @@ impl RenderPass for VoxelRayMarchPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Skip when no voxel volumes are present (composited into default graph).
-        if ctx.scene.voxel_volume_count == 0 {
+        let voxel_volume_count = self.volume_count;
+        if voxel_volume_count == 0 {
             return Ok(());
         }
 
-        let gen = ctx.scene.camera_generation as usize;
-        if self.compute_bg_key != Some(gen) || self.compute_bg.is_none() {
+        let gen = ctx.camera_generation as usize;
+        let lights_ptr = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer as *const _ as usize)
+            .unwrap_or(0);
+        if self.compute_bg_key != Some((gen, lights_ptr)) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);
         }
         if !shade_bind_group_matches_size(self.shade_bg_size, self.width, self.height)
@@ -483,7 +615,7 @@ impl RenderPass for VoxelRayMarchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("VoxelRayMarch")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =

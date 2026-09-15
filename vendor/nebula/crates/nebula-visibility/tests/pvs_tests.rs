@@ -1,5 +1,5 @@
-use nebula_visibility::{PvsConfig, PvsOutput, CHUNK_TAG};
 use nebula_core::traits::BakeOutput;
+use nebula_visibility::{PvsConfig, PvsOutput, CHUNK_TAG};
 
 // ── Chunk tag ─────────────────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ fn pvs_output_kind_name_is_pvs() {
 fn make_4cell_pvs() -> PvsOutput {
     let cell_count = 4u32;
     let words_per_cell = 1u32; // ceil(4 / 64) = 1
-    // Each source cell sees all cells (all bits set).
+                               // Each source cell sees all cells (all bits set).
     let bits = vec![0xFFFF_FFFF_FFFF_FFFFu64; (cell_count * words_per_cell) as usize];
     PvsOutput {
         world_min: [0.0, 0.0, 0.0],
@@ -126,14 +126,21 @@ fn pvs_is_visible_all_cells_see_all_cells() {
 #[test]
 fn pvs_is_visible_blind_pvs_returns_false() {
     let pvs = PvsOutput {
-        world_min: [0.0; 3], world_max: [6.0, 3.0, 6.0],
-        grid_dims: [2, 1, 2], cell_size: 3.0, cell_count: 4,
-        words_per_cell: 1, bits: vec![0u64; 4],
+        world_min: [0.0; 3],
+        world_max: [6.0, 3.0, 6.0],
+        grid_dims: [2, 1, 2],
+        cell_size: 3.0,
+        cell_count: 4,
+        words_per_cell: 1,
+        bits: vec![0u64; 4],
         config_json: "{}".to_string(),
     };
     for from in 0..4 {
         for to in 0..4 {
-            assert!(!pvs.is_visible(from, to), "blind PVS should not see anything");
+            assert!(
+                !pvs.is_visible(from, to),
+                "blind PVS should not see anything"
+            );
         }
     }
 }
@@ -149,8 +156,11 @@ fn pvs_is_visible_out_of_range_returns_false() {
 fn pvs_is_visible_selective_bits() {
     // 2-cell grid: cell 0 can see cell 1, cell 1 cannot see cell 0.
     let pvs = PvsOutput {
-        world_min: [0.0; 3], world_max: [6.0, 3.0, 3.0],
-        grid_dims: [2, 1, 1], cell_size: 3.0, cell_count: 2,
+        world_min: [0.0; 3],
+        world_max: [6.0, 3.0, 3.0],
+        grid_dims: [2, 1, 1],
+        cell_size: 3.0,
+        cell_count: 2,
         words_per_cell: 1,
         // bits for cell 0: bit 1 set (can see cell 1), bit 0 clear
         // bits for cell 1: all clear (sees nothing)
@@ -158,7 +168,7 @@ fn pvs_is_visible_selective_bits() {
         config_json: "{}".to_string(),
     };
     assert!(!pvs.is_visible(0, 0)); // cell 0 does not see itself
-    assert!(pvs.is_visible(0, 1));  // cell 0 does see cell 1
+    assert!(pvs.is_visible(0, 1)); // cell 0 does see cell 1
     assert!(!pvs.is_visible(1, 0)); // cell 1 does not see cell 0
     assert!(!pvs.is_visible(1, 1)); // cell 1 does not see itself
 }
@@ -243,16 +253,21 @@ fn pvs_config_json_roundtrip() {
 #[test]
 #[ignore = "requires GPU adapter"]
 fn pvs_baker_produces_output_for_empty_scene() {
+    use nebula_core::traits::BakePass;
     use nebula_core::{context::BakeContext, progress::NullReporter, scene::SceneGeometry};
     use nebula_visibility::PvsBaker;
-    use nebula_core::traits::BakePass;
 
     pollster::block_on(async {
         let ctx = BakeContext::new().await.expect("BakeContext");
         let scene = SceneGeometry::default();
         let cfg = PvsConfig::fast();
-        let out = PvsBaker.execute(&scene, &cfg, &ctx, &NullReporter).await
+        let out = PvsBaker
+            .execute(&scene, &cfg, &ctx, &NullReporter)
+            .await
             .expect("bake");
-        assert_eq!(out.cell_count, out.grid_dims[0] * out.grid_dims[1] * out.grid_dims[2]);
+        assert_eq!(
+            out.cell_count,
+            out.grid_dims[0] * out.grid_dims[1] * out.grid_dims[2]
+        );
     });
 }

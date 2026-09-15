@@ -29,13 +29,17 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, HelioAction, HelioCommandBridge, LightId, MaterialId, MeshId,
-    Movability, ObjectDescriptor, Renderer, RendererConfig, Scene,
+    HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
 use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
-use v3_demo_common::{box_mesh, make_material, point_light};
+use pulsar_scenedb::{Entity, SceneDb, World};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume,
+    update_light,
+};
 
 // User shader snippet injected into the post-process pipeline.
 // Uses noise_tex, noise_samp, and pp_custom from the core bindings.
@@ -458,7 +462,7 @@ fn generate_map() -> BackroomsMap {
 // Since this renderer doesn't expose a "set light intensity" call, a change
 // in brightness is applied by removing the old light and inserting a new one
 // with the updated intensity — using only APIs already used elsewhere in
-// this file (remove_light / insert_actor).
+// this file (remove_light / insert_entity).
 
 #[derive(Clone, Copy, PartialEq)]
 enum FlickerPhase {
@@ -468,8 +472,8 @@ enum FlickerPhase {
 }
 
 struct FlickerLight {
-    main_id: LightId,
-    fill_id: LightId,
+    main_id: Entity,
+    fill_id: Entity,
 
     pos: [f32; 3],
     fill_pos: [f32; 3],
@@ -492,8 +496,8 @@ struct FlickerLight {
 impl FlickerLight {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        main_id: LightId,
-        fill_id: LightId,
+        main_id: Entity,
+        fill_id: Entity,
         pos: [f32; 3],
         fill_pos: [f32; 3],
         color: [f32; 3],
@@ -528,10 +532,10 @@ impl FlickerLight {
         }
     }
 
-    /// Advance the flicker state machine by `dt` seconds, swapping the
-    /// underlying lights in `scene` whenever brightness changes enough to
+    /// Advance the flicker state machine by `dt` seconds, updating the
+    /// underlying lights in `world` whenever brightness changes enough to
     /// matter (a full phase change, a toggle, or a blip).
-    fn update(&mut self, scene: &mut Scene, dt: f32) {
+    fn update(&mut self, world: &mut World, dt: f32) {
         self.phase_timer -= dt;
         let mut ratio = self.last_ratio;
         let mut force_apply = false;
@@ -634,28 +638,21 @@ impl FlickerLight {
             let main_intensity = (self.base_intensity * ratio).max(0.0);
             let fill_intensity = (self.fill_base_intensity * (0.3 + 0.7 * ratio)).max(0.0);
 
-            let _ = scene.remove_light(self.main_id);
-            self.main_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
-                    point_light(self.pos, self.color, main_intensity, self.radius),
-                    Some(Movability::Movable),
-                ))
-                .as_light()
-                .unwrap();
-
-            let _ = scene.remove_light(self.fill_id);
-            self.fill_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
-                    point_light(
-                        self.fill_pos,
-                        self.fill_color,
-                        fill_intensity,
-                        self.fill_radius,
-                    ),
-                    Some(Movability::Movable),
-                ))
-                .as_light()
-                .unwrap();
+            update_light(
+                world,
+                self.main_id,
+                point_light(self.pos, self.color, main_intensity, self.radius),
+            );
+            update_light(
+                world,
+                self.fill_id,
+                point_light(
+                    self.fill_pos,
+                    self.fill_color,
+                    fill_intensity,
+                    self.fill_radius,
+                ),
+            );
         }
     }
 }
@@ -766,13 +763,16 @@ fn main() {
     event_loop.run_app(&mut app).expect("run");
 }
 
-// Ids we need to keep for regeneration
+// Ids we need to keep for regeneration -- each tile/prop is a (mesh entity,
+// object entity) pair, since despawning the mesh doesn't cascade to the
+// object entity that references it (unlike the old `Scene::remove_mesh`,
+// which apparently did).
 struct MapResources {
-    walls: Vec<MeshId>,
-    floors: Vec<MeshId>,
-    ceilings: Vec<MeshId>,
-    pillars: Vec<MeshId>,
-    light_ids: Vec<LightId>,
+    walls: Vec<(Entity, Entity)>,
+    floors: Vec<(Entity, Entity)>,
+    ceilings: Vec<(Entity, Entity)>,
+    pillars: Vec<(Entity, Entity)>,
+    light_ids: Vec<Entity>,
 }
 
 struct App {
@@ -788,6 +788,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Arc<Mutex<Renderer>>,
+    scene_db: SceneDb,
     action_rx: Receiver<HelioAction>,
     last_frame: std::time::Instant,
 
@@ -879,95 +880,71 @@ impl App {
         Self { state: None }
     }
 
+    /// Places an object referencing `mesh`, returning the new object entity
+    /// so callers can track it for despawning on regenerate.
     fn place(
-        scene: &mut Scene,
-        mesh: MeshId,
-        material: MaterialId,
+        world: &mut World,
+        mesh: Entity,
+        material: Entity,
         transform: glam::Mat4,
         radius: f32,
-    ) {
-        let _ = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
-            mesh,
-            material,
-            transform,
-            bounds: [
-                transform.w_axis.x,
-                transform.w_axis.y,
-                transform.w_axis.z,
-                radius,
-            ],
-            flags: 0,
-            groups: GroupMask::NONE,
-            movability: None,
-            user_tag: 0,
-        }));
+    ) -> Entity {
+        spawn_object(world, mesh, material, transform, radius).unwrap()
     }
 
     fn regenerate_map(state: &mut AppState) {
         let map = generate_map();
-        let mut renderer = state.renderer.lock().unwrap();
-        let scene = renderer.scene_mut();
+        let world = &mut state.scene_db.world;
 
         // Remove previous map resources
         if let Some(res) = &state.map_resources {
-            for &id in &res.walls {
-                let _ = scene.remove_mesh(id);
+            for &(mesh, obj) in &res.walls {
+                world.despawn(mesh);
+                world.despawn(obj);
             }
-            for &id in &res.floors {
-                let _ = scene.remove_mesh(id);
+            for &(mesh, obj) in &res.floors {
+                world.despawn(mesh);
+                world.despawn(obj);
             }
-            for &id in &res.ceilings {
-                let _ = scene.remove_mesh(id);
+            for &(mesh, obj) in &res.ceilings {
+                world.despawn(mesh);
+                world.despawn(obj);
             }
-            for &id in &res.pillars {
-                let _ = scene.remove_mesh(id);
+            for &(mesh, obj) in &res.pillars {
+                world.despawn(mesh);
+                world.despawn(obj);
             }
             for &id in &res.light_ids {
-                let _ = scene.remove_light(id);
+                world.despawn(id);
             }
         }
-        // Flickering lights carry their own, runtime-evolving light ids that
-        // aren't tracked in MapResources, so they need their own cleanup pass.
+        // Flickering lights carry their own light entities, which aren't
+        // tracked in MapResources, so they need their own cleanup pass.
         for fl in state.flicker_lights.drain(..) {
-            let _ = scene.remove_light(fl.main_id);
-            let _ = scene.remove_light(fl.fill_id);
+            world.despawn(fl.main_id);
+            world.despawn(fl.fill_id);
         }
 
-        let wall_mat = scene.insert_material(make_material(
-            [0.82, 0.72, 0.52, 1.0],
-            0.6,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let floor_mat = scene.insert_material(make_material(
-            [0.45, 0.38, 0.28, 1.0],
-            0.3,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let ceiling_mat = scene.insert_material(make_material(
-            [0.88, 0.88, 0.85, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let trim_mat = scene.insert_material(make_material(
-            [0.35, 0.32, 0.28, 1.0],
-            0.4,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let pillar_mat = scene.insert_material(make_material(
-            [0.5, 0.46, 0.36, 1.0],
-            0.5,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let wall_mat = spawn_material(
+            world,
+            make_material([0.82, 0.72, 0.52, 1.0], 0.6, 0.05, [0.0, 0.0, 0.0], 0.0),
+        );
+        let floor_mat = spawn_material(
+            world,
+            make_material([0.45, 0.38, 0.28, 1.0], 0.3, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let ceiling_mat = spawn_material(
+            world,
+            make_material([0.88, 0.88, 0.85, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let trim_mat = spawn_material(
+            world,
+            make_material([0.35, 0.32, 0.28, 1.0], 0.4, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let pillar_mat = spawn_material(
+            world,
+            make_material([0.5, 0.46, 0.36, 1.0], 0.5, 0.02, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let mut walls = Vec::new();
         let mut floors = Vec::new();
@@ -986,38 +963,26 @@ impl App {
                 let h = map.ceiling_h[x][y];
 
                 // Floor tile
-                let f = scene
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [H_CELL, 0.05, H_CELL],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                Self::place(
-                    scene,
+                let f = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [H_CELL, 0.05, H_CELL]));
+                let f_obj = Self::place(
+                    world,
                     f,
                     floor_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(wx, 0.0, wz)),
                     H_CELL,
                 );
-                floors.push(f);
+                floors.push((f, f_obj));
 
                 // Ceiling tile — height varies per room (low/normal/tall/atrium)
-                let c = scene
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [H_CELL, 0.03, H_CELL],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                Self::place(
-                    scene,
+                let c = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [H_CELL, 0.03, H_CELL]));
+                let c_obj = Self::place(
+                    world,
                     c,
                     ceiling_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(wx, h, wz)),
                     H_CELL,
                 );
-                ceilings.push(c);
+                ceilings.push((c, c_obj));
 
                 // Walls on edges adjacent to Wall cells. Rotation is chosen so
                 // the wall mesh's long axis (local z) lies along the shared
@@ -1046,52 +1011,37 @@ impl App {
                     // so height transitions between neighbouring rooms show
                     // up as an open ceiling ledge rather than a mismatched
                     // wall (there's no wall between two walkable cells).
-                    let w = scene
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
-                            [0.0, 0.0, 0.0],
-                            [0.1, h / 2.0, CELL / 2.0],
-                        )))
-                        .as_mesh()
-                        .unwrap();
+                    let w = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [0.1, h / 2.0, CELL / 2.0]));
                     let t =
                         glam::Mat4::from_translation(glam::Vec3::new(wx + ox, h / 2.0, wz + oz))
                             * glam::Mat4::from_rotation_y(rot_y);
-                    Self::place(scene, w, wall_mat, t, H_CELL);
-                    walls.push(w);
+                    let w_obj = Self::place(world, w, wall_mat, t, H_CELL);
+                    walls.push((w, w_obj));
 
                     // Baseboard trim
-                    let t2 = scene
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
-                            [0.0, 0.0, 0.0],
-                            [0.12, 0.05, CELL / 2.0],
-                        )))
-                        .as_mesh()
-                        .unwrap();
+                    let t2 = spawn_mesh(
+                        world,
+                        box_mesh([0.0, 0.0, 0.0], [0.12, 0.05, CELL / 2.0]),
+                    );
                     let tt = glam::Mat4::from_translation(glam::Vec3::new(wx + ox, 0.05, wz + oz))
                         * glam::Mat4::from_rotation_y(rot_y);
-                    Self::place(scene, t2, trim_mat, tt, H_CELL);
-                    walls.push(t2);
+                    let t2_obj = Self::place(world, t2, trim_mat, tt, H_CELL);
+                    walls.push((t2, t2_obj));
                 }
             }
         }
 
         // Pillars — decorative columns scattered through big/atrium rooms
         for &(px, pz, ph) in &map.pillars {
-            let p = scene
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.35, ph / 2.0, 0.35],
-                )))
-                .as_mesh()
-                .unwrap();
-            Self::place(
-                scene,
+            let p = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [0.35, ph / 2.0, 0.35]));
+            let p_obj = Self::place(
+                world,
                 p,
                 pillar_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(px, ph / 2.0, pz)),
                 0.5,
             );
-            pillars.push(p);
+            pillars.push((p, p_obj));
         }
 
         // Fluorescent lights — sparse: a few per room plus spaced corridor
@@ -1118,20 +1068,11 @@ impl App {
 
             let is_flicker = rng.chance(0.16);
 
-            let main_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
-                    point_light(main_pos, color, main_intensity, radius),
-                    Some(Movability::Movable),
-                ))
-                .as_light()
-                .unwrap();
-            let fill_id = scene
-                .insert_actor(helio::SceneActor::light_with_movability(
-                    point_light(fill_pos, fill_color, fill_intensity, fill_radius),
-                    Some(Movability::Movable),
-                ))
-                .as_light()
-                .unwrap();
+            let main_id = spawn_light(world, point_light(main_pos, color, main_intensity, radius));
+            let fill_id = spawn_light(
+                world,
+                point_light(fill_pos, fill_color, fill_intensity, fill_radius),
+            );
 
             if is_flicker {
                 let seed = 0xD1B5_4A32_9C3F_2717_u64
@@ -1301,47 +1242,30 @@ impl ApplicationHandler for App {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
 
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph_with_user_effects(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-            VHS_SHADER_SNIPPET,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_with_user_effects(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    VHS_SHADER_SNIPPET,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         #[cfg(not(target_arch = "wasm32"))]
         let mut xr_input = None;
@@ -1375,24 +1299,23 @@ impl ApplicationHandler for App {
         let xr_active = false;
 
         // ── VHS camcorder post-process volume ─────────────────────────────────
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
-                PostProcessVolumeDescriptor {
-                    bounds_min: [-1000.0, -1000.0, -1000.0],
-                    bounds_max: [1000.0, 1000.0, 1000.0],
-                    blend_radius: 0.0,
-                    unbound: true,
-                    priority: 100.0,
-                    blend_weight: 1.0,
-                    settings: PostProcessSettings {
-                        // All effects are handled by the user_effects WGSL snippet.
-                        // Keep the volume at defaults so the built-in chain is a
-                        // no-op — the VHS shader owns the entire post-process look.
-                        ..PostProcessSettings::default()
-                    },
+        spawn_post_process_volume(
+            &mut scene_db.world,
+            PostProcessVolumeDescriptor {
+                bounds_min: [-1000.0, -1000.0, -1000.0],
+                bounds_max: [1000.0, 1000.0, 1000.0],
+                blend_radius: 0.0,
+                unbound: true,
+                priority: 100.0,
+                blend_weight: 1.0,
+                settings: PostProcessSettings {
+                    // All effects are handled by the user_effects WGSL snippet.
+                    // Keep the volume at defaults so the built-in chain is a
+                    // no-op — the VHS shader owns the entire post-process look.
+                    ..PostProcessSettings::default()
                 },
-            ));
+            },
+        );
 
         renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -1425,6 +1348,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
             action_rx,
             last_frame: std::time::Instant::now(),
             map_resources: None,
@@ -1543,6 +1467,7 @@ impl ApplicationHandler for App {
                             &state.action_rx,
                             state.start_time,
                             &mut renderer,
+                            &mut state.scene_db.world,
                             dt,
                         );
                         // Headset path: render_xr() polls session events, locates the
@@ -1609,6 +1534,7 @@ impl AppState {
         action_rx: &Receiver<HelioAction>,
         start_time: std::time::Instant,
         renderer: &mut Renderer,
+        world: &mut World,
         dt: f32,
     ) {
         while let Ok(action) = action_rx.try_recv() {
@@ -1620,11 +1546,8 @@ impl AppState {
         }
 
         // Advance every flickering light's state machine this frame.
-        {
-            let scene = renderer.scene_mut();
-            for fl in flicker_lights.iter_mut() {
-                fl.update(scene, dt);
-            }
+        for fl in flicker_lights.iter_mut() {
+            fl.update(world, dt);
         }
 
         // Write VHS parameters to post-process custom params buffer
@@ -1713,6 +1636,7 @@ impl AppState {
             &self.action_rx,
             self.start_time,
             &mut renderer,
+            &mut self.scene_db.world,
             dt,
         );
 

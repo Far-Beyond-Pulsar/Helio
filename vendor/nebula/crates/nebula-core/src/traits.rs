@@ -1,4 +1,6 @@
-use crate::{context::BakeContext, error::NebulaError, progress::ProgressReporter, scene::SceneGeometry};
+use crate::{
+    context::BakeContext, error::NebulaError, progress::ProgressReporter, scene::SceneGeometry,
+};
 use async_trait::async_trait;
 
 /// Marker trait for any type that can be used as bake-pass input configuration.
@@ -7,7 +9,9 @@ pub trait BakeInput: Send + Sync + 'static {}
 /// Marker trait for the output produced by a [`BakePass`].
 pub trait BakeOutput: Send + Sync + 'static {
     /// A short human-readable name used in log messages.
-    fn kind_name() -> &'static str where Self: Sized;
+    fn kind_name() -> &'static str
+    where
+        Self: Sized;
 }
 
 /// A single GPU-accelerated bake pass.
@@ -20,7 +24,7 @@ pub trait BakeOutput: Send + Sync + 'static {
 /// ```
 #[async_trait(?Send)]
 pub trait BakePass: Send + Sync {
-    type Input:  BakeInput;
+    type Input: BakeInput;
     type Output: BakeOutput;
 
     /// Human-readable name of this pass (e.g. `"lightmap"`, `"ao"`, …)
@@ -29,9 +33,9 @@ pub trait BakePass: Send + Sync {
     /// Execute the bake on the GPU.
     async fn execute(
         &self,
-        scene:    &SceneGeometry,
-        input:    &Self::Input,
-        ctx:      &BakeContext,
+        scene: &SceneGeometry,
+        input: &Self::Input,
+        ctx: &BakeContext,
         reporter: &dyn ProgressReporter,
     ) -> Result<Self::Output, NebulaError>;
 }

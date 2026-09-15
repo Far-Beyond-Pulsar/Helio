@@ -28,12 +28,20 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
+
+pub mod components;
+pub use components::{
+    MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
+    SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
+    SublevelComponent, SublevelSceneBinding,
+};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
-use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use std::collections::HashMap;
+use pulsar_scenedb::gpu::BufferKey;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -237,30 +245,26 @@ impl RenderPass for GBufferPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw(
-            "gbuffer_albedo",
-            wgpu::TextureFormat::Rgba8Unorm,
+        builder.read("object_batch");
+        builder.read("culled_batch");
+        // The 4 bundled G-buffer targets consumed together downstream as one
+        // `Tracked<GBufferViews>` (see `publish_group` below) — declared as a
+        // single named group so the generic allocator combines them itself,
+        // rather than as 4 independent `write_color_raw` calls. See
+        // `docs/helio_3_0_spec.md` §5.
+        builder.write_group(
+            "gbuffer",
+            [
+                ("gbuffer_albedo", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_normal", ResourceFormat::Rgba16Float),
+                ("gbuffer_orm", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_emissive", ResourceFormat::Rgba16Float),
+            ],
             ResourceSize::MatchSurface,
         );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_normal",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_orm",
-            wgpu::TextureFormat::Rgba8Unorm,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_emissive",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.with_group_extra_usage("gbuffer", wgpu::TextureUsages::STORAGE_BINDING);
+        // The remaining 4 G-buffer targets are each read independently
+        // downstream (no bundling) — plain single-view declarations.
         builder.write_color_raw(
             "gbuffer_lightmap_uv",
             wgpu::TextureFormat::Rg16Float,
@@ -283,13 +287,38 @@ impl RenderPass for GBufferPass {
         );
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
+
+    fn publish_group<'a>(
+        &self,
+        group_name: &'static str,
+        views: &[&'a wgpu::TextureView],
+        frame: &mut libhelio::PassResources<'a>,
+    ) {
+        // Turns the generically-resolved "gbuffer" write_group into the
+        // stable bundled contract downstream passes (DeferredLight, SSAO,
+        // SSR, VirtualGeometry, …) read as `frame.gbuffer`. Order matches
+        // the `write_group` call in `declare_resources` above.
+        if group_name == "gbuffer" {
+            if let [albedo, normal, orm, emissive] = *views {
+                frame.gbuffer.write(
+                    libhelio::GBufferViews {
+                        albedo,
+                        normal,
+                        orm,
+                        emissive,
+                    },
+                    "GBufferPass",
+                );
+            }
+        }
+    }
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("GBuffer")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("GBuffer")?;
@@ -389,28 +418,28 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from frame_resources so the GBuffer globals match
+        // Read per-scene values from pass_resources so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
+            if let Some(ref environment) = ctx.pass_resources.render_environment.get().as_ref() {
                 (
                     [
-                        ms.ambient_color[0],
-                        ms.ambient_color[1],
-                        ms.ambient_color[2],
+                        environment.ambient_color[0],
+                        environment.ambient_color[1],
+                        environment.ambient_color[2],
                         1.0,
                     ],
-                    ms.ambient_intensity,
+                    environment.ambient_intensity,
                     [
-                        ms.rc_world_min[0],
-                        ms.rc_world_min[1],
-                        ms.rc_world_min[2],
+                        environment.rc_world_min[0],
+                        environment.rc_world_min[1],
+                        environment.rc_world_min[2],
                         0.0,
                     ],
                     [
-                        ms.rc_world_max[0],
-                        ms.rc_world_max[1],
-                        ms.rc_world_max[2],
+                        environment.rc_world_max[0],
+                        environment.rc_world_max[1],
+                        environment.rc_world_max[2],
                         0.0,
                     ],
                 )
@@ -423,7 +452,14 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: if ctx
+                .scene_buffers
+                .contains(pulsar_scenedb::gpu::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             ambient_intensity,
             ambient_color,
             rc_world_min,
@@ -439,19 +475,46 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
-        let main_scene = ctx.resources.main_scene;
-
-        if draw_count == 0 || main_scene.is_none() {
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.culled_batch.get() else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
+        if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = main_scene.read("GBuffer").unwrap();
+        let Some(material_textures) = ctx.resources.material_textures.read("GBuffer") else {
+            return Ok(());
+        };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let coordinate_spaces_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
+        let coord_spaces = ctx.resources.coordinate_spaces.get();
+        let coordinate_spaces_buf = coord_spaces
+            .map(|c| c.coordinate_spaces)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_prev_buf = coord_spaces
+            .map(|c| c.coordinate_spaces_prev)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_ptr = coordinate_spaces_buf as *const _ as usize;
         let key = (
             camera_ptr,
             instances_ptr,
@@ -466,7 +529,7 @@ impl RenderPass for GBufferPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -474,7 +537,7 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -482,80 +545,73 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: culled.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coordinate_spaces_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                        resource: coordinate_spaces_prev_buf.as_entire_binding(),
                     },
                 ],
             }));
             self.bind_group_0_key = Some(key);
         }
 
+        // Material rows are SceneDB component data.  The pass resolves the
+        // component column by key; it must not consume a renderer-owned
+        // material table hidden inside PassResources.
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
+
         // Rebuild bind group 1 when material textures version changes.
-        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+        let needs_rebuild = self.bind_group_1_version != Some(
+            material_textures.version ^ materials_epoch,
+        )
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version);
+            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
         }
 
-        let indirect = ctx.scene.indirect;
+        let indirect = culled.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(
-            main_scene.mesh_buffers.indices.slice(..),
+            indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
 
-        // Sync template registry from scene (survives graph rebuilds). This
-        // is just an Arc clone (cheap refcount bump) — the registry itself
-        // is shared, never deep-copied.
-        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                let new_keys = shared.read().unwrap().keys();
-                if self.last_template_keys != new_keys {
-                    // Registry changed — pipelines must be re-created
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_template_keys = new_keys;
-                }
-                self.template_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
-        let ranges = ctx.scene.material_class_ranges;
+        let ranges = batch.opaque_ranges;
         if ranges.is_empty() {
             // Fallback: no ranges (e.g. legacy mode without material_class data).
             // Use the default PBR pipeline and draw everything in one batch.
@@ -582,13 +638,7 @@ impl RenderPass for GBufferPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
                 // DrawIndexedIndirectArgs = 5 × u32 = 20 bytes per entry
                 #[cfg(not(target_arch = "wasm32"))]
@@ -628,7 +678,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["material_textures", "render_environment", "object_batch", "culled_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {

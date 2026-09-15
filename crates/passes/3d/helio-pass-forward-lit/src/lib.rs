@@ -5,6 +5,10 @@ use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+mod components;
+pub use components::{LightComponent, MAX_LIGHTS};
+use pulsar_scenedb::gpu::BufferKey;
+
 const TILE_SIZE: u32 = 16;
 
 #[repr(C)]
@@ -19,6 +23,18 @@ struct ForwardLitGlobals {
     num_tiles_y: u32,
     screen_width: f32,
     screen_height: f32,
+    /// 1 when `lights[i]`/`transforms[i]` share the same raw entity index
+    /// (the SceneDB-direct `"scene_lights"` path) and can be indexed
+    /// directly; 0 when `lights` is instead `ctx.scene.lights` -- a
+    /// freshly-rebuilt-every-frame dense array (`Renderer::submit_light_
+    /// frame`, driven by `engine_backend`'s per-frame SceneDB resolve, the
+    /// path production actually uses today) whose entry `i` came from
+    /// whatever entity `light_entity_indices[i]` names, not entity `i`
+    /// itself. See `light_entity_indices`'s binding doc in the shader.
+    light_mode_direct_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 pub struct ForwardLitPass {
@@ -55,7 +71,6 @@ impl ForwardLitPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
         let bind_group_layout_0 =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ForwardLit BGL 0"),
@@ -336,7 +351,15 @@ impl RenderPass for ForwardLitPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth", "pre_aa", "cluster_light_grid"]
+        &[
+            "material_textures",
+            "render_environment",
+            "depth",
+            "pre_aa",
+            "cluster_light_grid",
+            "object_batch",
+            "culled_batch",
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -346,16 +369,18 @@ impl RenderPass for ForwardLitPass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("depth");
         builder.read("cluster_light_grid");
+        builder.read("object_batch");
+        builder.read("culled_batch");
         builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("ForwardLit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
@@ -391,8 +416,8 @@ impl RenderPass for ForwardLitPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let (ambient_color, ambient_intensity) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
-                (ms.ambient_color, ms.ambient_intensity)
+            if let Some(ref environment) = ctx.pass_resources.render_environment.get().as_ref() {
+                (environment.ambient_color, environment.ambient_intensity)
             } else {
                 ([0.1, 0.1, 0.15], 0.1)
             };
@@ -400,44 +425,89 @@ impl RenderPass for ForwardLitPass {
         let num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
         let num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
 
+        // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
+        // `MAX_LIGHTS`, no per-frame CPU query -- see `LightComponent`'s
+        // module doc) when something has actually inserted one. Nothing in
+        // `engine_backend`/`helio_component` does today -- production's real
+        // light source is `libhelio::LightsFrameData` (the `Renderer`-seeded
+        // `light_count`/`lights` bridge -- see that struct's own doc), so
+        // that CPU-resolved count is the fallback, not a legacy dead end.
+        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
+        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
+
         let globals = ForwardLitGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             num_tiles_x,
             num_tiles_y,
             screen_width: ctx.width as f32,
             screen_height: ctx.height as f32,
+            light_mode_direct_index: use_direct_index as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
-        let main_scene = ctx.resources.main_scene;
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.culled_batch.get() else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
 
-        if draw_count == 0 || main_scene.is_none() {
+        if draw_count == 0 {
             return Ok(());
         }
-        let ms = main_scene.read("ForwardLit").unwrap();
+        let Some(material_textures) = ctx.resources.material_textures.read("ForwardLit") else {
+            return Ok(());
+        };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
-        let light_entity_indices_ptr = ctx.scene.light_entity_indices as *const _ as usize;
+        // Material rows are SceneDB component data.  Resolve the column by
+        // key so the renderer never becomes the material authority again.
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
+
+        let lights_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
+        let lights_ptr = lights_buf as *const _ as usize;
+        let light_entity_indices_ptr = 0;
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
-        let transforms_ptr = ctx
-            .scene
-            .transforms
-            .map(|b| b as *const _ as usize)
-            .unwrap_or(0);
+        let transforms_ptr = 0;
 
         let cluster = ctx.resources.cluster_light_grid.get();
         let tile_lists_ptr = cluster
@@ -459,7 +529,7 @@ impl RenderPass for ForwardLitPass {
         );
         if self.bind_group_0_key != Some(bg0_key) {
             let cluster_ref = ctx.resources.cluster_light_grid.get();
-            let fallback_buf = ctx.scene.instances; // fallback buffer for tile lists when cluster is absent
+            let fallback_buf = batch.instances; // fallback buffer for tile lists when cluster is absent
             let tile_lists = cluster_ref
                 .map(|c| c.tile_light_lists)
                 .unwrap_or(fallback_buf);
@@ -469,11 +539,11 @@ impl RenderPass for ForwardLitPass {
             // Same fallback idea as `tile_lists`/`tile_counts` above: before
             // `Scene::rebind_transform_buffer` has ever been called (e.g.
             // the very first frame), bind *some* valid buffer so bind-group
-            // creation can't fail -- the shader only reads it through
-            // `light_entity_indices`, which is empty until real lights with
-            // real transforms exist, so this fallback is never actually
-            // dereferenced at a live light's index in practice.
-            let transforms = ctx.scene.transforms.unwrap_or(fallback_buf);
+            // creation can't fail -- `light_count` is 0 whenever no real
+            // `Transform` buffer exists yet, so this fallback is never
+            // actually dereferenced at a live light's index in practice.
+            let transforms = fallback_buf;
+            let light_entity_indices_buf = fallback_buf;
 
             log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -482,7 +552,7 @@ impl RenderPass for ForwardLitPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -490,15 +560,15 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: culled.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -510,7 +580,7 @@ impl RenderPass for ForwardLitPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.light_entity_indices.as_entire_binding(),
+                        resource: light_entity_indices_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -521,63 +591,47 @@ impl RenderPass for ForwardLitPass {
             self.bind_group_0_key = Some(bg0_key);
         }
 
-        let needs_rebuild = self.bind_group_1_version != Some(ms.material_textures.version)
+        let needs_rebuild = self.bind_group_1_version != Some(
+            material_textures.version ^ materials_epoch,
+        )
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("ForwardLit: rebuilding bind group 1 (material textures version changed)");
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: ms.material_textures.material_textures.as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                ms.material_textures.texture_views,
-                ms.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ForwardLit BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(ms.material_textures.version);
+            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
         }
 
-        let indirect = ctx.scene.indirect;
+        let indirect = culled.indirect;
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        pass.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-
-        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                let new_keys: Vec<u32> = shared
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .into_iter()
-                    .filter(|id| *id >= 5)
-                    .collect();
-                if self.last_shared_keys != new_keys {
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_shared_keys = new_keys;
-                }
-                self.shared_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = if self.render_all_opaque {
-            ctx.scene.material_class_ranges
+            batch.opaque_ranges
         } else {
-            ctx.scene.forward_material_class_ranges
+            batch.forward_ranges
         };
         if ranges.is_empty() {
             let key = RadiantShaderKey {
@@ -607,16 +661,10 @@ impl RenderPass for ForwardLitPass {
                 if self.render_all_opaque {
                     key.feature_flags |= 1;
                 }
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
                 let pipeline = self.get_or_create_pipeline(
                     &ctx.device,
                     key,
-                    graph_wgsl,
+                    "",
                     self.render_all_opaque,
                 );
                 pass.set_pipeline(pipeline);

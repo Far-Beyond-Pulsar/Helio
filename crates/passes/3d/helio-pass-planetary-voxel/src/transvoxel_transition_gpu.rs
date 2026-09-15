@@ -2,8 +2,8 @@ use crate::{
     transvoxel::generated, GpuTerrainVertex, GpuTransvoxelCellOffset, GpuTransvoxelScanBlock,
     TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
+use crate::{CellWord, TRANSITION_FACE_MASK};
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{CellWord, TRANSITION_FACE_MASK};
 use wgpu::util::DeviceExt;
 
 pub const TRANSVOXEL_TRANSITION_FACE_COUNT: u32 = 6;

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use helio::{MaterialAsset, MaterialTextureRef, MaterialTextures, PackedVertex, TextureUpload};
+use helio::{PackedVertex, TextureUpload};
 use solid_rs::Scene;
 
 use crate::material_converter::{convert_material, ConvertedMaterial, ConvertedTextureRef};
@@ -498,37 +498,3 @@ fn unpack_snorm4x8(packed: u32) -> [f32; 4] {
     ]
 }
 
-fn remap_texture_slot(
-    texture: Option<ConvertedTextureRef>,
-    texture_ids: &[helio::TextureId],
-) -> Option<MaterialTextureRef> {
-    texture.map(|texture| MaterialTextureRef {
-        texture: texture_ids[texture.texture_index],
-        uv_channel: texture.uv_channel,
-        transform: texture.transform,
-    })
-}
-
-pub(crate) fn material_asset_from_converted(
-    material: &ConvertedMaterial,
-    texture_ids: &[helio::TextureId],
-) -> MaterialAsset {
-    MaterialAsset {
-        gpu: material.gpu,
-        textures: MaterialTextures {
-            base_color: remap_texture_slot(material.textures.base_color, texture_ids),
-            normal: remap_texture_slot(material.textures.normal, texture_ids),
-            roughness_metallic: remap_texture_slot(
-                material.textures.roughness_metallic,
-                texture_ids,
-            ),
-            emissive: remap_texture_slot(material.textures.emissive, texture_ids),
-            occlusion: remap_texture_slot(material.textures.occlusion, texture_ids),
-            specular_color: remap_texture_slot(material.textures.specular_color, texture_ids),
-            specular_weight: remap_texture_slot(material.textures.specular_weight, texture_ids),
-            normal_scale: material.textures.normal_scale,
-            occlusion_strength: material.textures.occlusion_strength,
-            alpha_cutoff: material.textures.alpha_cutoff,
-        },
-    }
-}

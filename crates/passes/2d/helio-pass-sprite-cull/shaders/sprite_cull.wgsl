@@ -14,7 +14,7 @@ struct CullUniforms {
     slot_count: u32,
     max_visible: u32,
     _pad0: u32,
-    _pad1: u32,
+    scene_mode: u32,
 }
 
 struct SpriteInstance {
@@ -53,7 +53,7 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= uniforms.slot_count {
         return;
     }
-    if slot_alive[i] == 0u {
+    if uniforms.scene_mode == 0u && slot_alive[i] == 0u {
         return;
     }
 

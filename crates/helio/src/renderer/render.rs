@@ -6,8 +6,7 @@ use web_time::Instant;
 use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
 
-use crate::groups::GroupId;
-use crate::scene::Camera;
+use crate::camera::Camera;
 
 use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
 
@@ -140,16 +139,9 @@ impl Renderer {
 
             self.baked_data = Some(baked.clone());
 
-            self.scene
-                .update_lightmap_indices(baked.lightmap_atlas_regions());
-        }
-
-        #[cfg(feature = "bake")]
-        if self.baked_data.is_some() && self.scene.is_bake_invalidated() {
-            log::warn!(
-                "[helio-bake] ⚠️  Static geometry or lights have been added since the last bake!\n\
-                 The baked lighting is now out of date. Call renderer.auto_bake() again to rebake the scene."
-            );
+            // The baked atlas is injected as a frame resource. Persistent
+            // lightmap/component state remains owned by SceneDB.
+            let _ = baked.lightmap_atlas_regions();
         }
 
         let now = Instant::now();
@@ -166,7 +158,9 @@ impl Renderer {
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
 
-        let frame_idx = self.scene.gpu_scene().frame_count;
+        // Frame sequencing is renderer scheduling state; scene identity comes
+        // from the SceneDB projection below.
+        let frame_idx = self.frame_times_cursor as u64;
         let (jitter_mat, jx, jy) = if self.enable_jitter || self.camera_jitter_override.is_some() {
             // Use R1/R2 plastic-ratio jitter to match TAA and TSR passes.
             let jitter = self
@@ -198,11 +192,7 @@ impl Renderer {
         let mut jittered_camera = camera.clone();
         jittered_camera.proj = jitter_mat * camera.proj;
         jittered_camera.jitter = [jx, jy];
-        self.scene.update_camera(jittered_camera);
-        self.scene.flush();
-
-        // Sync template registry to GpuScene before anything takes &self.scene
-        self.sync_template_registry_to_scene();
+        self.upload_camera(&jittered_camera);
 
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
@@ -212,7 +202,7 @@ impl Renderer {
 
     /// Upload every per-frame scene buffer (billboards, water, post-process
     /// volumes, material bindings, baked resources), assemble
-    /// [`libhelio::FrameResources`], clear `target`, execute the graph and kick
+    /// [`libhelio::PassResources`], clear `target`, execute the graph and kick
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
     /// `camera` supplies the post-process settings and the camera position used
@@ -246,108 +236,18 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let depth: &wgpu::TextureView = &self.depth_view;
 
-        let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
-        let light_count = self.scene.gpu_scene().lights.len();
-        let light_gen = self.scene.gpu_scene().movable_lights_generation;
-        let corona_gen = self.corona_emitter_generation;
-        if self.billboard_dirty
-            || light_count != self.billboard_cached_light_count
-            || light_gen != self.billboard_cached_light_gen
-            || editor_hidden != self.billboard_cached_editor_hidden
-            || corona_gen != self.billboard_cached_corona_gen
-        {
-            self.billboard_scratch.clear();
-            self.billboard_scratch
-                .extend_from_slice(&self.billboard_instances);
-            if !editor_hidden {
-                for light in self.scene.gpu_scene().lights.as_slice() {
-                    if light.light_type == libhelio::LightType::Point as u32
-                        || light.light_type == libhelio::LightType::Spot as u32
-                    {
-                        let [x, y, z, _] = light.position_range;
-                        let [r, g, b, _] = light.color_intensity;
-                        self.billboard_scratch
-                            .push(super::renderer_impl::BillboardInstance {
-                                world_pos: [x, y, z, 0.0],
-                                scale_flags: [0.25, 0.25, 0.0, 0.0],
-                                color: [r, g, b, 1.0],
-                            });
-                    }
-                }
-                for emitter in &self.corona_emitters {
-                    let [x, y, z, _] = emitter.transform[3];
-                    self.billboard_scratch
-                        .push(super::renderer_impl::BillboardInstance {
-                            world_pos: [x, y, z, 0.0],
-                            scale_flags: [0.25, 0.25, 0.0, 0.0],
-                            color: [0.2, 0.8, 1.0, 1.0],
-                        });
-                }
-            }
-            self.billboard_generation = self.billboard_generation.wrapping_add(1);
-            self.billboard_dirty = false;
-            self.billboard_cached_light_count = light_count;
-            self.billboard_cached_light_gen = light_gen;
-            self.billboard_cached_editor_hidden = editor_hidden;
-            self.billboard_cached_corona_gen = corona_gen;
-        }
-
-        let water_volume_count = self.scene.water_volumes_count();
-        if water_volume_count > 0 && self.scene.water_volumes_dirty() {
-            let water_volumes = self.scene.get_water_volumes_gpu_slice();
-            let water_volume_dirty_range = self.scene.water_volumes_dirty_range();
-            if let Some((start, end)) = water_volume_dirty_range {
-                self.queue.write_buffer(
-                    &self.water_volumes_buffer,
-                    (start * std::mem::size_of::<libhelio::GpuWaterVolume>()) as u64,
-                    bytemuck::cast_slice(&water_volumes[start..end]),
-                );
-            }
-            self.scene.clear_water_volumes_dirty();
-        }
-
-        let water_hitbox_count = self.scene.water_hitboxes_count();
-        if water_hitbox_count > 0 && self.scene.water_hitboxes_dirty() {
-            let water_hitboxes = self.scene.get_water_hitboxes_gpu_slice();
-            let water_hitbox_dirty_range = self.scene.water_hitboxes_dirty_range();
-            if let Some((start, end)) = water_hitbox_dirty_range {
-                self.queue.write_buffer(
-                    &self.water_hitboxes_buffer,
-                    (start * std::mem::size_of::<libhelio::GpuWaterHitbox>()) as u64,
-                    bytemuck::cast_slice(&water_hitboxes[start..end]),
-                );
-            }
-            self.scene.clear_water_hitboxes_dirty();
-        }
-
-        if self.scene.foliage_interactors_dirty() {
-            let interactors = self.scene.foliage_interactors_gpu_slice();
-            if let Some((start, end)) = self.scene.foliage_interactors_dirty_range() {
-                let end = end.min(interactors.len());
-                if start < end {
-                    self.queue.write_buffer(
-                        &self.foliage_interactors_buffer,
-                        (start * std::mem::size_of::<crate::scene::GpuFoliageInteractor>()) as u64,
-                        bytemuck::cast_slice(&interactors[start..end]),
-                    );
-                }
-            }
-            self.scene.clear_foliage_interactors_dirty();
-        }
-
-        let pp_count = self.scene.post_process_volumes_count();
-        if pp_count > 0 && self.scene.post_process_volumes_dirty() {
-            let range = self.scene.consume_post_process_volumes_dirty_range();
-            if let Some((start, end)) = range {
-                let volumes = self.scene.get_post_process_volumes_gpu_slice();
-                self.queue.write_buffer(
-                    &self.pp_volumes_buffer,
-                    (start * std::mem::size_of::<libhelio::GpuPostProcessVolume>()) as u64,
-                    bytemuck::cast_slice(&volumes[start..end]),
-                );
-            }
-            self.scene.clear_post_process_volumes_dirty();
-        }
+        // Water volumes/hitboxes are authored as `helio_pass_water_sim`'s
+        // `WaterVolumeComponent`/`WaterHitboxComponent` SceneDB rows and
+        // resolved by that pass (and `DeferredLightPass`) directly from
+        // Post-process volumes are authored as `helio_pass_postprocess::
+        // PostProcessVolumeComponent` SceneDB rows and resolved by
+        // `PostProcessVolumeBlendPass` directly from `ctx.scene_buffers` --
+        // no Renderer-owned arena, no CPU dirty-range upload here at all.
+        let has_pp_volumes = self
+            .scene_db
+            .store()
+            .resolve_buffer_handle(pulsar_scenedb::gpu::BufferKey::of("post_process_volumes"))
+            .is_some();
 
         {
             // Upload camera defaults as base; GPU volume blending (in PostProcessPass)
@@ -358,7 +258,7 @@ impl Renderer {
                 .write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
 
             // Gate bloom: conservative when volumes exist since a volume may enable it.
-            let bloom_visible = if pp_count > 0 {
+            let bloom_visible = if has_pp_volumes {
                 true
             } else {
                 pp.bloom_intensity > 0.001 && pp.bloom_enabled != 0
@@ -380,32 +280,8 @@ impl Renderer {
         // (overwhelming) majority that don't override it.
         self.graph.set_editor_mode(self.editor_mode);
 
-        let mut texture_views =
-            ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
-        let mut samplers = ArrayVec::<&wgpu::Sampler, { crate::material::MAX_TEXTURES }>::new();
-        for slot in 0..self.scene.material_binding_config().max_textures {
-            texture_views.push(self.scene.texture_view_for_slot(slot));
-            samplers.push(self.scene.texture_sampler_for_slot(slot));
-        }
-
-        let mesh_buffers = self.scene.mesh_buffers();
-        let dynamic_mesh_buffers = self.scene.dynamic_mesh_buffers();
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
-            // Volume bounds track whatever the scene currently holds. The
-            // generation only moves when the geometry actually differs, so a
-            // static scene keeps the pass's cached upload instead of re-sending
-            // every frame while the camera moves.
-            if state.editor_enabled {
-                let lines = self.scene.editor_volume_debug_lines();
-                if lines != state.editor_volume_lines {
-                    state.editor_volume_lines = lines;
-                    state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
-                }
-            } else if !state.editor_volume_lines.is_empty() {
-                state.editor_volume_lines = Vec::new();
-                state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
-            }
         }
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [
@@ -467,88 +343,50 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs = None;
 
-        let mut frame_resources = libhelio::FrameResources::empty();
-        frame_resources.main_scene.write(
-            libhelio::MainSceneResources {
-                mesh_buffers: libhelio::MeshBuffers {
-                    // `mesh_buffers`/`dynamic_mesh_buffers` (locals a few
-                    // lines up, from `self.scene.mesh_buffers()`/
-                    // `dynamic_mesh_buffers()`) now hold `VarLenBufferRef`
-                    // read-lock guards, not bare `&wgpu::Buffer`s (Pulsar-
-                    // Native#561 Phase D: MeshPool's storage moved to
-                    // `pulsar_scenedb::gpu::VarLenGpuPool`). Deref through
-                    // them explicitly -- `libhelio::MeshBuffers<'a>` itself
-                    // is unchanged, still plain `&'a wgpu::Buffer` fields.
-                    // The guards stay alive in their owning locals for the
-                    // rest of this function (never dropped early), so this
-                    // borrow is valid for exactly as long as `frame_resources`
-                    // needs it.
-                    vertices: &*mesh_buffers.vertices,
-                    indices: &*mesh_buffers.indices,
-                    dynamic_vertices: &*dynamic_mesh_buffers.vertices,
-                    dynamic_indices: &*dynamic_mesh_buffers.indices,
-                },
-                material_textures: libhelio::MaterialTextureBindings {
-                    material_textures: self.scene.material_texture_buffer(),
-                    texture_views: texture_views.as_slice(),
-                    samplers: samplers.as_slice(),
-                    version: self.scene.texture_binding_version(),
-                },
-                clear_color: self.clear_color,
-                ambient_color: self.ambient_color,
-                ambient_intensity: self.ambient_intensity,
-                rc_world_min: rc_min,
-                rc_world_max: rc_max,
-                tlas: self.scene.tlas(),
+        let mut pass_resources = libhelio::PassResources::empty();
+        let material_texture_views = vec![
+            &self.material_bindings.fallback_view;
+            self.material_bindings.texture_count
+        ];
+        let material_samplers = vec![
+            &self.material_bindings.fallback_sampler;
+            self.material_bindings.texture_count
+        ];
+        pass_resources.material_textures.write(
+            libhelio::MaterialTextureBindings {
+                material_textures: &self.material_bindings.material_textures,
+                texture_views: &material_texture_views,
+                samplers: &material_samplers,
+                version: self.material_bindings.version,
             },
             "Renderer",
         );
-        if !self.billboard_scratch.is_empty() {
-            frame_resources.billboards.write(
-                libhelio::BillboardFrameData {
-                    instances: bytemuck::cast_slice(&self.billboard_scratch),
-                    count: self.billboard_scratch.len() as u32,
-                    generation: self.billboard_generation,
-                },
-                "Renderer",
-            );
-        }
-
-        if !self.corona_emitters.is_empty() {
-            frame_resources.corona_emitters.write(
-                libhelio::CoronaEmitterFrameData {
-                    emitters: bytemuck::cast_slice(&self.corona_emitters),
-                    count: self.corona_emitters.len() as u32,
-                    generation: self.corona_emitter_generation,
-                    max_particles: libhelio::CORONA_MAX_PARTICLES,
-                },
-                "Renderer",
-            );
-        }
-        if water_volume_count > 0 {
-            frame_resources
-                .water_volumes
-                .write(&self.water_volumes_buffer, "Renderer");
-        }
-        frame_resources.water_volume_count = water_volume_count;
-        if water_hitbox_count > 0 {
-            frame_resources
-                .water_hitboxes
-                .write(&self.water_hitboxes_buffer, "Renderer");
-        }
-        frame_resources.water_hitbox_count = water_hitbox_count;
-        frame_resources
-            .pp_volumes
-            .write(&self.pp_volumes_buffer, "Renderer");
-        frame_resources.pp_volume_count = pp_count;
-        frame_resources
+        pass_resources.render_environment.write(
+            libhelio::RenderEnvironment {
+                clear_color: self.clear_color,
+                ambient_color: self.ambient_color,
+                ambient_intensity: self.ambient_intensity,
+                rc_world_min: [-100.0; 3],
+                rc_world_max: [100.0; 3],
+                tlas: None,
+            },
+            "Renderer",
+        );
+        // Phase 3 registry. Legacy passes continue to consume
+        // `pass_resources`; new passes receive this open typed registry via
+        // `PassContext::registry` / `PrepareContext::registry`.
+        let mut resource_registry = libhelio::ResourceRegistry::empty();
+        // Geometry, materials, lights, shadows, and transforms are SceneDB
+        // component buffers. Passes resolve them by BufferKey from the
+        // read-only SceneInput projection; Renderer owns none of those rows.
+        pass_resources
             .postprocess_uniforms
             .write(&self.postprocess_buffer, "Renderer");
         if let Some(ref lut) = self.color_grading_lut_view {
-            frame_resources.color_grading_lut.write(lut, "Renderer");
+            pass_resources.color_grading_lut.write(lut, "Renderer");
         }
         if let Some(ref ies) = self.ies_texture_view {
-            frame_resources.ies_textures.write(ies, "Renderer");
+            pass_resources.ies_textures.write(ies, "Renderer");
         }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
@@ -563,7 +401,7 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
-        frame_resources
+        pass_resources
             .depth_texture
             .write(depth_texture, "Renderer");
         #[cfg(not(target_arch = "wasm32"))]
@@ -577,7 +415,7 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
-        frame_resources
+        pass_resources
             .depth_sampler_view
             .write(depth_sampler_view, "Renderer");
         if let Some(v) = self
@@ -585,66 +423,48 @@ impl Renderer {
             .as_ref()
             .map(|v| v as &wgpu::TextureView)
         {
-            frame_resources.full_res_depth.write(v, "Renderer");
+            pass_resources.full_res_depth.write(v, "Renderer");
         }
         if let Some(t) = self
             .full_res_depth_texture
             .as_ref()
             .map(|t| t as &wgpu::Texture)
         {
-            frame_resources.full_res_depth_texture.write(t, "Renderer");
+            pass_resources.full_res_depth_texture.write(t, "Renderer");
         }
-        if let Some(vg_data) = self.scene.vg_frame_data() {
-            frame_resources.vg.write(vg_data, "Renderer");
-        }
-        // Foliage. `foliage_frame_data()` returns None when the scene registers no foliage
-        // types, and the slot is then deliberately left unwritten — that is the mechanism
-        // the foliage passes early-out on, and it is what makes an unplanted scene cost
-        // exactly nothing. Do not "helpfully" write an empty struct here.
-        let foliage_interactor_count = self.scene.foliage_interactor_count();
-        if let Some(foliage_data) = self.scene.foliage_frame_data() {
-            frame_resources.foliage.write(foliage_data, "Renderer");
-            if foliage_interactor_count > 0 {
-                frame_resources
-                    .foliage_interactors
-                    .write(&self.foliage_interactors_buffer, "Renderer");
-            }
-        }
-        frame_resources.foliage_interactor_count = foliage_interactor_count;
-        frame_resources.sky = self.scene.sky_context();
         if let Some(ao) = baked_ao {
-            frame_resources.baked_ao.write(ao, "Renderer");
+            pass_resources.baked_ao.write(ao, "Renderer");
         }
         if let Some(ao_sampler) = baked_ao_sampler {
-            frame_resources
+            pass_resources
                 .baked_ao_sampler
                 .write(ao_sampler, "Renderer");
         }
         if let Some(lightmap) = baked_lightmap {
-            frame_resources.baked_lightmap.write(lightmap, "Renderer");
+            pass_resources.baked_lightmap.write(lightmap, "Renderer");
         }
         if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            frame_resources
+            pass_resources
                 .baked_lightmap_sampler
                 .write(lightmap_sampler, "Renderer");
         }
         if let Some(reflection) = baked_reflection {
-            frame_resources
+            pass_resources
                 .baked_reflection
                 .write(reflection, "Renderer");
         }
         if let Some(reflection_sampler) = baked_reflection_sampler {
-            frame_resources
+            pass_resources
                 .baked_reflection_sampler
                 .write(reflection_sampler, "Renderer");
         }
         if let Some(irradiance_sh) = baked_irradiance_sh {
-            frame_resources
+            pass_resources
                 .baked_irradiance_sh
                 .write(irradiance_sh, "Renderer");
         }
         if let Some(pvs) = baked_pvs {
-            frame_resources.baked_pvs.write(pvs, "Renderer");
+            pass_resources.baked_pvs.write(pvs, "Renderer");
         }
 
         // Target clear + cull-stats clear are batched into a single command
@@ -688,11 +508,19 @@ impl Renderer {
         self.queue.submit(std::iter::once(clear_encoder.finish()));
 
         let _graph_start = Instant::now();
-        self.graph.execute_with_frame_resources(
-            self.scene.gpu_scene(),
+        let scene_input = crate::renderer::input::SceneInputAdapter::from_scene_db(
+            &self.scene_db,
+            &self.camera_buffer,
+            &self.camera_data,
+            self.camera_generation,
+            self.frame_count,
+        );
+        self.graph.execute_with_resources(
+            &scene_input,
             target,
             depth,
-            &frame_resources,
+            &pass_resources,
+            &mut resource_registry,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
@@ -725,21 +553,7 @@ impl Renderer {
             self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
         }
 
-        // Release the texture/sampler view borrows on the scene before advancing
-        // (which mutates it). `mesh_buffers`/`dynamic_mesh_buffers` join this
-        // list as of Pulsar-Native#561 Phase D: they now hold `VarLenBufferRef`
-        // read-lock guards (MeshPool's storage moved to a `pulsar_scenedb::gpu::
-        // VarLenGpuPool`), not plain `&wgpu::Buffer`s -- since the guard type
-        // has a non-trivial `Drop` (unlocking the `RwLock`), the borrow checker
-        // keeps `self.scene`'s immutable borrow alive until they're actually
-        // dropped, not just until their last read. `frame_resources` (which
-        // borrows through them via `libhelio::MeshBuffers`) is done being read
-        // by `execute_with_frame_resources` above, so this is the right place.
-        drop(texture_views);
-        drop(samplers);
-        drop(mesh_buffers);
-        drop(dynamic_mesh_buffers);
-        self.scene.advance_frame();
+        self.frame_count = self.frame_count.wrapping_add(1);
         Ok(())
     }
 
@@ -892,9 +706,7 @@ impl Renderer {
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer
             // valid even though only index 0 is read in this mode.
-            self.scene.update_stereo_cameras(&eye_uniform, &eye_uniform);
-            self.sync_template_registry_to_scene();
-            self.scene.flush();
+            self.upload_stereo_camera(&eye_uniform, &eye_uniform);
 
             // Both of these are per-eye. They used to be computed only for eye 0, which
             // left the right eye drawing with the left eye's camera:

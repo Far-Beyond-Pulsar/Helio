@@ -25,7 +25,8 @@
 //! applies) is kept — that one is genuinely author-tunable.
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use helio::{HdrOutputMode as HelioHdrOutputMode, Renderer, TonemapOperator as HelioTonemapOperator};
+use crate::subsystems::PendingWorldWrites;
+use helio::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
 use libhelio::postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
@@ -550,38 +551,35 @@ impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
         component: &Self,
         context: &mut dyn ComponentRuntimeContext,
     ) {
-        let cached_id = get_subsystem!(context, PostProcessVolumeCache).get(owner.scene_object_id);
-
+        // Post-process volumes are SceneDB-only:
+        // `helio_pass_postprocess::PostProcessVolumeComponent` is the only
+        // thing `PostProcessVolumeBlendPass` reads (no Renderer method, no
+        // Helio-owned CPU arena exists any more). `sync_component` runs
+        // under the sync pass's read lock, so it can't `World::insert`
+        // directly -- it queues the write in `PendingWorldWrites` instead;
+        // `engine_backend` applies every queued write under its own short
+        // Phase 2 write lock later this same pass. See that type's doc.
+        let Some(entity) = context
+            .subsystems_mut()
+            .get_mut::<pulsar_scenedb::Entity>()
+            .copied()
+        else {
+            // No entity yet for this object (very first sync pass or two) --
+            // nothing to author onto; the next sync pass tries again.
+            return;
+        };
+        let writes = get_subsystem!(context, PendingWorldWrites);
         if !component.enabled {
-            if let Some(id) = cached_id {
-                let removed = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .remove_post_process_volume(id);
-                if removed.is_ok() {
-                    get_subsystem!(context, PostProcessVolumeCache).remove(owner.scene_object_id);
-                }
-            }
+            writes.push(move |world| {
+                world.remove::<helio_pass_postprocess::PostProcessVolumeComponent>(entity);
+            });
             return;
         }
-
-        let descriptor = component.to_descriptor(owner);
-
-        match cached_id {
-            Some(id) => {
-                let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .update_post_process_volume(id, descriptor);
-            }
-            None => {
-                let inserted = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .insert_post_process_volume(descriptor);
-                if let Ok(id) = inserted {
-                    get_subsystem!(context, PostProcessVolumeCache)
-                        .insert(owner.scene_object_id.to_string(), id);
-                }
-            }
-        }
+        let gpu = component.to_descriptor(owner).to_gpu();
+        let packed = helio_pass_postprocess::PostProcessVolumeComponent::from(gpu);
+        writes.push(move |world| {
+            world.insert(entity, packed);
+        });
     }
 }
 

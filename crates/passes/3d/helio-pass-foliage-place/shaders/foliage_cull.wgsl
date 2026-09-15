@@ -27,7 +27,7 @@ const FOLIAGE_LOD_NONE: u32 = 4u;
 /// size that card to cover sixteen blades.
 const FOLIAGE_LOD_CLUMP: u32 = 3u;
 
-// Mirrors helio_foliage_core::TileState. `Placing` is excluded on purpose: its slab
+// Mirrors crate::TileState. `Placing` is excluded on purpose: its slab
 // contents are undefined until the placement dispatch's final barrier, so drawing it
 // renders whatever the previous tenant left behind.
 const TILE_STATE_RESIDENT: u32 = 2u;
@@ -79,7 +79,7 @@ struct FoliageCullUniforms {
     _pad0:                  u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuFoliageType` (Rust, 96 bytes). All scalars — see the
+/// Mirrors `crate::GpuFoliageType` (Rust, 96 bytes). All scalars — see the
 /// note in foliage_place.wgsl.
 struct FoliageType {
     density:               f32,
@@ -108,7 +108,7 @@ struct FoliageType {
     _pad2:                 u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuFoliageTile` (Rust, 32 bytes).
+/// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
 struct FoliageTile {
     tile_coord_x:    i32,
     tile_coord_z:    i32,
@@ -120,7 +120,7 @@ struct FoliageTile {
     generation:      u32,
 }
 
-/// Mirrors `helio_foliage_core::GpuBladeInstance` (Rust, 16 bytes).
+/// Mirrors `crate::GpuBladeInstance` (Rust, 16 bytes).
 struct BladeInstance {
     packed_pos:        u32,
     packed_height_yaw: u32,
@@ -238,7 +238,7 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
     return near_z > hiz_depth + 1.0 / 65536.0;
 }
 
-/// Transcription of `helio_foliage_core::select_blade_lod`.
+/// Transcription of `crate::select_blade_lod`.
 ///
 /// Bands are half-open and lower-inclusive: level `n` covers `[threshold[n-1],
 /// threshold[n])`, so a blade exactly on a boundary belongs to the *coarser* level. The

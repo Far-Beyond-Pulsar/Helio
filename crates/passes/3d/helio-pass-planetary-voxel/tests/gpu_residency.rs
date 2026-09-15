@@ -1,13 +1,13 @@
 use bytemuck::Pod;
 use helio_pass_planetary_voxel::{
-    FrameUpdateOutcome, GpuLookupKey, GpuLookupQuery, GpuLookupResult, GpuResidencyCounters,
-    GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
-    RESIDENCY_WGSL,
-};
-use helio_planet_voxel_core::{
     CellWord, EvictOutcome, GpuPageMeta, PageEvict, PageKey, PageUpload, PlanetFrameUniform,
     PlanetId, PlanetPageKey, PlanetPosition, SourceGeneration, UploadOutcome, VisiblePage,
     VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,
+};
+use helio_pass_planetary_voxel::{
+    FrameUpdateOutcome, GpuLookupKey, GpuLookupQuery, GpuLookupResult, GpuResidencyCounters,
+    GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
+    RESIDENCY_WGSL,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;

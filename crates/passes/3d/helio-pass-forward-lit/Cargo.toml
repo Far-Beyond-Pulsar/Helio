@@ -8,5 +8,9 @@ helio-core = { workspace = true }
 helio = { path = "../../../helio" }
 libhelio = { workspace = true }
 wgpu = { workspace = true }
-bytemuck = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f8ebfa44096451153fa238bba3bd24a00419e271" }
+pulsar_reflection = { workspace = true }
+serde_json = { workspace = true }

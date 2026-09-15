@@ -1015,13 +1015,18 @@ dependencies = [
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",
+ "helio-pass-deferred-light",
+ "helio-pass-foliage-place",
+ "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
  "helio-pass-perf-overlay",
  "helio-pass-planetary-voxel",
+ "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades-2d",
+ "helio-pass-sky",
  "helio-pass-sprite-batch",
  "helio-pass-sprite-cull",
  "helio-pass-sprite-simulate",
@@ -1030,16 +1035,16 @@ dependencies = [
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-pass-water-sim",
- "helio-planet-voxel-core",
- "helio-voxel-core",
  "helio-xr",
  "image",
  "libhelio",
  "log",
  "microfont",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "rapier3d 0.24.0",
  "salva3d",
+ "scenedb-inspector-agent",
  "wgpu",
  "winit",
 ]
@@ -1316,7 +1321,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1436,12 +1441,14 @@ dependencies = [
  "glam 0.33.5",
  "helio-bake",
  "helio-core",
- "helio-foliage-core",
+ "helio-pass-billboard",
+ "helio-pass-corona",
+ "helio-pass-foliage-place",
+ "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-sky",
  "helio-pass-tsr",
- "helio-portal-core",
- "helio-voxel-core",
+ "helio-pass-virtual-geometry",
  "helio-xr",
  "image",
  "libhelio",
@@ -1455,7 +1462,7 @@ dependencies = [
  "uuid",
  "web-time",
  "wgpu",
- "windows",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -1479,9 +1486,11 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio",
+ "helio-pass-gbuffer",
  "image",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "solid-fbx",
  "solid-gltf",
  "solid-obj",
@@ -1525,10 +1534,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
- "helio-voxel-core",
  "libhelio",
  "naga",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "thiserror 2.0.20",
  "wgpu",
 ]
@@ -1540,7 +1549,6 @@ dependencies = [
  "glam 0.33.5",
  "helio",
  "helio-core",
- "helio-foliage-core",
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
@@ -1557,6 +1565,7 @@ dependencies = [
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
  "helio-pass-light-cull",
+ "helio-pass-object-batch",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
@@ -1580,15 +1589,8 @@ dependencies = [
  "helio-pass-water-sim",
  "image",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wgpu",
-]
-
-[[package]]
-name = "helio-foliage-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
 ]
 
 [[package]]
@@ -1598,6 +1600,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1608,6 +1612,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1641,6 +1647,8 @@ dependencies = [
  "log",
  "naga",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1651,6 +1659,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1691,9 +1701,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "helio-foliage-core",
+ "helio-pass-foliage-place",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1702,10 +1713,12 @@ name = "helio-pass-foliage-place"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
- "helio-foliage-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1718,6 +1731,10 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "serde_json",
  "wgpu",
 ]
 
@@ -1736,10 +1753,15 @@ name = "helio-pass-gbuffer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio",
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40)",
+ "serde_json",
  "wgpu",
 ]
 
@@ -1787,6 +1809,21 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-object-batch"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-gbuffer",
+ "libhelio",
+ "log",
+ "pollster 0.4.0",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1829,7 +1866,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-planet-voxel-core",
  "libhelio",
  "log",
  "pollster 0.4.0",
@@ -1842,9 +1878,12 @@ name = "helio-pass-portal-cull"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1858,6 +1897,7 @@ dependencies = [
  "helio-pass-portal-cull",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1868,6 +1908,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1966,6 +2008,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -1988,6 +2032,10 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2000,6 +2048,7 @@ dependencies = [
  "libhelio",
  "log",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -2044,6 +2093,7 @@ dependencies = [
  "helio-pass-gbuffer",
  "libhelio",
  "log",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -2076,6 +2126,7 @@ dependencies = [
  "libhelio",
  "log",
  "naga",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -2086,6 +2137,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -2096,7 +2149,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-voxel-core",
  "libhelio",
  "log",
  "pollster 0.4.0",
@@ -2110,7 +2162,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "helio-voxel-core",
  "libhelio",
  "log",
  "wgpu",
@@ -2133,6 +2184,8 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
  "wgpu",
 ]
 
@@ -2148,24 +2201,6 @@ dependencies = [
 [[package]]
 name = "helio-passes"
 version = "0.0.0"
-
-[[package]]
-name = "helio-planet-voxel-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "pollster 0.4.0",
- "thiserror 2.0.20",
- "wgpu",
-]
-
-[[package]]
-name = "helio-portal-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
-]
 
 [[package]]
 name = "helio-snapshot"
@@ -2186,14 +2221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-voxel-core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
-]
-
-[[package]]
 name = "helio-wasm"
 version = "0.1.0"
 dependencies = [
@@ -2206,6 +2233,7 @@ dependencies = [
  "js-sys",
  "log",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -2229,7 +2257,6 @@ dependencies = [
  "helio-pass-postprocess",
  "helio-pass-sdf",
  "helio-pass-voxel-mesh",
- "helio-voxel-core",
  "helio-wasm",
  "libhelio",
  "log",
@@ -2697,6 +2724,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "meshopt"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2982,6 +3018,19 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "wgpu",
+]
+
+[[package]]
+name = "nix"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f3790c00a0150112de0f4cd161e3d7fc4b2d8a5542ffc35f099a2562aecb35c"
+dependencies = [
+ "bitflags 1.3.2",
+ "cc",
+ "cfg-if",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -3622,6 +3671,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ppv-lite86"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+dependencies = [
+ "zerocopy",
+]
+
+[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3680,7 +3738,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff#b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d#27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d"
 dependencies = [
  "dashmap",
  "glam 0.33.5",
@@ -3696,7 +3754,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff#b9dd888d84fd5e0724f8c6cc8abcbb10c351e5ff"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d#27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d"
 dependencies = [
  "owo-colors",
  "proc-macro2",
@@ -3707,13 +3765,15 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5#72291d0f211dc8826eb70339aeb0409be4270ad5"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
  "pulsar_reflection",
- "pulsar_scenedb_derive",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "serde",
  "serde_json",
+ "socket2",
  "tracing",
  "wgpu",
 ]
@@ -3722,6 +3782,26 @@ dependencies = [
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
 source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5#72291d0f211dc8826eb70339aeb0409be4270ad5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pulsar_scenedb_derive"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40#bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pulsar_scenedb_derive"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3782,6 +3862,36 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rand"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
+dependencies = [
+ "libc",
+ "rand_chacha",
+ "rand_core",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+dependencies = [
+ "getrandom 0.2.17",
+]
 
 [[package]]
 name = "range-alloc"
@@ -4097,6 +4207,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scenedb-inspector-agent"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "serde_json",
+ "shared_memory",
+ "wgpu",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4161,6 +4284,19 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "shared_memory"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba8593196da75d9dc4f69349682bd4c2099f8cde114257d1ef7ef1b33d1aba54"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "nix",
+ "rand",
+ "win-sys",
 ]
 
 [[package]]
@@ -4311,6 +4447,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "socket2"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5091,7 +5237,7 @@ dependencies = [
  "web-sys",
  "wgpu-naga-bridge",
  "wgpu-types",
- "windows",
+ "windows 0.62.2",
  "windows-core",
  "windows-result",
 ]
@@ -5133,6 +5279,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "win-sys"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b7b128a98c1cfa201b09eb49ba285887deb3cbe7466a98850eb1adabb452be5"
+dependencies = [
+ "windows 0.34.0",
+]
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5162,6 +5317,19 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "windows"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45296b64204227616fdbf2614cefa4c236b98ee64dfaaaa435207ed99fe7829f"
+dependencies = [
+ "windows_aarch64_msvc 0.34.0",
+ "windows_i686_gnu 0.34.0",
+ "windows_i686_msvc 0.34.0",
+ "windows_x86_64_gnu 0.34.0",
+ "windows_x86_64_msvc 0.34.0",
+]
 
 [[package]]
 name = "windows"
@@ -5298,13 +5466,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
 dependencies = [
  "windows_aarch64_gnullvm",
- "windows_aarch64_msvc",
- "windows_i686_gnu",
+ "windows_aarch64_msvc 0.52.6",
+ "windows_i686_gnu 0.52.6",
  "windows_i686_gnullvm",
- "windows_i686_msvc",
- "windows_x86_64_gnu",
+ "windows_i686_msvc 0.52.6",
+ "windows_x86_64_gnu 0.52.6",
  "windows_x86_64_gnullvm",
- "windows_x86_64_msvc",
+ "windows_x86_64_msvc 0.52.6",
 ]
 
 [[package]]
@@ -5324,9 +5492,21 @@ checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
 
 [[package]]
 name = "windows_aarch64_msvc"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17cffbe740121affb56fad0fc0e421804adf0ae00891205213b5cecd30db881d"
+
+[[package]]
+name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+
+[[package]]
+name = "windows_i686_gnu"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2564fde759adb79129d9b4f54be42b32c89970c18ebf93124ca8870a498688ed"
 
 [[package]]
 name = "windows_i686_gnu"
@@ -5342,9 +5522,21 @@ checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
 
 [[package]]
 name = "windows_i686_msvc"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cd9d32ba70453522332c14d38814bceeb747d80b3958676007acadd7e166956"
+
+[[package]]
+name = "windows_i686_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+
+[[package]]
+name = "windows_x86_64_gnu"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfce6deae227ee8d356d19effc141a509cc503dfd1f850622ec4b0f84428e1f4"
 
 [[package]]
 name = "windows_x86_64_gnu"
@@ -5357,6 +5549,12 @@ name = "windows_x86_64_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+
+[[package]]
+name = "windows_x86_64_msvc"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d19538ccc21819d01deaf88d6a17eae6596a12e9aafdbb97916fb49896d89de9"
 
 [[package]]
 name = "windows_x86_64_msvc"

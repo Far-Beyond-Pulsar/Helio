@@ -29,12 +29,14 @@
 //!
 //! This pass has no dependency on `helio` / `helio-default-graphs` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
-//! `libhelio` (for [`FrameResources`](libhelio::FrameResources)), matching
+//! `libhelio` (for [`PassResources`](libhelio::PassResources)), matching
 //! every other pass crate. It never touches `PassContext::scene`, so it is
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result};
+use pulsar_scenedb::gpu::BufferKey;
+use pulsar_scenedb_derive::SceneStore;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -42,6 +44,16 @@ use wgpu::util::DeviceExt;
 /// [`SpriteBatchPass::insert_sprite`]; opaque, not orderable across passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpriteHandle(u32);
+impl SpriteHandle {
+    /// Construct a handle for a SceneDB row slot.
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
 
 /// A single sprite's transform, atlas region, and tint.
 ///
@@ -121,6 +133,68 @@ impl SpriteInstance {
     }
 }
 
+/// SceneDB-owned persistent sprite row. The packed ABI intentionally matches
+/// [`SpriteInstance`] and `shaders/sprite.wgsl`; cull/sort/indirect buffers
+/// remain renderer-derived state.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, pulsar_reflection::Reflectable, SceneStore, bytemuck::Pod, bytemuck::Zeroable)]
+#[gpu(layout = packed, buffer = "sprite_instances")]
+pub struct SpriteComponent {
+    #[gpu]
+    pub position_x: f32,
+    #[gpu]
+    pub position_y: f32,
+    #[gpu]
+    pub size_x: f32,
+    #[gpu]
+    pub size_y: f32,
+    #[gpu]
+    pub rotation: f32,
+    #[gpu]
+    pub depth: f32,
+    #[gpu]
+    pub _pad_uv_x: f32,
+    #[gpu]
+    pub _pad_uv_y: f32,
+    #[gpu]
+    pub uv_rect: [f32; 4],
+    #[gpu]
+    pub color: [f32; 4],
+    #[gpu]
+    pub atlas_layer: u32,
+    #[gpu]
+    pub _pad_tail_0: u32,
+    #[gpu]
+    pub _pad_tail_1: u32,
+    #[gpu]
+    pub _pad_tail_2: u32,
+}
+
+impl From<SpriteInstance> for SpriteComponent {
+    fn from(value: SpriteInstance) -> Self {
+        Self {
+            position_x: value.position[0], position_y: value.position[1],
+            size_x: value.size[0], size_y: value.size[1],
+            rotation: value.rotation, depth: value.depth,
+            _pad_uv_x: value._pad_uv[0], _pad_uv_y: value._pad_uv[1],
+            uv_rect: value.uv_rect, color: value.color,
+            atlas_layer: value.atlas_layer,
+            _pad_tail_0: value._pad_tail[0], _pad_tail_1: value._pad_tail[1], _pad_tail_2: value._pad_tail[2],
+        }
+    }
+}
+
+impl From<SpriteComponent> for SpriteInstance {
+    fn from(value: SpriteComponent) -> Self {
+        Self {
+            position: [value.position_x, value.position_y], size: [value.size_x, value.size_y],
+            rotation: value.rotation, depth: value.depth,
+            _pad_uv: [value._pad_uv_x, value._pad_uv_y], uv_rect: value.uv_rect,
+            color: value.color, atlas_layer: value.atlas_layer,
+            _pad_tail: [value._pad_tail_0, value._pad_tail_1, value._pad_tail_2],
+        }
+    }
+}
 const INSTANCE_STRIDE: u64 = std::mem::size_of::<SpriteInstance>() as u64;
 
 #[repr(C)]
@@ -200,6 +274,8 @@ pub struct SpriteBatchPass {
     /// by the paired cull pass.
     alive_buf: Arc<wgpu::Buffer>,
     alive_capacity: usize,
+    scene_instances_buf: Option<wgpu::Buffer>,
+    scene_instances_epoch: Option<u64>,
 
     // ── GPU cull/sort wiring (provided by `helio-pass-sprite-cull`) ───────
     gpu_culling: Option<GpuCulling>,
@@ -433,6 +509,8 @@ impl SpriteBatchPass {
             instances_capacity: initial_capacity,
             alive_buf,
             alive_capacity: initial_capacity,
+            scene_instances_buf: None,
+            scene_instances_epoch: None,
             gpu_culling: None,
             camera_buf,
             camera_dirty: true,
@@ -653,7 +731,11 @@ impl SpriteBatchPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.instances_buf.as_entire_binding(),
+                    resource: self
+                            .scene_instances_buf
+                            .as_ref()
+                            .unwrap_or(&self.instances_buf)
+                            .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -777,7 +859,7 @@ impl RenderPass for SpriteBatchPass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // 2D sprites are alpha-blended and GPU-sorted (see `SpriteInstance::depth`)
         // — no depth attachment. `Box::leak` here matches the convention used by
@@ -829,6 +911,20 @@ impl RenderPass for SpriteBatchPass {
                 view_proj: view_proj.to_cols_array_2d(),
             };
             ctx.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
+        }
+
+        let scene_instances = ctx.scene_buffers.get(BufferKey::of("sprite_instances"));
+        let scene_epoch = scene_instances.map(|handle| handle.epoch);
+        if self.scene_instances_epoch != scene_epoch {
+            self.scene_instances_buf = scene_instances.map(|handle| handle.buffer.clone());
+            self.scene_instances_epoch = scene_epoch;
+            self.bind_group = None;
+        }
+
+        // SceneDB rows are authoritative and already mirrored by the frontend.
+        // Do not upload or grow the obsolete renderer-local pool on this path.
+        if self.scene_instances_buf.is_some() {
+            return Ok(());
         }
 
         // ── Delta-upload instance + alive-flag data ────────────────────────
@@ -899,7 +995,11 @@ impl RenderPass for SpriteBatchPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.instances_buf.as_entire_binding(),
+                        resource: self
+                            .scene_instances_buf
+                            .as_ref()
+                            .unwrap_or(&self.instances_buf)
+                            .as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,

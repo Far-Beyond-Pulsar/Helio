@@ -34,7 +34,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::PassResources<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -110,7 +110,8 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
-use crate::graph::ResourceBuilder;
+use crate::graph::{BindingOverrideBuilder, PipelineRecipeBuilder, ResourceBuilder};
+use crate::shader::ReflectedShader;
 use crate::{PassContext, PrepareContext, Result};
 
 /// Describes a debug visualisation mode that a render pass provides.
@@ -159,10 +160,15 @@ impl<T: std::any::Any> AsAny for T {
 /// # Contract
 ///
 /// Implementations must:
-/// - Be **thread-safe** (`Send + Sync`) for parallel pass compilation (future feature)
+/// - Be **thread-safe** (`Send + Sync`) so independent graph layers can record
+///   on worker threads without pass-local races
 /// - Return a **unique name** for profiling and debugging
 /// - **Record GPU commands** in `execute()` without blocking the CPU
 /// - **Upload uniforms** in `prepare()` if needed (optional)
+/// - Treat declared `reads()`/`writes()` (including `declare_resources()`)
+///   as the complete ordering contract: an independent pass may be recorded
+///   before, after, or concurrently with this pass, so `execute()` must not
+///   rely on incidental ordering or hidden mutable global state
 ///
 /// # Lifecycle
 ///
@@ -204,7 +210,7 @@ impl<T: std::any::Any> AsAny for T {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -257,7 +263,7 @@ impl<T: std::any::Any> AsAny for T {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::PassResources<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -333,7 +339,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
 
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
-    /// Return graph resource name strings (e.g. `"pre_aa"`, `"gbuffer"`).
+    /// Return graph resource name strings (for example, `"color_output"`).
     fn reads(&self) -> &'static [&'static str] {
         &[]
     }
@@ -382,11 +388,58 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Returns `Err` if GPU command recording fails (rare).
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()>;
 
-    /// Publishes outputs into the shared frame-resource contract for later passes.
+    /// Publishes outputs into the shared pass-resource view for later passes.
     ///
     /// Passes should expose only stable resource contracts here (e.g. GBuffer,
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
+
+    /// Publishes outputs into the open typed resource registry.
+    ///
+    /// This is the phase 3 migration path. Existing passes may continue to
+    /// Existing passes may continue to implement [`publish`](Self::publish)
+    /// against the typed pass-resource view; new graph-owned outputs should
+    /// declare a [`libhelio::ResourceKey`] in their own crate and publish
+    /// through this hook instead.
+    fn publish_registry(&self, _registry: &mut libhelio::ResourceRegistry<'_>) {}
+
+    /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
+    /// pass's own compound `PassResources` field.
+    ///
+    /// The executor calls this once per `write_group` this pass declared,
+    /// resolved to concrete views in declaration order — both once during
+    /// [`RenderGraph::lock`](crate::graph::RenderGraph::lock)'s attachment
+    /// probe, and once per real frame, in both cases *before* this pass's own
+    /// `render_pass_descriptor_with_pool`/`execute` runs (mirroring where a
+    /// pass's own bundle has always become available to it). This is
+    /// deliberately a separate, earlier hook than [`publish`](Self::publish)
+    /// (which runs after `execute`, once the pass has produced its output):
+    /// a pass whose own `render_pass_descriptor` reads back its own bundle to
+    /// build its attachments (as `GBufferPass` does) needs it populated
+    /// beforehand, not after.
+    ///
+    /// The core resolves `write_group` declarations generically — it has no
+    /// notion of what a given group's views mean, only the owning pass does.
+    /// This is how that pass turns them into a named, stable contract (e.g.
+    /// `PassResources::gbuffer`) for downstream readers, without the core
+    /// ever pattern-matching the group's name. `views` matches the
+    /// declaration order of the `write_group` call's `members` array.
+    ///
+    /// Default no-op — override only if you declared `write_group`.
+    ///
+    /// Deliberately `&self` rather than `&'a self` (unlike
+    /// [`publish`](Self::publish)): `views` and `frame` borrow from the
+    /// executor's resolved textures, not from this pass's own fields, so
+    /// tying the pass borrow's lifetime to `'a` would force it to outlive
+    /// `frame` — which conflicts with `execute(&mut self, ..)` running later
+    /// in the same frame.
+    fn publish_group<'a>(
+        &self,
+        _group_name: &'static str,
+        _views: &[&'a wgpu::TextureView],
+        _frame: &mut libhelio::PassResources<'a>,
+    ) {
+    }
 
     /// Build a reusable render bundle for passes that require no per-frame CPU work.
     ///
@@ -399,7 +452,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     fn build_gpu_render_bundle(
         &mut self,
         _device: &wgpu::Device,
-        _resources: &libhelio::FrameResources<'_>,
+        _resources: &libhelio::PassResources<'_>,
     ) -> Option<wgpu::RenderBundle> {
         None
     }
@@ -417,13 +470,13 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>>;
 
     /// Dynamic-rendering variant of [`render_pass_descriptor`](Self::render_pass_descriptor),
     /// additionally given the executor's texture registry (`pool`) so the
     /// descriptor can resolve arbitrary [`AttachmentSlot::Named`](crate::graph::AttachmentSlot::Named)
-    /// resources — not just the fixed set of fields `FrameResources` routes by
+    /// resources — not just the fixed set of fields `PassResources` routes by
     /// name — before `begin_render_pass` is called.
     ///
     /// The executor calls this instead of `render_pass_descriptor` at every
@@ -439,7 +492,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
         pool: &'a crate::graph::GraphTexturePool,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let _ = pool;
@@ -489,7 +542,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::PassResources<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// #     fn execute(&mut self, _: &mut PassContext) -> Result<()> { Ok(()) }
     /// fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
@@ -535,7 +588,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ///
     /// The graph uses these declarations to:
     /// - Create and own all inter-pass textures (removing per-pass allocation)
-    /// - Route texture views through `FrameResources` automatically
+    /// - Route texture views through `PassResources` automatically
     /// - Alias non-overlapping resources to reduce peak VRAM
     /// - Fuse linear A→B chains into subpasses (zero intermediate storage)
     ///
@@ -543,7 +596,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ///
     /// ```rust,ignore
     /// fn declare_resources(&self, builder: &mut ResourceBuilder) {
-    ///     builder.read("gbuffer_albedo");
+    ///     builder.read("color_output");
     ///     builder.read("depth");
     ///     builder.write_color("pre_aa", wgpu::TextureFormat::Rgba16Float, ResSize::Internal);
     /// }
@@ -553,4 +606,22 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// `ResourceSlot`-based [`reads`](Self::reads) / [`writes`](Self::writes)
     /// methods for backward compatibility.
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
+
+    /// Declares pipelines that the executor must resolve before `execute`.
+    ///
+    /// The recipe closure owns pipeline construction, while the executor owns
+    /// cache lifetime and invokes it only for a missing format key. Handles
+    /// are local to this pass and are read from `PassContext::pipelines`.
+    fn declare_pipelines(&self, _declare: &mut PipelineRecipeBuilder) {}
+
+    /// Declares explicit shader-variable to resource-name overrides for
+    /// reflected bindings. The default contract is name matching.
+    fn declare_bindings(&self, _declare: &mut BindingOverrideBuilder) {}
+
+    /// Opts this pass into executor-owned reflected bind groups. The shader
+    /// source must describe the same bind-group interface as the pipeline the
+    /// pass uses; existing/manual passes return `None`.
+    fn reflected_shader(&self) -> Option<ReflectedShader<'_>> {
+        None
+    }
 }

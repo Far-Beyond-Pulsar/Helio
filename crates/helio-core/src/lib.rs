@@ -74,7 +74,7 @@
 //! ## Quick Start: Creating a Renderer
 //!
 //! ```rust,no_run
-//! use helio_core::{RenderGraph, GpuScene, RenderPass, PassContext, Result};
+//! use helio_core::{RenderGraph, RenderPass, PassContext, Result};
 //! use std::sync::Arc;
 //!
 //! // Define a simple pass
@@ -91,7 +91,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -129,8 +129,6 @@
 //! // Build the render graph
 //! fn create_renderer(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) {
 //!     let mut graph = RenderGraph::new(&device, &queue);
-//!     let scene = GpuScene::new(device.clone(), queue.clone());
-//!
 //!     // Add passes (order matters)
 //!     // graph.add_pass(Box::new(ShadowPass::new(&device)));
 //!     // graph.add_pass(Box::new(GBufferPass::new(&device)));
@@ -139,7 +137,7 @@
 //!     // Render loop
 //!     // let target = surface.get_current_texture().unwrap();
 //!     // let view = target.texture.create_view(&Default::default());
-//!     // graph.execute(&scene, &view, &depth_view).unwrap();
+//!     // graph.execute(&scene_input, &view, &depth_view).unwrap();
 //! }
 //! ```
 //!
@@ -164,7 +162,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -191,38 +189,17 @@
 //!
 //! ## How Scene State Works
 //!
-//! Scene state (lights, meshes, materials) is managed by `GpuScene`:
+//! Authored scene state (lights, meshes, materials) is owned by SceneDB and
+//! exposed to passes through the type-erased `SceneInput::scene_buffers()` projection.
 //!
-//! ```rust,no_run
-//! use helio_core::GpuScene;
-//! use std::sync::Arc;
-//!
-//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
-//! let mut scene = GpuScene::new(
-//!     Arc::new(device),
-//!     Arc::new(queue),
-//! );
-//!
-//! // Add scene objects (future API)
-//! // let light_id = scene.lights.add(PointLight { ... });
-//! // scene.lights.remove(light_id);
-//! // scene.lights.update(light_id, PointLight { ... });
-//!
-//! // Flush dirty data to GPU (zero-cost at steady state)
-//! scene.flush();
-//!
-//! // Get zero-copy resource references for passes
-//! let resources = scene.resources();
-//! // resources.lights.buffer() -> &wgpu::Buffer
-//! // resources.meshes.buffer() -> &wgpu::Buffer
-//! # }
+//! ```text
+//! The frontend performs the SceneDB update/flush boundary and supplies the
+//! resulting borrowed GPU buffer projection to `RenderGraph::execute()`.
 //! ```
 //!
 //! **Key Points:**
-//! - All scene data lives on GPU with dirty-tracked CPU mirrors
-//! - `flush()` uploads only changed data (O(changed) not O(total))
-//! - At steady state (no changes), `flush()` is a no-op (zero cost)
-//! - Passes receive `SceneResources<'_>` with `&wgpu::Buffer` references (zero-copy)
+//! - SceneDB remains the only owner of authored scene data
+//! - Passes receive borrowed SceneDB GPU buffer handles (zero-copy)
 //!
 //! ## How Profiling Works
 //!
@@ -242,7 +219,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -284,12 +261,12 @@
 //! | v2 (Monolithic)                     | v3 (Modular)                          |
 //! |-------------------------------------|---------------------------------------|
 //! | `Renderer::render()`                | `RenderGraph::execute()`              |
-//! | `Renderer::add_light()`             | `GpuScene::lights.add()`              |
-//! | `prepare_env(SceneEnv)`             | `GpuScene::flush()` (automatic)       |
+//! | `Renderer::add_light()`             | SceneDB component update             |
+//! | `prepare_env(SceneEnv)`             | Frontend SceneDB flush               |
 //! | Passes in `passes/` folder          | Separate crates (`helio-gbuffer`)     |
 //! | Manual profiling calls              | Automatic via `PassContext`           |
-//! | `Arc<Mutex<GpuScene>>`              | `&GpuScene` (zero locks)              |
-//! | Owned `wgpu::Buffer` in passes      | `&wgpu::Buffer` via `SceneResources`  |
+//! | `Arc<Mutex<GpuScene>>`              | frontend-owned SceneDB projection    |
+//! | Owned `wgpu::Buffer` in passes      | `&wgpu::Buffer` via SceneDB keys      |
 //!
 //! **Example Migration:**
 //!
@@ -300,16 +277,13 @@
 //! // renderer.render(&target, &depth);
 //!
 //! // v3 (new)
-//! use helio_core::{RenderGraph, GpuScene};
+//! use helio_core::RenderGraph;
 //! use std::sync::Arc;
 //!
 //! # fn example(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) {
 //! let mut graph = RenderGraph::new(&device, &queue);
-//! let mut scene = GpuScene::new(device.clone(), queue.clone());
-//!
-//! // scene.lights.add(light);
-//! scene.flush(); // Upload changes
-//! // graph.execute(&scene, &target, &depth);
+//! // The frontend supplies a SceneInput implementation backed by SceneDB.
+//! // graph.execute(&scene_input, &target, &depth);
 //! # }
 //! ```
 //!
@@ -346,7 +320,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -368,25 +342,9 @@
 //!
 //! Managers track dirty state and skip uploads when nothing changed:
 //!
-//! ```rust,no_run
-//! use helio_core::GpuScene;
-//! use std::sync::Arc;
-//!
-//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
-//! let mut scene = GpuScene::new(Arc::new(device), Arc::new(queue));
-//!
-//! // Frame 1: Add lights (dirty = true)
-//! // scene.lights.add(light1);
-//! // scene.lights.add(light2);
-//! scene.flush(); // Uploads to GPU
-//!
-//! // Frame 2: No changes (dirty = false)
-//! scene.flush(); // No-op (zero cost)
-//!
-//! // Frame 3: Update one light (dirty = true)
-//! // scene.lights.update(light1_id, new_light);
-//! scene.flush(); // Uploads only changed data
-//! # }
+//! ```text
+//! The frontend batches SceneDB changes and flushes once before executing the
+//! graph; the graph itself only observes borrowed GPU handles.
 //! ```
 //!
 //! ### Automatic Profiling Pattern
@@ -431,34 +389,36 @@ pub const REFLECTIONS_SUPPORTED: bool = true;
 
 pub mod acceleration;
 pub mod actor;
-pub mod component;
 pub mod context;
 pub mod entity;
 pub mod error;
 pub mod graph;
 pub mod profiling;
-pub mod scene;
+pub mod scene_input;
 pub mod shader;
 pub mod traits;
 pub mod upload;
 
 // Re-export libhelio types for convenience
 pub use libhelio::{
-    DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms, GpuDrawCall,
-    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
+    DrawIndexedIndirectArgs, GBufferViews, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
+    GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix, ResourceKey, ResourceRegistry,
 };
 
 pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
 pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
-pub use crate::scene::managers::*;
 // Re-export core types
 pub use actor::Actor;
-pub use component::{Component, ComponentRegistry, ComponentSlot, ComponentVec};
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
-pub use graph::{DebugPassInfo, DebugResourceInfo, FrameDebugData, RenderGraph};
+pub use graph::{
+    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData,
+    GraphTimelinePass, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,
+    PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
+};
 pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
-pub use scene::{GpuScene, SceneResources};
+pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
+pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

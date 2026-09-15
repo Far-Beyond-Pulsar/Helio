@@ -194,3 +194,37 @@ where
         textures,
     })
 }
+
+/// Spawn a SceneDB material row for every material in a loaded
+/// [`crate::ConvertedScene`], returning one [`pulsar_scenedb::Entity`] per
+/// `scene.materials[i]`, in the same order.
+///
+/// This is the direct SceneDB replacement for the old `Scene`-based
+/// `upload_scene_materials`: since a material is now just a
+/// `helio_pass_gbuffer::MaterialComponent` row, spawning one *is* the whole
+/// job. Its old job also included uploading each material's textures into
+/// the (now-deleted) `Scene`'s bindless texture table and patching the
+/// resulting indices into the `GpuMaterial` before inserting it -- bindless
+/// texture upload has no SceneDB-authored home yet, so `ConvertedMaterial::
+/// textures` is not consulted here. `convert_material`'s own `GpuMaterial`
+/// already carries `NO_TEXTURE` in every `tex_*` slot (texture info is
+/// returned separately, in `textures`), so every spawned material carries
+/// its real base color/roughness/metallic/emissive factors but none of its
+/// texture maps.
+pub fn upload_scene_materials(
+    world: &mut pulsar_scenedb::World,
+    scene: &crate::ConvertedScene,
+) -> Vec<pulsar_scenedb::Entity> {
+    scene
+        .materials
+        .iter()
+        .map(|converted| {
+            let entity = world.spawn();
+            world.insert(
+                entity,
+                helio_pass_gbuffer::MaterialComponent::from(converted.gpu),
+            );
+            entity
+        })
+        .collect()
+}

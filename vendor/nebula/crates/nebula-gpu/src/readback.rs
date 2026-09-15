@@ -10,16 +10,16 @@ pub struct GpuReadback;
 impl GpuReadback {
     pub fn read_buffer<T: Pod>(
         device: &wgpu::Device,
-        queue:  &wgpu::Queue,
-        src:    &wgpu::Buffer,
-        len:    usize,
+        queue: &wgpu::Queue,
+        src: &wgpu::Buffer,
+        len: usize,
     ) -> Vec<T> {
         let byte_size = (std::mem::size_of::<T>() * len) as u64;
 
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("nebula_readback_staging"),
-            size:               byte_size,
-            usage:              wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            label: Some("nebula_readback_staging"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -31,9 +31,13 @@ impl GpuReadback {
 
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
         device.poll(wgpu::PollType::wait_indefinitely()).ok();
-        rx.recv().expect("wgpu readback channel closed unexpectedly").expect("map_async failed");
+        rx.recv()
+            .expect("wgpu readback channel closed unexpectedly")
+            .expect("map_async failed");
 
         let mapped = slice
             .get_mapped_range()

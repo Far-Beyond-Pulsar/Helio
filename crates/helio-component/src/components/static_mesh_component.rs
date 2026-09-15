@@ -359,7 +359,7 @@ pub struct StaticMeshComponent {
     /// site changes -- `..._gpu_handle` accessors keep their exact
     /// signature and now transparently resolve to a range shared with every
     /// other entity referencing the same asset.
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
     /// See [`Self::vertices`] -- same rules, the index half of the same
@@ -367,7 +367,7 @@ pub struct StaticMeshComponent {
     /// pool from `vertices`' own -- see `gpu::interned_pool`'s module doc
     /// on why sharing an id across two pools needs no coordination between
     /// them).
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
 }
@@ -404,7 +404,7 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
 /// `sync_component`'s existing "no mesh_asset" tolerance -- the component
 /// still hydrates, just with empty `vertices`/`indices` (a real, if
-/// invisible, entity, same as today's `insert_actor`-based path leaves an
+/// invisible, entity, same as today's `insert_entity`-based path leaves an
 /// object with no mesh assigned).
 fn hydrate_static_mesh_component(
     world: &mut pulsar_scenedb::World,
@@ -470,7 +470,7 @@ impl ComponentRuntimeBehavior for StaticMeshComponent {
     ) {
         // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
         // to load `mesh_asset` itself and call `Renderer::scene_mut()
-        // .insert_actor(SceneActor::mesh(upload))` -- a second, independent
+        // .insert_entity(SceneEntity::mesh(upload))` -- a second, independent
         // copy of the mesh data in Helio's own mesh pool, loaded from disk a
         // second time every dirty pass, on top of what `hydrate_static_mesh_component`
         // already does (loads the file once, populates this component's own

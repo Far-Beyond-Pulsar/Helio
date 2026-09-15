@@ -637,7 +637,14 @@ impl RenderPass for LensFlarePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx.scene.lights.len() as u32;
+        let light_count = if ctx
+            .scene_buffers
+            .contains(helio_core::BufferKey::of("scene_lights"))
+        {
+            256
+        } else {
+            0
+        };
         self.active_flare_count = light_count;
 
         let uniforms = FlareUniforms {
@@ -658,7 +665,7 @@ impl RenderPass for LensFlarePass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if self.active_flare_count == 0 {
             return None;
@@ -695,8 +702,13 @@ impl RenderPass for LensFlarePass {
         let depth_view = ctx.resources.depth_sampler_view.get().unwrap_or(ctx.depth);
 
         // Rebuild bind groups when buffer/depth pointers change
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
+        let lights_ptr = lights_buf as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         let depth_ptr = depth_view as *const _ as usize;
         let uniform_ptr = &self.uniform_buf as *const _ as usize;
         let key = (lights_ptr, camera_ptr, depth_ptr, uniform_ptr);
@@ -710,10 +722,10 @@ impl RenderPass for LensFlarePass {
             let qbg = Self::build_query_bg(
                 ctx.device,
                 &self.query_bgl,
-                ctx.scene.lights,
+                lights_buf,
                 &self.flare_query_buf,
                 &self.flare_count_buf,
-                ctx.scene.camera,
+                ctx.camera,
                 depth_view,
                 &self.uniform_buf,
             );

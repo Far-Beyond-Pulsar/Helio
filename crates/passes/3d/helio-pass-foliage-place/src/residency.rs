@@ -92,7 +92,7 @@ impl TileRing {
             tile_size: if tile_size.is_finite() && tile_size > 0.0 {
                 tile_size
             } else {
-                helio_foliage_core::FOLIAGE_TILE_SIZE_METERS
+                crate::FOLIAGE_TILE_SIZE_METERS
             },
             max_tiles_per_frame: max_tiles_per_frame.max(1),
             center: [0, 0],
@@ -215,7 +215,7 @@ impl TileRing {
     ///
     /// Residency is keyed on `(tile_coord, generation)` — a density or terrain edit bumps
     /// the generation, which both invalidates the cached blades and feeds
-    /// [`helio_foliage_core::blade_seed`] so the re-placed blades are a *different*
+    /// [`crate::blade_seed`] so the re-placed blades are a *different*
     /// deterministic set rather than the same one.
     pub fn update(&mut self, camera_xz: [f32; 2], generation: u32) -> RingUpdate {
         self.place_queue.clear();
@@ -464,7 +464,7 @@ impl TileRing {
 mod tests {
     use super::*;
 
-    const TILE: f32 = helio_foliage_core::FOLIAGE_TILE_SIZE_METERS;
+    const TILE: f32 = crate::FOLIAGE_TILE_SIZE_METERS;
 
     fn ring(across: u32, budget: u32) -> TileRing {
         TileRing::new(across * across, across, TILE, budget)

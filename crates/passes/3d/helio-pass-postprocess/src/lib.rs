@@ -23,6 +23,9 @@ use bytemuck;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+mod components;
+pub use components::PostProcessVolumeComponent;
+
 mod volume_blend;
 pub use volume_blend::PostProcessVolumeBlendPass;
 
@@ -35,8 +38,15 @@ const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
 const WG_EXPOSURE_X: u32 = 16;
 const WG_EXPOSURE_Y: u32 = 16;
-#[allow(dead_code)]
-const MAX_PP_VOLUMES: u32 = 256;
+/// Fixed capacity for the `"post_process_volumes"` SceneDB buffer, kept
+/// equal to `DEFAULT_AUTO_REGISTER_CAPACITY` -- same reasoning as
+/// `helio_pass_forward_lit::MAX_LIGHTS` (was `256` when this was a
+/// Renderer-owned CPU arena; SceneDB's auto-register capacity is what
+/// governs it now, so this stays in lockstep with that by construction).
+/// Also hardcoded into `postprocess.wgsl`'s own `MAX_PP_VOLUMES` -- the
+/// assertion below keeps the two from drifting apart.
+pub const MAX_PP_VOLUMES: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
+const _: () = assert!(MAX_PP_VOLUMES == 64);
 
 /// Position in the uber-shader effect chain where a user effect is injected.
 #[repr(u32)]
@@ -1057,7 +1067,7 @@ impl RenderPass for PostProcessPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -1168,7 +1178,7 @@ impl RenderPass for PostProcessPass {
             None => return Ok(()),
         };
 
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         // None when no VolumetricFogPass is in the graph; rebuild_bind_groups then
         // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
@@ -1315,7 +1325,7 @@ impl RenderPass for PostProcessPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         if let Some(view) = &self.pre_dof_view {
             frame.pre_dof.write(view, "PostProcess");
         }

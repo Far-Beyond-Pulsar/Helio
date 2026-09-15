@@ -6,6 +6,7 @@ description = "Helio 2D pass: GPU compute culling + radix sort for a growable in
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+pulsar_scenedb = { workspace = true }
 helio-core = { workspace = true }
 libhelio   = { workspace = true }
 wgpu       = { workspace = true }

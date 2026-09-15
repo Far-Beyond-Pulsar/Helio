@@ -5,14 +5,14 @@
 //! dirty-brick list each frame.
 
 mod marching_cubes;
+mod terrain;
+
+pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
-};
-use helio_voxel_core::{
-    GpuBrickMeshlet, GpuBrickMeta, MAX_SURFACE_INDICES_PER_BRICK, MAX_SURFACE_VERTS_PER_BRICK,
 };
 use libhelio::DrawIndexedIndirectArgs;
 
@@ -32,6 +32,29 @@ pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
 // the boundary between two bricks and the surface has a visible seam/gap at
 // every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
 pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
+pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 2048;
+pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 2048;
+
+/// Mesh-pass-owned metadata consumed by the extraction and meshlet shaders.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuBrickMeta {
+    pub data_offset: u32,
+    pub occupancy: u32,
+}
+
+/// Mesh-pass-owned indirect meshlet descriptor.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuBrickMeshlet {
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub vertex_count: u32,
+    pub index_count: u32,
+    pub brick_index: u32,
+    pub volume_id: u32,
+    pub _pad: [u32; 2],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttachmentMode {
@@ -654,7 +677,14 @@ impl RenderPass for VoxelMeshPass {
             return Ok(());
         }
         let params = MeshletParams {
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -689,8 +719,13 @@ impl RenderPass for VoxelMeshPass {
         // ── Step 2: Render — draw the resident brick range indirectly ───────
         // Rebuild the bind group when the camera or lights buffer pointer changes
         // (the lights buffer can be reallocated by GrowableBuffer as it grows).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let lights_ptr = lights_buf as *const _ as usize;
         if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
             self.render_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -699,11 +734,11 @@ impl RenderPass for VoxelMeshPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: ctx.scene.lights.as_entire_binding(),
+                            resource: lights_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -741,7 +776,7 @@ impl RenderPass for VoxelMeshPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
             return None;

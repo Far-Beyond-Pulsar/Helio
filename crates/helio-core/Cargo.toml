@@ -12,13 +12,11 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 thiserror = { workspace = true }
 libhelio = { workspace = true }
-helio-voxel-core = { workspace = true }
+pulsar_scenedb = { workspace = true }
+naga = { version = "30.0.0", features = ["wgsl-in"] }
 
 [dev-dependencies]
 pollster = { workspace = true }
-# Matches the naga inside wgpu 30, so tests/wgsl_validation.rs validates shaders
-# exactly as create_shader_module would at runtime.
-naga = { version = "30.0.0", features = ["wgsl-in"] }
 
 [features]
 default = ["profiling"]

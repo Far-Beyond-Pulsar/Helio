@@ -42,6 +42,17 @@ pub const INSTANCE_FLAG_RECEIVES_SHADOW: u32 = 1 << 1;
 /// bounding spheres are tight.
 pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
 
+/// This instance is `Movable` (participates in the dynamic shadow atlas and
+/// per-frame movement bookkeeping) rather than `Static`/`Stationary`. Unset
+/// (0) is the common case and matches a `Zeroable`-default row: an instance
+/// nobody has ever tagged movable is treated as static, the cheaper and more
+/// common case for a GPU-driven object-batch pipeline (`helio-pass-object-
+/// batch`) building the shadow-partitioned indirect buffers -- see that
+/// crate's module doc for how this bit feeds the static/movable shadow split
+/// `Scene::rebuild_shadow_partition_buffers` used to compute from a CPU-side
+/// `Movability` enum per object.
+pub const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
+
 /// Bit offset of the coordinate-space id within [`GpuInstanceData::flags`].
 ///
 /// # Coordinate spaces
@@ -57,7 +68,7 @@ pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
 /// sublevel assigns its members a space id once and moves the whole sublevel
 /// by writing one matrix (`Scene::move_sublevel`); a portal draws a *second*,
 /// clipped copy of nearby geometry through its own space id
-/// (`Scene::add_portal`). See `docs/` for the full design.
+/// (the SceneDB portal projection). See `docs/` for the full design.
 pub const INSTANCE_COORDINATE_SPACE_SHIFT: u32 = 8;
 
 /// Mask for the 8-bit coordinate-space id within [`GpuInstanceData::flags`].

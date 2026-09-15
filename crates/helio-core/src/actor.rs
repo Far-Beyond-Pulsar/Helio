@@ -1,7 +1,6 @@
-use crate::component::Component;
 use crate::entity::Entity;
 
-pub trait Actor: Component {
+pub trait Actor {
     fn entity(&self) -> Entity;
     fn set_entity(&mut self, entity: Entity);
 }

@@ -9,7 +9,7 @@ use helio_pass_planetary_voxel::{
     TRANSVOXEL_TRANSITION_CASE_WEIGHTS, TRANSVOXEL_TRANSITION_CELLS_PER_FACE,
     TRANSVOXEL_TRANSITION_CELL_COUNT, TRANSVOXEL_TRANSITION_SCAN_BLOCKS,
 };
-use helio_planet_voxel_core::{CellWord, PageKey};
+use helio_pass_planetary_voxel::{CellWord, PageKey};
 use std::{mem::size_of, sync::mpsc};
 
 #[test]

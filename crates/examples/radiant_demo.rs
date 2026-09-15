@@ -11,13 +11,19 @@ use std::time::Instant;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    GpuMaterial, Renderer, RendererConfig, Scene, SceneActor,
+    GpuMaterial, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use helio_pass_gbuffer::GBufferPass;
+use helio_default_graphs::build_default_graph_external;
+use helio_pass_gbuffer::MaterialComponent;
 use libhelio::{
-    FLAG_HAS_NORMAL_MAP, MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT,
-    MATERIAL_CLASS_DEFAULT, MATERIAL_CLASS_SKIN, MATERIAL_CLASS_SUBSURFACE,
+    MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
+    MATERIAL_CLASS_SUBSURFACE,
+};
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_sky, update_light,
 };
 use winit::{
     application::ApplicationHandler,
@@ -34,15 +40,6 @@ const LOOK_SENS: f32 = 0.002;
 const FLY_SPEED: f32 = 10.0;
 const DRAG: f32 = 6.0;
 
-const GRAPH_EMISSIVE_PULSE: &str = "\
-{
-    let t = f32(globals.frame) * 0.05;
-    let pulse = sin(t) * 0.5 + 0.5;
-    let pulse_color = vec3<f32>(1.0, 0.3, 0.1) * pulse * 2.0;
-    emissive = emissive + pulse_color;
-}
-";
-
 struct App {
     state: Option<AppState>,
 }
@@ -55,6 +52,7 @@ struct AppState {
     surface_format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: Instant,
     cam_pos: Vec3,
     yaw: f32,
@@ -63,11 +61,11 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    animated_iri_id: helio::MaterialId,
-    crystal_mat_id: helio::MaterialId,
-    aniso_mat_id: helio::MaterialId,
-    sun_light_id: helio::LightId,
-    key_light_id: helio::LightId,
+    animated_iri_id: Entity,
+    crystal_mat_id: Entity,
+    aniso_mat_id: Entity,
+    sun_light_id: Entity,
+    key_light_id: Entity,
 }
 
 impl ApplicationHandler for App {
@@ -134,48 +132,23 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, surface_format);
         config.enable_ssr = true;
-        let mut scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
-
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
         // ── Register iridescent template (Tier 3) ───────────────────────────
 
@@ -246,41 +219,36 @@ impl ApplicationHandler for App {
             water_transparent_class
         );
 
-        // ── Register graph snippet ──────────────────────────────────────────
-
-        let pulse_hash = 0xA3F10001u64;
-        renderer
-            .scene_mut()
-            .radiant_graphs
-            .register(pulse_hash, GRAPH_EMISSIVE_PULSE.to_string());
-
         // Tier-2 templates (clear_coat, subsurface, anisotropic, skin) are
         // auto-registered with their MATERIAL_CLASS_* IDs at RadianTemplate::new().
+        //
+        // The "Tier 2 graph snippet" showcase material (custom per-material
+        // WGSL emissive-pulse injection via `Scene::radiant_graphs`) has no
+        // SceneDB replacement -- that hash-keyed runtime snippet registry
+        // was renderer/Scene-owned and was not carried over. Every other
+        // tier's material still applies: it's now authored directly on
+        // `MaterialComponent`'s own `material_class`/`class_params` fields
+        // (what `set_material_class`/`update_material_class_params` used to
+        // set through the removed `Scene`), so it needs no runtime registry.
 
         // ── Materials ───────────────────────────────────────────────────────
 
-        let make_mat = v3_demo_common::make_material;
+        let make_mat = make_material;
 
         // Tier 1a: Gold metallic — broad sharp highlight
-        let gold_mat = renderer.scene_mut().insert_material(make_mat(
-            [1.0, 0.75, 0.2, 1.0],
-            0.15,
-            1.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let gold_mat = spawn_material(
+            &mut scene_db.world,
+            make_mat([1.0, 0.75, 0.2, 1.0], 0.15, 1.0, [0.0; 3], 0.0),
+        );
 
         // Tier 1b: Rough red plastic — soft matte diffuse
-        let plastic_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.9, 0.12, 0.08, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let plastic_mat = spawn_material(
+            &mut scene_db.world,
+            make_mat([0.9, 0.12, 0.08, 1.0], 0.85, 0.0, [0.0; 3], 0.0),
+        );
 
         // Tier 2: Clear coat — dark base with bright, sharp coated specular
-        let coat_mat = renderer.scene_mut().insert_material(GpuMaterial {
+        let coat_component: MaterialComponent = GpuMaterial {
             base_color: [0.01, 0.01, 0.02, 1.0],
             emissive: [0.0; 4],
             roughness_metallic: [0.3, 0.0, 1.5, 0.0],
@@ -291,19 +259,14 @@ impl ApplicationHandler for App {
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
             flags: 0,
-            material_class: 0,
-            class_params: [0.0; 4],
-        });
-        renderer
-            .scene_mut()
-            .set_material_class(coat_mat, MATERIAL_CLASS_CLEAR_COAT, 0, None)
-            .unwrap();
-        renderer
-            .scene_mut()
-            .update_material_class_params(coat_mat, [1.0, 0.01, 0.0, 0.0]);
+            material_class: MATERIAL_CLASS_CLEAR_COAT,
+            class_params: [1.0, 0.01, 0.0, 0.0],
+        }
+        .into();
+        let coat_mat = spawn_material(&mut scene_db.world, coat_component);
 
         // Tier 2: Crystal/gemstone — SSS with rim-transmission glow
-        let crystal_mat = renderer.scene_mut().insert_material(GpuMaterial {
+        let crystal_component: MaterialComponent = GpuMaterial {
             base_color: [0.98, 0.95, 0.92, 1.0],
             emissive: [0.0; 4],
             roughness_metallic: [0.01, 0.0, 2.42, 0.0],
@@ -314,111 +277,44 @@ impl ApplicationHandler for App {
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
             flags: 0,
-            material_class: 0,
-            class_params: [0.0; 4],
-        });
-        renderer
-            .scene_mut()
-            .set_material_class(crystal_mat, MATERIAL_CLASS_SUBSURFACE, 0, None)
-            .unwrap();
-        renderer
-            .scene_mut()
-            .update_material_class_params(crystal_mat, [0.2, 0.5, 0.9, 3.0]);
+            material_class: MATERIAL_CLASS_SUBSURFACE,
+            class_params: [0.2, 0.5, 0.9, 3.0],
+        }
+        .into();
+        let crystal_mat = spawn_material(&mut scene_db.world, crystal_component);
 
         // Tier 2: Brushed metal — stretched anisotropic highlight
-        let aniso_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.75, 0.6, 0.4, 1.0],
-            0.2,
-            1.0,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(aniso_mat, MATERIAL_CLASS_ANISOTROPIC, 0, None)
-            .unwrap();
-        renderer
-            .scene_mut()
-            .update_material_class_params(aniso_mat, [0.95, 0.0, 0.0, 0.0]);
+        let mut aniso = make_mat([0.75, 0.6, 0.4, 1.0], 0.2, 1.0, [0.0; 3], 0.0);
+        aniso.material_class = MATERIAL_CLASS_ANISOTROPIC;
+        aniso.class_params = [0.95, 0.0, 0.0, 0.0];
+        let aniso_mat = spawn_material(&mut scene_db.world, aniso);
 
         // Tier 2: Skin — F0=0.028 dielectric with SSS
-        let skin_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.82, 0.58, 0.48, 1.0],
-            0.35,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(skin_mat, MATERIAL_CLASS_SKIN, 0, None)
-            .unwrap();
-        renderer
-            .scene_mut()
-            .update_material_class_params(skin_mat, [0.75, 0.1, 0.05, 4.0]);
-
-        // Tier 2: Emissive pulse (graph snippet)
-        let pulse_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.25, 0.25, 0.3, 1.0],
-            0.5,
-            0.5,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(
-                pulse_mat,
-                MATERIAL_CLASS_DEFAULT,
-                pulse_hash,
-                Some(FLAG_HAS_NORMAL_MAP),
-            )
-            .unwrap();
+        let mut skin = make_mat([0.82, 0.58, 0.48, 1.0], 0.35, 0.0, [0.0; 3], 0.0);
+        skin.material_class = MATERIAL_CLASS_SKIN;
+        skin.class_params = [0.75, 0.1, 0.05, 4.0];
+        let skin_mat = spawn_material(&mut scene_db.world, skin);
 
         // Tier 3: Iridescent static
-        let iri_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.6, 0.6, 0.8, 1.0],
-            0.12,
-            0.8,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(iri_mat, iridescent_class, 0, None)
-            .unwrap();
+        let mut iri = make_mat([0.6, 0.6, 0.8, 1.0], 0.12, 0.8, [0.0; 3], 0.0);
+        iri.material_class = iridescent_class;
+        let iri_mat = spawn_material(&mut scene_db.world, iri);
 
         // Tier 3: Iridescent animated
-        let anim_iri_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.5, 0.5, 0.6, 1.0],
-            0.15,
-            0.7,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(anim_iri_mat, iridescent_class, 0, None)
-            .unwrap();
+        let mut anim_iri = make_mat([0.5, 0.5, 0.6, 1.0], 0.15, 0.7, [0.0; 3], 0.0);
+        anim_iri.material_class = iridescent_class;
+        let anim_iri_mat = spawn_material(&mut scene_db.world, anim_iri);
 
         // Animated brush direction metal
-        let aniso2_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.55, 0.55, 0.65, 1.0],
-            0.12,
-            0.9,
-            [0.0; 3],
-            0.0,
-        ));
-        renderer
-            .scene_mut()
-            .set_material_class(aniso2_mat, MATERIAL_CLASS_ANISOTROPIC, 0, None)
-            .unwrap();
+        let mut aniso2 = make_mat([0.55, 0.55, 0.65, 1.0], 0.12, 0.9, [0.0; 3], 0.0);
+        aniso2.material_class = MATERIAL_CLASS_ANISOTROPIC;
+        let aniso2_mat = spawn_material(&mut scene_db.world, aniso2);
 
         // Opal: milky translucent body with play-of-colour from internal
         // 3D cell noise.  The opal template uses SSS for the translucent body
         // and a hash-based cell noise for the coloured patches.
         // class_params.x = patch_scale, .y = patch_strength, .z = view_shift
-        let opal_mat = renderer.scene_mut().insert_material(GpuMaterial {
+        let opal_component: MaterialComponent = GpuMaterial {
             base_color: [0.88, 0.84, 0.78, 1.0],
             emissive: [0.0; 4],
             roughness_metallic: [0.06, 0.0, 1.45, 0.0],
@@ -429,20 +325,15 @@ impl ApplicationHandler for App {
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
             flags: 0,
-            material_class: 0,
-            class_params: [0.0; 4],
-        });
-        renderer
-            .scene_mut()
-            .set_material_class(opal_mat, opal_class, 0, None)
-            .unwrap();
-        renderer
-            .scene_mut()
-            .update_material_class_params(opal_mat, [3.0, 1.0, 0.4, 0.0]);
+            material_class: opal_class,
+            class_params: [3.0, 1.0, 0.4, 0.0],
+        }
+        .into();
+        let opal_mat = spawn_material(&mut scene_db.world, opal_component);
 
         // ── Glass material ────────────────────────────────────────────────────
 
-        let glass_mat = renderer.scene_mut().insert_material(GpuMaterial {
+        let glass_component: MaterialComponent = GpuMaterial {
             base_color: [0.85, 0.90, 0.95, 0.70], // slightly blue-tinted glass
             emissive: [0.0; 4],
             roughness_metallic: [0.015, 0.0, 1.5, 0.0],
@@ -452,23 +343,16 @@ impl ApplicationHandler for App {
             tex_emissive: GpuMaterial::NO_TEXTURE,
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
-            flags: 0,
-            material_class: 0,
+            flags: libhelio::FLAG_TRANSPARENT_ONLY,
+            material_class: glass_class,
             class_params: [0.0; 4],
-        });
-        renderer
-            .scene_mut()
-            .set_material_class(
-                glass_mat,
-                glass_class,
-                0,
-                Some(libhelio::FLAG_TRANSPARENT_ONLY),
-            )
-            .unwrap();
+        }
+        .into();
+        let glass_mat = spawn_material(&mut scene_db.world, glass_component);
 
         // ── Water material ────────────────────────────────────────────────────
 
-        let water_mat = renderer.scene_mut().insert_material(GpuMaterial {
+        let water_component: MaterialComponent = GpuMaterial {
             base_color: [0.02, 0.1, 0.15, 0.85],
             emissive: [0.0; 4],
             roughness_metallic: [0.02, 0.0, 1.33, 0.0],
@@ -479,27 +363,17 @@ impl ApplicationHandler for App {
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
             flags: 0,
-            material_class: 0,
+            material_class: water_class,
             class_params: [0.0; 4],
-        });
-        renderer
-            .scene_mut()
-            .set_material_class(water_mat, water_class, 0, None)
-            .unwrap();
+        }
+        .into();
+        let water_mat = spawn_material(&mut scene_db.world, water_component);
 
         // ── Meshes ───────────────────────────────────────────────────────────
 
-        let sphere_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(v3_demo_common::sphere_mesh([0.0; 3], 1.0)))
-            .as_mesh()
-            .unwrap();
+        let sphere_mesh_id = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0; 3], 1.0));
 
-        let plane_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(v3_demo_common::plane_mesh([0.0; 3], 16.0)))
-            .as_mesh()
-            .unwrap();
+        let plane_mesh_id = spawn_mesh(&mut scene_db.world, plane_mesh([0.0; 3], 16.0));
 
         // ── Scene objects ────────────────────────────────────────────────────
 
@@ -509,102 +383,92 @@ impl ApplicationHandler for App {
         let back_z = -5.0;
 
         // Dark ground plane
-        let plane_mat = renderer.scene_mut().insert_material(make_mat(
-            [0.03, 0.03, 0.035, 1.0],
-            0.95,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        v3_demo_common::insert_object(
-            &mut renderer,
-            plane_mesh,
+        let plane_mat = spawn_material(
+            &mut scene_db.world,
+            make_mat([0.03, 0.03, 0.035, 1.0], 0.95, 0.0, [0.0; 3], 0.0),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
+            plane_mesh_id,
             plane_mat,
             Mat4::from_translation(Vec3::new(0.0, -1.5, -2.5)),
             16.0,
         );
 
         // ── Front row ──
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             gold_mat,
             Mat4::from_translation(Vec3::new(-s * 1.5, yp, front_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             plastic_mat,
             Mat4::from_translation(Vec3::new(-s * 0.5, yp, front_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             coat_mat,
             Mat4::from_translation(Vec3::new(s * 0.5, yp, front_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
-            pulse_mat,
-            Mat4::from_translation(Vec3::new(s * 1.5, yp, front_z)),
-            1.0,
-        );
 
         // ── Back row ──
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             crystal_mat,
             Mat4::from_translation(Vec3::new(-s * 2.0, yp, back_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             aniso_mat,
             Mat4::from_translation(Vec3::new(-s * 1.0, yp, back_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             skin_mat,
             Mat4::from_translation(Vec3::new(s * 0.0, yp, back_z)),
             1.0,
         );
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             aniso2_mat,
             Mat4::from_translation(Vec3::new(s * 1.0, yp, back_z)),
             1.0,
         );
         // Glass: transparent sphere with Fresnel reflections
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             glass_mat,
             Mat4::from_translation(Vec3::new(-s * 2.5, yp + 0.5, front_z + 1.0)),
             0.8,
         );
 
         // Opal: milky body + iridescent play-of-colour
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             opal_mat,
             Mat4::from_translation(Vec3::new(s * 2.0, yp, back_z)),
             1.0,
         );
 
         // Water: animated wave surface
-        v3_demo_common::insert_object(
-            &mut renderer,
-            sphere_mesh,
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sphere_mesh_id,
             water_mat,
             Mat4::from_translation(Vec3::new(s * 3.5, yp - 0.3, back_z - 0.5)),
             1.2,
@@ -613,52 +477,32 @@ impl ApplicationHandler for App {
         // ── Lights ───────────────────────────────────────────────────────────
 
         // Key light: bright, close, sharp — makes specular highlights POP
-        let key_id = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(v3_demo_common::point_light(
-                [4.0, 6.0, 3.0],
-                [2.0, 1.8, 1.5],
-                18.0,
-                25.0,
-            )))
-            .as_light()
-            .unwrap();
+        let key_id = spawn_light(
+            &mut scene_db.world,
+            point_light([4.0, 6.0, 3.0], [2.0, 1.8, 1.5], 18.0, 25.0),
+        );
 
         // Second key from opposite side for backlighting (reveals SSS transmission)
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(v3_demo_common::point_light(
-                [-3.0, 4.0, -4.0],
-                [0.6, 0.8, 1.2],
-                12.0,
-                20.0,
-            )));
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-3.0, 4.0, -4.0], [0.6, 0.8, 1.2], 12.0, 20.0),
+        );
 
         // Fill
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(v3_demo_common::directional_light(
-                [-0.3, -0.5, -0.4],
-                [0.3, 0.35, 0.4],
-                0.5,
-            )));
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([-0.3, -0.5, -0.4], [0.3, 0.35, 0.4], 0.5),
+        );
 
         // Sun (orbits)
-        let sun_id = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(v3_demo_common::directional_light(
-                [0.4, -0.8, 0.3],
-                [1.0, 0.9, 0.75],
-                2.0,
-            )))
-            .as_light()
-            .unwrap();
+        let sun_id = spawn_light(
+            &mut scene_db.world,
+            directional_light([0.4, -0.8, 0.3], [1.0, 0.9, 0.75], 2.0),
+        );
 
         // ── Sky: nearly black — reflections visible only from lights ──────────
 
-        renderer.scene_mut().insert_actor(SceneActor::Sky(
-            helio::SkyActor::new().with_sky_color([0.02, 0.02, 0.04]),
-        ));
+        spawn_sky(&mut scene_db.world, [0.02, 0.02, 0.04]);
         renderer.set_ambient([0.01, 0.01, 0.02], 0.03);
 
         // ── Legend ───────────────────────────────────────────────────────────
@@ -670,7 +514,8 @@ impl ApplicationHandler for App {
         log::info!("  [-3.75] Gold metallic     (Tier 1, metallic flags)");
         log::info!("  [-1.25] Red plastic       (Tier 1, matte dielectric)");
         log::info!("  [ 1.25] Clear coat        (Tier 2, clear_coat template)");
-        log::info!("  [ 3.75] Emissive pulse    (Tier 2, graph snippet)");
+        log::info!("  [ 3.75] (removed -- was the Tier 2 graph-snippet showcase;");
+        log::info!("           see this file's comment on why it has no SceneDB replacement)");
         log::info!("  ── Back row ───────────────────────────");
         log::info!("  [-5.00] Crystal/gemstone  (Tier 2, SSS, animated tint)");
         log::info!("  [-2.50] Brushed metal     (Tier 2, anisotropic GGX)");
@@ -688,6 +533,7 @@ impl ApplicationHandler for App {
             surface_format,
             alpha_mode,
             renderer,
+            scene_db,
             last_frame: Instant::now(),
             cam_pos: Vec3::new(0.0, 1.5, 6.0),
             yaw: 0.0,
@@ -806,21 +652,25 @@ impl ApplicationHandler for App {
                 let t = now.duration_since(state.last_frame).as_secs_f32();
                 let key_x = (t * 0.15).cos() * 5.0;
                 let key_z = (t * 0.15).sin() * 5.0 + 2.0;
-                let _ = state.renderer.scene_mut().update_light(
+                update_light(
+                    &mut state.scene_db.world,
                     state.key_light_id,
-                    v3_demo_common::point_light([key_x, 5.0, key_z], [2.0, 1.8, 1.5], 18.0, 25.0),
+                    point_light([key_x, 5.0, key_z], [2.0, 1.8, 1.5], 18.0, 25.0),
                 );
 
                 // Animate iridescent
-                state.renderer.scene_mut().update_material_class_params(
-                    state.animated_iri_id,
-                    [
+                if let Some(mut m) = state
+                    .scene_db
+                    .world
+                    .get_mut::<MaterialComponent>(state.animated_iri_id)
+                {
+                    m.class_params = [
                         3.0 + (t * 0.3).sin() * 2.0,
                         0.5 + (t * 0.5).sin() * 0.5,
                         0.0,
                         0.0,
-                    ],
-                );
+                    ];
+                }
 
                 // Animate crystal: cycle internal colour
                 let crystal_tint = [
@@ -828,21 +678,27 @@ impl ApplicationHandler for App {
                     0.2 + (t * 0.9 + 2.0).cos() * 0.3,
                     0.2 + (t * 1.1 + 4.0).cos() * 0.35,
                 ];
-                state.renderer.scene_mut().update_material_class_params(
-                    state.crystal_mat_id,
-                    [
+                if let Some(mut m) = state
+                    .scene_db
+                    .world
+                    .get_mut::<MaterialComponent>(state.crystal_mat_id)
+                {
+                    m.class_params = [
                         crystal_tint[0],
                         crystal_tint[1],
                         crystal_tint[2],
                         3.0 + (t * 0.5).sin() * 1.5,
-                    ],
-                );
+                    ];
+                }
 
                 // Animate anisotropic: rotate brush direction
-                state
-                    .renderer
-                    .scene_mut()
-                    .update_material_class_params(state.aniso_mat_id, [0.9, t * 0.3, 0.0, 0.0]);
+                if let Some(mut m) = state
+                    .scene_db
+                    .world
+                    .get_mut::<MaterialComponent>(state.aniso_mat_id)
+                {
+                    m.class_params = [0.9, t * 0.3, 0.0, 0.0];
+                }
 
                 let output = match state.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,

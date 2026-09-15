@@ -2,7 +2,7 @@
 //! each of its 6 walls, each one reflecting the *same real room* back at
 //! itself. No manually-authored "copies" anywhere in this file: every
 //! reflection you see — including the second, third bounce receding into
-//! each doorway — comes entirely from `helio::Scene::add_portal` and the
+//! each doorway — comes entirely from SceneDB portal components and the
 //! engine's own portal-chain composition (`helio-pass-portal-cull` /
 //! `helio-pass-portal-instances`). This is the automatic-recursion
 //! generalization of `infinite_tunnel`'s single hand-placed corridor: a
@@ -27,11 +27,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupMask, LightId, ObjectDescriptor, PortalDescriptor, PortalId, Renderer,
-    RendererConfig, Scene, SceneActor,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -85,8 +88,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _portal_ids: Vec<PortalId>,
-    _light_ids: Vec<LightId>,
+    scene_db: SceneDb,
+    _portal_pairs: Vec<helio::PortalPair>,
+    _light_ids: Vec<Entity>,
 
     /// Debug-only: when `CUBE_SCREENSHOT` is set, counts frames so a single
     /// PNG can be captured after the scene has settled, then the process exits.
@@ -169,56 +173,20 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let wall_mat = renderer.scene_mut().insert_material(make_material(
-            [0.75, 0.75, 0.78, 1.0],
-            0.75,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let frame_mat = renderer.scene_mut().insert_material(make_material(
+        let wall_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.75, 0.75, 0.78, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let frame_mat = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.9, 1.0, 1.0],
             0.4,
             0.0,
@@ -229,11 +197,7 @@ impl ApplicationHandler for App {
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
-        let unit_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])))
-            .as_mesh()
-            .unwrap();
+        let unit_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
 
         // ── The room: one wall per axis direction, each with a centered
         // doorway. `up_hint` just needs to not be parallel to `normal` — Y
@@ -250,13 +214,13 @@ impl ApplicationHandler for App {
             (Vec3::NEG_Z, Vec3::Y),
         ];
 
-        let mut portal_ids = Vec::new();
+        let mut portal_pairs = Vec::new();
         for &(normal, up_hint) in &faces {
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
 
             insert_wall_face(
-                &mut renderer,
+                &mut scene_db.world,
                 unit_mesh,
                 wall_mat,
                 frame_mat,
@@ -273,48 +237,30 @@ impl ApplicationHandler for App {
             // the module doc for why this is the whole trick.
             let a = helio::portal_pose_facing(normal * HALF_SIZE, normal, up);
             let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
-            let portal = renderer
-                .scene_mut()
-                .add_portal(PortalDescriptor {
-                    a,
-                    b,
-                    half_extent: Vec2::new(DOOR_HALF_W, DOOR_HALF_H),
-                })
-                .expect("add_portal");
-            portal_ids.push(portal);
+            let portal = helio::PortalPair { a, b };
+            portal_pairs.push(portal);
         }
 
         // ── A light near the center so every wall reads, plus one per
         // doorway direction so the receding reflections don't go flat black.
         let mut light_ids = Vec::new();
-        light_ids.push(
-            renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(point_light(
-                    [0.0, HALF_SIZE * 0.85, 0.0],
-                    [1.0, 0.98, 0.92],
-                    4.0,
-                    HALF_SIZE * 1.8,
-                )))
-                .as_light()
-                .unwrap(),
-        );
+        light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light(
+                [0.0, HALF_SIZE * 0.85, 0.0],
+                [1.0, 0.98, 0.92],
+                4.0,
+                HALF_SIZE * 1.8,
+            ),
+        ));
         // Just 2 more (not one per face — 7 overlapping light-range gizmos
         // in editor mode turned into unreadable clutter) at opposite
         // corners, enough to break up the single center light's flatness.
         for &pos in &[Vec3::new(3.5, 3.0, 3.5), Vec3::new(-3.5, -3.0, -3.5)] {
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(SceneActor::light(point_light(
-                        [pos.x, pos.y, pos.z],
-                        [0.85, 0.92, 1.0],
-                        2.0,
-                        HALF_SIZE,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([pos.x, pos.y, pos.z], [0.85, 0.92, 1.0], 2.0, HALF_SIZE),
+            ));
         }
 
         // Deferred lighting shades every pixel — including portal
@@ -368,7 +314,8 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            _portal_ids: portal_ids,
+            scene_db,
+            _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
         });
@@ -590,16 +537,16 @@ impl AppState {
 /// up, normal)` must be orthonormal — see the call site for how that's
 /// built from each face's `up_hint`.
 fn insert_wall_face(
-    renderer: &mut Renderer,
-    unit_mesh: helio::MeshId,
-    wall_mat: helio::MaterialId,
-    frame_mat: helio::MaterialId,
+    world: &mut pulsar_scenedb::World,
+    unit_mesh: Entity,
+    wall_mat: Entity,
+    frame_mat: Entity,
     normal: Vec3,
     right: Vec3,
     up: Vec3,
 ) {
     let face_center = normal * HALF_SIZE;
-    let mut insert_box = |material: helio::MaterialId,
+    let mut insert_box = |material: Entity,
                           center_right: f32,
                           center_up: f32,
                           center_normal: f32,
@@ -624,18 +571,7 @@ fn insert_wall_face(
         // view regardless of where it actually maps to — wildly
         // overselecting and blowing straight through the cull pass's
         // per-group capacity.
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh: unit_mesh,
-                material,
-                transform,
-                bounds: [center.x, center.y, center.z, radius],
-                flags: 0,
-                groups: GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        let _ = spawn_object(world, unit_mesh, material, transform, radius);
     };
 
     // Top / bottom panels span the full width; left / right panels fill the

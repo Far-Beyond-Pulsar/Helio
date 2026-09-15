@@ -18,12 +18,11 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    Camera, DebugDrawState, GpuLight, LightType, Movability, RenderGraph, Renderer, RendererConfig,
-    Scene, SceneActor, VoxelMode, VoxelTerrain, VoxelVolumeDescriptor, VOXEL_TERRAIN_GRID_DIM,
+    Camera, DebugDrawState, GpuLight, LightRenderInput, LightType, RenderGraph, Renderer,
+    RendererConfig, Scene,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_mesh::VoxelMeshPass;
-use helio_voxel_core::GpuVoxelMaterial;
+use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
 
 const LOOK_SENS: f32 = 0.002;
@@ -32,7 +31,6 @@ const DRAG: f32 = 6.0;
 // The GPU-side voxel volume is a dense grid fixed by the engine; `VOXEL_SIZE`
 // just scales that grid into world units.
 const VOXEL_SIZE: f32 = 0.75;
-const ROOT_EXTENT: f32 = (VOXEL_TERRAIN_GRID_DIM as f32) * VOXEL_SIZE;
 
 pub struct Demo {
     queue: Arc<wgpu::Queue>,
@@ -142,91 +140,55 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        {
-            let scene = renderer.scene_mut();
-
-            // Material palette (index 0 is air / unused).
-            let _ = scene.insert_voxel_volume(VoxelVolumeDescriptor {
-                voxel_size: VOXEL_SIZE,
-                root_extent: ROOT_EXTENT,
-                local_to_world: glam::Mat4::IDENTITY,
-                movability: Some(Movability::Stationary),
-                mode: Some(VoxelMode::Auto),
-                material_palette: vec![
-                    GpuVoxelMaterial {
-                        color: [0.0, 0.0, 0.0],
-                        roughness: 1.0,
-                        metalness: 0.0,
-                        emissive: 0.0,
-                        _pad: [0; 2],
-                    }, // air
-                    GpuVoxelMaterial {
-                        color: [0.3, 0.7, 0.25],
-                        roughness: 0.8,
-                        metalness: 0.0,
-                        emissive: 0.0,
-                        _pad: [0; 2],
-                    }, // grass
-                    GpuVoxelMaterial {
-                        color: [0.45, 0.3, 0.15],
-                        roughness: 0.9,
-                        metalness: 0.0,
-                        emissive: 0.0,
-                        _pad: [0; 2],
-                    }, // dirt
-                    GpuVoxelMaterial {
-                        color: [0.5, 0.5, 0.52],
-                        roughness: 0.85,
-                        metalness: 0.0,
-                        emissive: 0.0,
-                        _pad: [0; 2],
-                    }, // stone
-                    GpuVoxelMaterial {
-                        color: [0.9, 0.75, 0.2],
-                        roughness: 0.4,
-                        metalness: 0.8,
-                        emissive: 0.0,
-                        _pad: [0; 2],
-                    }, // ore
-                ],
-            });
-
-            // VoxelMeshPass sums the scene lights buffer directly, the same
-            // infrastructure the default deferred lighting pass reads. This
-            // custom graph has no ambient fill, so the lights are turned up and
-            // a low sky-fill from below keeps shadowed faces readable.
-            scene.insert_actor(SceneActor::light(GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [0.35, -0.8, 0.25, 0.0],
-                color_intensity: [1.0, 0.96, 0.88, 6.0],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
-            }));
-            scene.insert_actor(SceneActor::light(GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [-0.4, -0.3, -0.6, 0.0],
-                color_intensity: [0.55, 0.65, 0.85, 2.5],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
-            }));
+        // VoxelMeshPass sums the scene lights buffer directly, the same
+        // infrastructure the default deferred lighting pass reads. This
+        // custom graph has no ambient fill, so the lights are turned up and
+        // a low sky-fill from below keeps shadowed faces readable.
+        renderer.submit_light_frame(&[
+            LightRenderInput {
+                light: GpuLight {
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [0.35, -0.8, 0.25, 0.0],
+                    color_intensity: [1.0, 0.96, 0.88, 6.0],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
+                },
+                user_tag: 0,
+                entity_index: 0,
+            },
+            LightRenderInput {
+                light: GpuLight {
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [-0.4, -0.3, -0.6, 0.0],
+                    color_intensity: [0.55, 0.65, 0.85, 2.5],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
+                },
+                user_tag: 0,
+                entity_index: 1,
+            },
             // Upward sky-fill so downward-facing faces aren't pitch black.
-            scene.insert_actor(SceneActor::light(GpuLight {
-                position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [0.1, 0.9, 0.2, 0.0],
-                color_intensity: [0.35, 0.4, 0.5, 1.5],
-                shadow_index: u32::MAX,
-                light_type: LightType::Directional as u32,
-                inner_angle: 0.0,
-                _pad: 0,
-                ..Default::default()
-            }));
-        }
+            LightRenderInput {
+                light: GpuLight {
+                    position_range: [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [0.1, 0.9, 0.2, 0.0],
+                    color_intensity: [0.35, 0.4, 0.5, 1.5],
+                    shadow_index: u32::MAX,
+                    light_type: LightType::Directional as u32,
+                    inner_angle: 0.0,
+                    _pad: 0,
+                    ..Default::default()
+                },
+                user_tag: 0,
+                entity_index: 2,
+            },
+        ]);
 
         // In case VoxelMeshPass honors the scene ambient term, lift it too.
         renderer.set_ambient([0.5, 0.55, 0.6], 0.35);

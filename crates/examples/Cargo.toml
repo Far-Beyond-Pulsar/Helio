@@ -273,13 +273,18 @@ helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
 helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
-helio-voxel-core = { path = "../helio-voxel-core" }
-helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
 helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+pulsar_scenedb = { workspace = true }
+scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 rapier3d = "0.24"
 image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }

@@ -20,10 +20,15 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene, VolumetricClouds,
+    Renderer, RendererBuilder, RendererConfig, VolumetricClouds,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{cube_mesh, directional_light, make_material, plane_mesh};
+use helio_default_graphs::build_default_graph_external;
+use helio_pass_sky::SkyComponent;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -35,6 +40,25 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+/// Build the SceneDB sky row for `clouds`, replacing the removed
+/// `SkyActor::new().with_clouds(..)` builder. `infinite_extent` has no
+/// `SkyComponent` field -- it's pass-owned state, applied separately via
+/// `helio_pass_sky::SkyPass::set_infinite_extent`.
+fn sky_component_for(clouds: VolumetricClouds) -> SkyComponent {
+    SkyComponent {
+        clouds_enabled: 1,
+        cloud_coverage: clouds.coverage,
+        cloud_density: clouds.density,
+        cloud_base: clouds.base,
+        cloud_top: clouds.top,
+        cloud_wind_x: clouds.wind_x,
+        cloud_wind_z: clouds.wind_z,
+        cloud_speed: clouds.speed,
+        skylight_intensity: clouds.skylight_intensity,
+        ..Default::default()
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -117,6 +141,8 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
+    sky_entity: Entity,
     last_frame: std::time::Instant,
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -125,7 +151,7 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
     sun_angle: f32,
-    sun_light_id: LightId,
+    sun_light_id: Entity,
     preset_idx: usize,
     coverage: f32,
     density: f32,
@@ -210,85 +236,45 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &cfg);
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
             0.5,
         );
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 40.0);
+        let _ = spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 40.0);
         let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
-                init_light_dir,
-                [1.0, 0.85, 0.7],
-                (init_lux * 0.35).max(0.01),
-            )))
-            .as_light()
-            .unwrap();
+        let sun_light_id = spawn_light(
+            &mut scene_db.world,
+            directional_light(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)),
+        );
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
         // Start with scattered boundless procedural clouds
         let preset = PRESETS[1].1;
@@ -303,9 +289,11 @@ impl ApplicationHandler for App {
             skylight_intensity: 0.25,
             infinite_extent: true,
         };
-        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
-            helio::SkyActor::new().with_clouds(volumetric),
-        ));
+        let sky_entity = scene_db.world.spawn();
+        scene_db.world.insert(sky_entity, sky_component_for(volumetric));
+        if let Some(pass) = renderer.find_pass_mut::<helio_pass_sky::SkyPass>() {
+            pass.set_infinite_extent(volumetric.infinite_extent);
+        }
         renderer.set_cloud_render_mode(helio::CloudRenderMode::Volume3D);
         renderer.set_cloud_quality(helio::CloudQuality::High);
         renderer.set_cloud_resolution(helio::CloudResolution::Half);
@@ -317,6 +305,8 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
+            scene_db,
+            sky_entity,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 2.5, 7.0),
             cam_yaw: 0.0,
@@ -509,6 +499,16 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    /// Push `clouds` into the sky entity's `SkyComponent` row and sync the
+    /// pass-owned `infinite_extent` flag that has no SceneDB column.
+    fn apply_clouds(&mut self, clouds: VolumetricClouds) {
+        if let Some(mut sky) = self.scene_db.world.get_mut::<SkyComponent>(self.sky_entity) {
+            *sky = sky_component_for(clouds);
+        }
+        if let Some(pass) = self.renderer.find_pass_mut::<helio_pass_sky::SkyPass>() {
+            pass.set_infinite_extent(clouds.infinite_extent);
+        }
+    }
     fn sync_clouds(&mut self) {
         let preset = PRESETS[self.preset_idx].1;
         let clouds = VolumetricClouds {
@@ -522,12 +522,7 @@ impl AppState {
             skylight_intensity: self.skylight,
             infinite_extent: self.infinite,
         };
-        // Re-insert sky actor — SkyActor is the single source of truth for sky+clouds
-        self.renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::Sky(
-                helio::SkyActor::new().with_clouds(clouds),
-            ));
+        self.apply_clouds(clouds);
     }
     fn sync_clouds_with_preset(&mut self, p: CloudPreset) {
         let clouds = VolumetricClouds {
@@ -543,11 +538,7 @@ impl AppState {
         };
         self.coverage = p.coverage;
         self.density = p.density;
-        self.renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::Sky(
-                helio::SkyActor::new().with_clouds(clouds),
-            ));
+        self.apply_clouds(clouds);
     }
     fn render(&mut self, dt: f32) {
         const SPEED: f32 = 5.0;
@@ -613,7 +604,8 @@ impl AppState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let _ = self.renderer.scene_mut().update_light(
+        update_light(
+            &mut self.scene_db.world,
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );

@@ -11,6 +11,12 @@ use bytemuck::{Pod, Zeroable};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
+
+/// Fixed capacity for the `"scene_lights"` SceneDB buffer, kept equal to
+/// `helio_pass_forward_lit::MAX_LIGHTS`/`helio_pass_light_cull::MAX_LIGHTS`
+/// by construction (all three are literally `DEFAULT_AUTO_REGISTER_CAPACITY`).
+const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -27,6 +33,14 @@ struct TransparentGlobals {
     num_tiles_y: u32,
     screen_width: f32,
     screen_height: f32,
+    // 1 when `lights`/`transforms` share the same raw entity index
+    // (SceneDB-direct); 0 when `lights` is `ctx.scene.lights`, a freshly
+    // rebuilt dense array needing `light_entity_indices[light_idx]`. See
+    // `transparent_base.wgsl`'s `light_entity_indices` binding doc.
+    light_mode_direct_index: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 pub struct TransparentPass {
@@ -41,21 +55,22 @@ pub struct TransparentPass {
     /// Key set as of the last sync, to detect content changes cheaply.
     last_shared_keys: Vec<u32>,
     pipeline_layout: wgpu::PipelineLayout,
-    bind_group: wgpu::BindGroup,
+    bind_group_layout_0: wgpu::BindGroupLayout,
+    /// Rebuilt per-frame in `execute()` — its `instances` source
+    /// (`object_batch.instances`) is a `GrowableBuffer` that can reallocate
+    /// across frames, so this can't be built once at construction time (see
+    /// `bind_group_key`).
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_key: Option<(usize, usize)>,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, usize, usize, usize)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
 }
 
 impl TransparentPass {
-    pub fn new(
-        device: &wgpu::Device,
-        camera_buf: &wgpu::Buffer,
-        instances_buf: &wgpu::Buffer,
-        surface_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Transparent Globals"),
             size: std::mem::size_of::<TransparentGlobals>() as u64,
@@ -132,24 +147,30 @@ impl TransparentPass {
                     },
                     count: None,
                 },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Transparent BG 0"),
-            layout: &bgl_0,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
+                // 3: light_entity_indices storage read -- parallel to `lights`
+                // only in CPU-resolved mode, see `transparent_base.wgsl`'s
+                // binding doc.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: globals_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: instances_buf.as_entire_binding(),
+                // 4: SceneDB `Transform` storage read -- entity-indexed the same
+                // way `lights` is, see `transparent_base.wgsl`'s binding doc.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
             ],
         });
@@ -186,7 +207,9 @@ impl TransparentPass {
             shared_registry: None,
             last_shared_keys: Vec::new(),
             pipeline_layout,
-            bind_group,
+            bind_group_layout_0: bgl_0,
+            bind_group: None,
+            bind_group_key: None,
             bind_group_layout_1: bgl_1,
             bind_group_1: None,
             bind_group_1_key: None,
@@ -206,24 +229,38 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene", "depth", "cluster_light_grid"]
+        &[
+            "depth",
+            "cluster_light_grid",
+            "object_batch",
+            "culled_batch",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("depth");
         builder.read("cluster_light_grid");
+        builder.read("object_batch");
+        builder.read("culled_batch");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let num_tiles_x = ctx.width.div_ceil(16);
         let num_tiles_y = ctx.height.div_ceil(16);
+        // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
+        // `MAX_LIGHTS`) when populated; else the `Renderer`-seeded
+        // `LightsFrameData` bridge's `movable_light_count`, production's
+        // actual light count today -- see `ForwardLitPass`'s identical
+        // `light_mode_direct_index` doc for the full reasoning.
+        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
+        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
         ctx.queue.write_buffer(
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&TransparentGlobals {
                 frame: ctx.frame_num as u32,
                 delta_time: 0.0,
-                light_count: ctx.scene.movable_light_count,
+                light_count,
                 ambient_intensity: 0.6,
                 ambient_color: [0.3, 0.35, 0.4, 1.0],
                 rc_world_min: [0.0; 4],
@@ -233,6 +270,10 @@ impl RenderPass for TransparentPass {
                 num_tiles_y,
                 screen_width: ctx.width as f32,
                 screen_height: ctx.height as f32,
+                light_mode_direct_index: use_direct_index as u32,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             }),
         );
         Ok(())
@@ -242,7 +283,7 @@ impl RenderPass for TransparentPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -273,64 +314,80 @@ impl RenderPass for TransparentPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.culled_batch.get() else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
         log::info!(
             "[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
             draw_count,
-            ctx.scene.transparent_material_class_ranges
+            batch.transparent_ranges
         );
         if draw_count == 0 {
             return Ok(());
         }
 
-        // Sync transparent templates from GpuScene (merge into existing registry,
-        // keeping the transparent base at class 0).
-        if let Some(reg_any) = ctx.scene.transparent_template_registry.as_ref() {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                // Only custom templates (id >= 5) apply here — class 0 is
-                // always the transparent base and must not be overwritten.
-                let new_keys: Vec<u32> = shared
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .into_iter()
-                    .filter(|id| *id >= 5)
-                    .collect();
-                if self.last_shared_keys != new_keys {
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_shared_keys = new_keys;
-                }
-                self.shared_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
-        let main_scene = ctx.resources.main_scene.read("Transparent");
-        let ms = main_scene.as_ref().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("TransparentPass requires main_scene".to_string())
-        })?;
-
-        // Rebuild bind group 1 (lights + cluster data) when buffer pointers change
+        // Rebuild bind group 1 (lights + transforms + cluster data) when
+        // buffer pointers change. Lights are always read from the SceneDB
+        // component buffer; the camera buffer is a valid binding fallback
+        // when no light component has been authored yet.
         let cluster = ctx.resources.cluster_light_grid.get();
-        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let lights_ptr = lights_buf as *const _ as usize;
+        let light_entity_indices_ptr = 0;
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
         let tile_counts_ptr = cluster
             .map(|c| c.tile_light_counts as *const _ as usize)
             .unwrap_or(0);
-        let bg1_key = (lights_ptr, tile_lists_ptr, tile_counts_ptr);
+        let transforms_ptr = 0;
+        let bg1_key = (
+            lights_ptr,
+            light_entity_indices_ptr,
+            tile_lists_ptr,
+            tile_counts_ptr,
+            transforms_ptr,
+        );
         if self.bind_group_1_key != Some(bg1_key) {
-            let fallback = ctx.scene.instances;
+            let fallback = batch.instances;
             let tile_lists = cluster.map(|c| c.tile_light_lists).unwrap_or(fallback);
             let tile_counts = cluster.map(|c| c.tile_light_counts).unwrap_or(fallback);
+            // `light_count` is 0 whenever no real `Transform` buffer exists
+            // yet, so this fallback is never actually dereferenced at a live
+            // light's index in practice -- same reasoning as
+            // `helio_pass_forward_lit`'s identical fallback.
+            let transforms = fallback;
+            let light_entity_indices_buf = fallback;
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.lights.as_entire_binding(),
+                        resource: lights_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -340,19 +397,56 @@ impl RenderPass for TransparentPass {
                         binding: 2,
                         resource: tile_counts.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: light_entity_indices_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: transforms.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_1_key = Some(bg1_key);
         }
 
-        let indirect = ctx.scene.indirect;
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
-        rp.set_bind_group(0, &self.bind_group, &[]);
-        rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        rp.set_vertex_buffer(0, ms.mesh_buffers.vertices.slice(..));
-        rp.set_index_buffer(ms.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+        // Rebuild bind group 0 (camera + globals + instances) when buffer
+        // pointers change -- `batch.instances` is a `GrowableBuffer` that can
+        // reallocate across frames as the scene grows, so this can't be
+        // built once at construction time (mirrors `bind_group_1`'s pattern).
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let bg0_key = (camera_ptr, instances_ptr);
+        if self.bind_group_key != Some(bg0_key) {
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Transparent BG 0"),
+                layout: &self.bind_group_layout_0,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.globals_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: batch.instances.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.bind_group_key = Some(bg0_key);
+        }
 
-        let ranges = ctx.scene.transparent_material_class_ranges;
+        let indirect = culled.indirect;
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+        rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_vertex_buffer(0, vertices.slice(..));
+        rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+
+        let ranges = batch.transparent_ranges;
         if ranges.is_empty() {
             let pipeline = self.get_or_create_pipeline(
                 &ctx.device,
@@ -380,13 +474,7 @@ impl RenderPass for TransparentPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 rp.set_pipeline(pipeline);
                 #[cfg(not(target_arch = "wasm32"))]
                 rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);

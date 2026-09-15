@@ -18,6 +18,10 @@ use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
+use pulsar_scenedb::gpu::{BufferKey, GpuMirrorHandle};
+
+pub mod components;
+pub use components::{AtmosphereComponent, CloudscapeComponent, SkyComponent};
 
 pub const VOLUME_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     width: 96,
@@ -320,13 +324,22 @@ pub struct SkyPass {
     sky_lut_bgl0: wgpu::BindGroupLayout,
     sky_lut_bgl1: wgpu::BindGroupLayout,
     sky_lut_bg0: wgpu::BindGroup,
-    sky_lut_bg1: wgpu::BindGroup,
+    sky_lut_bg1: Option<wgpu::BindGroup>,
+    /// Identity of the `"sky_components"` SceneDB buffer this was last built
+    /// against (0 when absent) -- see `execute()`'s resolution of
+    /// `scene_sky_buf` for why this can't be resolved once at construction.
+    sky_lut_bg1_key: Option<usize>,
     sky_pipeline: wgpu::RenderPipeline,
     sky_bgl0: wgpu::BindGroupLayout,
     sky_bgl1: wgpu::BindGroupLayout,
     sky_bg0: wgpu::BindGroup,
     sky_bg1: Option<wgpu::BindGroup>,
-    sky_bg1_key: Option<usize>,
+    // Includes the SceneDB `"sky_components"` buffer's identity (0 when
+    // absent) alongside `sky_lut_view`'s, so a `SkyComponent` inserted (or
+    // whose buffer regrows) after this pass was constructed still forces a
+    // rebuild -- see `execute()`'s resolution of `scene_sky_buf` for why
+    // this can no longer be resolved once at construction time.
+    sky_bg1_key: Option<(usize, usize)>,
     sky_lut_sampler: wgpu::Sampler,
     camera_buf: wgpu::Buffer,
 }
@@ -388,25 +401,6 @@ impl SkyPass {
         Self::new_with_camera_and_size(device, camera_buf, target_format, 1280, 720)
     }
 
-    /// Legacy volumetric constructor (no external camera buffer) — creates an internal dummy camera.
-    pub fn new_legacy(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let dummy_camera = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Sky Dummy Camera"),
-            size: 80,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self::new(device, &dummy_camera, target_format)
-    }
-
-    /// Backwards compat: CloudVolumePass::new redirected.
-    pub fn new_cloud_volume_compat(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
-        Self::new_legacy(device, target_format)
-    }
-
     pub fn new_with_size(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
@@ -428,6 +422,31 @@ impl SkyPass {
         target_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+    ) -> Self {
+        Self::new_with_camera_and_size_and_scene_db(
+            device,
+            camera_buf,
+            target_format,
+            width,
+            height,
+            None,
+        )
+    }
+
+    /// Construct the pass. `_scene_db` is accepted for source compatibility
+    /// with existing call sites but no longer used: the SceneDB
+    /// `"sky_components"` buffer is resolved fresh every frame from
+    /// `ctx.scene_buffers` in `execute()` instead of once here -- a
+    /// `SkyComponent` inserted after construction (the common case; level
+    /// load happens after the renderer/graph is built) used to never be
+    /// picked up otherwise. See `sky_lut_bg1_key`/`sky_bg1_key`'s docs.
+    pub fn new_with_camera_and_size_and_scene_db(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        target_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        _scene_db: Option<GpuMirrorHandle>,
     ) -> Self {
         let sim_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Cloud Volume Simulation"),
@@ -701,7 +720,9 @@ impl SkyPass {
         let sky_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sky Uniforms (Unifed)"),
             size: std::mem::size_of::<ShaderSkyUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let sky_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -742,7 +763,7 @@ impl SkyPass {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -757,14 +778,8 @@ impl SkyPass {
                 resource: camera_buf.as_entire_binding(),
             }],
         });
-        let sky_lut_bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Sky LUT BG1 (Unified)"),
-            layout: &sky_lut_bgl1,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: sky_uniform_buf.as_entire_binding(),
-            }],
-        });
+        // Built lazily in `execute()`, resolved fresh against SceneDB every
+        // frame instead of once here -- see `sky_lut_bg1_key`'s doc.
         let sky_lut_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky LUT PL (Unified)"),
             bind_group_layouts: &[Some(&sky_lut_bgl0), Some(&sky_lut_bgl1)],
@@ -819,7 +834,7 @@ impl SkyPass {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -913,7 +928,7 @@ impl SkyPass {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        // Intermediate buffers: Quarter-Res Target, History Buffer (ping-pong), Velocity/Depth handled via FrameResources
+        // Intermediate buffers: Quarter-Res Target, History Buffer (ping-pong), Velocity/Depth handled via PassResources
         let (quarter_color_texture, quarter_color_view) = texture_2d(
             device,
             "Cloud Quarter Color",
@@ -1413,21 +1428,21 @@ impl SkyPass {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                    // cloud_volume_lowres writes premultiplied radiance
-                    // (rgb already contains the integrated alpha). Do not
-                    // multiply it by alpha a second time during compositing.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
+                        // cloud_volume_lowres writes premultiplied radiance
+                        // (rgb already contains the integrated alpha). Do not
+                        // multiply it by alpha a second time during compositing.
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -1604,7 +1619,8 @@ impl SkyPass {
             sky_lut_bgl0,
             sky_lut_bgl1,
             sky_lut_bg0,
-            sky_lut_bg1,
+            sky_lut_bg1: None,
+            sky_lut_bg1_key: None,
             sky_pipeline,
             sky_bgl0,
             sky_bgl1,
@@ -1735,13 +1751,13 @@ impl RenderPass for SkyPass {
         &["sky_lut", "pre_aa"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Unified pass drives both sky_lut and pre_aa manually via encoder_ptr
         // to avoid encoder lock (graph would hold an active pre_aa pass while we
@@ -1788,7 +1804,7 @@ impl RenderPass for SkyPass {
         );
         // Velocity is read from gbuffer_velocity (published by GBufferPass)
         builder.read("gbuffer_velocity");
-        // Depth is accessed via ctx.depth / depth_texture from FrameResources
+        // Depth is accessed via ctx.depth / depth_texture from PassResources
         builder.read("pre_aa"); // for final composite read
     }
 
@@ -1866,7 +1882,7 @@ impl RenderPass for SkyPass {
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniform));
         let (cloud_base, cloud_top) = ctx
-            .frame_resources
+            .pass_resources
             .sky
             .clouds
             .map(|clouds| (clouds.base, clouds.top))
@@ -1884,9 +1900,9 @@ impl RenderPass for SkyPass {
         );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
-        if ctx.frame_resources.sky.has_sky {
+        if ctx.pass_resources.sky.has_sky {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
-            if let Some(clouds) = ctx.frame_resources.sky.clouds {
+            if let Some(clouds) = ctx.pass_resources.sky.clouds {
                 sky_uniforms.clouds_enabled = self.config.enabled as u32;
                 sky_uniforms.cloud_coverage = clouds.coverage;
                 sky_uniforms.cloud_density = clouds.density;
@@ -1919,12 +1935,38 @@ impl RenderPass for SkyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // SceneDB is the only sky-component source, resolved fresh by key
+        // every frame -- see `sky_bg1_key`/`sky_lut_bg1_key`'s docs for why
+        // this can't be a one-time construction-time resolution. Falls back
+        // to `self.sky_uniform_buf` (this pass's own CPU-driven uniforms)
+        // when no `SkyComponent` has ever been inserted.
+        let scene_sky_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("sky_components"))
+            .map(|handle| &handle.buffer);
+        let scene_sky_key = scene_sky_buf.map_or(0, |b| b as *const _ as usize);
+
         // ── 1) Sky LUT generation (192x108) ─────────────────────────────────
         if ctx.resources.sky.has_sky {
             // Ensure LUT bind group is up to date (for generation)
             // LUT generation render pass — writes to graph-owned sky_lut texture if available.
             // We use encoder_ptr directly because this pass also owns the subsequent pre_aa pass.
             if let Some(sky_lut_view) = ctx.resources.sky_lut.get() {
+                if self.sky_lut_bg1_key != Some(scene_sky_key) {
+                    self.sky_lut_bg1 =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Sky LUT BG1 (Unified)"),
+                            layout: &self.sky_lut_bgl1,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: scene_sky_buf.map_or_else(
+                                    || self.sky_uniform_buf.as_entire_binding(),
+                                    |b| b.as_entire_binding(),
+                                ),
+                            }],
+                        }));
+                    self.sky_lut_bg1_key = Some(scene_sky_key);
+                }
                 let encoder = unsafe { &mut *ctx.encoder_ptr };
                 let attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: sky_lut_view,
@@ -1945,7 +1987,7 @@ impl RenderPass for SkyPass {
                 });
                 pass.set_pipeline(&self.sky_lut_pipeline);
                 pass.set_bind_group(0, &self.sky_lut_bg0, &[]);
-                pass.set_bind_group(1, &self.sky_lut_bg1, &[]);
+                pass.set_bind_group(1, self.sky_lut_bg1.as_ref().expect("rebuilt above"), &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -1996,7 +2038,7 @@ impl RenderPass for SkyPass {
                 if ctx.resources.sky.has_sky {
                     // Also composite sky when in legacy mode
                     if let Some(sky_lut_view) = ctx.resources.sky_lut.get() {
-                        let key = sky_lut_view as *const _ as usize;
+                        let key = (sky_lut_view as *const _ as usize, scene_sky_key);
                         if self.sky_bg1_key != Some(key) {
                             self.sky_bg1 =
                                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2005,7 +2047,10 @@ impl RenderPass for SkyPass {
                                     entries: &[
                                         wgpu::BindGroupEntry {
                                             binding: 0,
-                                            resource: self.sky_uniform_buf.as_entire_binding(),
+                                            resource: scene_sky_buf.map_or_else(
+                                                || self.sky_uniform_buf.as_entire_binding(),
+                                                |b| b.as_entire_binding(),
+                                            ),
                                         },
                                         wgpu::BindGroupEntry {
                                             binding: 1,
@@ -2038,7 +2083,7 @@ impl RenderPass for SkyPass {
 
         // ── High-Performance Pipeline ─────────────────────────────────────────
         // Note: Full implementation would bind weather_map, depth, noise textures
-        // from FrameResources / scene. For portability, we use fallback 1x1
+        // from PassResources / scene. For portability, we use fallback 1x1
         // textures when those resources are not available, ensuring the pipeline
         // never fails validation on minimal graphs.
 
@@ -2062,7 +2107,10 @@ impl RenderPass for SkyPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.sky_uniform_buf.as_entire_binding(),
+                        resource: scene_sky_buf.map_or_else(
+                            || self.sky_uniform_buf.as_entire_binding(),
+                            |b| b.as_entire_binding(),
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2157,8 +2205,8 @@ impl RenderPass for SkyPass {
             };
             let key = cloud_source as *const _ as usize;
             if self.volume_composite_bg_key != Some(key) {
-                self.volume_composite_bg = Some(ctx.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
+                self.volume_composite_bg =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Finite Cloud Volume Composite BG"),
                         layout: &self.volume_composite_bgl,
                         entries: &[
@@ -2173,8 +2221,7 @@ impl RenderPass for SkyPass {
                                 ),
                             },
                         ],
-                    },
-                ));
+                    }));
                 self.volume_composite_bg_key = Some(key);
             }
         }
@@ -2182,7 +2229,7 @@ impl RenderPass for SkyPass {
         // ── 3) Composite sky + clouds into pre_aa (active render pass) ─────────
         // Lazy bind group for sky composite (needs LUT view)
         if let Some(sky_lut_view) = ctx.resources.sky_lut.get() {
-            let key = sky_lut_view as *const _ as usize;
+            let key = (sky_lut_view as *const _ as usize, scene_sky_key);
             if self.sky_bg1_key != Some(key) {
                 self.sky_bg1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Sky Composite BG1 (Unified)"),
@@ -2190,7 +2237,10 @@ impl RenderPass for SkyPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: self.sky_uniform_buf.as_entire_binding(),
+                            resource: scene_sky_buf.map_or_else(
+                                || self.sky_uniform_buf.as_entire_binding(),
+                                |b| b.as_entire_binding(),
+                            ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,

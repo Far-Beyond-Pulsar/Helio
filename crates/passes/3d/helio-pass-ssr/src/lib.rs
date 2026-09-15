@@ -186,7 +186,7 @@ impl RenderPass for SsrPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "hiz_min", "pre_aa"]
+        &["gbuffer", "depth", "hiz_min", "pre_aa", "render_environment"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -208,7 +208,7 @@ impl RenderPass for SsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -280,8 +280,8 @@ impl RenderPass for SsrPass {
 
         // ── Decide between default and RT path ──────────────────────────
         if self.use_rt {
-            let main_scene = ctx.resources.main_scene.read("SsrPass");
-            let tlas = main_scene.and_then(|ms| ms.tlas);
+            let environment = ctx.resources.render_environment.read("SsrPass");
+            let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
                 let rc_view = ctx.resources.rc_view.get();
@@ -343,7 +343,7 @@ impl RenderPass for SsrPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
 }
 
 fn buffer_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

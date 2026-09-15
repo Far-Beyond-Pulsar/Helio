@@ -23,8 +23,6 @@ impl Renderer {
         let height = height.max(1);
         let resize_start = Instant::now();
 
-        self.scene.set_render_size(width, height);
-
         let internal_w = (((width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((height as f32) * self.render_scale).ceil() as u32).max(1);
 
@@ -88,18 +86,15 @@ impl Renderer {
             self.graph = rebuilder(
                 &self.device,
                 &self.queue,
-                &self.scene,
                 config,
                 self.debug_state.clone(),
+                &self.camera_buffer,
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
         } else {
             self.graph.set_render_size(internal_w, internal_h);
         }
-
-        self.graph_has_sky = self.scene.sky_context().has_sky;
-        self.scene.mark_water_volumes_dirty();
 
         log::trace!(
             "apply_resize_now: total resize {}ms",
@@ -134,28 +129,7 @@ impl Renderer {
     /// Desktop hid this because the first window resize rebuilds the graph after the
     /// scene exists. The XR path renders into the runtime's swapchain and never resizes,
     /// so it kept the empty-scene graph forever.
-    pub(crate) fn rebuild_graph_if_sky_changed(&mut self) {
-        let has_sky = self.scene.sky_context().has_sky;
-        if has_sky == self.graph_has_sky {
-            return;
-        }
-        self.graph_has_sky = has_sky;
-
-        let Some(rebuilder) = self.graph_rebuilder.clone() else {
-            return;
-        };
-        log::info!("[graph] sky presence changed to {has_sky}; rebuilding render graph");
-        let config = self.renderer_config();
-        self.graph = rebuilder(
-            &self.device,
-            &self.queue,
-            &self.scene,
-            config,
-            self.debug_state.clone(),
-            &self.debug_camera_buffer,
-            &self.cull_stats_buffer,
-        );
-    }
+    pub(crate) fn rebuild_graph_if_sky_changed(&mut self) {}
 }
 
 impl Renderer {

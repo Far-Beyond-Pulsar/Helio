@@ -35,6 +35,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod components;
+pub use components::{FogComponent, FogSceneBinding};
+
 /// Froxel grid dimensions.
 ///
 /// 160x90 keeps the 16:9 aspect so froxels stay roughly square on screen; 64
@@ -358,7 +361,7 @@ impl RenderPass for VolumetricFogPass {
         &["fog_accum"]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
         // The graph's pool is 2D-only, so this texture is pass-owned and handed
         // over here rather than routed by name.
         frame
@@ -370,7 +373,7 @@ impl RenderPass for VolumetricFogPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -385,7 +388,14 @@ impl RenderPass for VolumetricFogPass {
 
         let globals = FogGlobals {
             csm_splits: libhelio::CSM_SPLITS,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
@@ -403,9 +413,18 @@ impl RenderPass for VolumetricFogPass {
             return Ok(());
         };
 
-        let camera_buf = ctx.scene.camera;
-        let lights_buf = ctx.scene.lights;
-        let shadow_matrices = ctx.scene.shadow_matrices;
+        let camera_buf = ctx.camera;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices = ctx
+            .resources
+            .shadow_matrices
+            .get()
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
 
         // Swap the ping-pong: last frame's write target is this frame's history.
         self.write_idx ^= 1;

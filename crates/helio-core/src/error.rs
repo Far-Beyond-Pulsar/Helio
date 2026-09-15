@@ -107,7 +107,7 @@ pub enum Error {
     /// ```rust,no_run
     /// use helio_core::Error;
     ///
-    /// let error = Error::ResourceNotFound("gbuffer_albedo".to_string());
+    /// let error = Error::ResourceNotFound("color_output".to_string());
     /// eprintln!("Resource error: {}", error);
     /// ```
     #[error("Resource not found: {0}")]

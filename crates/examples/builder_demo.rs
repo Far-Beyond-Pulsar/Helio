@@ -12,13 +12,16 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, LightId,
-    Movability, ObjectId, RendererBuilder, RendererConfig, SceneActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    Movability, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
-    sphere_mesh, update_point_light,
+    box_mesh, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
+    sphere_mesh,
+    update_object_transform, update_point_light,
 };
 
 use winit::{
@@ -62,8 +65,10 @@ struct State {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    orbit_lights: [LightId; 4],
-    spin_crystal: ObjectId,
+    scene_db: SceneDb,
+
+    orbit_lights: [Entity; 4],
+    spin_crystal: Entity,
 }
 
 impl App {
@@ -143,36 +148,38 @@ impl ApplicationHandler for App {
 
         // ── Build renderer with the new builder ─────────────────────────────
         let config = RendererConfig::new(w, h, surface_format);
-        let mut renderer = RendererBuilder::new(config)
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_editor_mode(true)
-            .with_graph(Box::new(|d, q, s, c, ds, cb, csb| {
-                build_default_graph_external(d, q, s, c, ds, cb, csb, None)
+            .with_graph(Box::new(move |d, q, s, c, ds, cb, csb| {
+                build_default_graph_external(d, q, ds, s, c, cb, csb, None, graph_scene_db.clone())
             }))
             .build(device.clone(), queue.clone(), w, h, surface_format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let gold = renderer.scene_mut().insert_material(make_material(
+        let gold = spawn_material(&mut scene_db.world, make_material(
             [0.95, 0.75, 0.25, 1.0],
             0.25,
             0.85,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let marble = renderer.scene_mut().insert_material(make_material(
+        let marble = spawn_material(&mut scene_db.world, make_material(
             [0.85, 0.83, 0.80, 1.0],
             0.55,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let crystal = renderer.scene_mut().insert_material(make_material(
+        let crystal = spawn_material(&mut scene_db.world, make_material(
             [0.3, 0.6, 1.0, 1.0],
             0.05,
             0.1,
             [0.2, 0.4, 1.0],
             2.0,
         ));
-        let floor = renderer.scene_mut().insert_material(make_material(
+        let floor = spawn_material(&mut scene_db.world, make_material(
             [0.22, 0.22, 0.25, 1.0],
             0.7,
             0.05,
@@ -181,18 +188,12 @@ impl ApplicationHandler for App {
         ));
 
         // ── Sky ─────────────────────────────────────────────────────────────
-        renderer.scene_mut().insert_actor(SceneActor::sky(
-            helio::SkyActor::new().with_sky_color([0.15, 0.25, 0.45]),
-        ));
+        v3_demo_common::spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);
 
         // ── Ground ──────────────────────────────────────────────────────────
-        let ground_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object_with_movability(
-            &mut renderer,
+        let ground_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 12.0));
+        let _ = spawn_object_with_movability(
+            &mut scene_db.world,
             ground_mesh,
             floor,
             glam::Mat4::IDENTITY,
@@ -201,19 +202,11 @@ impl ApplicationHandler for App {
         );
 
         // ── Columns (box pillars + sphere tops) ────────────────────────────
-        let pillar_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.15, 2.0, 0.15],
-            )))
-            .as_mesh()
-            .unwrap();
-        let sphere_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
+        let pillar_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.15, 2.0, 0.15]),
+        );
+        let sphere_mesh_id = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 0.4));
 
         let radius = 4.0;
         let positions = [
@@ -225,8 +218,8 @@ impl ApplicationHandler for App {
         let mut orbit_lights = Vec::new();
         for (i, (x, _, z)) in positions.iter().enumerate() {
             // Pillar
-            let _ = insert_object_with_movability(
-                &mut renderer,
+            let _ = spawn_object_with_movability(
+                &mut scene_db.world,
                 pillar_mesh,
                 marble,
                 glam::Mat4::from_translation(glam::vec3(*x, 2.0, *z)),
@@ -234,8 +227,8 @@ impl ApplicationHandler for App {
                 None,
             );
             // Gold sphere on top
-            let _ = insert_object_with_movability(
-                &mut renderer,
+            let _ = spawn_object_with_movability(
+                &mut scene_db.world,
                 sphere_mesh_id,
                 gold,
                 glam::Mat4::from_translation(glam::vec3(*x, 4.3, *z)),
@@ -249,27 +242,17 @@ impl ApplicationHandler for App {
                 [0.3, 0.5, 1.0],
                 [1.0, 0.8, 0.2],
             ];
-            let lid = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(point_light(
-                    [*x, 5.0, *z],
-                    colors[i],
-                    8.0,
-                    8.0,
-                )))
-                .as_light()
-                .unwrap();
+            let lid = spawn_light(
+                &mut scene_db.world,
+                point_light([*x, 5.0, *z], colors[i], 8.0, 8.0),
+            );
             orbit_lights.push(lid);
         }
 
         // ── Floating crystal (centre, rotating) ────────────────────────────
-        let crystal_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.6)))
-            .as_mesh()
-            .unwrap();
-        let spin_crystal = insert_object_with_movability(
-            &mut renderer,
+        let crystal_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.6));
+        let spin_crystal = spawn_object_with_movability(
+            &mut scene_db.world,
             crystal_mesh,
             crystal,
             glam::Mat4::from_translation(glam::vec3(0.0, 2.5, 0.0)),
@@ -293,6 +276,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             orbit_lights: orbit_lights.try_into().unwrap(),
             spin_crystal,
         });
@@ -456,7 +440,7 @@ impl State {
             let x = angle.cos() * 4.0;
             let z = angle.sin() * 4.0;
             update_point_light(
-                &mut self.renderer,
+                &mut self.scene_db.world,
                 lid,
                 glam::vec3(x, 5.0 + (elapsed * 1.2 + i as f32).sin() * 0.5, z),
                 colors[i],
@@ -469,10 +453,12 @@ impl State {
         let rot = glam::Quat::from_rotation_y(elapsed * 0.8)
             * glam::Quat::from_rotation_x((elapsed * 0.5).sin() * 0.3);
         let t = glam::Mat4::from_rotation_translation(rot, glam::vec3(0.0, 2.5, 0.0));
-        let _ = self
-            .renderer
-            .scene_mut()
-            .update_object_transform(self.spin_crystal, t);
+        let _ = update_object_transform(
+            &mut self.scene_db.world,
+            &mut self.renderer,
+            self.spin_crystal,
+            t,
+        );
 
         // ── Render ─────────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {

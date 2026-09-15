@@ -1,4 +1,4 @@
-use helio_planet_voxel_core::{AddressError, PageKey, TransitionFace, MAX_ADDRESSABLE_LOD};
+use crate::{AddressError, PageKey, TransitionFace, MAX_ADDRESSABLE_LOD};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn page_edge_constant_matches_canonical_addressing() {
-        assert_eq!(helio_planet_voxel_core::PAGE_EDGE_CELLS, 32);
+        assert_eq!(crate::PAGE_EDGE_CELLS, 32);
     }
 
     fn assert_transition_ownership_is_exact(topology: &TerrainLodTopology, case_index: usize) {

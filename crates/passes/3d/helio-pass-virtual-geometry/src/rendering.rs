@@ -9,6 +9,7 @@ use helio_core::{
     Result as HelioResult,
 };
 use libhelio::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
+use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
@@ -62,6 +63,25 @@ pub struct VirtualGeometryPass {
     pub(crate) last_max_draw_count: u32,
     pub(crate) object_dispatch_width: u32,
     pub(crate) work_dispatch_width: u32,
+}
+
+/// Build the cull-only projection owned by this pass. It deliberately contains
+/// no scene records: the instance publication remains the input to the pass's
+/// GPU buffer, while this short-lived array contains only derived transform and
+/// material classification data needed by the cull shader.
+pub(crate) fn build_instance_cull_data(
+    instances: &[GpuInstanceData],
+    materials: &[helio_core::GpuMaterial],
+) -> Vec<InstanceCullData> {
+    instances
+        .iter()
+        .map(|instance| {
+            let material_flags = materials
+                .get(instance.material_id as usize)
+                .map_or(0, |material| material.flags);
+            InstanceCullData::from_instance(instance, material_flags)
+        })
+        .collect()
 }
 
 impl VirtualGeometryPass {
@@ -735,12 +755,12 @@ impl RenderPass for VirtualGeometryPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_debug_readback(ctx.device);
 
-        let Some(vg) = ctx.frame_resources.vg.get() else {
+        let Some(vg) = ctx.pass_resources.vg.get() else {
             return Ok(());
         };
 
         if vg.buffer_version != self.last_version {
-            let camera_buf = ctx.scene.camera.buffer();
+            let camera_buf = ctx.camera;
             let mut grew = false;
             let bounded_max_draw_count = VirtualGeometryBudget::new(self.publication_limit)
                 .clamp_draw_count(vg.max_draw_count);
@@ -796,16 +816,10 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let materials = ctx.scene.materials.as_slice();
-            self.instance_cull_scratch.clear();
-            self.instance_cull_scratch
-                .extend(instances.iter().map(|inst| {
-                    let mat_flags = materials
-                        .get(inst.material_id as usize)
-                        .map(|m| m.flags)
-                        .unwrap_or(0);
-                    InstanceCullData::from_instance(inst, mat_flags)
-                }));
+            // Material classification is authored into the SceneDB material
+            // component and consumed on-GPU. The CPU preparation path must
+            // not resurrect a renderer-owned material mirror.
+            self.instance_cull_scratch = build_instance_cull_data(instances, &[]);
             ctx.write_buffer(
                 &self.instance_cull_buf,
                 0,
@@ -837,16 +851,7 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&instances[start..end]),
             );
 
-            let materials = ctx.scene.materials.as_slice();
-            self.instance_cull_scratch.clear();
-            self.instance_cull_scratch
-                .extend(instances[start..end].iter().map(|inst| {
-                    let mat_flags = materials
-                        .get(inst.material_id as usize)
-                        .map(|m| m.flags)
-                        .unwrap_or(0);
-                    InstanceCullData::from_instance(inst, mat_flags)
-                }));
+            self.instance_cull_scratch = build_instance_cull_data(&instances[start..end], &[]);
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
             ctx.write_buffer(
                 &self.instance_cull_buf,
@@ -864,7 +869,8 @@ impl RenderPass for VirtualGeometryPass {
         // correctly handles large objects whose bounding sphere may be close
         // to the camera even when the instance centre is far away.
         {
-            let cam_pos = ctx.scene.camera.position();
+            let position_near = ctx.camera_data.position_near;
+            let cam_pos = [position_near[0], position_near[1], position_near[2]];
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let objects: &[GpuVgObject] = bytemuck::cast_slice(vg.objects);
             let work_items: &[GpuVgWorkItem] = bytemuck::cast_slice(vg.work_items);
@@ -942,60 +948,68 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(main_scene) = ctx.frame_resources.main_scene.read("VirtualGeometry") else {
+        let Some(material_textures) = ctx.pass_resources.material_textures.read("VirtualGeometry") else {
+            return Ok(());
+        };
+        let environment = ctx.pass_resources.render_environment.get();
+        let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
         if self.draw_bg_1.is_none()
-            || self.bg1_version != Some(main_scene.material_textures.version)
+            || self.bg1_version != Some(material_textures.version)
         {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.buffer().as_entire_binding(),
+                    resource: materials.buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.draw_bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Draw BG1"),
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
-            self.bg1_version = Some(main_scene.material_textures.version);
+            self.bg1_version = Some(material_textures.version ^ materials.epoch);
         }
 
         let globals = VgGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.016,
-            light_count: ctx.scene.lights.len() as u32,
-            ambient_intensity: main_scene.ambient_intensity,
+            light_count: if ctx
+                .scene_buffers
+                .contains(BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
+            ambient_intensity: environment.map(|value| value.ambient_intensity).unwrap_or(0.1),
             ambient_color: [
-                main_scene.ambient_color[0],
-                main_scene.ambient_color[1],
-                main_scene.ambient_color[2],
+                environment.map(|value| value.ambient_color[0]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[1]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[2]).unwrap_or(0.15),
                 0.0,
             ],
             rc_world_min: [
-                main_scene.rc_world_min[0],
-                main_scene.rc_world_min[1],
-                main_scene.rc_world_min[2],
+                environment.map(|value| value.rc_world_min[0]).unwrap_or(-100.0),
+                environment.map(|value| value.rc_world_min[1]).unwrap_or(-100.0),
+                environment.map(|value| value.rc_world_min[2]).unwrap_or(-100.0),
                 0.0,
             ],
             rc_world_max: [
-                main_scene.rc_world_max[0],
-                main_scene.rc_world_max[1],
-                main_scene.rc_world_max[2],
+                environment.map(|value| value.rc_world_max[0]).unwrap_or(100.0),
+                environment.map(|value| value.rc_world_max[1]).unwrap_or(100.0),
+                environment.map(|value| value.rc_world_max[2]).unwrap_or(100.0),
                 0.0,
             ],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
@@ -1013,7 +1027,7 @@ impl RenderPass for VirtualGeometryPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
@@ -1132,7 +1146,7 @@ impl RenderPass for VirtualGeometryPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1192,9 +1206,20 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
             return Ok(());
         };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let max_draw_count = self.last_max_draw_count;
 
@@ -1264,9 +1289,9 @@ impl RenderPass for VirtualGeometryPass {
 
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
-            rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+            rpass.set_vertex_buffer(0, vertices.slice(..));
             rpass.set_index_buffer(
-                main_scene.mesh_buffers.indices.slice(..),
+                indices.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
 
@@ -1333,7 +1358,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "main_scene", "vg", "hiz"]
+        &["gbuffer", "material_textures", "render_environment", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &[

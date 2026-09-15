@@ -424,7 +424,7 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "pre_aa"]
+        &["hiz", "pre_aa", "render_environment"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -455,14 +455,21 @@ impl RenderPass for RadianceCascadesPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx.scene.lights.len() as u32;
-        let sky = ctx.frame_resources.sky.sky_color;
+        let light_count = if ctx
+            .scene_buffers
+            .contains(helio_core::BufferKey::of("scene_lights"))
+        {
+            256
+        } else {
+            0
+        };
+        let sky = ctx.pass_resources.sky.sky_color;
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],
             world_max: [10.0, 10.0, 10.0, 0.0],
@@ -552,7 +559,7 @@ impl RadianceCascadesPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                 ],
             }));
@@ -594,11 +601,15 @@ impl RadianceCascadesPass {
         })?;
         let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let lights_buf = ctx.scene.lights;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
 
         // Get TLAS from frame resources (set by the renderer from GpuScene)
-        let main_scene = ctx.resources.main_scene.read("RadianceCascades");
-        let tlas = main_scene.and_then(|ms| ms.tlas);
+        let environment = ctx.resources.render_environment.read("RadianceCascades");
+        let tlas = environment.and_then(|value| value.tlas);
 
         let Some(tlas) = tlas else {
             // No TLAS — fall back to the ambient-only fallback shader.

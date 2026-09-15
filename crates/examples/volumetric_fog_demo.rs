@@ -29,11 +29,15 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
 use libhelio::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
-use v3_demo_common::{box_mesh, directional_light, make_material, plane_mesh};
+use v3_demo_common::{
+    build_default_renderer, box_mesh, directional_light, make_material,
+    new_scene_db_with_gpu_mirror, plane_mesh, spawn_light, spawn_material,
+    spawn_mesh, spawn_object, update_light,
+};
+use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -70,6 +74,7 @@ struct AppState {
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: glam::Vec3,
@@ -81,7 +86,7 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     sun_angle: f32,
-    sun_light_id: LightId,
+    sun_light_id: pulsar_scenedb::Entity,
 
     // Fog state, pushed onto the camera every frame.
     fog_enabled: bool,
@@ -179,48 +184,10 @@ impl ApplicationHandler for App {
         // be honest.
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
 
-        let stone = renderer.scene_mut().insert_material(make_material(
+        let stone = spawn_material(&mut scene_db.world, make_material(
             [0.62, 0.60, 0.58, 1.0],
             0.85,
             0.0,
@@ -229,26 +196,17 @@ impl ApplicationHandler for App {
         ));
 
         // Floor
-        let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
-            .as_mesh()
-            .unwrap();
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, floor, stone, glam::Mat4::IDENTITY, 40.0);
+        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
+        let _ = spawn_object(&mut scene_db.world, floor, stone, glam::Mat4::IDENTITY, 40.0);
 
         // Roof — without it the sun lights everything and there is nothing to
         // slice the light into shafts.
-        let roof = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let roof = spawn_mesh(&mut scene_db.world, box_mesh(
+            [0.0, 0.0, 0.0],
+            [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
+        ));
+        let _ = spawn_object(
+            &mut scene_db.world,
             roof,
             stone,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, ROOF_Y, 0.0)),
@@ -256,21 +214,17 @@ impl ApplicationHandler for App {
         );
 
         // Two rows of pillars. The gaps between them are what the sun cuts through.
-        let pillar = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
-            )))
-            .as_mesh()
-            .unwrap();
+        let pillar = spawn_mesh(&mut scene_db.world, box_mesh(
+            [0.0, 0.0, 0.0],
+            [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
+        ));
 
         let count = (HALL_HALF_Z * 2.0 / PILLAR_SPACING) as i32;
         for i in 0..=count {
             let z = -HALL_HALF_Z + i as f32 * PILLAR_SPACING;
             for side in [-1.0_f32, 1.0] {
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                let _ = spawn_object(
+                    &mut scene_db.world,
                     pillar,
                     stone,
                     glam::Mat4::from_translation(glam::Vec3::new(
@@ -287,13 +241,7 @@ impl ApplicationHandler for App {
         // lights without it still light surfaces but cost the fog pass nothing.
         let mut sun = directional_light(sun_light_dir(1.0), [1.0, 0.9, 0.75], 4.0);
         sun.god_rays_enabled = 1;
-        let sun_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(sun))
-            .as_light()
-            .unwrap();
-
-        renderer.set_ambient([0.10, 0.12, 0.18], 0.05);
+        let sun_light_id = spawn_light(&mut scene_db.world, sun);
 
         // A denser pocket of fog mid-hall.
         //
@@ -302,10 +250,7 @@ impl ApplicationHandler for App {
         // bool fields via `select(base, vol, t > 0.5)`, and a lone volume at
         // blend_weight 1.0 lands on exactly t = 0.5, so it cannot flip an enable
         // flag. Floats blend fine, which is what this volume varies.
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
-                PostProcessVolumeDescriptor {
+        let fog_volume = PostProcessVolumeDescriptor {
                     bounds_min: [-HALL_HALF_X, 0.0, -6.0],
                     bounds_max: [HALL_HALF_X, ROOF_Y, 6.0],
                     priority: 10.0,
@@ -319,8 +264,12 @@ impl ApplicationHandler for App {
                         fog_scattering_anisotropy: 0.7,
                         ..Default::default()
                     },
-                },
-            ));
+                };
+        let fog_entity = scene_db.world.spawn();
+        scene_db.world.insert(
+            fog_entity,
+            helio_pass_postprocess::PostProcessVolumeComponent::from(fog_volume.to_gpu()),
+        );
 
         print_help();
 
@@ -330,6 +279,7 @@ impl ApplicationHandler for App {
             device,
             surface_format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 2.0, 16.0),
             cam_yaw: 0.0,
@@ -605,10 +555,7 @@ impl AppState {
 
         let mut sun = directional_light(sun_light_dir(self.sun_angle), [1.0, 0.9, 0.75], 4.0);
         sun.god_rays_enabled = self.shafts_enabled as u32;
-        let _ = self
-            .renderer
-            .scene_mut()
-            .update_light(self.sun_light_id, sun);
+        update_light(&mut self.scene_db.world, self.sun_light_id, sun);
 
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);

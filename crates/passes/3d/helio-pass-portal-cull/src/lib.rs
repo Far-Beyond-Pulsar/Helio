@@ -1,7 +1,7 @@
 //! Per-portal-*chain* GPU frustum culling.
 //!
-//! For each active portal chain (a sequence of up to `libhelio::MAX_CHAIN_DEPTH`
-//! portals — see `libhelio::GpuPortalChain`'s docs for why chains, not single
+//! For each active portal chain (a sequence of up to `MAX_CHAIN_DEPTH` portals
+//! — see `GpuPortalChain`'s docs for why chains, not single
 //! portals, are what makes portals reflect each other automatically), tests
 //! every draw-call group's instances — mapped through that chain's *composed*
 //! transform — against the main camera frustum, and compacts survivors into
@@ -53,8 +53,17 @@
 
 use std::sync::Arc;
 
+mod portal_math;
+pub use portal_math::{
+    crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
+};
+mod contract;
+pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
+pub mod components;
 
 /// Fixed cap on draw-call groups considered. Realistic scenes have dozens to
 /// low hundreds of distinct mesh+material combinations; this is generous
@@ -247,19 +256,37 @@ impl RenderPass for PortalCullPass {
         "PortalCull"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["object_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_calls.len() as u32;
-        self.chain_count = ctx.scene.portal_chains.len() as u32;
-        let planes = extract_frustum_planes(ctx.scene.camera.data().view_proj);
+        self.draw_count = ctx
+            .pass_resources
+            .object_batch
+            .get()
+            .map(|b| b.draw_count)
+            .unwrap_or(0);
+        self.chain_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("portal_chains"))
+            .map(|h| (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32)
+            .unwrap_or(0)
+            .min(MAX_PORTAL_CHAINS as u32);
+        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {
             frustum_planes: planes,
@@ -291,14 +318,26 @@ impl RenderPass for PortalCullPass {
         if self.draw_count == 0 || self.chain_count == 0 {
             return Ok(());
         }
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
+        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
+            return Ok(());
+        };
 
         let key = (
-            ctx.scene.camera as *const wgpu::Buffer as usize,
-            ctx.scene.instances as *const wgpu::Buffer as usize,
-            ctx.scene.draw_calls as *const wgpu::Buffer as usize,
-            ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
-            ctx.scene.portal_views as *const wgpu::Buffer as usize,
-            ctx.scene.portal_chains as *const wgpu::Buffer as usize,
+            ctx.camera as *const wgpu::Buffer as usize,
+            batch.instances as *const wgpu::Buffer as usize,
+            batch.draw_calls as *const wgpu::Buffer as usize,
+            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
+            &portal_views.buffer as *const wgpu::Buffer as usize,
+            &portal_chains.buffer as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -307,7 +346,7 @@ impl RenderPass for PortalCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -315,19 +354,19 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                        resource: batch.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -343,7 +382,7 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                        resource: portal_chains.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,

@@ -119,7 +119,7 @@ impl ShipState {
     fn push_transforms(&self, renderer: &mut Renderer) {
         let t = Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         for &id in &self.ids {
-            let _ = renderer.scene_mut().update_object_transform(id, t);
+            let _ = renderer.scene().update_object_transform(id, t);
         }
     }
 
@@ -133,7 +133,7 @@ impl ShipState {
         let sl_i = 35.0;
         let l_pos = self.render_pos + right * (-r * 0.4) + up * (r * 0.15) + fwd * (-r * 0.9);
         let rr_pos = self.render_pos + right * (r * 0.4) + up * (r * 0.15) + fwd * (-r * 0.9);
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.spotlight_left,
             spot_light(
                 l_pos.to_array(),
@@ -145,7 +145,7 @@ impl ShipState {
                 35_f32.to_radians(),
             ),
         );
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.spotlight_right,
             spot_light(
                 rr_pos.to_array(),
@@ -160,7 +160,7 @@ impl ShipState {
 
         let hi = 12.0;
         let hr = r * 4.0;
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.hull_port,
             point_light(
                 (self.render_pos + right * (-r * 0.75) + up * (r * 0.2)).to_array(),
@@ -169,7 +169,7 @@ impl ShipState {
                 hr,
             ),
         );
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.hull_starboard,
             point_light(
                 (self.render_pos + right * (r * 0.75) + up * (r * 0.2)).to_array(),
@@ -178,7 +178,7 @@ impl ShipState {
                 hr,
             ),
         );
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.hull_top,
             point_light(
                 (self.render_pos + up * (r * 0.5) + fwd * (r * 0.2)).to_array(),
@@ -187,7 +187,7 @@ impl ShipState {
                 hr,
             ),
         );
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.hull_belly,
             point_light(
                 (self.render_pos - up * (r * 0.4) + fwd * (r * 0.2)).to_array(),
@@ -198,7 +198,7 @@ impl ShipState {
         );
 
         let glow = if self.thrusting { 9.0 } else { 1.8 };
-        let _ = renderer.scene_mut().update_light(
+        let _ = renderer.scene().update_light(
             self.engine_light,
             point_light(
                 (self.render_pos - fwd * (r * 0.8)).to_array(),
@@ -266,7 +266,7 @@ impl HelioWasmApp for Demo {
                         for v in &mut vertices {
                             v.position = (Vec3::from(v.position) - center).to_array();
                         }
-                        let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(
+                        let mesh_id = renderer.scene().insert_entity(helio::SceneEntity::mesh(
                             helio::MeshUpload {
                                 vertices,
                                 indices: mesh.indices.clone(),
@@ -277,7 +277,7 @@ impl HelioWasmApp for Demo {
                             .and_then(|i| mat_ids.get(i).copied())
                             .or_else(|| mat_ids.first().copied())
                             .unwrap_or_else(|| {
-                                renderer.scene_mut().insert_material(make_material(
+                                renderer.scene().insert_material(make_material(
                                     [0.25, 0.40, 0.70, 1.0],
                                     0.25,
                                     0.85,
@@ -293,7 +293,7 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("ship FBX load failed: {e:?}, using fallback cube");
-                let mat = renderer.scene_mut().insert_material(make_material(
+                let mat = renderer.scene().insert_material(make_material(
                     [0.25, 0.40, 0.70, 1.0],
                     0.25,
                     0.85,
@@ -301,22 +301,22 @@ impl HelioWasmApp for Demo {
                     0.0,
                 ));
                 let mesh = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0)));
+                    .scene()
+                    .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0)));
                 let id = insert_object(renderer, mesh, mat, Mat4::IDENTITY, 2.0).unwrap();
                 (vec![id], 2.0, 240.0)
             }
         };
 
         // Asteroid field
-        let rocky = renderer.scene_mut().insert_material(make_material(
+        let rocky = renderer.scene().insert_material(make_material(
             [0.15, 0.12, 0.09, 1.0],
             0.90,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let dark = renderer.scene_mut().insert_material(make_material(
+        let dark = renderer.scene().insert_material(make_material(
             [0.09, 0.09, 0.11, 1.0],
             0.70,
             0.25,
@@ -324,8 +324,8 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
         let cube = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)));
+            .scene()
+            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)));
 
         let field_radius = 12000.0_f32;
         let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
@@ -368,8 +368,8 @@ impl HelioWasmApp for Demo {
 
         // Ship lights
         let engine_light = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0; 3],
                 [0.35, 0.65, 1.0],
                 1.8,
@@ -378,8 +378,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let spotlight_left = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(spot_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(spot_light(
                 [0.0; 3],
                 [0.0, 0.0, -1.0],
                 [1.0, 1.0, 0.95],
@@ -391,8 +391,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let spotlight_right = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(spot_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(spot_light(
                 [0.0; 3],
                 [0.0, 0.0, -1.0],
                 [1.0, 1.0, 0.95],
@@ -404,8 +404,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let hull_port = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0; 3],
                 [1.0, 0.1, 0.1],
                 12.0,
@@ -414,8 +414,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let hull_starboard = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0; 3],
                 [0.1, 1.0, 0.1],
                 12.0,
@@ -424,8 +424,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let hull_top = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0; 3],
                 [1.0, 1.0, 1.0],
                 9.6,
@@ -434,8 +434,8 @@ impl HelioWasmApp for Demo {
             .as_light()
             .unwrap();
         let hull_belly = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(point_light(
                 [0.0; 3],
                 [0.4, 0.6, 1.0],
                 8.4,
@@ -446,15 +446,15 @@ impl HelioWasmApp for Demo {
 
         // Distant stars (directional)
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [-0.5, -0.4, 0.8],
                 [1.0, 0.98, 0.95],
                 0.8,
             )));
         renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
+            .scene()
+            .insert_entity(helio::SceneEntity::light(directional_light(
                 [0.6, 0.2, -0.7],
                 [0.2, 0.25, 0.4],
                 0.04,

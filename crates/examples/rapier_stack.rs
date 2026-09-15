@@ -8,15 +8,18 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light,
+    box_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, update_object_transform,
 };
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, MaterialId, ObjectId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
 use rapier3d::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,7 +32,7 @@ use winit::{
 };
 
 struct BoxItem {
-    id: ObjectId,
+    id: Entity,
     body_handle: RigidBodyHandle,
     collider_handle: ColliderHandle,
 }
@@ -51,8 +54,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    scene_db: SceneDb,
     boxes: Vec<BoxItem>,
-    stack_mat: MaterialId,
+    stack_mat: Entity,
     physics_enabled: bool,
 
     physics_integration: IntegrationParameters,
@@ -146,56 +150,23 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = renderer.scene_mut().insert_material(make_material(
+        let floor_mat = spawn_material(&mut scene_db.world, make_material(
             [0.25, 0.25, 0.3, 1.0],
             0.85,
             0.03,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let block_mat = renderer.scene_mut().insert_material(make_material(
+        let block_mat = spawn_material(&mut scene_db.world, make_material(
             [0.78, 0.72, 0.19, 1.0],
             0.46,
             0.0,
@@ -203,39 +174,23 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 50.0));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor_mesh,
             floor_mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.01, 0.0)),
             50.0,
         );
 
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [20.0, 24.0, 20.0],
-                [0.9, 0.85, 0.8],
-                14.0,
-                60.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-20.0, 20.0, -20.0],
-                [0.6, 0.7, 1.0],
-                12.0,
-                60.0,
-            )))
-            .as_light()
-            .unwrap();
+        spawn_light(
+            &mut scene_db.world,
+            point_light([20.0, 24.0, 20.0], [0.9, 0.85, 0.8], 14.0, 60.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-20.0, 20.0, -20.0], [0.6, 0.7, 1.0], 12.0, 60.0),
+        );
 
         let mut state = AppState {
             window,
@@ -252,6 +207,7 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            scene_db,
             boxes: Vec::new(),
             physics_enabled: true,
             stack_mat: block_mat,
@@ -419,7 +375,7 @@ impl ApplicationHandler for App {
 impl AppState {
     fn clear_stack(&mut self) {
         for item in self.boxes.drain(..) {
-            let _ = self.renderer.scene_mut().remove_object(item.id);
+            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, item.id);
             self.physics_colliders.remove(
                 item.collider_handle,
                 &mut self.physics_forces,
@@ -437,7 +393,7 @@ impl AppState {
         }
     }
 
-    fn reset_stack(&mut self, box_mat: MaterialId) {
+    fn reset_stack(&mut self, box_mat: Entity) {
         self.clear_stack();
 
         let stack_height = 16;
@@ -451,17 +407,9 @@ impl AppState {
                     );
                     let transform = glam::Mat4::from_translation(pos)
                         * glam::Mat4::from_scale(glam::Vec3::splat(1.0));
-                    let box_mesh_id = self
-                        .renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(box_mesh(
-                            [0.0, 0.0, 0.0],
-                            [0.5, 0.5, 0.5],
-                        )))
-                        .as_mesh()
-                        .unwrap();
-                    let obj = insert_object_with_movability(
-                        &mut self.renderer,
+                    let box_mesh_id = spawn_mesh(&mut self.scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]));
+                    let obj = spawn_object_with_movability(
+                        &mut self.scene_db.world,
                         box_mesh_id,
                         box_mat,
                         transform,
@@ -544,10 +492,12 @@ impl AppState {
                     position.rotation.w,
                 );
                 let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_quat(rot); // no scale
-                let _ = self
-                    .renderer
-                    .scene_mut()
-                    .update_object_transform(item.id, transform);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    item.id,
+                    transform,
+                );
             }
         }
     }

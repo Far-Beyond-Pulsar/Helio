@@ -48,6 +48,12 @@ egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
 env_logger = "0.11"
 log = "0.4"
+# Required as a *direct* dependency (not just transitively via
+# pulsar_reflection) by any crate using #[derive(Reflectable)] -- its
+# generated code writes `::serde_json::Value`, and `::crate_name` paths
+# resolve against the compiling crate's own direct dependencies (the 2018+
+# extern prelude), not a proc-macro crate's.
+serde_json = "1"
 
 # SolidRS - 3D asset loading library
 solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
@@ -62,7 +68,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
-helio-portal-core = { path = "crates/helio-portal-core" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f8ebfa44096451153fa238bba3bd24a00419e271", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f8ebfa44096451153fa238bba3bd24a00419e271" }
+# Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
+# a different rev is a different SourceId and thus a second,
+# type-incompatible copy of this crate in the build (see helio-wasm's
+# BufferKey mismatch, hit and fixed earlier from exactly this). Every crate
+# that needs the Reflectable derive should depend on this workspace entry,
+# never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
+# of stale per-crate pins fixed in the same session.
+pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
@@ -74,11 +89,8 @@ helio = { path = "crates/helio" }
 libhelio = { path = "crates/libhelio" }
 helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
-helio-voxel-core = { path = "crates/helio-voxel-core" }
-helio-foliage-core = { path = "crates/helio-foliage-core" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
-helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
 helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
@@ -92,6 +104,7 @@ helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
 helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
 helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
 helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
+helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
 

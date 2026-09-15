@@ -9,6 +9,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
     let device = Arc::new(device);
     let queue = Arc::new(queue);
     let mut scene = helio_core::GpuScene::new(device.clone(), queue.clone());
+    let scene_resources = scene.resources();
     let mut pass = TsrPass::new(
         &device,
         32,
@@ -84,8 +85,8 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
         pass.prepare(&PrepareContext {
             device: &device,
             queue: &queue,
-            scene: &scene,
-            frame_resources: &libhelio::FrameResources::empty(),
+            scene: scene_resources,
+            pass_resources: &libhelio::PassResources::empty(),
             width: size[0],
             height: size[1],
             frame_num: frame,

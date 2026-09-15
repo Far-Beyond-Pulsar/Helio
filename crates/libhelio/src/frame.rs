@@ -1,11 +1,11 @@
 //! Per-frame transient resource views.
 //!
-//! `FrameResources` holds borrowed references to the transient textures that the
+//! `PassResources` holds borrowed references to the transient textures that the
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
-use crate::wind::GpuWind;
 use crate::CoronaEmitterFrameData;
+use std::collections::{HashMap, HashSet};
 
 /// Per-frame billboard instance data, provided by the high-level `Renderer`.
 ///
@@ -37,24 +37,6 @@ pub struct GBufferViews<'a> {
     pub emissive: &'a wgpu::TextureView,
 }
 
-/// Borrowed mesh buffers for passes that render scene geometry directly.
-///
-/// Static geometry (terrain, buildings, props) lives in `vertices`/`indices`.
-/// Dynamic geometry (skinned characters, morphed meshes) lives in
-/// `dynamic_vertices`/`dynamic_indices`. Each pair must be bound separately
-/// around the corresponding draw calls.
-#[derive(Clone, Copy)]
-pub struct MeshBuffers<'a> {
-    /// Vertex buffer for upload-once static geometry.
-    pub vertices: &'a wgpu::Buffer,
-    /// Index buffer for upload-once static geometry.
-    pub indices: &'a wgpu::Buffer,
-    /// Vertex buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_vertices: &'a wgpu::Buffer,
-    /// Index buffer for per-frame-updatable dynamic geometry.
-    pub dynamic_indices: &'a wgpu::Buffer,
-}
-
 /// Borrowed material-texture state for passes that sample Helio's texture table.
 #[derive(Clone, Copy)]
 pub struct MaterialTextureBindings<'a> {
@@ -64,11 +46,13 @@ pub struct MaterialTextureBindings<'a> {
     pub version: u64,
 }
 
-/// Frame-local scene inputs for the high-level Helio renderer.
+/// Backend material-texture bindings used by passes that sample material rows.
+///
+/// The material rows themselves are SceneDB component data. This value only
+/// describes the backend descriptor bindings needed to sample any referenced
+/// textures; it is not a scene container or an ownership model for materials.
 #[derive(Clone, Copy)]
-pub struct MainSceneResources<'a> {
-    pub mesh_buffers: MeshBuffers<'a>,
-    pub material_textures: MaterialTextureBindings<'a>,
+pub struct RenderEnvironment<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
@@ -180,12 +164,313 @@ impl<T> Tracked<T> {
     }
 }
 
+/// A typed handle to an open per-frame resource slot.
+///
+/// Resource keys are declared by the crate that owns the resource.  The
+/// registry only uses the key's name to find a slot; the type marker keeps
+/// reads and writes statically typed at the call site.
+#[derive(Clone, Copy)]
+pub struct ResourceKey<T> {
+    name: &'static str,
+    type_tag: fn() -> &'static str,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> ResourceKey<T> {
+    /// Creates a key for a named resource slot.
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            type_tag: resource_type_tag::<T>,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns the stable declaration name used by the registry.
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+}
+
+fn resource_type_tag<T>() -> &'static str {
+    std::any::type_name::<T>()
+}
+
+trait ErasedResourceSlot: Send + Sync {
+    fn type_tag(&self) -> &'static str;
+    fn self_ptr(&self) -> *const ();
+    fn self_mut_ptr(&mut self) -> *mut ();
+    fn has_value(&self) -> bool;
+    fn reset_tracking(&mut self, writer: &'static str);
+}
+
+struct TypedResourceSlot<T> {
+    value: Option<T>,
+    #[cfg(debug_assertions)]
+    written_by: Option<&'static str>,
+}
+
+impl<T> TypedResourceSlot<T> {
+    fn empty() -> Self {
+        Self {
+            value: None,
+            #[cfg(debug_assertions)]
+            written_by: None,
+        }
+    }
+}
+
+impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
+    fn type_tag(&self) -> &'static str {
+        resource_type_tag::<T>()
+    }
+
+    fn self_ptr(&self) -> *const () {
+        self as *const Self as *const ()
+    }
+
+    fn self_mut_ptr(&mut self) -> *mut () {
+        self as *mut Self as *mut ()
+    }
+
+    fn has_value(&self) -> bool {
+        self.value.is_some()
+    }
+
+    fn reset_tracking(&mut self, writer: &'static str) {
+        #[cfg(debug_assertions)]
+        {
+            self.written_by = self.value.as_ref().map(|_| writer);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = writer;
+    }
+}
+
+/// Open, typed per-frame resource storage.
+///
+/// Unlike [`PassResources`], this registry has no closed list of resource
+/// fields.  Pass crates can declare new [`ResourceKey`] values without
+/// editing `libhelio` or `helio-core`.
+pub struct ResourceRegistry<'a> {
+    slots: HashMap<&'static str, Box<dyn ErasedResourceSlot + 'a>>,
+    bindings: HashMap<String, wgpu::BindingResource<'a>>,
+    graph_bindings: HashSet<String>,
+}
+
+impl<'a> ResourceRegistry<'a> {
+    /// Creates an empty registry for a frame.
+    pub fn empty() -> Self {
+        Self {
+            slots: HashMap::new(),
+            bindings: HashMap::new(),
+            graph_bindings: HashSet::new(),
+        }
+    }
+
+    /// Publishes a GPU resource for the generic reflected-binding contract.
+    pub fn write_binding(
+        &mut self,
+        name: impl Into<String>,
+        resource: wgpu::BindingResource<'a>,
+        _writer: &'static str,
+    ) {
+        self.bindings.insert(name.into(), resource);
+    }
+
+    /// Publishes a graph-owned texture view into the reflected-binding projection.
+    pub fn write_texture_binding(
+        &mut self,
+        name: impl Into<String>,
+        view: &wgpu::TextureView,
+        writer: &'static str,
+    ) {
+        let name = name.into();
+        let resource = unsafe {
+            std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(
+                wgpu::BindingResource::TextureView(view),
+            )
+        };
+        self.write_binding(name.clone(), resource, writer);
+        self.graph_bindings.insert(name);
+    }
+
+    /// Returns a graph-routed texture view by name.
+    pub fn texture_binding(&self, name: &str) -> Option<&'a wgpu::TextureView> {
+        match self.bindings.get(name)? {
+            wgpu::BindingResource::TextureView(view) => Some(*view),
+            _ => None,
+        }
+    }
+
+    /// Removes graph-generated bindings before the next execution.
+    pub fn clear_graph_bindings(&mut self) {
+        for name in self.graph_bindings.drain() {
+            self.bindings.remove(&name);
+        }
+    }
+
+    /// Returns a reflected-binding resource by its shader/resource name.
+    pub fn binding(&self, name: &str) -> Option<wgpu::BindingResource<'a>> {
+        self.bindings.get(name).cloned()
+    }
+
+    /// Writes a value and records its writer in debug builds.
+    pub fn write<T: Copy + Send + Sync + 'a>(
+        &mut self,
+        key: ResourceKey<T>,
+        value: T,
+        writer: &'static str,
+    ) {
+        let slot = self
+            .slots
+            .entry(key.name)
+            .or_insert_with(|| Box::new(TypedResourceSlot::<T>::empty()));
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+
+        // The type tag check above establishes that this is the matching
+        // TypedResourceSlot<T>. The registry owns the erased value, so the
+        // cast is local and does not expose an untyped API to callers.
+        let typed = unsafe { &mut *(slot.self_mut_ptr() as *mut TypedResourceSlot<T>) };
+        typed.value = Some(value);
+        #[cfg(debug_assertions)]
+        {
+            typed.written_by = Some(writer);
+        }
+    }
+
+    /// Reads a value, panicking in debug builds if it was never written.
+    pub fn read<T: Copy + Send + Sync + 'a>(
+        &self,
+        key: ResourceKey<T>,
+        reader: &'static str,
+    ) -> Option<T> {
+        let Some(slot) = self.slots.get(key.name) else {
+            #[cfg(debug_assertions)]
+            panic!(
+                "[RenderGraph] pass '{}' read resource '{}' that was never written this frame",
+                reader, key.name
+            );
+            #[cfg(not(debug_assertions))]
+            return None;
+        };
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+        #[cfg(debug_assertions)]
+        if !typed.has_value() {
+            panic!(
+                "[RenderGraph] pass '{}' read resource '{}' that was never written this frame",
+                reader, key.name
+            );
+        }
+        typed.value
+    }
+
+    /// Reads a value without debug tracking for legitimately optional slots.
+    pub fn get<T: Copy + Send + Sync + 'a>(&self, key: ResourceKey<T>) -> Option<T> {
+        let slot = self.slots.get(key.name)?;
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+        typed.value
+    }
+
+    /// Returns whether a slot was written during this frame.
+    pub fn was_written<T: Send + Sync>(&self, key: ResourceKey<T>) -> bool {
+        let Some(slot) = self.slots.get(key.name) else {
+            return false;
+        };
+        assert_eq!(
+            slot.type_tag(),
+            (key.type_tag)(),
+            "resource key '{}' was used with multiple value types",
+            key.name
+        );
+        #[cfg(debug_assertions)]
+        {
+            let typed = unsafe { &*(slot.self_ptr() as *const TypedResourceSlot<T>) };
+            return typed.written_by.is_some();
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            slot.has_value()
+        }
+    }
+
+    /// Re-seeds tracking for values carried into the next frame.
+    pub fn reset_tracking(&mut self, writer: &'static str) {
+        for slot in self.slots.values_mut() {
+            slot.reset_tracking(writer);
+        }
+    }
+}
+
+impl<'a> Default for ResourceRegistry<'a> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+#[cfg(test)]
+mod resource_registry_tests {
+    use super::{ResourceKey, ResourceRegistry};
+
+    const VALUE: ResourceKey<u32> = ResourceKey::new("test_value");
+    const OPTIONAL: ResourceKey<u64> = ResourceKey::new("optional_value");
+
+    #[test]
+    fn slots_are_created_on_first_write() {
+        let mut registry = ResourceRegistry::empty();
+
+        assert_eq!(registry.get(OPTIONAL), None);
+        assert!(!registry.was_written(VALUE));
+
+        registry.write(VALUE, 42, "test_writer");
+
+        assert_eq!(registry.get(VALUE), Some(42));
+        assert_eq!(registry.read(VALUE, "test_reader"), Some(42));
+        assert!(registry.was_written(VALUE));
+    }
+
+    #[test]
+    fn reset_tracking_keeps_values_available() {
+        let mut registry = ResourceRegistry::empty();
+        registry.write(VALUE, 7, "test_writer");
+        registry.reset_tracking("Renderer");
+
+        assert_eq!(registry.get(VALUE), Some(7));
+        assert!(registry.was_written(VALUE));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "never written this frame")]
+    fn required_reads_fail_for_missing_slots() {
+        let registry = ResourceRegistry::empty();
+        let _ = registry.read(VALUE, "test_reader");
+    }
+}
+
 /// All transient per-frame texture references.
 ///
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
 /// borrowed views through this struct. Zero allocations in the hot path.
 #[derive(Clone, Copy)]
-pub struct FrameResources<'a> {
+pub struct PassResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Tracked<GBufferViews<'a>>,
     /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
@@ -240,8 +525,10 @@ pub struct FrameResources<'a> {
 
     /// Full-resolution depth texture object for compute passes that need raw texture access.
     pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
-    /// High-level Helio scene resources used by wrapper-owned passes.
-    pub main_scene: Tracked<MainSceneResources<'a>>,
+    /// Backend bindings for the material component buffer's texture slots.
+    pub material_textures: Tracked<MaterialTextureBindings<'a>>,
+    /// Frame-local environment and optional acceleration structure state.
+    pub render_environment: Tracked<RenderEnvironment<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
@@ -252,18 +539,6 @@ pub struct FrameResources<'a> {
     /// Water caustics texture (populated by WaterCausticsPass)
     pub water_caustics: Tracked<&'a wgpu::TextureView>,
 
-    /// Water volumes buffer (populated by Scene)
-    pub water_volumes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of water volumes in the buffer
-    pub water_volume_count: u32,
-
-    /// Post-process volumes storage buffer (populated by Renderer)
-    pub pp_volumes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of post-process volumes in the buffer
-    pub pp_volume_count: u32,
-
     /// Water heightfield simulation texture (Rgba16Float 256×256, ping-pong current)
     /// R=height, G=velocity, B=normal.x, A=normal.z
     /// Populated by `WaterSimPass::publish()`.
@@ -271,23 +546,6 @@ pub struct FrameResources<'a> {
 
     /// Linear clamp sampler for water_sim_texture (set by WaterSimPass)
     pub water_sim_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Water hitboxes storage buffer (populated by Renderer each frame)
-    pub water_hitboxes: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of hitboxes in water_hitboxes
-    pub water_hitbox_count: u32,
-
-    // ── Foliage ──────────────────────────────────────────────────────────────
-    /// Foliage type/layer tables plus the global wind uniform for this frame.
-    ///
-    /// Published by the high-level `Renderer`; read by every foliage pass. Left
-    /// unwritten when no foliage types are registered, which is how the foliage passes
-    /// early-out of `prepare()` and record zero commands — see the zero-overhead
-    /// guarantees in the foliage plan. Do not "helpfully" write an empty
-    /// [`FoliageFrameData`] instead: that turns the free path into a per-frame upload of
-    /// two empty buffers plus four zero-instance indirect draws.
-    pub foliage: Tracked<FoliageFrameData<'a>>,
 
     /// Top-down terrain capture over the active foliage ring, written by
     /// `FoliageTerrainPass` and read by placement, interaction and the far-ring
@@ -312,17 +570,6 @@ pub struct FrameResources<'a> {
     /// texel grid, so a repeating address mode wraps trampled grass from one edge of the
     /// field to the opposite edge, 64 m away.
     pub foliage_interaction_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Foliage interactor storage buffer (populated by the Renderer each frame).
-    ///
-    /// Splatted into the interaction field by `FoliageInteractionPass`. Follows the
-    /// `water_hitboxes` contract exactly: the buffer may be over-allocated, and
-    /// [`foliage_interactor_count`](Self::foliage_interactor_count) — not the buffer
-    /// size — is the authority on how many entries are live this frame.
-    pub foliage_interactors: Tracked<&'a wgpu::Buffer>,
-
-    /// Number of interactors in foliage_interactors
-    pub foliage_interactor_count: u32,
 
     /// Radiance Cascades cascade atlas texture view
     pub rc_view: Tracked<&'a wgpu::TextureView>,
@@ -379,6 +626,24 @@ pub struct FrameResources<'a> {
 
     /// Cluster light grid for forward rendering (populated by LightCullPass).
     pub cluster_light_grid: Tracked<ClusterLightGrid<'a>>,
+
+    /// GPU-driven static-object batch (populated by `ObjectBatchPass`) --
+    /// see [`ObjectBatchFrameData`]'s own doc.
+    pub object_batch: Tracked<ObjectBatchFrameData<'a>>,
+
+    /// Shadow matrices, written by the `Renderer` each frame -- see
+    /// [`ShadowMatricesFrameData`]'s own doc.
+    pub shadow_matrices: Tracked<ShadowMatricesFrameData<'a>>,
+    /// Coordinate-space transforms, written by the `Renderer` each frame --
+    /// see [`CoordinateSpacesFrameData`]'s own doc.
+    pub coordinate_spaces: Tracked<CoordinateSpacesFrameData<'a>>,
+    /// Frustum-culled draw args (populated by `IndirectDispatchPass`) --
+    /// see [`IndirectDispatchFrameData`]'s own doc.
+    pub indirect_dispatch: Tracked<IndirectDispatchFrameData<'a>>,
+
+    /// Fully-culled draw args (populated by `OcclusionCullPass`) -- see
+    /// [`CulledBatchFrameData`]'s own doc.
+    pub culled_batch: Tracked<CulledBatchFrameData<'a>>,
 
     /// Corona particle emitter definitions (uploaded by the Renderer each frame)
     pub corona_emitters: Tracked<CoronaEmitterFrameData<'a>>,
@@ -486,11 +751,134 @@ pub struct ClusterLightGrid<'a> {
     pub num_tiles_y: u32,
 }
 
+/// GPU-driven static-object batch: the sorted instance/draw-call/range/
+/// shadow-partition data every geometry-drawing pass needs, all derived
+/// fresh each frame from SceneDB's `StaticObjectComponent` rows with zero
+/// per-frame CPU iteration.
+///
+/// Produced by `helio-pass-object-batch`'s `ObjectBatchPass`, consumed by
+/// every pass that used to read the equivalent fields directly off
+/// `GpuScene`/`SceneResources` (`helio-pass-gbuffer`, `helio-pass-
+/// occlusion-cull`, `helio-pass-indirect-dispatch`, `helio-pass-shadow` and
+/// its `-cull`/`-dirty` siblings, `helio-pass-transparent`, `helio-pass-
+/// forward-lit`, `helio-pass-depth-prepass`, `helio-pass-portal-cull`/
+/// `-instances`) -- those fields are gone from `GpuScene` now; this is the
+/// one place that knows static objects exist at all outside `helio-pass-
+/// object-batch` and `helio-pass-gbuffer` (which owns the `StaticObjectComponent`
+/// schema itself).
+///
+/// `opaque_ranges`/`transparent_ranges`/`forward_ranges` are a small,
+/// bounded, ASYNC (one-frame-latency) CPU readback -- see `helio-pass-
+/// object-batch`'s `readback` module doc for why that's the correct
+/// tradeoff for exactly this one piece of the pipeline's output (PSO
+/// selection needs `(start, count)` as plain `u32`s on the CPU before
+/// `multi_draw_indexed_indirect` can be recorded; nothing else here is a
+/// CPU readback of any kind).
+#[derive(Clone, Copy)]
+pub struct ObjectBatchFrameData<'a> {
+    /// Sorted-order instance data (`GpuInstanceData` layout).
+    pub instances: &'a wgpu::Buffer,
+    /// Sorted-order bounding spheres, same order as `instances`.
+    pub aabbs: &'a wgpu::Buffer,
+    /// One entry per draw-call group (`GpuDrawCall` layout) -- used by
+    /// culling passes that need `index_count`/`first_index`/`vertex_offset`
+    /// directly, not just the hardware indirect-draw ABI.
+    pub draw_calls: &'a wgpu::Buffer,
+    /// Same per-group data as `draw_calls`, reordered to wgpu's hardware
+    /// indirect-draw ABI -- what `multi_draw_indexed_indirect` actually
+    /// reads.
+    pub indirect: &'a wgpu::Buffer,
+    /// Live draw-call group count this frame.
+    pub draw_count: u32,
+    /// Live instance count this frame (== `instances`'s valid prefix length).
+    pub instance_count: u32,
+    /// `(material_class, graph_hash, start, count)` ranges over `draw_calls`
+    /// -- `start`/`count` index `draw_calls`/`indirect` directly, not
+    /// `instances`. One `multi_draw_indexed_indirect` call per range.
+    pub opaque_ranges: &'a [(u32, u64, u32, u32)],
+    pub transparent_ranges: &'a [(u32, u64, u32, u32)],
+    pub forward_ranges: &'a [(u32, u64, u32, u32)],
+    /// One-instance indirect draw args per static (non-movable) object,
+    /// for the static shadow atlas.
+    pub shadow_static_indirect: &'a wgpu::Buffer,
+    pub shadow_static_draw_count: u32,
+    /// Same, for movable objects (the dynamic shadow atlas).
+    pub shadow_movable_indirect: &'a wgpu::Buffer,
+    pub shadow_movable_draw_count: u32,
+    /// Bumps whenever the static object set's size last changed -- see
+    /// `ObjectBatchPass::shadow_static_generation`'s doc. `helio-pass-
+    /// shadow`'s static-atlas cache invalidation signal.
+    pub shadow_static_generation: u64,
+}
+
+/// Frustum-culled indirect draw args + compacted instance indices --
+/// `helio-pass-indirect-dispatch`'s own output, read ONLY by `helio-pass-
+/// occlusion-cull` (the next culling stage). Not for drawing passes -- see
+/// [`CulledBatchFrameData`] for the buffers a pass actually issuing draw
+/// calls should read.
+#[derive(Clone, Copy)]
+pub struct IndirectDispatchFrameData<'a> {
+    /// Per-group indirect draw args, `instance_count` replaced with each
+    /// group's frustum-surviving count.
+    pub indirect: &'a wgpu::Buffer,
+    /// Frustum-culling survivors, packed per draw-call group starting at
+    /// that group's `first_instance` offset -- index `instances` (from
+    /// [`ObjectBatchFrameData`]) through this, not directly.
+    pub compacted_indices: &'a wgpu::Buffer,
+}
+
+/// The final, fully-culled (frustum + Hi-Z occlusion) indirect draw args and
+/// compacted instance indices -- what every pass that actually issues
+/// `multi_draw_indexed_indirect` calls (`helio-pass-gbuffer`, `helio-pass-
+/// shadow` and its `-cull`/`-dirty` siblings, `helio-pass-transparent`,
+/// `helio-pass-forward-lit`, `helio-pass-depth-prepass`, `helio-pass-
+/// portal-cull`/`-instances`) should read. Produced by `helio-pass-
+/// occlusion-cull` from [`IndirectDispatchFrameData`].
+#[derive(Clone, Copy)]
+pub struct CulledBatchFrameData<'a> {
+    /// Per-group indirect draw args, `instance_count` replaced with each
+    /// group's final (frustum + occlusion) surviving count.
+    pub indirect: &'a wgpu::Buffer,
+    /// Final surviving instance slots, packed per draw-call group -- index
+    /// `instances` (from [`ObjectBatchFrameData`]) through this.
+    pub compacted_indices: &'a wgpu::Buffer,
+}
+
+/// Shadow matrices + per-caster dirty tracking for this frame -- written
+/// directly by the `Renderer`, NOT published by `helio-pass-shadow-matrix`
+/// (that pass computes into this buffer but does not yet own its
+/// allocation -- a real, still-pending relocation, same shape as
+/// `ObjectBatchPass` got this session; tracked separately, not solved here).
+#[derive(Clone, Copy)]
+pub struct ShadowMatricesFrameData<'a> {
+    pub shadow_matrices: &'a wgpu::Buffer,
+    /// Live shadow-face count this frame.
+    pub shadow_count: u32,
+    /// Per-caster (42 max) dirty generation counters -- `ShadowPass`
+    /// compares against its own last-rendered gen to decide which faces to
+    /// re-render.
+    pub per_caster_dirty_gen: [u64; 42],
+    /// Increments whenever any movable object moves -- the O(1) CPU gate
+    /// `ShadowPass` checks before doing any per-face work.
+    pub movable_objects_generation: u64,
+}
+
+/// Coordinate-space transforms (portals + sublevels) for this frame --
+/// written directly by the `Renderer`. A real pass-owned relocation (reading
+/// `SublevelComponent` from SceneDB directly, owned by whichever pass ends
+/// up assembling the portal/sublevel registry) is still-pending future work,
+/// not solved here.
+#[derive(Clone, Copy)]
+pub struct CoordinateSpacesFrameData<'a> {
+    pub coordinate_spaces: &'a wgpu::Buffer,
+    pub coordinate_spaces_prev: &'a wgpu::Buffer,
+}
+
 // ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
 
 /// Owned CPU-side PVS data stored in [`BakedData`].
 ///
-/// Published as a zero-copy [`BakedPvsRef`] into `FrameResources` each frame.
+/// Published as a zero-copy [`BakedPvsRef`] into `PassResources` each frame.
 pub struct BakedPvsData {
     pub world_min: [f32; 3],
     pub world_max: [f32; 3],
@@ -501,8 +889,8 @@ pub struct BakedPvsData {
     pub bits: Vec<u64>,
 }
 
-impl<'a> FrameResources<'a> {
-    /// Creates an empty (all-Tracked::empty) frame resources for the start of a frame.
+impl<'a> PassResources<'a> {
+    /// Creates an empty (all-Tracked::empty) pass-resource view for a frame.
     pub fn empty() -> Self {
         Self {
             gbuffer: Tracked::empty(),
@@ -526,25 +914,17 @@ impl<'a> FrameResources<'a> {
             tile_light_counts: Tracked::empty(),
             full_res_depth: Tracked::empty(),
             full_res_depth_texture: Tracked::empty(),
-            main_scene: Tracked::empty(),
+            material_textures: Tracked::empty(),
+            render_environment: Tracked::empty(),
             sky: crate::sky::SkyContext::default(),
             billboards: Tracked::empty(),
             vg: Tracked::empty(),
             water_caustics: Tracked::empty(),
-            water_volumes: Tracked::empty(),
-            water_volume_count: 0,
-            pp_volumes: Tracked::empty(),
-            pp_volume_count: 0,
             water_sim_texture: Tracked::empty(),
             water_sim_sampler: Tracked::empty(),
-            water_hitboxes: Tracked::empty(),
-            water_hitbox_count: 0,
-            foliage: Tracked::empty(),
             foliage_terrain: Tracked::empty(),
             foliage_interaction: Tracked::empty(),
             foliage_interaction_sampler: Tracked::empty(),
-            foliage_interactors: Tracked::empty(),
-            foliage_interactor_count: 0,
             depth_texture: Tracked::empty(),
             depth_sampler_view: Tracked::empty(),
             rc_view: Tracked::empty(),
@@ -557,6 +937,11 @@ impl<'a> FrameResources<'a> {
             baked_irradiance_sh: Tracked::empty(),
             baked_pvs: Tracked::empty(),
             cluster_light_grid: Tracked::empty(),
+            object_batch: Tracked::empty(),
+            shadow_matrices: Tracked::empty(),
+            coordinate_spaces: Tracked::empty(),
+            indirect_dispatch: Tracked::empty(),
+            culled_batch: Tracked::empty(),
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
             color_grading_lut: Tracked::empty(),
@@ -571,6 +956,53 @@ impl<'a> FrameResources<'a> {
             pre_dof: Tracked::empty(),
             post_dof: Tracked::empty(),
         }
+    }
+
+    /// Routes a graph-owned texture into the legacy compatibility view.
+    ///
+    /// This compatibility-only adapter derives names from the legacy field
+    /// identifiers so the graph executor has no pass/resource-name table of
+    /// its own. New code should publish through [`ResourceRegistry`].
+    pub fn route_named_texture(
+        &mut self,
+        name: &str,
+        view: &'a wgpu::TextureView,
+        writer: &'static str,
+    ) -> bool {
+        macro_rules! route_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if name == stringify!($field) {
+                        self.$field.write(view, writer);
+                        return true;
+                    }
+                )+
+            };
+        }
+
+        route_fields!(
+            pre_aa,
+            ssao,
+            fog_accum,
+            hiz,
+            sky_lut,
+            gbuffer_lightmap_uv,
+            gbuffer_sss,
+            gbuffer_extra,
+            gbuffer_velocity,
+            water_sim_texture,
+            water_caustics,
+            shadow_atlas,
+            static_shadow_atlas,
+            ssr_trace,
+            planar_reflection,
+            ies_textures,
+        );
+        if name == stringify!(rc_cascades) {
+            self.rc_view.write(view, writer);
+            return true;
+        }
+        false
     }
 
     /// Resets debug tracking markers so that fields written in a previous
@@ -610,22 +1042,16 @@ impl<'a> FrameResources<'a> {
             reset_field!(tile_light_counts);
             reset_field!(full_res_depth);
             reset_field!(full_res_depth_texture);
-            reset_field!(main_scene);
+            reset_field!(material_textures);
+            reset_field!(render_environment);
             reset_field!(billboards);
             reset_field!(vg);
             reset_field!(water_caustics);
-            reset_field!(water_volumes);
-            reset_field!(pp_volumes);
             reset_field!(water_sim_texture);
             reset_field!(water_sim_sampler);
-            reset_field!(water_hitboxes);
-            // `foliage_interactor_count` is a plain u32, not a `Tracked` slot, so it gets
-            // no line here — same as `water_hitbox_count` directly above.
-            reset_field!(foliage);
             reset_field!(foliage_terrain);
             reset_field!(foliage_interaction);
             reset_field!(foliage_interaction_sampler);
-            reset_field!(foliage_interactors);
             reset_field!(depth_texture);
             reset_field!(depth_sampler_view);
             reset_field!(rc_view);
@@ -638,6 +1064,11 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_irradiance_sh);
             reset_field!(baked_pvs);
             reset_field!(cluster_light_grid);
+            reset_field!(object_batch);
+            reset_field!(shadow_matrices);
+            reset_field!(coordinate_spaces);
+            reset_field!(indirect_dispatch);
+            reset_field!(culled_batch);
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
             reset_field!(color_grading_lut);
@@ -655,6 +1086,11 @@ impl<'a> FrameResources<'a> {
 /// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
 /// first frame and whenever `buffer_version` advances. Transform-only changes
 /// advance `instance_version` and upload only `instance_dirty_start..+count`.
+///
+/// `instances` is the renderer's single CPU publication of the VG instance
+/// records. Consumers may derive pass-local data from it, but must not publish
+/// those records into a second SceneDB component set merely to support a
+/// pass-specific CPU operation.
 #[derive(Clone, Copy)]
 pub struct VgFrameData<'a> {
     /// Raw bytes of a `GpuMeshletEntry` array.
@@ -681,48 +1117,6 @@ pub struct VgFrameData<'a> {
     pub instance_dirty_start: u32,
     /// Number of dirty instances; zero when `buffer_version` owns the update.
     pub instance_dirty_count: u32,
-}
-
-/// Per-frame foliage data: immutable type/layer tables plus the per-frame wind clock.
-///
-/// Carried as raw byte slices for the same reason [`VgFrameData`] is: `libhelio` holds the
-/// inter-pass contract and must not depend on the crate that defines `GpuFoliageType` /
-/// `GpuFoliageLayer`, or every pass crate would be forced to link the foliage crate to see
-/// `FrameResources`. The producer and the consuming passes agree on the element type; this
-/// struct only carries bytes and counts. Publishing a slice whose length is not
-/// `count * size_of::<element>()` is therefore undetectable here and shows up as garbage
-/// densities and blades placed under the world — bytemuck-cast on the publishing side, do
-/// not hand-roll the slice.
-///
-/// The `FoliagePlacePass` uploads the tables on the first frame and whenever `generation`
-/// advances, mirroring `VgFrameData::buffer_version`.
-#[derive(Clone, Copy)]
-pub struct FoliageFrameData<'a> {
-    /// Raw bytes of a `GpuFoliageType` array — one entry per authored foliage type.
-    pub types: &'a [u8],
-    /// Raw bytes of a `GpuFoliageLayer` array — one entry per authored foliage layer.
-    pub layers: &'a [u8],
-    /// Number of valid entries in `types`. Foliage type ids index this array directly, so
-    /// a stale count silently reads past the end of the table on the GPU.
-    pub type_count: u32,
-    /// Number of valid entries in `layers`.
-    pub layer_count: u32,
-
-    /// Global wind state for this frame, including both timestamps.
-    ///
-    /// Lives here rather than in its own `Tracked` slot because wind is only ever
-    /// meaningful when there is foliage to move, and because every foliage pass that
-    /// needs it already reads this struct. See [`GpuWind::time_prev_time`] for why the
-    /// second timestamp cannot be dropped.
-    pub wind: GpuWind,
-
-    /// Version counter incremented when the type or layer tables change.
-    ///
-    /// **Wind must not advance this.** `wind` changes every single frame; if the
-    /// publisher folds it into the generation, the type and layer tables are re-uploaded
-    /// every frame and the residency cache's whole point — that steady-state foliage costs
-    /// nothing on the CPU — is lost. Tables change on authoring edits only.
-    pub generation: u64,
 }
 
 /// Views into the top-down foliage terrain capture.

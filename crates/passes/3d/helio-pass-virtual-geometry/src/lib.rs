@@ -400,6 +400,17 @@ mod tests {
     }
 
     #[test]
+    fn cull_projection_is_derived_and_defaults_missing_material_to_opaque() {
+        let instances = [instance_with_model([
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ])];
+        let projection = super::rendering::build_instance_cull_data(&instances, &[]);
+
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].cull_flags >> 1 & 1, 1);
+    }
+
+    #[test]
     fn singular_or_non_finite_transform_is_rejected() {
         let singular = instance_with_model([0.0; 16]);
         assert_eq!(

@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::{error::NebulaError, traits::BakeOutput};
 use nebula_serialize::chunk::ChunkTag;
+use serde::{Deserialize, Serialize};
 
 /// Chunk tag for baked reflection cubemap data.
 pub const REFLECTION_CHUNK_TAG: ChunkTag = ChunkTag::from_bytes(*b"RPRO");
@@ -28,7 +28,9 @@ pub struct ReflectionOutput {
 }
 
 impl BakeOutput for ReflectionOutput {
-    fn kind_name() -> &'static str { "reflection_probe" }
+    fn kind_name() -> &'static str {
+        "reflection_probe"
+    }
 }
 
 impl ReflectionOutput {
@@ -48,7 +50,11 @@ impl ReflectionOutput {
 
 /// A single RGB spherical-harmonic coefficient.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct ShCoeff { pub r: f32, pub g: f32, pub b: f32 }
+pub struct ShCoeff {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
 
 /// Baked irradiance described as spherical-harmonic coefficients.
 ///
@@ -66,7 +72,9 @@ pub struct IrradianceOutput {
 }
 
 impl BakeOutput for IrradianceOutput {
-    fn kind_name() -> &'static str { "irradiance_probe" }
+    fn kind_name() -> &'static str {
+        "irradiance_probe"
+    }
 }
 
 impl IrradianceOutput {

@@ -9,7 +9,7 @@
 //!
 //! Regenerating every visible blade every frame is the common GPU-grass shortcut and
 //! costs about a millisecond at a million blades. Instead the world is a grid of 8 m
-//! tiles ([`helio_foliage_core::FOLIAGE_TILE_SIZE_METERS`]), a ring of them around the
+//! tiles ([`crate::FOLIAGE_TILE_SIZE_METERS`]), a ring of them around the
 //! camera is kept resident in a GPU arena, and placement only runs for tiles *entering*
 //! the ring. Steady-state placement cost is therefore zero, and moving-camera cost is
 //! proportional to the ring's **perimeter** rather than its area.
@@ -36,9 +36,9 @@
 //!
 //! # Zero overhead when absent
 //!
-//! When `FrameResources::foliage` is unwritten — no foliage types registered —
+//! When the SceneDB `foliage_types` column is absent — no foliage types registered —
 //! [`RenderPass::prepare`] early-returns before touching a buffer and
-//! [`RenderPass::execute`] records no commands at all. [`foliage_frame_is_present`] is
+//! [`RenderPass::execute`] records no commands at all. [`foliage_scene_is_present`] is
 //! the single predicate both gate on, exposed so the guarantee can be asserted without a
 //! GPU. [`FoliagePlacePass::commands_recorded`] counts the frames on which `execute`
 //! actually recorded work.
@@ -62,6 +62,11 @@
 
 use bytemuck::{Pod, Zeroable};
 
+mod contract;
+pub use contract::*;
+pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
+
+pub mod components;
 mod pass;
 mod reference;
 mod residency;
@@ -172,22 +177,20 @@ pub const MAX_CANDIDATES_PER_TILE: u32 = 16_384;
 /// Whether this frame has any foliage work at all.
 ///
 /// The single predicate both `prepare` and `execute` gate on, and the mechanism behind
-/// the plan's §10 zero-overhead guarantee: an unwritten `FrameResources::foliage` slot
+/// the plan's §10 zero-overhead guarantee: an absent SceneDB `foliage_types` column
 /// means no foliage types are registered, so there is nothing to place, nothing to cull
 /// and no reason to record a command. Exposed as a free function so the guarantee is
 /// testable on a machine with no GPU.
 ///
 /// Note that this checks for *presence*, not for a non-empty table. A publisher that
-/// "helpfully" writes an empty [`libhelio::FoliageFrameData`] instead of leaving the slot
-/// alone turns the free path into a per-frame upload plus four zero-instance draws; the
-/// `type_count == 0` check in `prepare` catches that case as well, but the slot being
-/// unwritten is the cheaper contract and the one `libhelio` documents.
+/// "helpfully" registers an empty column instead of leaving the column absent turns the
+/// free path into four zero-instance draws; the buffer-size check catches that case too,
+/// but an absent column is the cheaper contract.
 #[inline]
-pub fn foliage_frame_is_present(resources: &libhelio::FrameResources<'_>) -> bool {
-    resources
-        .foliage
-        .get()
-        .is_some_and(|foliage| foliage.type_count > 0)
+pub fn foliage_scene_is_present(buffers: &helio_core::SceneBufferProjection) -> bool {
+    buffers
+        .get(pulsar_scenedb::gpu::BufferKey::of("foliage_types"))
+        .is_some_and(|handle| handle.buffer.size() >= std::mem::size_of::<GpuFoliageType>() as u64)
 }
 
 /// Mirror of [`wgpu::util::DrawIndirectArgs`] used only for layout assertions and tests.
@@ -288,9 +291,9 @@ mod tests {
 
     #[test]
     fn zero_overhead_gate_is_closed_on_an_empty_frame() {
-        let resources = libhelio::FrameResources::empty();
+        let resources = helio_core::SceneBufferProjection::default();
         assert!(
-            !foliage_frame_is_present(&resources),
+            !foliage_scene_is_present(&resources),
             "an unwritten foliage slot must not make the pass do work"
         );
     }

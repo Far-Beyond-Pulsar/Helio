@@ -11,15 +11,17 @@
 
 mod v3_demo_common;
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh,
-    point_light,
+    box_mesh, cube_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, update_object_transform,
 };
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, ObjectId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use rapier3d::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -42,12 +44,12 @@ const ROUND_RESET_DELAY: Duration = Duration::from_secs(2);
 struct BattleShape {
     body_handle: RigidBodyHandle,
     collider_handle: ColliderHandle,
-    object_id: ObjectId,
+    object_id: Entity,
     eliminated: bool,
 }
 
 struct BlastParticle {
-    object_id: ObjectId,
+    object_id: Entity,
     birth: Instant,
     position: glam::Vec3,
     velocity: glam::Vec3,
@@ -64,6 +66,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: Instant,
     frame_count: u64,
 
@@ -91,8 +94,8 @@ struct AppState {
     round_active: bool,
     round_end_instant: Option<Instant>,
 
-    mats: [helio::MaterialId; 4],
-    meshes: [helio::MeshId; 4],
+    mats: [Entity; 4],
+    meshes: [Entity; 4],
 
     time_render_end: Option<Instant>,
     time_about_to_wait_start: Option<Instant>,
@@ -172,94 +175,49 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let flooring = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.15, 0.18, 1.0],
-            0.86,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let red = renderer.scene_mut().insert_material(make_material(
-            [0.84, 0.14, 0.14, 1.0],
-            0.45,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let green = renderer.scene_mut().insert_material(make_material(
-            [0.18, 0.85, 0.25, 1.0],
-            0.45,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let blue = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.38, 0.90, 1.0],
-            0.45,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let yellow = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.85, 0.17, 1.0],
-            0.45,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let flooring = spawn_material(
+            &mut scene_db.world,
+            make_material([0.15, 0.15, 0.18, 1.0], 0.86, 0.05, [0.0, 0.0, 0.0], 0.0),
+        );
+        let red = spawn_material(
+            &mut scene_db.world,
+            make_material([0.84, 0.14, 0.14, 1.0], 0.45, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.18, 0.85, 0.25, 1.0], 0.45, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let blue = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.38, 0.90, 1.0], 0.45, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let yellow = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.85, 0.17, 1.0], 0.45, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
-        let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh(
-                [0.0, 0.0, 0.0],
-                ARENA_RADIUS,
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], ARENA_RADIUS));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor_mesh,
             flooring,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.0)),
@@ -267,59 +225,25 @@ impl ApplicationHandler for App {
         );
 
         // add lights to avoid TileLightLists COPY_DST validation failure
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [7.0, 6.0, 6.0],
-                [0.9, 0.8, 0.7],
-                10.0,
-                20.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-7.0, 6.0, -6.0],
-                [0.7, 0.9, 1.0],
-                10.0,
-                20.0,
-            )))
-            .as_light()
-            .unwrap();
+        spawn_light(
+            &mut scene_db.world,
+            point_light([7.0, 6.0, 6.0], [0.9, 0.8, 0.7], 10.0, 20.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-7.0, 6.0, -6.0], [0.7, 0.9, 1.0], 10.0, 20.0),
+        );
 
-        let sphere_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.4, 0.4, 0.4],
-            )))
-            .as_mesh()
-            .unwrap();
-        let cuboid_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.35, 0.55, 0.25],
-            )))
-            .as_mesh()
-            .unwrap();
-        let capsule_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.35, 0.55, 0.35],
-            )))
-            .as_mesh()
-            .unwrap();
-        let cylinder_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.3, 0.6, 0.3],
-            )))
-            .as_mesh()
-            .unwrap();
+        let sphere_mesh_id = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]));
+        let cuboid_mesh_id = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.35, 0.55, 0.25]),
+        );
+        let capsule_mesh_id = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.35, 0.55, 0.35]),
+        );
+        let cylinder_mesh_id = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 0.6, 0.3]));
 
         let meshes = [
             sphere_mesh_id,
@@ -335,6 +259,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: fmt,
             renderer,
+            scene_db,
             last_frame: Instant::now(),
             frame_count: 0,
             cam_pos: glam::Vec3::new(0.0, 16.0, 32.0),
@@ -513,24 +438,20 @@ impl AppState {
         let wall_material = self.mats[0];
 
         // Wall mesh is reused for visual objects; physics walls are separate colliders.
-        let wall_mesh_x = self
-            .renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+        let wall_mesh_x = spawn_mesh(
+            &mut self.scene_db.world,
+            box_mesh(
                 [0.0, 0.0, 0.0],
                 [WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_mesh_z = self
-            .renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ),
+        );
+        let wall_mesh_z = spawn_mesh(
+            &mut self.scene_db.world,
+            box_mesh(
                 [0.0, 0.0, 0.0],
                 [ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0],
-            )))
-            .as_mesh()
-            .unwrap();
+            ),
+        );
 
         let wall_poses = [
             (
@@ -561,8 +482,8 @@ impl AppState {
 
         for (x, y, z, mesh_id) in wall_poses.iter() {
             let transform = glam::Mat4::from_translation(glam::Vec3::new(*x, *y, *z));
-            let _ = insert_object(
-                &mut self.renderer,
+            let _ = spawn_object(
+                &mut self.scene_db.world,
                 *mesh_id,
                 wall_material,
                 transform,
@@ -599,7 +520,7 @@ impl AppState {
     fn start_new_round(&mut self) {
         // clear old objects
         for shape in self.battle_shapes.drain(..) {
-            let _ = self.renderer.scene_mut().remove_object(shape.object_id);
+            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, shape.object_id);
             self.physics_colliders.remove(
                 shape.collider_handle,
                 &mut self.physics_forces,
@@ -616,7 +537,7 @@ impl AppState {
             );
         }
         for part in self.explosion_particles.drain(..) {
-            let _ = self.renderer.scene_mut().remove_object(part.object_id);
+            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, part.object_id);
         }
         self.round_active = true;
         self.round_end_instant = None;
@@ -665,8 +586,8 @@ impl AppState {
             let mat_id = self.mats[i % self.mats.len()];
             let transform =
                 glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(scale * size);
-            let obj = insert_object_with_movability(
-                &mut self.renderer,
+            let obj = spawn_object_with_movability(
+                &mut self.scene_db.world,
                 mesh_id,
                 mat_id,
                 transform,
@@ -692,15 +613,10 @@ impl AppState {
             let velocity = dir * speed;
             let offset = dir * 0.2;
             let pos = position + offset;
-            let mesh = self
-                .renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.12)))
-                .as_mesh()
-                .unwrap();
+            let mesh = spawn_mesh(&mut self.scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.12));
             let mat = self.mats[(i % self.mats.len())];
-            let obj = insert_object_with_movability(
-                &mut self.renderer,
+            let obj = spawn_object_with_movability(
+                &mut self.scene_db.world,
                 mesh,
                 mat,
                 glam::Mat4::from_translation(pos),
@@ -753,10 +669,12 @@ impl AppState {
                 let m = body.position().to_homogeneous();
                 let mat: [f32; 16] = m.as_slice().try_into().unwrap();
                 let trans = glam::Mat4::from_cols_array(&mat);
-                let _ = self
-                    .renderer
-                    .scene_mut()
-                    .update_object_transform(shape.object_id, trans);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    shape.object_id,
+                    trans,
+                );
 
                 let pos = body.position().translation.vector;
                 let radial_dist = glam::Vec3::new(pos.x, 0.0, pos.z).length();
@@ -781,7 +699,7 @@ impl AppState {
 
         for (_i, explosion_pos, object_id, collider_handle, body_handle) in eliminated {
             self.create_explosion(explosion_pos);
-            let _ = self.renderer.scene_mut().remove_object(object_id);
+            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, object_id);
             self.physics_colliders.remove(
                 collider_handle,
                 &mut self.physics_forces,
@@ -820,12 +738,14 @@ impl AppState {
                 p.velocity *= 0.94;
                 p.position += p.velocity * dt;
                 let new_transform = glam::Mat4::from_translation(p.position);
-                let _ = self
-                    .renderer
-                    .scene_mut()
-                    .update_object_transform(p.object_id, new_transform);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    p.object_id,
+                    new_transform,
+                );
             } else {
-                let _ = self.renderer.scene_mut().remove_object(p.object_id);
+                let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, p.object_id);
             }
             alive
         });

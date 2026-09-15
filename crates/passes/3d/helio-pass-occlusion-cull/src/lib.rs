@@ -35,12 +35,22 @@ struct CullParams {
     world_bounds_max_z: f32,
 }
 
+/// Below this many instances, `compacted_indices_2_buf` still allocates at
+/// this floor -- matches `ObjectBatchPass`'s own `MIN_SCRATCH_CAPACITY` idiom.
+const MIN_CAPACITY: u32 = 256;
+
 pub struct OcclusionCullPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
+    /// This pass's own output -- no longer a central `GpuScene` field (see
+    /// `CulledBatchFrameData`'s doc in `libhelio`): final (frustum +
+    /// occlusion) surviving instance slots, one `u32` per live instance
+    /// (worst case).
+    compacted_indices_2_buf: wgpu::Buffer,
+    instance_capacity: u32,
 
     /// Placeholder 3D texture used when no static HiZ is loaded.
     placeholder_static_hiz_view: wgpu::TextureView,
@@ -286,12 +296,16 @@ impl OcclusionCullPass {
             cache: None,
         });
 
+        let compacted_indices_2_buf = create_compacted_indices_2_buf(device, MIN_CAPACITY);
+
         Self {
             pipeline,
             bgl,
             cull_params_buf,
             hiz_sampler,
             cull_stats_buf,
+            compacted_indices_2_buf,
+            instance_capacity: MIN_CAPACITY,
             placeholder_static_hiz_view,
             placeholder_static_hiz_sampler,
             static_hiz_bounds_min: [0.0; 3],
@@ -302,6 +316,19 @@ impl OcclusionCullPass {
             screen_width,
             screen_height,
         }
+    }
+
+    /// Grows `compacted_indices_2_buf` to at least `instance_count` rows
+    /// (next-power-of-two, floor `MIN_CAPACITY`). Returns `true` if it
+    /// reallocated (the caller must then rebuild the bind group).
+    fn ensure_capacity(&mut self, device: &wgpu::Device, instance_count: u32) -> bool {
+        if instance_count <= self.instance_capacity {
+            return false;
+        }
+        self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
+        self.compacted_indices_2_buf =
+            create_compacted_indices_2_buf(device, self.instance_capacity);
+        true
     }
 
     /// Update internal-resolution dimensions used by cull uniforms.
@@ -323,30 +350,77 @@ impl OcclusionCullPass {
     }
 }
 
+fn create_compacted_indices_2_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("OcclusionCull CompactedIndices2"),
+        size: (capacity as u64 * 4).max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 impl RenderPass for OcclusionCullPass {
     fn name(&self) -> &'static str {
         "OcclusionCull"
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "static_hiz", "static_hiz_sampler"]
+        &[
+            "hiz",
+            "static_hiz",
+            "static_hiz_sampler",
+            "object_batch",
+            "indirect_dispatch",
+        ]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["culled_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+        builder.read("indirect_dispatch");
+        builder.write_buffer("culled_batch");
+    }
+
+    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
+        // `indirect_dispatch.indirect` is mutated IN PLACE by this pass
+        // (its `instance_count` field, refined from frustum-only down to
+        // frustum+occlusion survivors) -- there is no separate owned
+        // `indirect` buffer here, so `culled_batch` simply republishes the
+        // same buffer reference `indirect_dispatch` already holds.
+        let Some(indirect_dispatch) = frame.indirect_dispatch.get() else {
+            return;
+        };
+        frame.culled_batch.write(
+            libhelio::CulledBatchFrameData {
+                indirect: indirect_dispatch.indirect,
+                compacted_indices: &self.compacted_indices_2_buf,
+            },
+            "OcclusionCull",
+        );
     }
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let static_hiz_available = ctx.frame_resources.static_hiz.is_some();
+        let batch = ctx.pass_resources.object_batch.get();
+        let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
+        self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
+
+        let static_hiz_available = ctx.pass_resources.static_hiz.is_some();
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
-            draw_count: ctx.scene.draw_calls.len() as u32,
+            draw_count,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
             static_hiz_available: if static_hiz_available { 1 } else { 0 },
             grid_resolution_x: self.static_hiz_grid_resolution[0],
@@ -364,7 +438,16 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
+        let Some(batch) = ctx.resources.object_batch.get() else {
+            return Ok(());
+        };
+        let Some(indirect_dispatch) = ctx.resources.indirect_dispatch.get() else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
@@ -374,12 +457,12 @@ impl RenderPass for OcclusionCullPass {
         // pass the frustum-culled list through unchanged instead of leaving it
         // stale/uninitialized.
         if ctx.frame_num == 0 {
-            let instance_count = ctx.scene.instance_count as u64;
+            let instance_count = batch.instance_count as u64;
             if instance_count > 0 {
                 unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
-                    ctx.scene.compacted_indices,
+                    indirect_dispatch.compacted_indices,
                     0,
-                    ctx.scene.compacted_indices_2,
+                    &self.compacted_indices_2_buf,
                     0,
                     instance_count * 4,
                 );
@@ -407,17 +490,17 @@ impl RenderPass for OcclusionCullPass {
             .unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.instances as *const _ as usize,
-            ctx.scene.draw_calls as *const _ as usize,
-            ctx.scene.indirect as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            batch.instances as *const _ as usize,
+            batch.draw_calls as *const _ as usize,
+            indirect_dispatch.indirect as *const _ as usize,
             hiz_view as *const _ as usize,
             static_hiz_view as *const _ as usize,
             static_hiz_sampler as *const _ as usize,
             &self.cull_stats_buf as *const _ as usize,
-            ctx.scene.compacted_indices as *const _ as usize,
-            ctx.scene.compacted_indices_2 as *const _ as usize,
-            ctx.scene.coordinate_spaces as *const _ as usize,
+            indirect_dispatch.compacted_indices as *const _ as usize,
+            &self.compacted_indices_2_buf as *const _ as usize,
+            coord_data.coordinate_spaces as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -426,7 +509,7 @@ impl RenderPass for OcclusionCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -434,11 +517,11 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                        resource: batch.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -450,7 +533,7 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.indirect.as_entire_binding(),
+                        resource: indirect_dispatch.indirect.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
@@ -466,15 +549,15 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                        resource: indirect_dispatch.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 11,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: self.compacted_indices_2_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 12,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

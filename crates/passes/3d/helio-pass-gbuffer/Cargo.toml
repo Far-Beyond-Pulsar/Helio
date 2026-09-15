@@ -5,10 +5,19 @@ edition = "2021"
 description = "Helio render pass: helio-pass-gbuffer"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
 helio      = { workspace = true }
 helio-core  = { workspace = true }
 libhelio  = { workspace = true }
+glam      = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 log       = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40" }
+pulsar_reflection = { workspace = true }
+serde_json = { workspace = true }

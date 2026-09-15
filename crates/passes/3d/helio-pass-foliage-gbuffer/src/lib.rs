@@ -47,7 +47,7 @@
 //!
 //! # Zero overhead when absent
 //!
-//! When `frame.foliage` is unwritten, [`FoliageGBufferPass::prepare`] early-returns
+//! When the SceneDB `foliage_types` column is absent, [`FoliageGBufferPass::prepare`] early-returns
 //! before any upload and [`FoliageGBufferPass::execute`] records nothing. It still
 //! returns `Some(descriptor)` from [`FoliageGBufferPass::render_pass_descriptor`]
 //! whenever the G-buffer views exist. That is not an oversight: a pass that
@@ -75,7 +75,8 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_foliage_core::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
+use helio_pass_foliage_place::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
+use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Interface contract with `FoliagePlacePass`
@@ -349,10 +350,10 @@ pub const MAX_FOLIAGE_TYPES: usize = 256;
 /// pass does anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoliageTables {
-    /// Number of entries in `FoliageFrameData::types`.
+    /// Number of entries in the SceneDB `foliage_types` projection.
     pub type_count: u32,
-    /// `FoliageFrameData::generation`. Wind must not advance it — see the field's docs
-    /// in `libhelio::frame`.
+    /// Content generation for the projected foliage type table. Wind does not
+    /// advance it because wind is a separate SceneDB projection.
     pub generation: u64,
 }
 
@@ -380,10 +381,9 @@ pub struct FoliageFrameDecision {
 ///
 /// Three cases:
 ///
-/// - `frame.foliage` unwritten ⇒ nothing at all. Not "upload an empty table", not
-///   "record four empty draws" — the publisher deliberately leaves the slot empty rather
-///   than writing an empty [`FoliageFrameData`](libhelio::frame::FoliageFrameData) for
-///   this reason.
+/// - The SceneDB `foliage_types` projection is absent ⇒ nothing at all. Not
+///   "upload an empty table", not "record four empty draws" — the pass leaves
+///   the projection absent for this reason.
 /// - Published but no types registered ⇒ still nothing: a type id indexes the descriptor
 ///   table directly, so an empty table means no blade can resolve.
 /// - Types registered ⇒ four draws, whatever the ring holds. An empty ring is four
@@ -414,7 +414,7 @@ pub fn decide_frame(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Upper distance bound of LOD `level`, with the same non-decreasing repair
-/// [`helio_foliage_core::select_blade_lod`] applies.
+/// [`helio_pass_foliage_place::select_blade_lod`] applies.
 ///
 /// The repair matters: a mis-authored ladder like `[8, 45, 20, 120]` must degrade to an
 /// empty L2 rather than let a band be skipped, or the scene pops straight from a
@@ -450,10 +450,11 @@ pub fn cross_fade_alpha(
     band: f32,
 ) -> f32 {
     let upper = lod_threshold(lod_distances, level, quality_scale);
-    let mut alpha = helio_foliage_core::lod_fade_alpha(distance, upper - band, upper);
+    let mut alpha = helio_pass_foliage_place::lod_fade_alpha(distance, upper - band, upper);
     if level > 0 {
         let lower = lod_threshold(lod_distances, level - 1, quality_scale);
-        alpha = alpha.min(1.0 - helio_foliage_core::lod_fade_alpha(distance, lower - band, lower));
+        alpha = alpha
+            .min(1.0 - helio_pass_foliage_place::lod_fade_alpha(distance, lower - band, lower));
     }
     alpha
 }
@@ -479,15 +480,11 @@ pub struct FoliageGBufferPass {
 
     // ── Pass-owned buffers ───────────────────────────────────────────────────
     globals_buf: wgpu::Buffer,
-    wind_buf: wgpu::Buffer,
-    /// This pass's own copy of the foliage type descriptor table.
-    ///
-    /// A copy rather than a handle to the placement pass's copy because the pinned
-    /// constructor contract carries four buffers and this is not one of them. It costs
-    /// 24 KiB and one upload per authoring edit — `generation` gates it, and wind
-    /// deliberately does not advance `generation`, so a steady-state frame uploads
-    /// nothing here.
-    type_buf: wgpu::Buffer,
+    /// Valid only when the SceneDB columns have not been registered yet. Authored
+    /// foliage never enters either placeholder; the bind group resolves the mirror's
+    /// `foliage_wind`/`foliage_types` buffers directly each frame.
+    placeholder_wind: wgpu::Buffer,
+    placeholder_type: wgpu::Buffer,
     lod_buf: wgpu::Buffer,
     lod_uniforms_written: bool,
 
@@ -501,7 +498,7 @@ pub struct FoliageGBufferPass {
     placeholder_sampler: wgpu::Sampler,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize, usize, usize)>,
     bind_group_1: wgpu::BindGroup,
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
@@ -569,18 +566,16 @@ impl FoliageGBufferPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let wind_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("FoliageGBuffer/Wind"),
+        let placeholder_wind = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FoliageGBuffer/WindPlaceholder"),
             size: std::mem::size_of::<libhelio::wind::GpuWind>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        // Fixed size: the type id is 8 bits, so 256 descriptors is the ceiling and the
-        // table can never need to grow. 24 KiB, allocated once.
-        let type_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("FoliageGBuffer/Types"),
-            size: (MAX_FOLIAGE_TYPES * std::mem::size_of::<GpuFoliageType>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        let placeholder_type = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FoliageGBuffer/TypesPlaceholder"),
+            size: std::mem::size_of::<GpuFoliageType>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let lod_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -666,7 +661,7 @@ impl FoliageGBufferPass {
                         binding: 2,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -793,8 +788,8 @@ impl FoliageGBufferPass {
             visible_blades,
             foliage_indirect,
             globals_buf,
-            wind_buf,
-            type_buf,
+            placeholder_wind,
+            placeholder_type,
             lod_buf,
             lod_uniforms_written: false,
             placeholder_view,
@@ -906,7 +901,7 @@ impl RenderPass for FoliageGBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::PassResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Returns `Some` whenever the G-buffer exists, regardless of whether there is
         // any foliage this frame. A pass that returns `None` on per-frame state can
@@ -1004,39 +999,22 @@ impl RenderPass for FoliageGBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let foliage = ctx.frame_resources.foliage.get();
-        self.decision = decide_frame(
-            foliage.map(|f| FoliageTables {
-                type_count: f.type_count,
-                generation: f.generation,
-            }),
-            self.uploaded_generation,
-        );
+        let type_handle = ctx.scene_buffers.get(BufferKey::of("foliage_types"));
+        let wind_handle = ctx.scene_buffers.get(BufferKey::of("foliage_wind"));
+        let tables = type_handle.map(|handle| FoliageTables {
+            type_count: (handle.buffer.size() / std::mem::size_of::<GpuFoliageType>() as u64)
+                .min(MAX_FOLIAGE_TYPES as u64) as u32,
+            generation: handle.epoch,
+        });
+        self.decision = decide_frame(tables, self.uploaded_generation);
         if !self.decision.enabled {
             // The zero-overhead path: not one buffer write. See `decide_frame`.
             return Ok(());
         }
-        // Unreachable by construction — `decide_frame` only enables on `Some` tables —
-        // but written as a fallthrough rather than an `expect`, because a panic inside
-        // `prepare` takes the whole frame down and there is nothing here worth that.
-        let Some(foliage) = foliage else {
+        if wind_handle.is_none() {
             return Ok(());
-        };
-
-        // ── Type table (authoring edits only) ─────────────────────────────────
-        if self.decision.upload_types {
-            let entry = std::mem::size_of::<GpuFoliageType>();
-            let wanted = (foliage.type_count as usize).min(MAX_FOLIAGE_TYPES) * entry;
-            // Truncate rather than trust: `FoliageFrameData` carries raw bytes and a
-            // separate count, so a publisher that got the cast wrong hands us a slice
-            // shorter than the count claims. Reading past it would be a CPU-side
-            // out-of-bounds; drawing the types that did arrive is recoverable.
-            let bytes = &foliage.types[..wanted.min(foliage.types.len())];
-            if !bytes.is_empty() {
-                ctx.write_buffer(&self.type_buf, 0, bytes);
-            }
-            self.uploaded_generation = Some(foliage.generation);
         }
+        self.uploaded_generation = tables.map(|t| t.generation);
 
         // ── Per-LOD constants (once) ──────────────────────────────────────────
         if !self.lod_uniforms_written {
@@ -1054,16 +1032,13 @@ impl RenderPass for FoliageGBufferPass {
             self.lod_uniforms_written = true;
         }
 
-        // ── Wind (every frame — both timestamps move) ─────────────────────────
-        ctx.write_buffer(&self.wind_buf, 0, bytemuck::bytes_of(&foliage.wind));
-
         // ── Globals ───────────────────────────────────────────────────────────
         // Three conditions, all required. The field placement is the one that is easy to
         // forget: a published view with no published origin would bend every blade in
         // the world against a 64 m field sitting at the world origin, which looks like a
         // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.frame_resources.foliage_interaction.is_some()
-            && ctx.frame_resources.foliage_interaction_sampler.is_some()
+        let interaction_valid = ctx.pass_resources.foliage_interaction.is_some()
+            && ctx.pass_resources.foliage_interaction_sampler.is_some()
             && self.interaction_field_published;
         let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {
@@ -1144,10 +1119,22 @@ impl RenderPass for FoliageGBufferPass {
                 .foliage_interaction_sampler
                 .get()
                 .unwrap_or(&self.placeholder_sampler);
+            let wind_buffer = ctx
+                .scene_buffers
+                .get(BufferKey::of("foliage_wind"))
+                .map(|h| &h.buffer)
+                .unwrap_or(&self.placeholder_wind);
+            let type_buffer = ctx
+                .scene_buffers
+                .get(BufferKey::of("foliage_types"))
+                .map(|h| &h.buffer)
+                .unwrap_or(&self.placeholder_type);
             let key = (
-                ctx.scene.camera as *const _ as usize,
+                ctx.camera as *const _ as usize,
                 interaction_view as *const wgpu::TextureView as usize,
                 interaction_sampler as *const wgpu::Sampler as usize,
+                wind_buffer as *const _ as usize,
+                type_buffer as *const _ as usize,
             );
             let rebuilt = if self.bind_group_0_key != Some(key) {
                 log::debug!("FoliageGBuffer: rebuilding bind group 0");
@@ -1157,7 +1144,7 @@ impl RenderPass for FoliageGBufferPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -1165,11 +1152,11 @@ impl RenderPass for FoliageGBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: self.wind_buf.as_entire_binding(),
+                            resource: wind_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: self.type_buf.as_entire_binding(),
+                            resource: type_buffer.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
