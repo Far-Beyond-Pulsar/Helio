@@ -28,6 +28,7 @@ pub fn new_scene_db_with_gpu_mirror(
     let gpu_store = Arc::new(pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg));
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
+    scenedb_inspector_agent::install_world(&mut scene_db.world);
     scene_db
 }
 
