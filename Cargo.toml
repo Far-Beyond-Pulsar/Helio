@@ -69,6 +69,7 @@ serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f8ebfa44096451153fa238bba3bd24a00419e271", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f8ebfa44096451153fa238bba3bd24a00419e271" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's

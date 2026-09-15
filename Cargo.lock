@@ -2032,6 +2032,10 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2044,6 +2048,7 @@ dependencies = [
  "libhelio",
  "log",
  "pollster 0.4.0",
+ "pulsar_scenedb",
  "wgpu",
 ]
 
