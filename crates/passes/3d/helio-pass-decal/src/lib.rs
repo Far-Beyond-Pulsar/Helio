@@ -3,7 +3,9 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
 
 pub mod components;
+pub mod gpu_types;
 pub use components::DecalComponent;
+pub use gpu_types::*;
 
 /// Fixed capacity for the `"decals"` SceneDB buffer, matching
 /// `helio_pass_forward_lit::MAX_LIGHTS`'s reasoning exactly: kept equal to
@@ -25,7 +27,7 @@ struct DecalGlobals {
 }
 
 pub struct DecalPass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     collect_pipeline: wgpu::ComputePipeline,
     apply_pipeline: wgpu::ComputePipeline,
     bgl_collect: wgpu::BindGroupLayout,
@@ -64,7 +66,7 @@ impl DecalPass {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let collect_src = decal_collect_source(material_binding);
         let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Collect"),
@@ -76,7 +78,7 @@ impl DecalPass {
         });
         let fallback_decals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Decal Fallback Decals"),
-            size: std::mem::size_of::<libhelio::GpuDecal>() as u64,
+            size: std::mem::size_of::<crate::GpuDecal>() as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -274,7 +276,7 @@ fn make_temp(
 /// rewritten to individual bindings (baseline WebGPU has no `binding_array`), and
 /// elsewhere the declared length is resized to match the selected material tier — the BGL and
 /// the shader must agree exactly or `create_bind_group` fails validation.
-fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> String {
+fn decal_collect_source(material_binding: helio_mats::MaterialBindingConfig) -> String {
     let src = include_str!("../shaders/decal_collect.wgsl");
     if material_binding.uses_binding_arrays() {
         src.replace(
@@ -289,14 +291,14 @@ fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> St
             &format!("binding_array<sampler, {}>", material_binding.max_textures),
         )
     } else {
-        libhelio::shader::apply_webgpu_decal_bindings(src, material_binding.max_textures)
+        helio_mats::apply_webgpu_decal_bindings(src, material_binding.max_textures)
     }
 }
 
 /// BGL for group 1: the scene's bindless texture table, shared with the GBuffer pass.
 fn create_decal_texture_bgl(
     device: &wgpu::Device,
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroupLayout {
     let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
     material_binding.append_layout_entries(&mut entries, 0, wgpu::ShaderStages::COMPUTE);
@@ -356,12 +358,12 @@ impl RenderPass for DecalPass {
         builder.read("hiz");
         builder.read("material_textures");
     }
-    fn publish<'a>(&'a self, _: &mut libhelio::PassResources<'a>) {}
+    fn publish<'a>(&self, _: &mut helio_core::ResourceRegistry<'a>) {}
     fn render_pass_descriptor<'a>(
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::PassResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -392,17 +394,17 @@ impl RenderPass for DecalPass {
         if self.decal_count == 0 {
             return Ok(());
         }
-        let gb = match ctx.resources.gbuffer.read(self.name()) {
+        let gb = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), self.name()) {
             Some(g) => g,
             None => return Ok(()),
         };
-        let depth_view = match ctx.resources.hiz.read(self.name()) {
+        let depth_view = match ctx.resources.read(helio_core::ResourceKey::new("hiz"), self.name()) {
             Some(v) => v,
             None => return Ok(()),
         };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
-        let material_textures = match ctx.resources.material_textures.read(self.name()) {
+        let material_textures = match ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), self.name()) {
             Some(m) => m,
             None => return Ok(()),
         };
@@ -423,9 +425,9 @@ impl RenderPass for DecalPass {
             camera_ptr,
             decal_ptr,
             depth_view as *const _ as usize,
-            gb.albedo as *const _ as usize,
-            gb.normal as *const _ as usize,
-            gb.orm as *const _ as usize,
+            gb.views[0] as *const _ as usize,
+            gb.views[1] as *const _ as usize,
+            gb.views[2] as *const _ as usize,
             u64::from(self.last_w) | (u64::from(self.last_h) << 32),
         );
         if self.bg_collect_key != Some(ck) || self.bg_collect.is_none() {
@@ -437,10 +439,10 @@ impl RenderPass for DecalPass {
                     bind_buf(1, &self.globals_buf),
                     bind_buf(2, decals_buf),
                     bind_tex(3, depth_view),
-                    bind_tex(4, gb.albedo),
-                    bind_tex(5, gb.normal),
-                    bind_tex(6, gb.orm),
-                    bind_tex(7, gb.emissive),
+                    bind_tex(4, gb.views[0]),
+                    bind_tex(5, gb.views[1]),
+                    bind_tex(6, gb.views[2]),
+                    bind_tex(7, gb.views[3]),
                     bind_tex(8, ta),
                     bind_tex(9, tn),
                     bind_tex(10, to),
@@ -495,10 +497,10 @@ impl RenderPass for DecalPass {
                     bind_tex(4, tn),
                     bind_tex(5, to),
                     bind_tex(6, te),
-                    bind_tex(7, gb.albedo),
-                    bind_tex(8, gb.normal),
-                    bind_tex(9, gb.orm),
-                    bind_tex(10, gb.emissive),
+                    bind_tex(7, gb.views[0]),
+                    bind_tex(8, gb.views[1]),
+                    bind_tex(9, gb.views[2]),
+                    bind_tex(10, gb.views[3]),
                 ],
             }));
             self.bg_apply_key = Some(ak);
@@ -530,8 +532,8 @@ impl RenderPass for DecalPass {
 fn build_texture_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    textures: &libhelio::MaterialTextureBindings,
-    material_binding: libhelio::MaterialBindingConfig,
+    textures: &helio_mats::MaterialTextureBindings,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
     material_binding.append_bind_group_entries(
@@ -574,9 +576,9 @@ mod tests {
     #[test]
     fn webgpu_fixup_rewrites_every_binding_array_in_the_real_shader() {
         let src = include_str!("../shaders/decal_collect.wgsl");
-        let fixed = libhelio::shader::apply_webgpu_decal_bindings(
+        let fixed = helio_mats::apply_webgpu_decal_bindings(
             src,
-            libhelio::MAX_MATERIAL_TEXTURES.min(16),
+            helio_mats::MAX_MATERIAL_TEXTURES.min(16),
         );
 
         assert!(
@@ -596,7 +598,7 @@ mod tests {
     #[test]
     fn collect_shader_translates_portable_depth_to_gles() {
         let src = include_str!("../shaders/decal_collect.wgsl");
-        let src = libhelio::shader::apply_webgpu_decal_bindings(src, 1);
+        let src = helio_mats::apply_webgpu_decal_bindings(src, 1);
         let module = naga::front::wgsl::parse_str(&src)
             .expect("Decal Collect WGSL must parse after baseline binding expansion");
         let info = naga::valid::Validator::new(
@@ -643,7 +645,7 @@ mod tests {
         for adapter in &adapters {
             let info = adapter.get_info();
             let backend = format!("{:?}", info.backend);
-            let required_features = adapter.features() & libhelio::BINDLESS_MATERIAL_FEATURES;
+            let required_features = adapter.features() & helio_mats::BINDLESS_MATERIAL_FEATURES;
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Decal Portability Test Device"),

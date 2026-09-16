@@ -27,7 +27,7 @@
 //! placement. Deferred, not overlooked.
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use libhelio::GpuWaterVolume;
+use helio_pass_water_sim::GpuWaterVolume;
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner,
 };

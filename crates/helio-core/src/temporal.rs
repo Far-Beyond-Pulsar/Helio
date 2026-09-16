@@ -1,4 +1,7 @@
 //! Shared temporal sampling conventions for raster passes and ray tracers.
+//!
+//! Generic: pure math on camera jitter/origin-rebasing, no pass or
+//! scene-object knowledge.
 
 /// Express a previous view-projection in a new floating origin. `origin_shift`
 /// is new origin minus old origin; current local points therefore need this

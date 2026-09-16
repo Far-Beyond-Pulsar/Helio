@@ -1,9 +1,11 @@
+pub mod gpu_types;
 pub mod rendering;
 
+pub use gpu_types::*;
 pub use rendering::VirtualGeometryPass;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::GpuInstanceData;
+use helio_pass_object_batch::GpuInstanceData;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Constants
@@ -157,7 +159,7 @@ impl InstanceCullData {
     const CULL_FLAG_OPAQUE: u32 = 1 << 1;
 
     pub(crate) fn from_instance(instance: &GpuInstanceData, material_flags: u32) -> Self {
-        const FLAG_ALPHA_TEST: u32 = 1 << 2; // libhelio::FLAG_ALPHA_TEST
+        const FLAG_ALPHA_TEST: u32 = 1 << 2; // helio_mats::FLAG_ALPHA_TEST
         let model = &instance.model;
         let scale_x = (model[0] * model[0] + model[1] * model[1] + model[2] * model[2]).sqrt();
         let scale_y = (model[4] * model[4] + model[5] * model[5] + model[6] * model[6]).sqrt();
@@ -314,7 +316,7 @@ mod tests {
         select_object_lod, CullUniforms, InstanceCullData, LodQuality, VirtualGeometryBudget,
         VirtualGeometryDebugStats, DEFAULT_MAX_PUBLISHED_MESHLETS,
     };
-    use helio_core::GpuInstanceData;
+    use helio_pass_object_batch::GpuInstanceData;
 
     fn instance_with_model(model: [f32; 16]) -> GpuInstanceData {
         GpuInstanceData {

@@ -32,10 +32,21 @@
 //! untouched, so unmigrated passes that declare their own `Camera` keep working
 //! (and would otherwise collide with the prelude's).
 //!
+//! # Pass-owned snippets
+//!
+//! [`PRELUDE`] is the one snippet `helio-core` owns directly — every pass
+//! shares exactly one camera/depth convention, so it names no specific pass.
+//! Anything else a pass wants pre-pended by marker (Hi-Z traversal, a
+//! material PBR evaluation library, a foliage wind model, ...) is declared as
+//! a [`ShaderSnippet`] by the pass crate that owns that content and passed
+//! explicitly to [`resolve_with`]/[`module_with`] — `helio-core` never
+//! hardcodes a specific snippet's name or source, only the generic
+//! marker-plus-text shape.
+//!
 //! # Caveat
 //!
 //! Prepending shifts line numbers, so naga diagnostics for a prelude-using
-//! shader point into the combined source, offset by [`PRELUDE_LINES`]. That is
+//! shader point into the combined source, offset by [`expanded_lines`]. That is
 //! the price of concatenation over a real preprocessor; keeping the prelude small
 //! and stable keeps it manageable.
 
@@ -52,99 +63,86 @@ pub use reflection::{
 };
 
 /// The canonical camera struct and depth/G-buffer conventions.
+///
+/// The one snippet `helio-core` owns directly: every pass in the graph
+/// shares exactly one camera/depth-reconstruction convention, so this names
+/// no specific pass (like `PassContext::camera` being a first-class field).
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
 
 /// Marker opting a shader into the prelude. Must appear in the source.
 pub const MARKER: &str = "//!use helio_prelude";
 
-/// Hi-Z screen-space ray marching, shared by SSR and water.
+/// A pass-declared shader snippet: text pre-pended to a shader's source when
+/// the shader contains `marker` as a WGSL comment.
 ///
-/// Separate from [`PRELUDE`] because it is only wanted by the two passes that
-/// march the pyramid, and prepending it everywhere would push every other
-/// shader's diagnostics further out of alignment for nothing.
-pub const HIZ: &str = include_str!("hiz_trace.wgsl");
+/// Declared as a `const` by whichever pass crate owns the snippet's content
+/// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-pass-gbuffer`'s PBR
+/// evaluation library, `helio-pass-foliage-place`'s wind model) and passed
+/// explicitly to [`resolve_with`]/[`module_with`] by the pass that wants it.
+/// `helio-core` never declares one itself and never hardcodes a marker or
+/// source string belonging to a specific domain — only this generic shape.
+#[derive(Clone, Copy)]
+pub struct ShaderSnippet {
+    /// WGSL comment marker that must appear in a shader's source to opt in.
+    pub marker: &'static str,
+    /// Text pre-pended to the shader when `marker` is present.
+    pub source: &'static str,
+}
 
-/// Marker opting a shader into the Hi-Z traversal. Must appear in the source.
-pub const HIZ_MARKER: &str = "//!use helio_hiz";
+impl ShaderSnippet {
+    pub const fn new(marker: &'static str, source: &'static str) -> Self {
+        Self { marker, source }
+    }
 
-/// The three-band foliage wind model and the `Wind` uniform layout.
-///
-/// Separate from [`PRELUDE`] for the same reason as [`HIZ`]: only the foliage
-/// passes want it, and every shader that does not would pay for it in shifted
-/// diagnostics. Shared rather than per-pass because grass geometry, tree WPO and
-/// impostor cards draw the same plant inside a LOD cross-fade band and have to
-/// evaluate byte-identical wind to stay in phase.
-/// Shared PBR/BRDF evaluation — `fresnel_schlick`, the distribution and geometry terms.
-///
-/// Lives in `libhelio/shaders/` rather than here because it is the GPU half of the
-/// material model `libhelio` already owns on the CPU side.
-///
-/// Registering a module here is the step that is easy to miss and gives no warning when
-/// missed: the `//!use` marker is an ordinary WGSL comment, so an unregistered module
-/// leaves the marker inert, the source passes through untouched, and the shader fails at
-/// `create_shader_module` with "no definition in scope" for a function that plainly
-/// exists. That is exactly how `deferred_lighting.wgsl` and `forward_lit.wgsl` came to be
-/// uncompilable — which on this path takes out lighting entirely.
-pub const PBR: &str = include_str!("../../../libhelio/shaders/pbr_eval.wgsl");
-
-/// Marker opting a shader into [`PBR`]. Must appear in the source.
-pub const PBR_MARKER: &str = "//!use pbr_eval";
-
-pub const WIND: &str = include_str!("foliage_wind.wgsl");
-
-/// Marker opting a shader into the foliage wind model. Must appear in the source.
-pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
+    fn used_by(&self, source: &str) -> bool {
+        source.contains(self.marker)
+    }
+}
 
 /// Returns `true` if `source` opts into the prelude.
 pub fn uses_prelude(source: &str) -> bool {
     source.contains(MARKER)
 }
 
-/// Returns `true` if `source` opts into the Hi-Z traversal.
-pub fn uses_hiz(source: &str) -> bool {
-    source.contains(HIZ_MARKER)
-}
-
-/// Returns `true` if `source` opts into the foliage wind model.
-pub fn uses_wind(source: &str) -> bool {
-    source.contains(WIND_MARKER)
-}
-
-/// Returns `true` if `source` opts into the PBR evaluation module.
-pub fn uses_pbr(source: &str) -> bool {
-    source.contains(PBR_MARKER)
-}
-
-/// Lines prepended ahead of `source`, for offsetting diagnostics back to the
-/// original file. Depends on which markers the source opts into.
+/// Lines prepended ahead of `source` by [`resolve`] (prelude only).
 pub fn expanded_lines(source: &str) -> usize {
+    expanded_lines_with(source, &[])
+}
+
+/// Lines prepended ahead of `source` by [`resolve_with`], for offsetting
+/// diagnostics back to the original file. Depends on which of `snippets`
+/// (plus the prelude) the source opts into.
+pub fn expanded_lines_with(source: &str, snippets: &[ShaderSnippet]) -> usize {
     let mut lines = 0;
     if uses_prelude(source) {
         lines += PRELUDE.lines().count() + 1;
     }
-    if uses_hiz(source) {
-        lines += HIZ.lines().count() + 1;
-    }
-    if uses_pbr(source) {
-        lines += PBR.lines().count() + 1;
-    }
-    if uses_wind(source) {
-        lines += WIND.lines().count() + 1;
+    for snippet in snippets {
+        if snippet.used_by(source) {
+            lines += snippet.source.lines().count() + 1;
+        }
     }
     lines
 }
 
-/// Expands a shader source to what the GPU actually compiles.
-///
-/// The single point of truth for prelude expansion: [`module`] and the
-/// `wgsl_validation` test both go through here, so the test validates exactly
-/// what the runtime builds rather than an approximation of it.
+/// Expands a shader source to what the GPU actually compiles, using only the
+/// generic prelude. Equivalent to `resolve_with(source, &[])`.
 pub fn resolve(source: &str) -> Cow<'_, str> {
+    resolve_with(source, &[])
+}
+
+/// Expands a shader source, prepending the prelude (if opted into) and every
+/// snippet in `snippets` whose marker the source contains, in the order
+/// given.
+///
+/// The single point of truth for shader expansion: [`module_with`] and each
+/// pass's own `wgsl_validation`-style tests should go through here, so the
+/// test validates exactly what the runtime builds rather than an
+/// approximation of it.
+pub fn resolve_with<'a>(source: &'a str, snippets: &[ShaderSnippet]) -> Cow<'a, str> {
     let prelude = uses_prelude(source);
-    let hiz = uses_hiz(source);
-    let pbr = uses_pbr(source);
-    let wind = uses_wind(source);
-    if !prelude && !hiz && !pbr && !wind {
+    let active: Vec<&ShaderSnippet> = snippets.iter().filter(|s| s.used_by(source)).collect();
+    if !prelude && active.is_empty() {
         return Cow::Borrowed(source);
     }
 
@@ -159,8 +157,8 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
     //
     // So directives are hoisted out of the source and re-emitted first. Each hoisted line
     // is replaced by a blank line rather than deleted, which keeps every later line of the
-    // original file at its original index and so keeps `expanded_lines` a correct
-    // diagnostic offset.
+    // original file at its original index and so keeps `expanded_lines`/`expanded_lines_with`
+    // a correct diagnostic offset.
     // Only rewritten when a directive is actually present, so every other shader is
     // concatenated byte-for-byte as before.
     let is_directive = |line: &str| line.starts_with("enable ") || line.starts_with("requires ");
@@ -186,37 +184,33 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
         out.push_str(PRELUDE);
         out.push('\n');
     }
-    // After the prelude, so the traversal may lean on it if it ever needs to.
-    if hiz {
-        out.push_str(HIZ);
-        out.push('\n');
-    }
-    // After the prelude: the BRDF terms take view/normal vectors the prelude's
-    // conventions define, and a lighting shader opting into both wants them in
-    // that order.
-    if pbr {
-        out.push_str(PBR);
-        out.push('\n');
-    }
-    // Last. Wind depends on neither of the above today, so the only thing the
-    // order decides is whose diagnostics move: appending keeps the prelude and
-    // the Hi-Z traversal at the same resolved line numbers whether or not a
-    // shader also opts into wind, and leaves room for wind to lean on the
-    // prelude (a foliage shader wanting `helio_view_depth` for a distance fade
-    // is the obvious future case) without another reshuffle.
-    if wind {
-        out.push_str(WIND);
+    // Snippets follow the prelude, in caller-supplied order — the order a
+    // pass lists its own snippets in is that pass's concern, not the core's.
+    for snippet in active {
+        out.push_str(snippet.source);
         out.push('\n');
     }
     out.push_str(&body);
     Cow::Owned(out)
 }
 
-/// Creates a shader module, expanding the prelude if the source opts in.
+/// Creates a shader module, expanding only the generic prelude if the source
+/// opts in. Equivalent to `module_with(device, label, source, &[])`.
 pub fn module(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
+    module_with(device, label, source, &[])
+}
+
+/// Creates a shader module, expanding the prelude and any of `snippets` the
+/// source opts into.
+pub fn module_with(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+    snippets: &[ShaderSnippet],
+) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(resolve(source)),
+        source: wgpu::ShaderSource::Wgsl(resolve_with(source, snippets)),
     })
 }
 
@@ -259,19 +253,32 @@ mod tests {
     fn expanded_line_count_matches_what_resolve_prepends() {
         // Every marker, independently and in every combination — the reported
         // offset is what maps a diagnostic back to the file the reader will
-        // open, so it has to track whatever `resolve` actually prepended.
+        // open, so it has to track whatever `resolve`/`resolve_with` actually
+        // prepended.
+        // Trailing newlines match real `include_str!`-sourced snippets (every
+        // `.wgsl` file on disk ends with one): `push_str(source); push('\n')`
+        // then produces a blank-line separator before the body, which is
+        // what `expanded_lines_with`'s `+ 1` accounts for.
+        const A: ShaderSnippet =
+            ShaderSnippet::new("//!use test_a", "// snippet a\n// two lines\n");
+        const B: ShaderSnippet = ShaderSnippet::new("//!use test_b", "// snippet b\n");
+        let snippets = [A, B];
         for src in [
             "//!use helio_prelude\nfoo",
-            "//!use helio_hiz\nfoo",
-            "//!use helio_foliage_wind\nfoo",
-            "//!use helio_prelude\n//!use helio_hiz\nfoo",
-            "//!use helio_prelude\n//!use helio_foliage_wind\nfoo",
-            "//!use helio_hiz\n//!use helio_foliage_wind\nfoo",
-            "//!use helio_prelude\n//!use helio_hiz\n//!use helio_foliage_wind\nfoo",
+            "//!use test_a\nfoo",
+            "//!use test_b\nfoo",
+            "//!use helio_prelude\n//!use test_a\nfoo",
+            "//!use helio_prelude\n//!use test_b\nfoo",
+            "//!use test_a\n//!use test_b\nfoo",
+            "//!use helio_prelude\n//!use test_a\n//!use test_b\nfoo",
         ] {
-            let resolved = resolve(src);
+            let resolved = resolve_with(src, &snippets);
             let offset = resolved.lines().count() - src.lines().count();
-            assert_eq!(offset, expanded_lines(src), "offset wrong for {src:?}");
+            assert_eq!(
+                offset,
+                expanded_lines_with(src, &snippets),
+                "offset wrong for {src:?}"
+            );
         }
     }
 
@@ -283,65 +290,20 @@ mod tests {
     }
 
     #[test]
-    fn hiz_declares_the_shared_traversal() {
-        // Same reasoning as the prelude: renaming these breaks SSR and water at
-        // runtime, so pin them.
-        for symbol in ["struct HelioHizHit", "fn helio_hiz_march"] {
-            assert!(HIZ.contains(symbol), "hiz include is missing {symbol}");
-        }
+    fn unmatched_snippets_are_not_prepended() {
+        const UNUSED: ShaderSnippet = ShaderSnippet::new("//!use never_used", "// never");
+        let src = "@compute @workgroup_size(1) fn main() {}";
+        assert!(matches!(resolve_with(src, &[UNUSED]), Cow::Borrowed(_)));
     }
 
     #[test]
-    fn wind_declares_the_shared_model() {
-        // Same reasoning as the prelude and the Hi-Z include: a rename here
-        // breaks the grass, tree-WPO and impostor shaders at `create_shader_module`
-        // time, i.e. only on a machine with a GPU and only once the pass is
-        // actually built. Pin the names so it surfaces in `cargo test` instead.
-        for symbol in [
-            "struct Wind",
-            "fn helio_wind_sway",
-            "fn helio_wind_flutter",
-            "fn helio_wind_jitter",
-            "fn helio_wind_gust",
-            "fn helio_wind_offset",
-            "fn helio_wind_noise",
-            "fn helio_wind_hash_u32",
-        ] {
-            assert!(WIND.contains(symbol), "wind include is missing {symbol}");
-        }
-    }
-
-    #[test]
-    fn wind_keeps_time_an_explicit_parameter() {
-        // The composed offset must never read the clock out of the uniform: the
-        // caller has to be able to ask for `t - dt` to build `prev_clip_position`,
-        // and a shader that reads `wind.time_prev_time.x` internally silently
-        // reports zero foliage velocity and hands TAA a full-screen smear.
-        let offset = WIND
-            .split_once("fn helio_wind_offset")
-            .expect("wind include should define helio_wind_offset")
-            .1;
-        assert!(
-            offset.contains("time: f32,"),
-            "helio_wind_offset must take `time` explicitly"
-        );
-        assert!(
-            !offset.contains("wind.time_prev_time"),
-            "helio_wind_offset must not read the clock out of the uniform"
-        );
-    }
-
-    #[test]
-    fn wind_declares_no_bindings_of_its_own() {
-        // The including shader owns group/binding, exactly as it does for
-        // `camera`. A binding declared here would collide with whatever the
-        // foliage passes already have bound and could not be relocated.
-        for line in WIND.lines() {
-            let line = line.trim_start();
-            assert!(
-                !line.starts_with("@group"),
-                "wind include must not declare bindings: {line}"
-            );
-        }
+    fn snippets_are_appended_in_the_order_given() {
+        const FIRST: ShaderSnippet = ShaderSnippet::new("//!use first", "FIRST");
+        const SECOND: ShaderSnippet = ShaderSnippet::new("//!use second", "SECOND");
+        let src = "//!use first\n//!use second\nbody";
+        let resolved = resolve_with(src, &[FIRST, SECOND]);
+        let first_pos = resolved.find("FIRST").unwrap();
+        let second_pos = resolved.find("SECOND").unwrap();
+        assert!(first_pos < second_pos);
     }
 }

@@ -1,0 +1,8 @@
+[package]
+name = "helio-bake-types"
+version = "0.1.0"
+edition = "2021"
+description = "Baked-lighting PVS data shape shared between helio (host) and helio-bake, without helio-bake's heavyweight nebula dependency"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

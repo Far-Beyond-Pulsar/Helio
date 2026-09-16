@@ -104,13 +104,13 @@ impl PostProcessVolumeBlendPass {
 
         let blend_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Blend Output"),
-            size: std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64,
+            size: std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let fallback_pp_volumes = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Fallback Volumes"),
-            size: std::mem::size_of::<libhelio::GpuPostProcessVolume>() as u64,
+            size: std::mem::size_of::<crate::GpuPostProcessVolume>() as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -137,7 +137,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -159,7 +159,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             return Ok(());
         }
 
-        let Some(postprocess_buf) = ctx.resources.postprocess_uniforms.get() else {
+        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
         let pp_volumes_buf = ctx
@@ -220,7 +220,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             0,
             postprocess_buf,
             0,
-            std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64,
+            std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
         );
 
         Ok(())

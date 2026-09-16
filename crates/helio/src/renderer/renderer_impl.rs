@@ -27,7 +27,7 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
-use crate::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
+use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 use crate::camera::Camera;
 
 use super::config::GiConfig;
@@ -94,7 +94,7 @@ pub struct Renderer {
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     pub(crate) gi_config: GiConfig,
-    pub(crate) shadow_quality: libhelio::ShadowQuality,
+    pub(crate) shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub(crate) shadow_atlas_size: u32,
     pub(crate) shadow_face_capacity: u32,
     /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
@@ -407,7 +407,7 @@ impl Renderer {
     /// answer "is anything actually being rasterized"). Every other
     /// render-graph buffer (G-buffer, shadow atlas, etc.) is privately
     /// owned inside its own pass crate and only reachable as a
-    /// `wgpu::TextureView` via `PassResources` -- no path back to the
+    /// `wgpu::TextureView` via `ResourceRegistry` -- no path back to the
     /// owning `Texture` a GPU readback needs -- so this is deliberately
     /// the one buffer `Renderer` itself still owns directly, not a general
     /// "every buffer" debug API.
@@ -457,7 +457,7 @@ impl Renderer {
         self.gi_config
     }
 
-    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality) {
+    pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality) {
         self.shadow_quality = quality;
     }
 
@@ -508,7 +508,7 @@ impl Renderer {
         self.editor_mode
     }
 
-    pub fn shadow_quality(&self) -> libhelio::ShadowQuality {
+    pub fn shadow_quality(&self) -> helio_pass_shadow_matrix::ShadowQuality {
         self.shadow_quality
     }
 
@@ -714,7 +714,7 @@ impl Renderer {
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
             tsr_quality: self.tsr_quality,
-            hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
             enable_foliage: self.enable_foliage,

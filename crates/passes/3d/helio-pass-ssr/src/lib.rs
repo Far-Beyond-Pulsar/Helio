@@ -64,10 +64,11 @@ impl SsrPass {
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 
-        let shader = helio_core::shader::module(
+        let shader = helio_core::shader::module_with(
             device,
             "SSR Trace Shader",
             include_str!("../shaders/ssr_trace.wgsl"),
+            &[helio_pass_hiz::HIZ_SNIPPET],
         );
 
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -208,7 +209,7 @@ impl RenderPass for SsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -223,13 +224,13 @@ impl RenderPass for SsrPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.resources.gbuffer.read("SsrPass") {
+        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "SsrPass") {
             Some(g) => g,
             None => return Ok(()),
         };
 
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.resources.pre_aa.get() {
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -244,8 +245,8 @@ impl RenderPass for SsrPass {
 
         // ── BG1: always bound ───────────────────────────────────────────
         let key = (
-            gbuffer.normal as *const _ as usize,
-            gbuffer.orm as *const _ as usize,
+            gbuffer.views[1] as *const _ as usize,
+            gbuffer.views[2] as *const _ as usize,
             depth_view as *const _ as usize,
             pre_aa_view as *const _ as usize,
             hiz_min_view as *const _ as usize,
@@ -257,8 +258,8 @@ impl RenderPass for SsrPass {
                 label: Some("SSR BG1"),
                 layout: &self.bgl_1,
                 entries: &[
-                    texture_view_entry(0, gbuffer.normal),
-                    texture_view_entry(1, gbuffer.orm),
+                    texture_view_entry(0, gbuffer.views[1]),
+                    texture_view_entry(1, gbuffer.views[2]),
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(depth_view),
@@ -280,11 +281,11 @@ impl RenderPass for SsrPass {
 
         // ── Decide between default and RT path ──────────────────────────
         if self.use_rt {
-            let environment = ctx.resources.render_environment.read("SsrPass");
+            let environment = ctx.resources.read::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment"), "SsrPass");
             let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
-                let rc_view = ctx.resources.rc_view.get();
+                let rc_view = ctx.resources.get(helio_core::ResourceKey::new("rc_view"));
 
                 let rt_key = (
                     tlas_binding as *const _ as usize,
@@ -343,7 +344,7 @@ impl RenderPass for SsrPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
+    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 }
 
 fn buffer_uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

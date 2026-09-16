@@ -1,10 +1,23 @@
 //! Mechanical backstop for Helio's pass-isolation rule.
 //!
 //! The registry and graph APIs are intentionally open-ended: adding a pass
-//! must not require adding a resource-name literal to `helio-core` or
-//! `libhelio`. This test is deliberately small and explicit. It catches the
-//! concrete regressions identified by the 3.0 audit without pretending that a
+//! must not require adding a resource-name literal to `helio-core`. This
+//! test is deliberately small and explicit. It catches the concrete
+//! regressions identified by the 3.0 audit without pretending that a
 //! source-text heuristic can prove all architectural properties.
+//!
+//! The stronger, AST-based guard (no pass-specific symbol, no unapproved
+//! data shape, no `helio-pass-*` production dependency, anywhere in
+//! `helio-core`) is `scripts/core-boundary` -- run it via
+//! `cargo run --manifest-path scripts/core-boundary/Cargo.toml` from the
+//! Helio workspace root. `libhelio` (the historical second "core" crate this
+//! rule used to also cover) has been fully removed: every type it held was
+//! either genuinely generic (moved into `helio-core` itself: the resource
+//! registry, camera, temporal jitter math, `Movability`, generic asset
+//! types) or pass-specific (moved into its owning `helio-pass-*` crate, or
+//! into `helio-mats`/`helio-bake-types` for the handful of types shared by
+//! several passes without a single natural owner -- see
+//! `docs/helio_3_0_migration.md` for the full per-type ownership table).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,10 +59,7 @@ fn string_literals(source: &str) -> impl Iterator<Item = &str> {
 #[test]
 fn core_crates_do_not_name_audited_pass_resources() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let roots = [
-        manifest_dir.join("src"),
-        manifest_dir.join("../libhelio/src"),
-    ];
+    let roots = [manifest_dir.join("src")];
     let mut files = Vec::new();
     for root in roots {
         source_files(&root, &mut files);

@@ -1,0 +1,13 @@
+[package]
+name = "helio-mats"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "Shared materials/shading contract: GPU material layout, binding-mode selection, PBR evaluation, and the Radiant material-template system"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+log = { workspace = true }

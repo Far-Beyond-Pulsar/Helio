@@ -125,7 +125,7 @@ impl RenderPass for DemoPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -137,7 +137,7 @@ impl RenderPass for DemoPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
         pool: &'a GraphTexturePool,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let intent = ColorAttachmentIntent::new(

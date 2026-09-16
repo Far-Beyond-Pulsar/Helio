@@ -77,7 +77,7 @@ impl RenderGraph {
     fn create_reflected_groups(
         &self,
         pass_index: usize,
-        registry: &libhelio::ResourceRegistry<'_>,
+        registry: &crate::ResourceRegistry<'_>,
     ) -> Result<Vec<wgpu::BindGroup>> {
         let Some(pipeline) = self
             .reflected_pipelines
@@ -613,33 +613,30 @@ impl RenderGraph {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
     ) -> Result<wgpu::SubmissionIndex> {
-        let pass_resources = libhelio::PassResources::empty();
-        let mut registry = libhelio::ResourceRegistry::empty();
-        self.execute_with_resources(scene, target, depth, &pass_resources, &mut registry)
+        let mut registry = crate::ResourceRegistry::empty();
+        self.execute_with_resources(scene, target, depth, &mut registry)
     }
 
-    pub fn execute_with_pass_resources(
+    pub fn execute_with_registry(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        pass_resources: &libhelio::PassResources<'_>,
+        registry: &mut crate::ResourceRegistry<'_>,
     ) -> Result<wgpu::SubmissionIndex> {
-        let mut registry = libhelio::ResourceRegistry::empty();
-        self.execute_with_resources(scene, target, depth, pass_resources, &mut registry)
+        self.execute_with_resources(scene, target, depth, registry)
     }
 
     /// Records graphs with no fused render chains in dependency-layer order.
     /// Each pass receives private encoders and a private profiler, while
     /// publication back into the frame contract remains deterministic and
     /// occurs on the caller thread after the layer joins.
-    fn execute_parallel_layers<'a, 'b>(
+    fn execute_parallel_layers<'a>(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        visible: &mut libhelio::PassResources<'a>,
-        registry: &mut libhelio::ResourceRegistry<'b>,
+        visible: &mut crate::ResourceRegistry<'a>,
         reflected_groups: &[Vec<wgpu::BindGroup>],
         resized_this_frame: bool,
     ) -> Result<(
@@ -692,7 +689,7 @@ impl RenderGraph {
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
                         pass_resources: visible,
-                        registry: &*registry,
+                        registry: &*visible,
                         resize: resized_this_frame,
                         width: internal_w,
                         height: internal_h,
@@ -702,8 +699,8 @@ impl RenderGraph {
                 }
             }
 
-            let visible_ref: &libhelio::PassResources<'_> = &*visible;
-            let registry_ref: &libhelio::ResourceRegistry<'_> = &*registry;
+            let visible_ref: &crate::ResourceRegistry<'_> = &*visible;
+            let registry_ref: &crate::ResourceRegistry<'_> = &*visible;
             let device = scene.device().clone();
             let queue = scene.queue().clone();
             let camera = scene.camera();
@@ -854,11 +851,11 @@ impl RenderGraph {
                 cpu_timings.push(cpu_timing);
                 worker_profilers.push(worker_profiler);
                 let pass_ptr = &passes[pass_index] as *const Box<dyn RenderPass>;
-                let frame_ptr: *mut libhelio::PassResources<'a> =
-                    unsafe { std::mem::transmute(visible as *mut libhelio::PassResources<'_>) };
+                let frame_ptr: *mut crate::ResourceRegistry<'a> =
+                    unsafe { std::mem::transmute(visible as *mut crate::ResourceRegistry<'_>) };
                 unsafe {
                     (&*pass_ptr).publish(&mut *frame_ptr);
-                    (&*pass_ptr).publish_registry(registry);
+                    (&*pass_ptr).publish_registry(visible);
                 }
             }
         }
@@ -869,15 +866,14 @@ impl RenderGraph {
     /// phase 3 open resource registry.
     ///
     /// `registry` is supplied by the host so external inputs can be written
-    /// with typed [`libhelio::ResourceKey`] values before execution. Existing
+    /// with typed [`crate::ResourceKey`] values before execution. Existing
     /// passes continue to see `pass_resources` unchanged.
     pub fn execute_with_resources(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        pass_resources: &libhelio::PassResources<'_>,
-        registry: &mut libhelio::ResourceRegistry<'_>,
+        registry: &mut crate::ResourceRegistry<'_>,
     ) -> Result<wgpu::SubmissionIndex> {
         assert!(
             self.locked,
@@ -928,7 +924,6 @@ impl RenderGraph {
         // buffers; per-pass markers on compute alone omit all graphics work.
         self.profiler
             .begin_gpu_pass(&mut compute_encoder, "__graph_frame");
-        let mut visible_pass_resources = *pass_resources;
         registry.reset_tracking("RenderGraph");
         let reflected_groups: Vec<Vec<wgpu::BindGroup>> = self
             .passes
@@ -947,7 +942,6 @@ impl RenderGraph {
                     scene,
                     target,
                     depth,
-                    &mut visible_pass_resources,
                     registry,
                     &reflected_groups,
                     resized_this_frame,
@@ -963,6 +957,15 @@ impl RenderGraph {
         let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
 
         if !use_parallel_recording {
+            // Raw pointer, not a borrow: `self.passes.iter_mut()` below holds
+            // `self.passes` mutably for the loop body, and `pre_pass_actions`
+            // is graph-owned and immutable for the duration of execution (see
+            // the identical technique in `execute_parallel_layers`) -- each
+            // `unsafe { &*pre_pass_actions_ptr }` reborrow gets its own
+            // inferred lifetime, long enough to satisfy `publish_group`'s
+            // `'a` (tied to `registry`) rather than the shorter, unrelated
+            // lifetime a plain `self.pre_pass_actions.get(..)` borrow would carry.
+            let pre_pass_actions_ptr: *const Vec<Vec<PrePassAction>> = &self.pre_pass_actions;
             for (pass_index, pass) in self.passes.iter_mut().enumerate() {
                 if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                     let pass_name = pass.name();
@@ -972,7 +975,7 @@ impl RenderGraph {
                     if let Some(desc) = pass.render_pass_descriptor_with_pool(
                         target,
                         depth,
-                        &visible_pass_resources,
+                        &*registry,
                         &self.pool,
                     ) {
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
@@ -992,7 +995,7 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &visible_pass_resources,
+                            resources: &*registry,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1012,7 +1015,7 @@ impl RenderGraph {
                     }
 
                     self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
-                    pass.publish(&mut visible_pass_resources);
+                    pass.publish(registry);
                     pass.publish_registry(registry);
                     continue;
                 }
@@ -1028,7 +1031,7 @@ impl RenderGraph {
                         camera_data: scene.camera_data(),
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
-                        pass_resources: &visible_pass_resources,
+                        pass_resources: &*registry,
                         registry: &*registry,
                         resize: resized_this_frame,
                         width: self.internal_w,
@@ -1038,12 +1041,12 @@ impl RenderGraph {
                     pass.prepare(&prepare_ctx)?;
                 }
 
-                // Populate graph-owned output textures into PassResources BEFORE execute().
-                if let Some(actions) = self.pre_pass_actions.get(pass_index) {
+                // Populate graph-owned output textures into ResourceRegistry BEFORE execute().
+                if let Some(actions) = unsafe { &*pre_pass_actions_ptr }.get(pass_index) {
                     for action in actions {
                         match action {
                             PrePassAction::Route { name, view } => {
-                                visible_pass_resources.route_named_texture(name, view, "Graph");
+                                registry.route_named_texture(name, view, "Graph");
                             }
                             PrePassAction::Group { name, members } => {
                                 // Generic: the core resolves a `write_group`'s
@@ -1052,10 +1055,10 @@ impl RenderGraph {
                                 // pass, since `Group` actions are always stored
                                 // at their group's first-write pass index) knows
                                 // how to publish them into its own bespoke
-                                // `PassResources` field (e.g. `.gbuffer`).
+                                // `ResourceRegistry` field (e.g. `.gbuffer`).
                                 let views: Vec<&wgpu::TextureView> =
                                     members.iter().map(|(_, v)| v).collect();
-                                pass.publish_group(*name, &views, &mut visible_pass_resources);
+                                pass.publish_group(*name, &views, registry);
                             }
                         }
                     }
@@ -1070,7 +1073,7 @@ impl RenderGraph {
                 if let Some(desc) = pass.render_pass_descriptor_with_pool(
                     target,
                     depth,
-                    &visible_pass_resources,
+                    &*registry,
                     &self.pool,
                 ) {
                     let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
@@ -1129,7 +1132,7 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &visible_pass_resources,
+                            resources: &*registry,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1211,7 +1214,7 @@ impl RenderGraph {
                                 width: self.internal_w,
                                 height: self.internal_h,
                                 device: scene.device(),
-                                resources: &visible_pass_resources,
+                                resources: &*registry,
                                 registry: &*registry,
                                 owns_device: self.owns_device,
                                 resource_pool: &self.pool,
@@ -1259,7 +1262,7 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         device: scene.device(),
-                        resources: &visible_pass_resources,
+                        resources: &*registry,
                         registry: &*registry,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
@@ -1280,7 +1283,7 @@ impl RenderGraph {
 
                 self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
 
-                pass.publish(&mut visible_pass_resources);
+                pass.publish(registry);
                 pass.publish_registry(registry);
             }
         }
@@ -1399,13 +1402,13 @@ impl RenderGraph {
 
         self.prepare_pipeline_registries();
 
-        // Build a "canon" `PassResources` for the attachment probe below by
+        // Build a "canon" `ResourceRegistry` for the attachment probe below by
         // replaying the exact same pre-pass routing the real per-frame loop
-        // performs (see `execute_with_pass_resources`), generically: plain
+        // performs (see `execute_with_registry`), generically: plain
         // named routes via `route_named_texture`, and any `write_group`
         // bundle via the owning pass's `publish_group` — core never
         // special-cases a specific group's name here.
-        let mut canon = libhelio::PassResources::empty();
+        let mut canon = crate::ResourceRegistry::empty();
         for (pi, actions) in self.pre_pass_actions.iter().enumerate() {
             let Some(pass) = self.passes.get(pi) else {
                 continue;
@@ -1492,6 +1495,8 @@ impl RenderGraph {
             .iter()
             .map(|p| p.as_ref().map(|(_, sig)| sig.clone()))
             .collect();
+
+        drop(canon);
 
         // Phase 2: detect chains and compute chain_local BEFORE final allocation.
         // Save previous membership so incremental bundle rebuild can find
@@ -1658,12 +1663,13 @@ impl RenderGraph {
     /// Rebuild all GPU render bundles from scratch.
     fn rebuild_gpu_render_bundles(&mut self) {
         self.gpu_render_bundles.clear();
-        let mut base = libhelio::PassResources::empty();
+        let mut base = crate::ResourceRegistry::empty();
         for pass in &mut self.passes {
             let bundle = pass.build_gpu_render_bundle(&self.device, &base);
             self.gpu_render_bundles.push(bundle);
             pass.publish(&mut base);
         }
+        drop(base);
         self.last_bundle_chain_gen = vec![self.chain_generation; self.passes.len()];
     }
 
@@ -1708,7 +1714,7 @@ impl RenderGraph {
         // Rebuild from `start` to end.  Passes before `start` keep
         // their existing bundles.  Rebuild the cumulative base from
         // the surviving prefix.
-        let mut base = libhelio::PassResources::empty();
+        let mut base = crate::ResourceRegistry::empty();
         let (prefix, suffix) = self.passes.split_at_mut(start);
         for pass in prefix.iter_mut() {
             pass.publish(&mut base);
@@ -1720,6 +1726,7 @@ impl RenderGraph {
             pass.publish(&mut base);
         }
         self.last_bundle_chain_gen.truncate(start);
+        drop(base);
         self.last_bundle_chain_gen
             .resize(self.passes.len(), self.chain_generation);
     }

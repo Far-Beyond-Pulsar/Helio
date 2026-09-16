@@ -12,7 +12,7 @@ impl RenderPass for Original {
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::PassResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -28,7 +28,7 @@ impl RenderPass for Replacement {
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::PassResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -69,7 +69,7 @@ impl RenderPass for BundleObserver {
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::PassResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -82,7 +82,7 @@ impl RenderPass for BundleObserver {
     fn build_gpu_render_bundle(
         &mut self,
         _: &wgpu::Device,
-        _: &libhelio::PassResources<'_>,
+        _: &helio_core::ResourceRegistry<'_>,
     ) -> Option<wgpu::RenderBundle> {
         if self.expect_resize {
             assert_eq!(

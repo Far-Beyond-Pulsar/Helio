@@ -10,7 +10,7 @@ gpu = []
 
 [dependencies]
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-mats = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 wgpu = { workspace = true }

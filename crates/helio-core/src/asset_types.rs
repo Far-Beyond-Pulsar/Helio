@@ -2,6 +2,10 @@
 //!
 //! These types intentionally contain no GPU buffers, handles, arenas, or
 //! renderer state. Frontends convert them into SceneDB component rows.
+//!
+//! Generic: a vertex-interchange layout (position/normal/tangent/uv packing)
+//! any mesh-owning pass can use to author geometry, not a specific pass's
+//! resource — the same tier as `GpuCameraUniforms`.
 
 use bytemuck::{Pod, Zeroable};
 

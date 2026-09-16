@@ -7,13 +7,15 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core  = { workspace = true }
-libhelio  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 glam      = { workspace = true }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-shadow-matrix = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
 naga = { version = "30", features = ["wgsl-in"] }
 image = { workspace = true }
 half = "2"
+helio-pass-forward-lit = { workspace = true }

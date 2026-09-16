@@ -24,7 +24,9 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 mod components;
+pub mod gpu_types;
 pub use components::PostProcessVolumeComponent;
+pub use gpu_types::*;
 
 mod volume_blend;
 pub use volume_blend::PostProcessVolumeBlendPass;
@@ -1067,7 +1069,7 @@ impl RenderPass for PostProcessPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -1169,11 +1171,11 @@ impl RenderPass for PostProcessPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let pre_aa_view = match ctx.resources.pre_aa.get() {
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let postprocess_buf = match ctx.resources.postprocess_uniforms.get() {
+        let postprocess_buf = match ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -1184,9 +1186,9 @@ impl RenderPass for PostProcessPass {
         // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
         // added, removed, or resized rebuilds the group instead of leaving b17
         // pointing at a stale view.
-        let fog_view = ctx.resources.fog_accum.get();
-        let velocity_view = ctx.resources.gbuffer_velocity.get();
-        let lut_view = ctx.resources.color_grading_lut.get();
+        let fog_view = ctx.resources.get(helio_core::ResourceKey::new("fog_accum"));
+        let velocity_view = ctx.resources.get(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx.resources.get(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
             pre_aa_view as *const _ as usize,
@@ -1325,9 +1327,10 @@ impl RenderPass for PostProcessPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         if let Some(view) = &self.pre_dof_view {
-            frame.pre_dof.write(view, "PostProcess");
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+            frame.write(helio_core::ResourceKey::new("pre_dof"), view, "PostProcess");
         }
     }
 }

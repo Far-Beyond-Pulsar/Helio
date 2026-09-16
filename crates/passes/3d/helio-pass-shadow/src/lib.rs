@@ -428,7 +428,7 @@ impl RenderPass for ShadowPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -457,20 +457,20 @@ impl RenderPass for ShadowPass {
         &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
+    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(shadow_data) = ctx.resources.shadow_matrices.get() else {
+        let Some(shadow_data) = ctx.resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
             return Ok(());
         };
         let face_count = (shadow_data.shadow_count as usize)

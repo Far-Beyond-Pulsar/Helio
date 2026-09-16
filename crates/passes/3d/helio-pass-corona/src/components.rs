@@ -34,13 +34,13 @@ pub struct CoronaEmitterComponent {
     pub _pad: [f32; 12],
 }
 
-impl From<libhelio::GpuCoronaEmitter> for CoronaEmitterComponent {
-    fn from(value: libhelio::GpuCoronaEmitter) -> Self {
+impl From<crate::GpuCoronaEmitter> for CoronaEmitterComponent {
+    fn from(value: crate::GpuCoronaEmitter) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<CoronaEmitterComponent> for libhelio::GpuCoronaEmitter {
+impl From<CoronaEmitterComponent> for crate::GpuCoronaEmitter {
     fn from(value: CoronaEmitterComponent) -> Self {
         bytemuck::cast(value)
     }
@@ -54,7 +54,7 @@ mod tests {
     fn scene_record_matches_corona_gpu_abi() {
         assert_eq!(
             std::mem::size_of::<CoronaEmitterComponent>(),
-            std::mem::size_of::<libhelio::GpuCoronaEmitter>()
+            std::mem::size_of::<crate::GpuCoronaEmitter>()
         );
         assert_eq!(std::mem::align_of::<CoronaEmitterComponent>(), 4);
     }

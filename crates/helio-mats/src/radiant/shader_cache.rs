@@ -39,7 +39,7 @@ impl RadiantShaderCache {
         key: RadiantShaderKey,
         template: &super::template::RadiantTemplate,
         graph_wgsl: &str,
-        material_binding: libhelio::MaterialBindingConfig,
+        material_binding: crate::material::MaterialBindingConfig,
         label: &str,
     ) -> &wgpu::ShaderModule {
         if !self.modules.contains_key(&key) {

@@ -97,7 +97,7 @@ fn new_graph(
 }
 
 /// Registers the resource names that every full (non-`simple`) default graph
-/// relies on the host `Renderer` to supply directly into `PassResources`
+/// relies on the host `Renderer` to supply directly into `ResourceRegistry`
 /// every frame, rather than any pass in the graph writing them — see
 /// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
 /// §6. `"material_textures"` and `"render_environment"` are read by the

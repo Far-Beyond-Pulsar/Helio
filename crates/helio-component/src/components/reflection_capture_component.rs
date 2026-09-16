@@ -9,7 +9,7 @@
 //! this closes is purely the author-facing `#[engine_class]` wrapper, same
 //! as every component migrated in Phase B4/B5.
 //!
-//! `libhelio::ReflectionCaptureShape`/`ReflectionCaptureMobility` aren't
+//! `helio_pass_deferred_light::ReflectionCaptureShape`/`ReflectionCaptureMobility` aren't
 //! re-exported from `helio`'s own crate root and aren't reflection-friendly
 //! (no `Serialize`/`Deserialize`) even if they were, so this module defines
 //! its own mirrored enums rather than reusing them directly or editing the
@@ -60,11 +60,11 @@ pub struct ReflectionCaptureGpuComponent {
     #[gpu] pub brightness: f32,
 }
 
-impl From<libhelio::GpuReflectionCapture> for ReflectionCaptureGpuComponent {
-    fn from(value: libhelio::GpuReflectionCapture) -> Self { bytemuck::cast(value) }
+impl From<helio_pass_deferred_light::GpuReflectionCapture> for ReflectionCaptureGpuComponent {
+    fn from(value: helio_pass_deferred_light::GpuReflectionCapture) -> Self { bytemuck::cast(value) }
 }
 
-impl From<ReflectionCaptureGpuComponent> for libhelio::GpuReflectionCapture {
+impl From<ReflectionCaptureGpuComponent> for helio_pass_deferred_light::GpuReflectionCapture {
     fn from(value: ReflectionCaptureGpuComponent) -> Self { bytemuck::cast(value) }
 }
 
@@ -83,7 +83,7 @@ impl ReflectionCaptureSceneBinding {
     pub fn epoch(&self) -> u64 { self.handle.epoch }
 }
 
-/// Influence-volume shape. Mirrors `libhelio::ReflectionCaptureShape`.
+/// Influence-volume shape. Mirrors `helio_pass_deferred_light::ReflectionCaptureShape`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum ReflectionCaptureShape {
     /// Radial influence, faded over the outer 10% of `influence_radius`.
@@ -100,7 +100,7 @@ impl Default for ReflectionCaptureShape {
 }
 
 /// How the capture's cubemap pixels are produced. Mirrors
-/// `libhelio::ReflectionCaptureMobility`.
+/// `helio_pass_deferred_light::ReflectionCaptureMobility`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum ReflectionCaptureMobility {
     /// Pre-filtered offline by the probe baker. The only mode that
@@ -108,7 +108,7 @@ pub enum ReflectionCaptureMobility {
     Static,
     /// Re-rendered at runtime rather than baked. **Not implemented in Helio
     /// yet** — a `Dynamic` capture is inert (never assigned a cubemap
-    /// layer), see `libhelio::ReflectionCaptureMobility::Dynamic`'s own doc.
+    /// layer), see `helio_pass_deferred_light::ReflectionCaptureMobility::Dynamic`'s own doc.
     /// Exposed now for forward compatibility, not because it does anything.
     Dynamic,
 }

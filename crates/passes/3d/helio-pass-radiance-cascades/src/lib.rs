@@ -4,6 +4,24 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+/// Radiance-cascades GI volume extent (dual-tier GI: RC near, ambient far).
+///
+/// Published by the `Renderer` under the well-known `"radiance_cascades_volume"`
+/// [`helio_core::ResourceKey`], separate from the generic `RenderEnvironment`
+/// resource (clear color, ambient fallback, TLAS): this bounds volume is
+/// specific to the radiance-cascades GI technique, not a property every
+/// shading pass's environment has, so it is this pass's own resource, not a
+/// smuggled field on a core-owned type.
+#[derive(Clone, Copy)]
+pub struct RadianceCascadesVolume {
+    pub world_min: [f32; 3],
+    pub world_max: [f32; 3],
+}
+
+/// Resource-registry key for [`RadianceCascadesVolume`].
+pub const RADIANCE_CASCADES_VOLUME: helio_core::ResourceKey<RadianceCascadesVolume> =
+    helio_core::ResourceKey::new("radiance_cascades_volume");
+
 const PROBE_DIM: u32 = 8;
 const DIR_DIM: u32 = 4;
 const ATLAS_W: u32 = PROBE_DIM * DIR_DIM;
@@ -455,7 +473,7 @@ impl RenderPass for RadianceCascadesPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -469,7 +487,11 @@ impl RenderPass for RadianceCascadesPass {
         } else {
             0
         };
-        let sky = ctx.pass_resources.sky.sky_color;
+        let sky = ctx
+            .pass_resources
+            .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
+            .map(|sky| sky.sky_color)
+            .unwrap_or([0.0, 0.0, 0.0]);
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],
             world_max: [10.0, 10.0, 10.0, 0.0],
@@ -517,11 +539,11 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let depth_view = match ctx.resources.hiz.get() {
+        let depth_view = match ctx.resources.get(helio_core::ResourceKey::new("hiz")) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let pre_aa_view = match ctx.resources.pre_aa.get() {
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -608,7 +630,7 @@ impl RadianceCascadesPass {
             .unwrap_or(ctx.camera);
 
         // Get TLAS from frame resources (set by the renderer from GpuScene)
-        let environment = ctx.resources.render_environment.read("RadianceCascades");
+        let environment = ctx.resources.read::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment"), "RadianceCascades");
         let tlas = environment.and_then(|value| value.tlas);
 
         let Some(tlas) = tlas else {

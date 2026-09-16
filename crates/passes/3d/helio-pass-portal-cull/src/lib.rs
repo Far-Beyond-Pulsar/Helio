@@ -59,6 +59,7 @@ pub use portal_math::{
 };
 mod contract;
 pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
+pub use helio_pass_gbuffer::CoordinateSpacesFrameData;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -268,7 +269,7 @@ impl RenderPass for PortalCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -276,9 +277,7 @@ impl RenderPass for PortalCullPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx
             .pass_resources
-            .object_batch
-            .get()
-            .map(|b| b.draw_count)
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.draw_count)
             .unwrap_or(0);
         self.chain_count = ctx
             .scene_buffers
@@ -318,10 +317,10 @@ impl RenderPass for PortalCullPass {
         if self.draw_count == 0 || self.chain_count == 0 {
             return Ok(());
         }
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("coordinate_spaces")) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {

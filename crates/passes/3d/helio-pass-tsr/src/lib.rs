@@ -140,7 +140,7 @@ struct TsrUniform {
 /// Temporal Super-Resolution pass.
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
-/// Reads `"pre_aa"` from [`PassResources`](libhelio::PassResources) and
+/// Reads `"pre_aa"` from [`ResourceRegistry`](helio_core::ResourceRegistry) and
 /// writes the upsampled, temporally accumulated image to `ctx.target`.
 pub struct TsrPass {
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
@@ -514,7 +514,7 @@ impl RenderPass for TsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -580,7 +580,7 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.pre_aa.read("TSR").ok_or_else(|| {
+        let pre_aa_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )

@@ -7,4 +7,3 @@ edition = "2021"
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 helio-core = { workspace = true }
-libhelio = { workspace = true }

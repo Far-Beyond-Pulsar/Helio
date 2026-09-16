@@ -433,7 +433,7 @@ pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterH
 /// `helio_pass_postprocess::PostProcessVolumeComponent` the pass reads).
 pub fn spawn_post_process_volume(
     world: &mut World,
-    descriptor: libhelio::PostProcessVolumeDescriptor,
+    descriptor: helio_pass_postprocess::PostProcessVolumeDescriptor,
 ) -> Entity {
     let entity = world.spawn();
     world.insert(
@@ -444,12 +444,12 @@ pub fn spawn_post_process_volume(
 }
 
 /// Spawn a decal record. `helio_pass_decal::DecalComponent` mirrors
-/// `libhelio::GpuDecal` byte-for-byte, so any already-built `GpuDecal` value
+/// `helio_pass_decal::GpuDecal` byte-for-byte, so any already-built `GpuDecal` value
 /// (as constructed for the removed `Scene::insert_texture` bindless-table
 /// path) can be spawned directly -- only per-decal *textures* (an
 /// `albedo_texture_index` other than `u32::MAX`) have no SceneDB-authored
 /// replacement yet, since no component owns a bindless texture table.
-pub fn spawn_decal(world: &mut World, decal: libhelio::GpuDecal) -> Entity {
+pub fn spawn_decal(world: &mut World, decal: helio_pass_decal::GpuDecal) -> Entity {
     let entity = world.spawn();
     world.insert(entity, helio_pass_decal::DecalComponent::from(decal));
     entity
@@ -470,13 +470,13 @@ pub fn spawn_reflection_capture_box(
     transition_distance: f32,
 ) -> Entity {
     let position = transform.w_axis.truncate();
-    let gpu = libhelio::GpuReflectionCapture {
+    let gpu = helio_pass_deferred_light::GpuReflectionCapture {
         position_radius: [position.x, position.y, position.z, 0.0],
         extents_transition: [extents[0], extents[1], extents[2], transition_distance],
         world_to_local: transform.inverse().to_cols_array_2d(),
         cubemap_index: -1,
-        shape: libhelio::ReflectionCaptureShape::Box as u32,
-        mobility: libhelio::ReflectionCaptureMobility::Static as u32,
+        shape: helio_pass_deferred_light::ReflectionCaptureShape::Box as u32,
+        mobility: helio_pass_deferred_light::ReflectionCaptureMobility::Static as u32,
         brightness: 1.0,
     };
     let entity = world.spawn();
@@ -649,7 +649,7 @@ pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
 pub fn spawn_corona_emitter(
     world: &mut World,
     slot: u32,
-    emitter: libhelio::GpuCoronaEmitter,
+    emitter: helio_pass_corona::GpuCoronaEmitter,
 ) -> Entity {
     let entity = world.spawn();
     world.insert(entity, corona_component_for_slot(slot, emitter));
@@ -663,7 +663,7 @@ pub fn update_corona_emitter(
     world: &mut World,
     entity: Entity,
     slot: u32,
-    emitter: libhelio::GpuCoronaEmitter,
+    emitter: helio_pass_corona::GpuCoronaEmitter,
 ) {
     if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity) {
         *existing = corona_component_for_slot(slot, emitter);
@@ -672,12 +672,12 @@ pub fn update_corona_emitter(
 
 fn corona_component_for_slot(
     slot: u32,
-    mut emitter: libhelio::GpuCoronaEmitter,
+    mut emitter: helio_pass_corona::GpuCoronaEmitter,
 ) -> helio_pass_corona::CoronaEmitterComponent {
     emitter.particle_count = emitter
         .particle_count
-        .min(libhelio::CORONA_MAX_PARTICLES_PER_EMITTER);
-    emitter.particle_offset = slot * libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
+        .min(helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER);
+    emitter.particle_offset = slot * helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER;
     helio_pass_corona::CoronaEmitterComponent::from(emitter)
 }
 

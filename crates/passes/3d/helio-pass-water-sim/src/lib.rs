@@ -7,7 +7,9 @@ use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
 pub mod components;
+pub mod gpu_types;
 pub use components::{WaterHitboxComponent, WaterVolumeComponent};
+pub use gpu_types::*;
 
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -538,7 +540,7 @@ impl RenderPass for WaterSimPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -584,18 +586,27 @@ impl RenderPass for WaterSimPass {
         ]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
-        let view = if self.front_per_layer[0] {
-            &self.sim_layer_views_a[0]
-        } else {
-            &self.sim_layer_views_b[0]
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // SAFETY: every borrow below is extended out of `self`, which is
+        // pass-lifetime (owned by the RenderGraph across many frames), never
+        // frame-scoped -- `'a` is always shorter than these fields' real
+        // lifetime. `publish(&self, ..)` (not `&'a self`) cannot express that
+        // relationship, so the borrow checker sees an unrelated, shorter
+        // lifetime here instead; matches `ResourceRegistry::
+        // write_texture_binding`'s own transmute for the same reason.
+        let view: &'a wgpu::TextureView = unsafe {
+            std::mem::transmute(if self.front_per_layer[0] {
+                &self.sim_layer_views_a[0]
+            } else {
+                &self.sim_layer_views_b[0]
+            })
         };
-        frame.water_sim_texture.write(view, "WaterSim");
-        frame
-            .water_sim_sampler
-            .write(&self.output_sampler, "WaterSim");
+        frame.write(helio_core::ResourceKey::new("water_sim_texture"), view, "WaterSim");
+        let sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&self.output_sampler) };
+        frame.write(helio_core::ResourceKey::new("water_sim_sampler"), sampler, "WaterSim");
         if let Some(view) = &self.water_output_view {
-            frame.pre_aa.write(view, "WaterSim");
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+            frame.write(helio_core::ResourceKey::new("pre_aa"), view, "WaterSim");
         }
     }
 
@@ -1009,7 +1020,7 @@ impl RenderPass for WaterSimPass {
                     self.caustics_bg_key = Some(new_key);
                 }
 
-                let caustics_view = ctx.resources.water_caustics.read("WaterSim").unwrap();
+                let caustics_view = ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap();
                 let cau_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: caustics_view,
                     resolve_target: None,
@@ -1047,8 +1058,7 @@ impl RenderPass for WaterSimPass {
             .expect("water_output view from graph");
         let scene_view: &wgpu::TextureView = ctx
             .resources
-            .pre_aa
-            .get()
+            .get(helio_core::ResourceKey::new("pre_aa"))
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
@@ -1097,9 +1107,8 @@ impl RenderPass for WaterSimPass {
             if let Some(vols_buf) = water_volumes_buf {
                 let gbuffer_normal_view = ctx
                     .resources
-                    .gbuffer
-                    .get()
-                    .map(|gb| gb.normal)
+                    .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"))
+                    .map(|gb| gb.views[1])
                     .unwrap_or(&self.gbuffer_fallback_view);
                 let depth_view = ctx.depth;
 
@@ -1150,7 +1159,7 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.resources.water_caustics.read("WaterSim").unwrap(),
+                                        ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -1297,7 +1306,7 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 8,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.resources.water_caustics.read("WaterSim").unwrap(),
+                                            ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                         ),
                                     },
                                 ],

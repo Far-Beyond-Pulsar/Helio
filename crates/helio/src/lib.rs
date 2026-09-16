@@ -4,11 +4,9 @@
 //! generic GPU component buffers. This crate owns backend GPU machinery and
 //! transient render products; it does not own a typed scene container.
 
-mod asset_types;
 mod camera;
 mod material;
 mod quark_commands;
-pub mod radiant;
 mod renderer;
 // SceneDB is the sole scene authority; the legacy scene container was removed.
 
@@ -22,11 +20,11 @@ pub use helio_pass_portal_cull::{
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;
-pub use libhelio::{
+pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_core::{MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
@@ -42,14 +40,15 @@ pub use helio_bake::{
     LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
 };
 pub use helio_core::{
-    Actor, DebugViewDescriptor, DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms,
-    GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuTimingAvailability,
+    Actor, DebugViewDescriptor, Entity, Error, GpuCameraUniforms, GpuTimingAvailability, Movability,
     RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
-pub use libhelio::{
-    HdrOutputMode, LightType, Movability, ShadowQuality, SkyActor, TonemapOperator,
-    VolumetricClouds,
-};
+pub use helio_pass_forward_lit::{GpuLight, LightType};
+pub use helio_pass_object_batch::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+pub use helio_mats::GpuMaterial;
+pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
+pub use helio_pass_shadow_matrix::ShadowQuality;
+pub use helio_pass_sky::{SkyActor, VolumetricClouds};
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].

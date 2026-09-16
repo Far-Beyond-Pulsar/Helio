@@ -93,7 +93,7 @@ impl Default for GpuWind {
 /// and the impostor cards out of phase at the cross-fade band.
 ///
 /// ```
-/// # use libhelio::wind::Wind;
+/// # use helio_pass_foliage_place::wind::Wind;
 /// # use glam::Vec3;
 /// let mut wind = Wind { direction: Vec3::X, speed: 4.0, gust_amplitude: 0.6, ..Default::default() };
 /// wind.advance(1.0 / 60.0);

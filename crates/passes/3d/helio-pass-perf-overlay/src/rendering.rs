@@ -682,7 +682,7 @@ impl RenderPass for PerfOverlayPass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -712,10 +712,10 @@ impl RenderPass for PerfOverlayPass {
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
-            ctx.resources.gbuffer.get(),
-            ctx.resources.tile_light_counts.get(),
+            ctx.resources.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+            ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
-            let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
+            let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
             let key = (gbuffer_orm_ptr, tile_light_counts_ptr);
 
@@ -735,7 +735,7 @@ impl RenderPass for PerfOverlayPass {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
-                                resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                                resource: wgpu::BindingResource::TextureView(gbuffer.views[2]),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
@@ -761,9 +761,9 @@ impl RenderPass for PerfOverlayPass {
         }
 
         if let (Some(_pre_aa), Some(gbuffer)) =
-            (ctx.resources.pre_aa.get(), ctx.resources.gbuffer.get())
+            (ctx.resources.read_texture_view(helio_core::ResourceKey::new("pre_aa"), "PerfOverlay"), ctx.resources.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")))
         {
-            let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
+            let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let key = gbuffer_orm_ptr;
 
             if self.visualize_bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
@@ -786,7 +786,7 @@ impl RenderPass for PerfOverlayPass {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 3,
-                                resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                                resource: wgpu::BindingResource::TextureView(gbuffer.views[2]),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 4,

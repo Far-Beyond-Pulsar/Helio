@@ -12,7 +12,7 @@ use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 
 /// Persistent fog settings.  The layout intentionally matches
-/// `libhelio::postprocess::GpuFogUniforms` exactly.
+/// `helio_pass_postprocess::GpuFogUniforms` exactly.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "fog_components")]
@@ -62,13 +62,13 @@ impl Default for FogComponent {
     }
 }
 
-impl From<libhelio::postprocess::GpuFogUniforms> for FogComponent {
-    fn from(value: libhelio::postprocess::GpuFogUniforms) -> Self {
+impl From<helio_pass_postprocess::GpuFogUniforms> for FogComponent {
+    fn from(value: helio_pass_postprocess::GpuFogUniforms) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<FogComponent> for libhelio::postprocess::GpuFogUniforms {
+impl From<FogComponent> for helio_pass_postprocess::GpuFogUniforms {
     fn from(value: FogComponent) -> Self {
         bytemuck::cast(value)
     }
@@ -109,20 +109,20 @@ mod tests {
         assert_eq!(std::mem::size_of::<FogComponent>(), 64);
         assert_eq!(
             std::mem::size_of::<FogComponent>(),
-            std::mem::size_of::<libhelio::postprocess::GpuFogUniforms>()
+            std::mem::size_of::<helio_pass_postprocess::GpuFogUniforms>()
         );
         assert_eq!(FogComponent::default().fog_max_distance, 10000.0);
     }
 
     #[test]
     fn fog_component_round_trips_without_a_scene_lock() {
-        let source = libhelio::postprocess::GpuFogUniforms {
+        let source = helio_pass_postprocess::GpuFogUniforms {
             fog_enabled: 1,
             fog_mode: 1,
             fog_density: 0.4,
             ..Default::default()
         };
-        let round_trip: libhelio::postprocess::GpuFogUniforms = FogComponent::from(source).into();
+        let round_trip: helio_pass_postprocess::GpuFogUniforms = FogComponent::from(source).into();
         assert_eq!(round_trip.fog_enabled, 1);
         assert_eq!(round_trip.fog_density, 0.4);
     }

@@ -213,7 +213,7 @@ impl RenderPass for SimpleCubePass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -230,7 +230,7 @@ impl RenderPass for SimpleCubePass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
-        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
+        let depth_view = resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),
             color_attachments,

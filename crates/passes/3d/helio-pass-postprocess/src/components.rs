@@ -4,7 +4,7 @@
 //! blend weight, and every exposure/tonemap/fog/color-grading knob) authors
 //! exactly one packed row here -- there is no separate "settings" component,
 //! the whole editor property set is this one GPU-facing struct, field for
-//! field identical to `libhelio::GpuPostProcessVolume`'s ABI.
+//! field identical to `crate::GpuPostProcessVolume`'s ABI.
 use pulsar_scenedb_derive::SceneStore;
 
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
@@ -30,7 +30,7 @@ pub struct PostProcessVolumeComponent {
     pub unbound: u32,
     #[gpu]
     pub _pad: [f32; 4],
-    /// `libhelio::GpuPostProcessUniforms`'s raw bytes, as `u32`s rather than
+    /// `crate::GpuPostProcessUniforms`'s raw bytes, as `u32`s rather than
     /// the struct itself: SceneDB's packed-layout derive requires every
     /// `#[gpu]` field to implement its own `pulsar_scenedb::Pod` (a
     /// different trait than `bytemuck::Pod`, which is all
@@ -43,15 +43,15 @@ pub struct PostProcessVolumeComponent {
     pub settings: [u32; 116],
 }
 const _: () = assert!(
-    std::mem::size_of::<[u32; 116]>() == std::mem::size_of::<libhelio::GpuPostProcessUniforms>()
+    std::mem::size_of::<[u32; 116]>() == std::mem::size_of::<crate::GpuPostProcessUniforms>()
 );
 
-impl From<libhelio::GpuPostProcessVolume> for PostProcessVolumeComponent {
-    fn from(v: libhelio::GpuPostProcessVolume) -> Self {
+impl From<crate::GpuPostProcessVolume> for PostProcessVolumeComponent {
+    fn from(v: crate::GpuPostProcessVolume) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<PostProcessVolumeComponent> for libhelio::GpuPostProcessVolume {
+impl From<PostProcessVolumeComponent> for crate::GpuPostProcessVolume {
     fn from(v: PostProcessVolumeComponent) -> Self {
         bytemuck::cast(v)
     }
@@ -68,7 +68,7 @@ mod tests {
         // structs' internal shapes differ (nested struct vs. flat `u32`s).
         assert_eq!(
             std::mem::size_of::<PostProcessVolumeComponent>(),
-            std::mem::size_of::<libhelio::GpuPostProcessVolume>()
+            std::mem::size_of::<crate::GpuPostProcessVolume>()
         );
     }
 }

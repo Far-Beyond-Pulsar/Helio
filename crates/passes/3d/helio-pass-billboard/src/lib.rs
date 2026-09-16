@@ -527,21 +527,21 @@ impl RenderPass for BillboardPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always returns Some, even with zero instances (execute() then draws
         // nothing) — a pass that conditionally returns None based on per-frame
         // state can never safely participate in subpass-chain fusion, since the
         // executor decides chain membership once via a lock-time probe.
         let target_view = if self.occluded_by_geometry {
-            resources.pre_aa.get().unwrap_or(target)
+            resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target)
         } else {
             target
         };
 
         let depth_view = if self.occluded_by_geometry {
             depth
-        } else if let Some(frd) = resources.full_res_depth.get() {
+        } else if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth")) {
             frd
         } else {
             depth

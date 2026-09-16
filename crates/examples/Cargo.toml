@@ -254,7 +254,8 @@ path = "vr/main.rs"
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-mats = { workspace = true }
+helio-pass-object-batch = { workspace = true }
 helio-pass-sprite-batch = { workspace = true }
 helio-pass-sprite-cull = { workspace = true }
 helio-pass-sprite-simulate = { workspace = true }

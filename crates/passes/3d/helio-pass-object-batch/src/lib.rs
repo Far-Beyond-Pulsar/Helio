@@ -23,7 +23,9 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use helio_pass_gbuffer::StaticObjectComponent;
 use pulsar_scenedb::gpu::BufferKey;
 
+pub mod gpu_types;
 mod readback;
+pub use gpu_types::*;
 
 const WG: u32 = 256;
 const SORT_BITS: usize = 32;
@@ -64,19 +66,18 @@ struct RangeBlockUniformGpu {
 }
 
 /// Matches `shaders/object_batch.wgsl`'s `GpuDrawCallOut` -- 20 bytes, same
-/// shape as `libhelio::GpuDrawCall` (this crate doesn't depend on `libhelio`
-/// for it since it never needs the typed version, only the byte layout for
+/// shape as `helio_pass_object_batch::GpuDrawCall`  /// for it since it never needs the typed version, only the byte layout for
 /// buffer sizing).
 const DRAW_CALL_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `GpuInstanceDataOut` -- 208 bytes,
-/// see `libhelio::GpuInstanceData`'s own doc for the exact field breakdown.
+/// see `helio_pass_object_batch::GpuInstanceData`'s own doc for the exact field breakdown.
 const INSTANCE_BYTES: u64 = 208;
 /// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 16 bytes.
 const AABB_BYTES: u64 = 16;
 /// Matches `shaders/object_batch.wgsl`'s `GpuRangeOut` -- 20 bytes.
 const RANGE_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `DrawIndexedIndirectArgsOut` -- 20
-/// bytes, same shape as `libhelio::DrawIndexedIndirectArgs`.
+/// bytes, same shape as `helio_pass_object_batch::DrawIndexedIndirectArgs`.
 const INDIRECT_ARGS_BYTES: u64 = 20;
 
 fn create_storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
@@ -1101,7 +1102,7 @@ impl ObjectBatchPass {
     }
 
     /// GPU-produced, sorted-order instance buffer -- same shape as
-    /// `libhelio::GpuInstanceData`.
+    /// `helio_pass_object_batch::GpuInstanceData`.
     pub fn instances_buffer(&self) -> &wgpu::Buffer {
         &self.scratch.instances_out
     }
@@ -1240,7 +1241,7 @@ impl RenderPass for ObjectBatchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None // Compute-only pass -- no render pass.
     }
@@ -1253,10 +1254,18 @@ impl RenderPass for ObjectBatchPass {
         builder.write_buffer("object_batch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let (draw_count, shadow_static_draw_count, shadow_movable_draw_count) = self.counts();
-        frame.object_batch.write(
-            libhelio::ObjectBatchFrameData {
+        // SAFETY: every borrow in this struct comes out of `self`'s own
+        // owned buffers/scratch, which are pass-lifetime (owned by the
+        // RenderGraph across many frames), never frame-scoped -- so any
+        // single frame's `'a` is always shorter than the pass's real
+        // lifetime. `publish(&self, ..)` (not `&'a self`) cannot express
+        // that relationship, so the borrow checker sees an unrelated,
+        // shorter lifetime here instead; matches `ResourceRegistry::
+        // write_texture_binding`'s own transmute for the same reason.
+        let data: helio_pass_gbuffer::ObjectBatchFrameData<'a> = unsafe {
+            std::mem::transmute(helio_pass_gbuffer::ObjectBatchFrameData {
                 instances: &self.scratch.instances_out,
                 aabbs: &self.scratch.aabbs_out,
                 draw_calls: &self.draw_calls_out,
@@ -1271,9 +1280,9 @@ impl RenderPass for ObjectBatchPass {
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
                 shadow_movable_draw_count,
                 shadow_static_generation: self.shadow_static_generation(),
-            },
-            "ObjectBatch",
-        );
+            })
+        };
+        frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

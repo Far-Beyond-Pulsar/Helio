@@ -1012,6 +1012,7 @@ dependencies = [
  "helio-controls",
  "helio-core",
  "helio-default-graphs",
+ "helio-mats",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",
@@ -1021,6 +1022,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
+ "helio-pass-object-batch",
  "helio-pass-perf-overlay",
  "helio-pass-planetary-voxel",
  "helio-pass-portal-cull",
@@ -1037,7 +1039,6 @@ dependencies = [
  "helio-pass-water-sim",
  "helio-xr",
  "image",
- "libhelio",
  "log",
  "microfont",
  "pollster 0.4.0",
@@ -1440,18 +1441,23 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-bake",
+ "helio-bake-types",
  "helio-core",
+ "helio-mats",
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-foliage-place",
+ "helio-pass-forward-lit",
+ "helio-pass-gbuffer",
+ "helio-pass-object-batch",
  "helio-pass-portal-cull",
  "helio-pass-postprocess",
+ "helio-pass-radiance-cascades",
+ "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-tsr",
- "helio-pass-virtual-geometry",
  "helio-xr",
  "image",
- "libhelio",
  "log",
  "meshopt",
  "openxr",
@@ -1487,9 +1493,10 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio",
+ "helio-mats",
+ "helio-pass-forward-lit",
  "helio-pass-gbuffer",
  "image",
- "libhelio",
  "log",
  "pulsar_scenedb",
  "solid-fbx",
@@ -1511,8 +1518,8 @@ dependencies = [
  "getrandom 0.2.17",
  "glam 0.33.5",
  "half",
+ "helio-bake-types",
  "helio-core",
- "libhelio",
  "log",
  "nebula",
  "pollster 0.4.0",
@@ -1520,6 +1527,10 @@ dependencies = [
  "thiserror 2.0.20",
  "wgpu",
 ]
+
+[[package]]
+name = "helio-bake-types"
+version = "0.1.0"
 
 [[package]]
 name = "helio-controls"
@@ -1535,7 +1546,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
- "libhelio",
+ "helio-mats",
+ "helio-pass-foliage-place",
+ "helio-pass-hiz",
  "naga",
  "pollster 0.4.0",
  "pulsar_scenedb",
@@ -1595,12 +1608,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-mats"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "log",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-billboard"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
@@ -1613,7 +1635,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
@@ -1626,7 +1647,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1636,7 +1656,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1646,7 +1665,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-mats",
  "log",
  "naga",
  "pollster 0.4.0",
@@ -1662,7 +1681,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-mats",
+ "helio-pass-radiance-cascades",
+ "helio-pass-shadow-matrix",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
@@ -1675,7 +1696,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
  "log",
  "wgpu",
 ]
@@ -1686,7 +1707,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1696,7 +1716,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1707,7 +1726,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-pass-foliage-place",
- "libhelio",
  "log",
  "pulsar_scenedb",
  "wgpu",
@@ -1720,11 +1738,11 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
+ "serde_json",
  "wgpu",
 ]
 
@@ -1733,9 +1751,10 @@ name = "helio-pass-forward-lit"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
- "libhelio",
+ "helio-mats",
+ "helio-pass-gbuffer",
+ "helio-pass-light-cull",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -1750,7 +1769,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1760,9 +1778,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
- "helio",
  "helio-core",
- "libhelio",
+ "helio-mats",
+ "helio-pass-radiance-cascades",
+ "helio-pass-shadow-matrix",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -1777,7 +1796,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "pollster 0.4.0",
  "wgpu",
@@ -1791,8 +1809,10 @@ dependencies = [
  "glam 0.33.5",
  "half",
  "helio-core",
+ "helio-pass-forward-lit",
+ "helio-pass-gbuffer",
+ "helio-pass-shadow-matrix",
  "image",
- "libhelio",
  "naga",
  "pollster 0.4.0",
  "wgpu",
@@ -1804,7 +1824,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
  "wgpu",
 ]
 
@@ -1814,7 +1834,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pulsar_scenedb",
  "wgpu",
 ]
@@ -1826,7 +1845,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-pass-gbuffer",
- "libhelio",
  "log",
  "pollster 0.4.0",
  "pulsar_scenedb",
@@ -1839,7 +1857,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
+ "helio-pass-indirect-dispatch",
  "pollster 0.4.0",
  "wgpu",
 ]
@@ -1850,7 +1869,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -1860,7 +1878,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -1872,7 +1889,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
  "log",
  "pollster 0.4.0",
  "thiserror 2.0.20",
@@ -1886,7 +1902,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -1900,9 +1916,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-mats",
  "helio-pass-gbuffer",
  "helio-pass-portal-cull",
- "libhelio",
  "log",
  "pulsar_scenedb",
  "wgpu",
@@ -1914,7 +1930,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
@@ -1927,7 +1942,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-sky",
  "naga",
  "pollster 0.4.0",
  "wgpu",
@@ -1939,7 +1954,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -1951,7 +1965,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -1962,7 +1975,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
+ "helio-pass-shadow-matrix",
  "log",
  "wgpu",
 ]
@@ -1973,7 +1987,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
+ "helio-pass-shadow-matrix",
  "wgpu",
 ]
 
@@ -1983,7 +1998,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-gbuffer",
+ "helio-pass-shadow-matrix",
  "wgpu",
 ]
 
@@ -1993,7 +2009,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2003,7 +2018,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -2014,11 +2028,11 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2028,7 +2042,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2039,7 +2052,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -2054,7 +2066,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "pollster 0.4.0",
  "pulsar_scenedb",
@@ -2067,7 +2078,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -2078,7 +2088,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2088,7 +2097,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-hiz",
  "wgpu",
 ]
 
@@ -2097,10 +2106,11 @@ name = "helio-pass-transparent"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
+ "helio-mats",
  "helio-pass-gbuffer",
- "libhelio",
+ "helio-pass-light-cull",
+ "helio-pass-occlusion-cull",
  "log",
  "pulsar_scenedb",
  "wgpu",
@@ -2112,7 +2122,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
  "pollster 0.4.0",
  "wgpu",
 ]
@@ -2122,7 +2131,6 @@ name = "helio-pass-underwater"
 version = "0.1.0"
 dependencies = [
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2132,7 +2140,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-mats",
+ "helio-pass-gbuffer",
+ "helio-pass-object-batch",
+ "helio-pass-radiance-cascades",
  "log",
  "naga",
  "pulsar_scenedb",
@@ -2145,7 +2156,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-postprocess",
+ "helio-pass-shadow-matrix",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
@@ -2159,7 +2171,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
+ "helio-pass-object-batch",
  "log",
  "pollster 0.4.0",
  "wgpu",
@@ -2172,7 +2184,6 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
- "libhelio",
  "log",
  "wgpu",
 ]
@@ -2182,7 +2193,6 @@ name = "helio-pass-water-caustics"
 version = "0.1.0"
 dependencies = [
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2192,7 +2202,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "libhelio",
+ "helio-pass-hiz",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -2205,7 +2215,6 @@ name = "helio-pass-water-surface"
 version = "0.1.0"
 dependencies = [
  "helio-core",
- "libhelio",
  "wgpu",
 ]
 
@@ -2269,7 +2278,6 @@ dependencies = [
  "helio-pass-sdf",
  "helio-pass-voxel-mesh",
  "helio-wasm",
- "libhelio",
  "log",
  "wasm-bindgen",
  "wgpu",
@@ -2290,7 +2298,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "glam 0.33.5",
- "libhelio",
+ "helio-core",
  "libloading 0.9.0",
  "log",
  "openxr",
@@ -2593,15 +2601,6 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-
-[[package]]
-name = "libhelio"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "wgpu",
-]
 
 [[package]]
 name = "libloading"

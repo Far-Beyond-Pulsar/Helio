@@ -12,7 +12,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_external;
 use helio_pass_perf_overlay::PerfOverlayMode;
-use libhelio::{DecalBlendMode, DecalType, GpuDecal};
+use helio_pass_decal::{DecalBlendMode, DecalType, GpuDecal};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,

@@ -21,9 +21,13 @@ helio-pass-tsr = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-billboard = { workspace = true }
 helio-pass-corona = { workspace = true }
-helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
-
-libhelio = { workspace = true }
+helio-mats = { workspace = true }
+helio-pass-forward-lit = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+helio-pass-gbuffer = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
+helio-pass-radiance-cascades = { workspace = true }
+helio-bake-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }

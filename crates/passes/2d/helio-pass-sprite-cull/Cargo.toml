@@ -8,7 +8,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 pulsar_scenedb = { workspace = true }
 helio-core = { workspace = true }
-libhelio   = { workspace = true }
 wgpu       = { workspace = true }
 bytemuck   = { workspace = true, features = ["derive"] }
 log        = { workspace = true }

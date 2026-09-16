@@ -19,7 +19,7 @@
 //! Two `PostProcessSettings` fields are deliberately not exposed:
 //! `lut_generation`/`lut_platform`. Unlike every other field here, these
 //! have no backing Rust enum and default to a bare `0` with no author-facing
-//! meaning documented anywhere in `libhelio::postprocess` — internal
+//! meaning documented anywhere in `helio_pass_postprocess` — internal
 //! bookkeeping, not something a level designer tunes. Always written as `0`
 //! when building the descriptor. `lut_intensity` (how strongly a baked LUT
 //! applies) is kept — that one is genuinely author-tunable.
@@ -27,7 +27,7 @@
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
 use crate::subsystems::PendingWorldWrites;
 use helio::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
-use libhelio::postprocess::{
+use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
 };

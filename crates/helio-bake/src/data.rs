@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use libhelio::BakedPvsData;
+use helio_bake_types::BakedPvsData;
 
 use crate::bake::BakeError;
 use crate::cache::{CachedAo, CachedLightmap, CachedProbes, CachedPvs};
 
-/// GPU-resident baked data ready to be published into `PassResources` each frame.
+/// GPU-resident baked data ready to be published into `ResourceRegistry` each frame.
 ///
 /// Owned by the [`BakeInjectPass`](crate::BakeInjectPass) inside the render graph.
 /// `Arc`-wrapped fields allow `SsaoPass` to hold its own reference to the AO
@@ -60,11 +60,11 @@ impl BakedData {
         self.pvs.as_ref()
     }
 
-    // ── Zero-copy reference accessors for PassResources population ────────────
+    // ── Zero-copy reference accessors for ResourceRegistry population ────────────
     //
     // These borrow from the Arc contents (lifetime tied to &self).  The Renderer
     // stores `Arc<BakedData>` which lives for the entire render() call, so the
-    // returned references are valid for the PassResources<'_> lifetime.
+    // returned references are valid for the ResourceRegistry<'_> lifetime.
 
     /// Borrowed AO texture view (zero-copy, no Arc clone).
     pub fn ao_view_ref(&self) -> Option<&wgpu::TextureView> {
@@ -137,8 +137,8 @@ impl BakedData {
     }
 
     /// Constructs a zero-copy [`BakedPvsRef`] from the owned PVS data, if present.
-    pub fn pvs_ref(&self) -> Option<libhelio::BakedPvsRef<'_>> {
-        self.pvs.as_ref().map(|p| libhelio::BakedPvsRef {
+    pub fn pvs_ref(&self) -> Option<helio_bake_types::BakedPvsRef<'_>> {
+        self.pvs.as_ref().map(|p| helio_bake_types::BakedPvsRef {
             world_min: p.world_min,
             world_max: p.world_max,
             grid_dims: p.grid_dims,

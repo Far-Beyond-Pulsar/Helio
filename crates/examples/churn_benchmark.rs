@@ -770,7 +770,7 @@ impl AppState {
 /// an intermediate render-graph buffer (G-buffer albedo, depth, etc.):
 /// those are privately owned inside each pass crate (`Renderer` itself only
 /// holds `depth_texture` as a raw `wgpu::Texture`; everything else is a
-/// `wgpu::TextureView` handed out per-frame via `PassResources`, with no
+/// `wgpu::TextureView` handed out per-frame via `ResourceRegistry`, with no
 /// path back to the owning `Texture` `copy_texture_to_buffer` needs), so
 /// capturing them would mean adding a new debug-only trait method to
 /// `RenderPass` and implementing it pass-by-pass -- worth doing later if a

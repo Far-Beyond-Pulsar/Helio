@@ -11,7 +11,7 @@ use crate::camera::Camera;
 use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
-use libhelio::temporal::r1_r2_jitter;
+use helio_core::temporal::r1_r2_jitter;
 
 /// Fullscreen-triangle shader for the PC mirror: samples the XR swapchain's
 /// 2-layer array texture and draws eye 0 on the left half, eye 1 on the right.
@@ -202,7 +202,7 @@ impl Renderer {
 
     /// Upload every per-frame scene buffer (billboards, water, post-process
     /// volumes, material bindings, baked resources), assemble
-    /// [`libhelio::PassResources`], clear `target`, execute the graph and kick
+    /// [`helio_core::ResourceRegistry`], clear `target`, execute the graph and kick
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
     /// `camera` supplies the post-process settings and the camera position used
@@ -298,52 +298,51 @@ impl Renderer {
         #[cfg(feature = "bake")]
         let baked_ao = self.baked_data.as_deref().and_then(|d| d.ao_view_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_ao = None;
+        let baked_ao: Option<&wgpu::TextureView> = None;
         #[cfg(feature = "bake")]
         let baked_ao_sampler = self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_ao_sampler = None;
+        let baked_ao_sampler: Option<&wgpu::Sampler> = None;
         #[cfg(feature = "bake")]
         let baked_lightmap = self
             .baked_data
             .as_deref()
             .and_then(|d| d.lightmap_view_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_lightmap = None;
+        let baked_lightmap: Option<&wgpu::TextureView> = None;
         #[cfg(feature = "bake")]
         let baked_lightmap_sampler = self
             .baked_data
             .as_deref()
             .and_then(|d| d.lightmap_sampler_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_lightmap_sampler = None;
+        let baked_lightmap_sampler: Option<&wgpu::Sampler> = None;
         #[cfg(feature = "bake")]
         let baked_reflection = self
             .baked_data
             .as_deref()
             .and_then(|d| d.reflection_view_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_reflection = None;
+        let baked_reflection: Option<&wgpu::TextureView> = None;
         #[cfg(feature = "bake")]
         let baked_reflection_sampler = self
             .baked_data
             .as_deref()
             .and_then(|d| d.reflection_sampler_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_reflection_sampler = None;
+        let baked_reflection_sampler: Option<&wgpu::Sampler> = None;
         #[cfg(feature = "bake")]
         let baked_irradiance_sh = self
             .baked_data
             .as_deref()
             .and_then(|d| d.irradiance_sh_buf_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_irradiance_sh = None;
+        let baked_irradiance_sh: Option<&wgpu::Buffer> = None;
         #[cfg(feature = "bake")]
         let baked_pvs = self.baked_data.as_deref().and_then(|d| d.pvs_ref());
         #[cfg(not(feature = "bake"))]
-        let baked_pvs = None;
+        let baked_pvs: Option<helio_bake_types::BakedPvsRef<'_>> = None;
 
-        let mut pass_resources = libhelio::PassResources::empty();
         let material_texture_views = vec![
             &self.material_bindings.fallback_view;
             self.material_bindings.texture_count
@@ -352,8 +351,9 @@ impl Renderer {
             &self.material_bindings.fallback_sampler;
             self.material_bindings.texture_count
         ];
-        pass_resources.material_textures.write(
-            libhelio::MaterialTextureBindings {
+        let mut resource_registry = helio_core::ResourceRegistry::empty();
+        resource_registry.write(helio_core::ResourceKey::new("material_textures"), 
+            helio_mats::MaterialTextureBindings {
                 material_textures: &self.material_bindings.material_textures,
                 texture_views: &material_texture_views,
                 samplers: &material_samplers,
@@ -361,32 +361,32 @@ impl Renderer {
             },
             "Renderer",
         );
-        pass_resources.render_environment.write(
-            libhelio::RenderEnvironment {
+        resource_registry.write(helio_core::ResourceKey::new("render_environment"),
+            helio_core::RenderEnvironment {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
-                rc_world_min: [-100.0; 3],
-                rc_world_max: [100.0; 3],
                 tlas: None,
             },
             "Renderer",
         );
-        // Phase 3 registry. Legacy passes continue to consume
-        // `pass_resources`; new passes receive this open typed registry via
-        // `PassContext::registry` / `PrepareContext::registry`.
-        let mut resource_registry = libhelio::ResourceRegistry::empty();
+        resource_registry.write(
+            helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME,
+            helio_pass_radiance_cascades::RadianceCascadesVolume {
+                world_min: [-100.0; 3],
+                world_max: [100.0; 3],
+            },
+            "Renderer",
+        );
         // Geometry, materials, lights, shadows, and transforms are SceneDB
         // component buffers. Passes resolve them by BufferKey from the
         // read-only SceneInput projection; Renderer owns none of those rows.
-        pass_resources
-            .postprocess_uniforms
-            .write(&self.postprocess_buffer, "Renderer");
+        resource_registry.write(helio_core::ResourceKey::new("postprocess_uniforms"), &self.postprocess_buffer, "Renderer");
         if let Some(ref lut) = self.color_grading_lut_view {
-            pass_resources.color_grading_lut.write(lut, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("color_grading_lut"), lut, "Renderer");
         }
         if let Some(ref ies) = self.ies_texture_view {
-            pass_resources.ies_textures.write(ies, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("ies_textures"), ies, "Renderer");
         }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
@@ -401,9 +401,7 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
-        pass_resources
-            .depth_texture
-            .write(depth_texture, "Renderer");
+        resource_registry.write(helio_core::ResourceKey::new("depth_texture"), depth_texture, "Renderer");
         #[cfg(not(target_arch = "wasm32"))]
         let depth_sampler_view: &wgpu::TextureView = if multiview {
             self.xr_depth_view_layer0
@@ -415,56 +413,44 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
-        pass_resources
-            .depth_sampler_view
-            .write(depth_sampler_view, "Renderer");
+        resource_registry.write(helio_core::ResourceKey::new("depth_sampler_view"), depth_sampler_view, "Renderer");
         if let Some(v) = self
             .full_res_depth_view
             .as_ref()
             .map(|v| v as &wgpu::TextureView)
         {
-            pass_resources.full_res_depth.write(v, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("full_res_depth"), v, "Renderer");
         }
         if let Some(t) = self
             .full_res_depth_texture
             .as_ref()
             .map(|t| t as &wgpu::Texture)
         {
-            pass_resources.full_res_depth_texture.write(t, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("full_res_depth_texture"), t, "Renderer");
         }
         if let Some(ao) = baked_ao {
-            pass_resources.baked_ao.write(ao, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_ao"), ao, "Renderer");
         }
         if let Some(ao_sampler) = baked_ao_sampler {
-            pass_resources
-                .baked_ao_sampler
-                .write(ao_sampler, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_ao_sampler"), ao_sampler, "Renderer");
         }
         if let Some(lightmap) = baked_lightmap {
-            pass_resources.baked_lightmap.write(lightmap, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_lightmap"), lightmap, "Renderer");
         }
         if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            pass_resources
-                .baked_lightmap_sampler
-                .write(lightmap_sampler, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_lightmap_sampler"), lightmap_sampler, "Renderer");
         }
         if let Some(reflection) = baked_reflection {
-            pass_resources
-                .baked_reflection
-                .write(reflection, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_reflection"), reflection, "Renderer");
         }
         if let Some(reflection_sampler) = baked_reflection_sampler {
-            pass_resources
-                .baked_reflection_sampler
-                .write(reflection_sampler, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_reflection_sampler"), reflection_sampler, "Renderer");
         }
         if let Some(irradiance_sh) = baked_irradiance_sh {
-            pass_resources
-                .baked_irradiance_sh
-                .write(irradiance_sh, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_irradiance_sh"), irradiance_sh, "Renderer");
         }
         if let Some(pvs) = baked_pvs {
-            pass_resources.baked_pvs.write(pvs, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new("baked_pvs"), pvs, "Renderer");
         }
 
         // Target clear + cull-stats clear are batched into a single command
@@ -519,9 +505,9 @@ impl Renderer {
             &scene_input,
             target,
             depth,
-            &pass_resources,
             &mut resource_registry,
         )?;
+        drop(resource_registry);
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
         if self.owns_device

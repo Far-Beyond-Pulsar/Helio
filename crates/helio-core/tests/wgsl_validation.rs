@@ -12,11 +12,22 @@
 //! This test walks the repo rather than taking an explicit list, so a new shader
 //! is covered the moment it is added.
 //!
-//! Sources go through `helio_core::shader::resolve` first — the same call the
-//! runtime makes — so a prelude-using shader is validated as the GPU will see it,
-//! not as the bare file on disk.
+//! Sources go through `helio_core::shader::resolve_with` first — the same call
+//! (modulo which snippets a given pass registers) the runtime makes — so a
+//! prelude/snippet-using shader is validated as the GPU will see it, not as
+//! the bare file on disk. The snippet list here (HIZ, PBR, wind) is this
+//! test's own aggregation of every pass-owned snippet in the workspace, not
+//! something `helio-core` itself knows about — `resolve_with` never fails
+//! for a marker with no matching snippet, so listing all of them here is
+//! harmless for shaders that only use a subset.
 
 use std::path::{Path, PathBuf};
+
+const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
+    helio_pass_hiz::HIZ_SNIPPET,
+    helio_mats::PBR_EVAL_SNIPPET,
+    helio_pass_foliage_place::WIND_SNIPPET,
+];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
@@ -74,7 +85,7 @@ fn is_fragment(path: &Path, source: &str) -> bool {
 /// diagnostic in a prelude-using shader points at a line that actually exists in
 /// the file the reader will open.
 fn describe_location(source: &str, rendered: &str) -> String {
-    let prepended = helio_core::shader::expanded_lines(source);
+    let prepended = helio_core::shader::expanded_lines_with(source, SNIPPETS);
     if prepended > 0 {
         format!(" (expanded: subtract {prepended} lines for the original file)")
     } else {
@@ -114,7 +125,7 @@ fn every_wgsl_shader_parses_and_validates() {
         checked += 1;
 
         // Exactly what create_shader_module would receive.
-        let resolved = helio_core::shader::resolve(&source);
+        let resolved = helio_core::shader::resolve_with(&source, SNIPPETS);
 
         let module = match naga::front::wgsl::parse_str(&resolved) {
             Ok(m) => m,

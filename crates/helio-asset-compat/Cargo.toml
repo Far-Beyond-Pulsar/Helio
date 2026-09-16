@@ -8,7 +8,8 @@ description = "SolidRS integration layer for Helio renderer - asset loading and 
 [dependencies]
 # Helio renderer facade
 helio = { workspace = true }
-libhelio = { workspace = true }
+helio-mats = { path = "../helio-mats" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 
 # SceneDB: material rows spawned by `upload_scene_materials` are plain
 # `helio_pass_gbuffer::MaterialComponent` rows now, same as everywhere else.

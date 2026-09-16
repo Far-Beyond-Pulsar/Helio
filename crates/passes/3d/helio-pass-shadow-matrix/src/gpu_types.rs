@@ -1,9 +1,24 @@
-//! Shadow configuration types for runtime quality control.
+//! GPU shadow-matrix and shadow-quality-configuration types.
 //!
-//! Provides GPU-compatible shadow configuration structs and quality presets
-//! for controlling CSM splits, bias, filter radius, and PCSS parameters.
+//! Shadow matrices are this pass's own per-frame output; shadow quality/CSM
+//! configuration is consumed by every pass that shades against shadows
+//! (gbuffer, deferred-light, hlfs, volumetric-fog) but this pass is the one
+//! that actually computes the cascades, so it owns the shape.
 
 use bytemuck::{Pod, Zeroable};
+
+/// Per-light shadow matrix for the shadow map atlas.
+/// Layout: one `mat4x4<f32>` = 64 bytes, matching `LightMatrix` in all WGSL shaders.
+/// 6 consecutive entries per light (indices light_idx*6 .. light_idx*6+5):
+///   - Point lights: 6 cube-face view-projection matrices (+X/-X/+Y/-Y/+Z/-Z)
+///   - Spot lights:  face 0 = perspective view-proj, faces 1-5 = identity (unused)
+///   - Directional:  face 0 = ortho view-proj,       faces 1-5 = identity (unused)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuShadowMatrix {
+    /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
+    pub light_view_proj: [f32; 16],
+}
 
 /// Cascade far-plane distances (metres) shared by all passes that read or
 /// write CSM data (GBuffer, DeferredLight, HLFS).
@@ -222,4 +237,23 @@ impl ShadowConfig {
         }
         splits
     }
+}
+
+/// Shadow matrices + per-caster dirty tracking for this frame -- written
+/// directly by the `Renderer`, NOT published by `ShadowMatrixPass` (that pass
+/// computes into this buffer but does not yet own its allocation -- a real,
+/// still-pending relocation tracked as a known gap, not solved by this type
+/// move).
+#[derive(Clone, Copy)]
+pub struct ShadowMatricesFrameData<'a> {
+    pub shadow_matrices: &'a wgpu::Buffer,
+    /// Live shadow-face count this frame.
+    pub shadow_count: u32,
+    /// Per-caster (42 max) dirty generation counters -- `ShadowPass`
+    /// compares against its own last-rendered gen to decide which faces to
+    /// re-render.
+    pub per_caster_dirty_gen: [u64; 42],
+    /// Increments whenever any movable object moves -- the O(1) CPU gate
+    /// `ShadowPass` checks before doing any per-face work.
+    pub movable_objects_generation: u64,
 }

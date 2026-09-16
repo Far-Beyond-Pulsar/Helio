@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 #[derive(SceneStore, Clone, Debug)]
 pub struct MeshComponent {
     #[gpu(buffer = "builtin_mesh_vertex", mirror = Once)]
-    pub vertices: Vec<helio::PackedVertex>,
+    pub vertices: Vec<helio_core::PackedVertex>,
     #[gpu(buffer = "builtin_mesh_index", mirror = Once)]
     pub indices: Vec<u32>,
 }
@@ -56,13 +56,13 @@ pub struct MaterialComponent {
     pub class_params: [f32; 4],
 }
 
-impl From<libhelio::GpuMaterial> for MaterialComponent {
-    fn from(value: libhelio::GpuMaterial) -> Self {
+impl From<helio_mats::GpuMaterial> for MaterialComponent {
+    fn from(value: helio_mats::GpuMaterial) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<MaterialComponent> for libhelio::GpuMaterial {
+impl From<MaterialComponent> for helio_mats::GpuMaterial {
     fn from(value: MaterialComponent) -> Self {
         bytemuck::cast(value)
     }
@@ -78,7 +78,7 @@ impl MaterialComponent {
         emissive: [f32; 3],
         emissive_strength: f32,
     ) -> Self {
-        let missing = libhelio::GpuMaterial::NO_TEXTURE;
+        let missing = helio_mats::GpuMaterial::NO_TEXTURE;
         Self {
             base_color,
             emissive: [emissive[0], emissive[1], emissive[2], emissive_strength],
@@ -211,7 +211,7 @@ pub struct StaticObjectComponent {
     pub graph_hash_lo: u32,
     #[gpu]
     pub graph_hash_hi: u32,
-    /// See `libhelio::GpuInstanceData::flags`.
+    /// See `helio_pass_object_batch::GpuInstanceData::flags`.
     #[gpu]
     pub flags: u32,
 }
@@ -279,7 +279,7 @@ impl StaticObjectComponent {
 }
 
 /// Inverse-transpose of `m`'s upper-left 3x3, as three padded columns
-/// (matches `libhelio::GpuInstanceData::normal_mat`'s layout).
+/// (matches `helio_pass_object_batch::GpuInstanceData::normal_mat`'s layout).
 fn normal_matrix_cols(m: glam::Mat4) -> [[f32; 4]; 3] {
     let m3 = glam::Mat3::from_mat4(m);
     let inv_t = m3.inverse().transpose();

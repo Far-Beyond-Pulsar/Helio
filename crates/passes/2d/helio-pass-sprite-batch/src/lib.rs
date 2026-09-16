@@ -29,7 +29,7 @@
 //!
 //! This pass has no dependency on `helio` / `helio-default-graphs` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
-//! `libhelio` (for [`PassResources`](libhelio::PassResources)), matching
+//! `helio-core` (for [`ResourceRegistry`](helio_core::ResourceRegistry)), matching
 //! every other pass crate. It never touches `PassContext::scene`, so it is
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
 
@@ -859,7 +859,7 @@ impl RenderPass for SpriteBatchPass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // 2D sprites are alpha-blended and GPU-sorted (see `SpriteInstance::depth`)
         // — no depth attachment. `Box::leak` here matches the convention used by

@@ -154,7 +154,7 @@ impl RenderPass for DepthPrepassPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([]));
@@ -176,10 +176,10 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.culled_batch.get() else {
+        let Some(culled) = ctx.resources.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.

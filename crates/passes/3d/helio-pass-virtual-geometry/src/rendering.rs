@@ -5,10 +5,11 @@ use crate::{
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
-    DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
+    DebugViewDescriptor, PassContext, PrepareContext, RenderPass,
     Result as HelioResult,
 };
-use libhelio::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
+use helio_pass_object_batch::GpuInstanceData;
+use crate::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
 use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -22,7 +23,7 @@ enum DebugReadbackState {
 }
 
 pub struct VirtualGeometryPass {
-    pub(crate) material_binding: libhelio::MaterialBindingConfig,
+    pub(crate) material_binding: helio_mats::MaterialBindingConfig,
     pub(crate) select_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_bgl: wgpu::BindGroupLayout,
@@ -71,7 +72,7 @@ pub struct VirtualGeometryPass {
 /// material classification data needed by the cull shader.
 pub(crate) fn build_instance_cull_data(
     instances: &[GpuInstanceData],
-    materials: &[helio_core::GpuMaterial],
+    materials: &[helio_mats::GpuMaterial],
 ) -> Vec<InstanceCullData> {
     instances
         .iter()
@@ -94,7 +95,7 @@ impl VirtualGeometryPass {
         camera_buf: &wgpu::Buffer,
         budget: VirtualGeometryBudget,
     ) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VG Cull Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
@@ -115,7 +116,7 @@ impl VirtualGeometryPass {
             if material_binding.uses_binding_arrays() {
                 s
             } else {
-                libhelio::shader::apply_webgpu_material_bindings(&s, material_binding.max_textures)
+                helio_mats::apply_webgpu_material_bindings(&s, material_binding.max_textures)
             }
         };
         let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -666,7 +667,7 @@ impl VirtualGeometryPass {
     fn make_work_item_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Work Item Buffer"),
-            size: capacity * std::mem::size_of::<libhelio::GpuVgWorkItem>() as u64,
+            size: capacity * std::mem::size_of::<crate::GpuVgWorkItem>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -686,7 +687,7 @@ impl VirtualGeometryPass {
     fn make_draw_metadata_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Draw Metadata Buffer"),
-            size: capacity * std::mem::size_of::<libhelio::GpuVgDraw>() as u64,
+            size: capacity * std::mem::size_of::<crate::GpuVgDraw>() as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         })
@@ -755,7 +756,7 @@ impl RenderPass for VirtualGeometryPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_debug_readback(ctx.device);
 
-        let Some(vg) = ctx.pass_resources.vg.get() else {
+        let Some(vg): Option<crate::VgFrameData<'_>> = ctx.pass_resources.get(helio_core::ResourceKey::new("vg")) else {
             return Ok(());
         };
 
@@ -792,7 +793,7 @@ impl RenderPass for VirtualGeometryPass {
                 grew = true;
             }
             let work_item_capacity =
-                self.work_item_buf.size() / std::mem::size_of::<libhelio::GpuVgWorkItem>() as u64;
+                self.work_item_buf.size() / std::mem::size_of::<crate::GpuVgWorkItem>() as u64;
             if (vg.work_item_count as u64) > work_item_capacity {
                 self.work_item_buf =
                     Self::make_work_item_buf(ctx.device, vg.work_item_count as u64 * 2);
@@ -948,10 +949,13 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(material_textures) = ctx.pass_resources.material_textures.read("VirtualGeometry") else {
+        let Some(material_textures): Option<helio_mats::MaterialTextureBindings<'_>> = ctx.pass_resources.read(helio_core::ResourceKey::new("material_textures"), "VirtualGeometry") else {
             return Ok(());
         };
-        let environment = ctx.pass_resources.render_environment.get();
+        let environment: Option<helio_core::RenderEnvironment<'_>> = ctx.pass_resources.get(helio_core::ResourceKey::new("render_environment"));
+        let rc_volume = ctx
+            .pass_resources
+            .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
@@ -1001,15 +1005,15 @@ impl RenderPass for VirtualGeometryPass {
                 0.0,
             ],
             rc_world_min: [
-                environment.map(|value| value.rc_world_min[0]).unwrap_or(-100.0),
-                environment.map(|value| value.rc_world_min[1]).unwrap_or(-100.0),
-                environment.map(|value| value.rc_world_min[2]).unwrap_or(-100.0),
+                rc_volume.map(|v| v.world_min[0]).unwrap_or(-100.0),
+                rc_volume.map(|v| v.world_min[1]).unwrap_or(-100.0),
+                rc_volume.map(|v| v.world_min[2]).unwrap_or(-100.0),
                 0.0,
             ],
             rc_world_max: [
-                environment.map(|value| value.rc_world_max[0]).unwrap_or(100.0),
-                environment.map(|value| value.rc_world_max[1]).unwrap_or(100.0),
-                environment.map(|value| value.rc_world_max[2]).unwrap_or(100.0),
+                rc_volume.map(|v| v.world_max[0]).unwrap_or(100.0),
+                rc_volume.map(|v| v.world_max[1]).unwrap_or(100.0),
+                rc_volume.map(|v| v.world_max[2]).unwrap_or(100.0),
                 0.0,
             ],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
@@ -1027,16 +1031,16 @@ impl RenderPass for VirtualGeometryPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
-        let sss = resources.gbuffer_sss.read("VirtualGeometry")?;
-        let extra = resources.gbuffer_extra.read("VirtualGeometry")?;
+        let gbuffer: helio_core::ViewGroup<'_, 4> = resources.read(helio_core::ResourceKey::new("gbuffer"), "VirtualGeometry")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "VirtualGeometry")?;
+        let sss = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "VirtualGeometry")?;
+        let extra = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "VirtualGeometry")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: gbuffer.views[0],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1045,7 +1049,7 @@ impl RenderPass for VirtualGeometryPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
+                    view: gbuffer.views[1],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1054,7 +1058,7 @@ impl RenderPass for VirtualGeometryPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
+                    view: gbuffer.views[2],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1063,7 +1067,7 @@ impl RenderPass for VirtualGeometryPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
+                    view: gbuffer.views[3],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1120,20 +1124,18 @@ impl RenderPass for VirtualGeometryPass {
         if self.last_object_count == 0
             || self.last_work_item_count == 0
             || self.last_max_draw_count == 0
-            || ctx.resources.vg.is_none()
+            || !ctx.resources.contains("vg")
         {
             return Ok(());
         }
 
         let hiz_view = ctx
             .resources
-            .hiz
-            .as_ref()
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("hiz"))
             .expect("VirtualGeometry: 'hiz' view not routed by graph");
         let hiz_sampler = ctx
             .resources
-            .hiz_sampler
-            .as_ref()
+            .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("hiz_sampler"))
             .expect("VirtualGeometry: 'hiz_sampler' not available");
         let hiz_key = (
             hiz_view as *const _ as usize,
@@ -1402,7 +1404,7 @@ impl RenderPass for VirtualGeometryPass {
 
 fn create_material_bgl(
     device: &wgpu::Device,
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {

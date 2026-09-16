@@ -389,23 +389,33 @@ pub const REFLECTIONS_SUPPORTED: bool = true;
 
 pub mod acceleration;
 pub mod actor;
+pub mod asset_types;
+pub mod camera;
 pub mod context;
 pub mod entity;
 pub mod error;
 pub mod graph;
+pub mod movability;
 pub mod profiling;
+pub mod registry;
+pub mod render_environment;
 pub mod scene_input;
 pub mod shader;
+pub mod temporal;
 pub mod traits;
 pub mod upload;
 
-// Re-export libhelio types for convenience
-pub use libhelio::{
-    DrawIndexedIndirectArgs, GBufferViews, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix, ResourceKey, ResourceRegistry,
-};
+// Generic types owned directly by helio-core: graph scheduling, the open
+// resource registry, and render primitives (camera, mobility) that name no
+// specific pass or scene-object type. Pass-specific GPU shapes (lights,
+// materials, geometry instances, ...) live in their owning `helio-pass-*`
+// crate, never here.
+pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use camera::GpuCameraUniforms;
+pub use movability::Movability;
+pub use registry::{ResourceKey, ResourceRegistry, Tracked, ViewGroup};
+pub use render_environment::RenderEnvironment;
 
-pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
 pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
 // Re-export core types

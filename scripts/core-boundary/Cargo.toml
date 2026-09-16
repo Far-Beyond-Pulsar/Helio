@@ -1,0 +1,13 @@
+[package]
+name = "helio-core-boundary"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Independent so the source gate can run when the renderer does not compile.
+[workspace]
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+

@@ -12,7 +12,6 @@ gpu = []
 [dependencies]
 pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
-libhelio  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }

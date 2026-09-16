@@ -36,12 +36,12 @@ pub struct DecalComponent {
     pub _pad1: f32,
 }
 
-impl From<libhelio::GpuDecal> for DecalComponent {
-    fn from(v: libhelio::GpuDecal) -> Self {
+impl From<crate::GpuDecal> for DecalComponent {
+    fn from(v: crate::GpuDecal) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<DecalComponent> for libhelio::GpuDecal {
+impl From<DecalComponent> for crate::GpuDecal {
     fn from(v: DecalComponent) -> Self {
         bytemuck::cast(v)
     }
@@ -54,7 +54,7 @@ mod tests {
     fn layout_matches_gpu_abi() {
         assert_eq!(
             std::mem::size_of::<DecalComponent>(),
-            std::mem::size_of::<libhelio::GpuDecal>()
+            std::mem::size_of::<crate::GpuDecal>()
         );
     }
 }

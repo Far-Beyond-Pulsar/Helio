@@ -147,6 +147,44 @@ const _: () = {
     );
 };
 
+/// Per-frame virtual geometry data: immutable mesh/object slices and dirty-tracked instances.
+///
+/// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
+/// first frame and whenever `buffer_version` advances. Transform-only changes
+/// advance `instance_version` and upload only `instance_dirty_start..+count`.
+///
+/// `instances` is the renderer's single CPU publication of the VG instance
+/// records. Consumers may derive pass-local data from it, but must not publish
+/// those records into a second SceneDB component set merely to support a
+/// pass-specific CPU operation.
+#[derive(Clone, Copy)]
+pub struct VgFrameData<'a> {
+    /// Raw bytes of a `GpuMeshletEntry` array.
+    pub meshlets: &'a [u8],
+    /// Raw bytes of a `GpuVgObject` array (one entry per VG object).
+    pub objects: &'a [u8],
+    /// Raw bytes of a `GpuInstanceData` array (one entry per VG object).
+    pub instances: &'a [u8],
+    /// Raw bytes of immutable `GpuVgWorkItem` expansion records.
+    pub work_items: &'a [u8],
+    /// Number of unique meshlet descriptors across all referenced virtual meshes.
+    pub meshlet_count: u32,
+    /// Number of VG objects (and corresponding instance entries).
+    pub object_count: u32,
+    /// Number of second-stage 64-meshlet work spans.
+    pub work_item_count: u32,
+    /// Exact worst-case number of indirect draws after selecting one LOD per object.
+    pub max_draw_count: u32,
+    /// Version counter incremented when meshlet, object, or work-item topology changes.
+    pub buffer_version: u64,
+    /// Version counter incremented when a transform-only dirty range is published.
+    pub instance_version: u64,
+    /// First dirty instance in the current transform-only publication.
+    pub instance_dirty_start: u32,
+    /// Number of dirty instances; zero when `buffer_version` owns the update.
+    pub instance_dirty_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

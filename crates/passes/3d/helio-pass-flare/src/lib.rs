@@ -13,6 +13,9 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod gpu_types;
+pub use gpu_types::*;
+
 const MAX_FLARES: u32 = 64;
 const WG: u32 = 64;
 
@@ -85,7 +88,7 @@ impl LensFlarePass {
 
         let flare_query_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("LensFlare Query Buffer"),
-            size: MAX_FLARES as u64 * std::mem::size_of::<libhelio::GpuFlareQuery>() as u64,
+            size: MAX_FLARES as u64 * std::mem::size_of::<crate::GpuFlareQuery>() as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -665,12 +668,12 @@ impl RenderPass for LensFlarePass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if self.active_flare_count == 0 {
             return None;
         }
-        let target_view = resources.pre_aa.get().unwrap_or(target);
+        let target_view = resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
@@ -699,7 +702,7 @@ impl RenderPass for LensFlarePass {
         // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
         // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
         // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
-        let depth_view = ctx.resources.depth_sampler_view.get().unwrap_or(ctx.depth);
+        let depth_view = ctx.resources.get(helio_core::ResourceKey::new("depth_sampler_view")).unwrap_or(ctx.depth);
 
         // Rebuild bind groups when buffer/depth pointers change
         let lights_buf = ctx

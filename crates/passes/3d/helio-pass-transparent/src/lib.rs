@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
+use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
@@ -48,10 +48,10 @@ pub struct TransparentPass {
     shader_cache: RadiantShaderCache,
     /// This pass's own class-0 override (the transparent base — never
     /// synced from the scene).
-    local_class0: helio::radiant::RadiantTemplate,
+    local_class0: helio_mats::radiant::RadiantTemplate,
     /// User-registered custom templates (id >= 5), shared with the renderer
     /// and other passes — never deep-cloned (see `SharedTemplateRegistry`).
-    shared_registry: Option<helio::radiant::SharedTemplateRegistry>,
+    shared_registry: Option<helio_mats::radiant::SharedTemplateRegistry>,
     /// Key set as of the last sync, to detect content changes cheaply.
     last_shared_keys: Vec<u32>,
     pipeline_layout: wgpu::PipelineLayout,
@@ -184,18 +184,18 @@ impl TransparentPass {
         // Just the transparent base shader at class 0 — NOT
         // RadiantTemplateRegistry::new(), which populates classes 0-4 with
         // gbuffer templates that have incompatible bind group layouts.
-        let base_src = include_str!("../../../../helio/templates/transparent_base.wgsl");
+        let base_src = include_str!("../../../../helio-mats/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
             let mut resolved =
-                String::with_capacity(base_src.len() + libhelio::shader::PBR_EVAL.len());
-            resolved.push_str(libhelio::shader::PBR_EVAL);
+                String::with_capacity(base_src.len() + helio_mats::PBR_EVAL.len());
+            resolved.push_str(helio_mats::PBR_EVAL);
             resolved.push('\n');
             resolved.push_str(base_src);
             Box::leak(resolved.into_boxed_str())
         } else {
             base_src
         };
-        let local_class0 = helio::radiant::RadiantTemplate {
+        let local_class0 = helio_mats::radiant::RadiantTemplate {
             name: "transparent_base",
             wgsl_source: resolved_src,
         };
@@ -283,7 +283,7 @@ impl RenderPass for TransparentPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -295,7 +295,7 @@ impl RenderPass for TransparentPass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
-        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
+        let depth_view = resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("Transparent"),
             color_attachments,
@@ -314,10 +314,10 @@ impl RenderPass for TransparentPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.culled_batch.get() else {
+        let Some(culled) = ctx.resources.get::<helio_pass_occlusion_cull::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -349,7 +349,7 @@ impl RenderPass for TransparentPass {
         // buffer pointers change. Lights are always read from the SceneDB
         // component buffer; the camera buffer is a valid binding fallback
         // when no light component has been authored yet.
-        let cluster = ctx.resources.cluster_light_grid.get();
+        let cluster = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))
@@ -523,7 +523,7 @@ impl TransparentPass {
                 key,
                 template,
                 graph_wgsl,
-                libhelio::MaterialBindingConfig::for_device(device),
+                helio_mats::MaterialBindingConfig::for_device(device),
                 "Transparent Shader",
             );
             let alpha_blend = wgpu::BlendState {

@@ -7,12 +7,15 @@
 //! * `tile_light_counts[tile_idx]`  — number of lights that hit this tile
 //! * `tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]` — light index i
 //!
-//! These buffers are published into `PassResources` so `DeferredLightPass` can
+//! These buffers are published into `ResourceRegistry` so `DeferredLightPass` can
 //! skip every light that doesn't touch the current pixel's tile.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+pub mod gpu_types;
+pub use gpu_types::*;
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
 
 pub const TILE_SIZE: u32 = 16;
@@ -271,17 +274,21 @@ impl RenderPass for LightCullPass {
         self.cull_cache_key = None;
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
-        frame
-            .tile_light_lists
-            .write(&self.tile_light_lists, "LightCull");
-        frame
-            .tile_light_counts
-            .write(&self.tile_light_counts, "LightCull");
-        frame.cluster_light_grid.write(
-            libhelio::ClusterLightGrid {
-                tile_light_lists: &self.tile_light_lists,
-                tile_light_counts: &self.tile_light_counts,
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // SAFETY: extended out of `self`'s own owned buffers, which are
+        // pass-lifetime (owned by the RenderGraph across many frames), never
+        // frame-scoped -- see `helio-pass-object-batch::publish`'s identical
+        // comment for the full reasoning.
+        let tile_light_lists: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.tile_light_lists) };
+        let tile_light_counts: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.tile_light_counts) };
+        frame.write(helio_core::ResourceKey::new("tile_light_lists"), tile_light_lists, "LightCull");
+        frame.write(helio_core::ResourceKey::new("tile_light_counts"), tile_light_counts, "LightCull");
+        frame.write(helio_core::ResourceKey::new("cluster_light_grid"),
+            crate::ClusterLightGrid {
+                tile_light_lists,
+                tile_light_counts,
                 num_tiles_x: self.num_tiles_x,
                 num_tiles_y: self.num_tiles_y,
             },
@@ -293,7 +300,7 @@ impl RenderPass for LightCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

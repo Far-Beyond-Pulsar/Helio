@@ -12,9 +12,9 @@ gpu = []
 pulsar_reflection = { workspace = true }
 glam = { workspace = true }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
+serde_json = { workspace = true }

@@ -290,24 +290,14 @@ impl RenderPass for ShadowDirtyPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let movable_draw_count = ctx
-            .pass_resources
-            .object_batch
-            .get()
-            .map(|b| b.shadow_movable_draw_count)
-            .unwrap_or(0);
-        let face_count = ctx
-            .pass_resources
-            .shadow_matrices
-            .get()
-            .map(|s| s.shadow_count)
-            .unwrap_or(0)
+        let movable_draw_count = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.shadow_movable_draw_count).unwrap_or(0);
+        let face_count = ctx.pass_resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")).map(|s| s.shadow_count).unwrap_or(0)
             .min(MAX_SHADOW_FACES as u32);
 
         // Detect topology changes (objects added/removed from movable set).
@@ -330,11 +320,11 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
         let movable_draw_count = batch.shadow_movable_draw_count;
-        let Some(shadow_data) = ctx.resources.shadow_matrices.get() else {
+        let Some(shadow_data) = ctx.resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")) else {
             return Ok(());
         };
         let face_count = shadow_data.shadow_count;

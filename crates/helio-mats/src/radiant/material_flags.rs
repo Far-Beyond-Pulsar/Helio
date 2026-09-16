@@ -1,8 +1,8 @@
 //! Feature-flag helper functions for material flags.
 //!
-//! These are thin wrappers over the bit-flag constants defined in `libhelio`.
+//! These are thin wrappers over the bit-flag constants defined in this crate.
 
-use libhelio::{
+use crate::material::{
     FLAG_ALPHA_BLEND, FLAG_ALPHA_TEST, FLAG_DOUBLE_SIDED, FLAG_HAS_ANISOTROPY, FLAG_HAS_CLEAR_COAT,
     FLAG_HAS_CUSTOM_SHADER, FLAG_HAS_NORMAL_MAP, FLAG_HAS_SUBSURFACE,
 };

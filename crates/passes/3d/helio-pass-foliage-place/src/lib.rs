@@ -67,15 +67,32 @@ pub use contract::*;
 pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
 
 pub mod components;
+mod frame_data;
 mod pass;
 mod reference;
 mod residency;
 mod uniforms;
+pub mod wind;
 
+pub use frame_data::FoliageTerrainViews;
 pub use pass::FoliagePlacePass;
 pub use reference::{place_tile_reference, ReferenceCandidate, ReferencePlacement};
 pub use residency::{RingUpdate, TileRing};
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
+pub use wind::{GpuWind, Wind};
+
+/// Marker opting a shader into [`WIND`]. Must appear in the source.
+pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
+
+/// The three-band foliage wind model and the `Wind` uniform layout, as a
+/// `helio-core` shader snippet (see `helio_core::shader::ShaderSnippet`).
+pub const WIND: &str = include_str!("../shaders/foliage_wind.wgsl");
+
+/// [`helio_core::shader::ShaderSnippet`] for [`WIND`]. Passed explicitly to
+/// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
+/// via [`WIND_MARKER`] — `helio-core` itself never names this snippet.
+pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::shader::ShaderSnippet::new(WIND_MARKER, WIND);
 
 /// Vertices emitted per instance for each foliage LOD, from the plan's §6.3 ladder:
 /// a 5-segment blade, a 3-segment blade, a card and a clump card.

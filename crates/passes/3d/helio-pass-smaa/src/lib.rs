@@ -293,7 +293,7 @@ impl RenderPass for SmaaPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -312,7 +312,7 @@ impl RenderPass for SmaaPass {
         // ── Lazy bind group rebuild ───────────────────────────────────────────
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's pointer changes (e.g. after resize).
-        let pre_aa = ctx.resources.pre_aa.read("SMAA").ok_or_else(|| {
+        let pre_aa = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "SMAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )

@@ -1,4 +1,8 @@
 //! GPU camera uniform types.
+//!
+//! Generic: every pass in the graph shares exactly one camera per frame, so
+//! this is a first-class `helio-core` shape (like `PassContext::camera`),
+//! not a pass-owned resource.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};

@@ -39,7 +39,7 @@ use pulsar_scenedb_derive::SceneStore;
 pub const MAX_LIGHTS: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
 
 /// A placed light, authored as a SceneDB component. Field-for-field
-/// identical to [`libhelio::GpuLight`] (enforced by the size/align test
+/// identical to [`crate::GpuLight`] (enforced by the size/align test
 /// below) so conversion is a zero-cost `bytemuck::cast`, matching
 /// `CoronaEmitterComponent`'s relationship to `GpuCoronaEmitter`.
 #[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
@@ -94,13 +94,13 @@ pub struct LightComponent {
     pub ies_angle_offset: f32,
 }
 
-impl From<libhelio::GpuLight> for LightComponent {
-    fn from(value: libhelio::GpuLight) -> Self {
+impl From<crate::GpuLight> for LightComponent {
+    fn from(value: crate::GpuLight) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<LightComponent> for libhelio::GpuLight {
+impl From<LightComponent> for crate::GpuLight {
     fn from(value: LightComponent) -> Self {
         bytemuck::cast(value)
     }
@@ -114,11 +114,11 @@ mod tests {
     fn scene_record_matches_light_gpu_abi() {
         assert_eq!(
             std::mem::size_of::<LightComponent>(),
-            std::mem::size_of::<libhelio::GpuLight>()
+            std::mem::size_of::<crate::GpuLight>()
         );
         assert_eq!(
             std::mem::align_of::<LightComponent>(),
-            std::mem::align_of::<libhelio::GpuLight>()
+            std::mem::align_of::<crate::GpuLight>()
         );
     }
 }

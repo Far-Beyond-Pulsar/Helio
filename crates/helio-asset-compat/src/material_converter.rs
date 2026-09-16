@@ -1,7 +1,7 @@
 //! PBR material mapping from SolidRS to Helio material assets.
 
 use helio::{GpuMaterial, TextureTransform};
-use libhelio::MaterialWorkflow;
+use helio_mats::MaterialWorkflow;
 use solid_rs::scene::{AlphaMode, Material as SolidMaterial, TextureRef as SolidTextureRef};
 
 use crate::texture_loader::TextureSemantic;

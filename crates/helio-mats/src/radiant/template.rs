@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use libhelio::{
+use crate::material::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,
 };
@@ -76,7 +76,7 @@ impl RadiantTemplate {
     /// texture/sampler bindings plus an explicit switch retain all material slots
     /// without requiring a native-only feature.
     pub fn apply_webgpu_fixups(src: &str, max_textures: usize) -> String {
-        libhelio::shader::apply_webgpu_material_bindings(src, max_textures)
+        crate::shader::apply_webgpu_material_bindings(src, max_textures)
     }
 }
 
@@ -176,7 +176,7 @@ impl RadiantTemplateRegistry {
 
     /// Register the built-in tier-2 surface templates shipped with the engine.
     /// Each template is registered with its predefined `MATERIAL_CLASS_*` ID
-    /// so users can reference them by the constants from `libhelio`.
+    /// so users can reference them by the constants from `helio_mats`.
     fn register_default_templates(&mut self) {
         self.register_partial_str_with_id(
             MATERIAL_CLASS_CLEAR_COAT,

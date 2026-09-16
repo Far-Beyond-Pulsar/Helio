@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 /// WebGPU baseline guarantees only 16; native Vulkan/D3D12 supports 256.
 /// Mobile GPUs (Apple, Android/Adreno) get the same conservative cap as wasm —
 /// their shader compilers/descriptor limits choke on a 256-wide binding array.
-pub const MAX_TEXTURES: usize = libhelio::MAX_MATERIAL_TEXTURES;
+pub const MAX_TEXTURES: usize = helio_mats::MAX_MATERIAL_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureSamplerDesc {

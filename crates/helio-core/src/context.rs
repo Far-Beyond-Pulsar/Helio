@@ -52,7 +52,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::PassResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -103,7 +103,7 @@
 
 use crate::graph::PipelineRegistry;
 use crate::{Profiler, SceneBufferProjection};
-use libhelio::GpuCameraUniforms;
+use crate::GpuCameraUniforms;
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -148,7 +148,7 @@ use libhelio::GpuCameraUniforms;
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::PassResources<'a>,
+///         _: &'a helio_core::ResourceRegistry<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -231,7 +231,7 @@ pub struct PassContext<'a> {
     /// type -- lights, camera, materials, shadow matrices, coordinate
     /// spaces, voxels, portals -- removed; every such field's replacement
     /// data source, if one exists yet, lives behind a `BufferKey` or a
-    /// `libhelio::PassResources` slot published by the pass that owns it.)
+    /// `crate::ResourceRegistry` slot published by the pass that owns it.)
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Profiler (automatic - injected by RenderGraph).
@@ -251,11 +251,11 @@ pub struct PassContext<'a> {
     pub device: &'a wgpu::Device,
 
     /// Per-frame transient resource views.
-    pub resources: &'a libhelio::PassResources<'a>,
+    pub resources: &'a crate::ResourceRegistry<'a>,
 
     /// Open typed per-frame resource registry. New passes should prefer this
     /// over the legacy `resources` field when publishing or consuming data.
-    pub registry: &'a libhelio::ResourceRegistry<'a>,
+    pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// Subpass index within a fused render-pass chain.
     pub subpass_index: u32,
@@ -406,7 +406,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::PassResources<'a>,
+    /// #         _: &'a helio_core::ResourceRegistry<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -475,7 +475,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::PassResources<'a>,
+    /// #         _: &'a helio_core::ResourceRegistry<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -543,7 +543,7 @@ impl<'a> PassContext<'a> {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::PassResources<'a>,
+///         _: &'a helio_core::ResourceRegistry<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -621,10 +621,10 @@ pub struct PrepareContext<'a> {
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Per-frame transient resource views (for passes that need them in prepare).
-    pub pass_resources: &'a libhelio::PassResources<'a>,
+    pub pass_resources: &'a crate::ResourceRegistry<'a>,
 
     /// Open typed per-frame resource registry for new passes.
-    pub registry: &'a libhelio::ResourceRegistry<'a>,
+    pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// True if the render target was resized this frame.
     pub resize: bool,

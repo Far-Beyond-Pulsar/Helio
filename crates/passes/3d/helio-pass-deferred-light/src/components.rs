@@ -1,7 +1,7 @@
 //! SceneDB-owned reflection capture records.
 //!
 //! `ReflectionCaptureComponent` is field-for-field identical to
-//! `libhelio::GpuReflectionCapture`'s ABI: one placed capture volume (sphere
+//! `crate::GpuReflectionCapture`'s ABI: one placed capture volume (sphere
 //! or oriented box), its parallax transform, and which cube-array layer its
 //! baked (or not-yet-baked) cubemap lives in.
 //!
@@ -43,12 +43,12 @@ pub struct ReflectionCaptureComponent {
     pub brightness: f32,
 }
 
-impl From<libhelio::GpuReflectionCapture> for ReflectionCaptureComponent {
-    fn from(v: libhelio::GpuReflectionCapture) -> Self {
+impl From<crate::GpuReflectionCapture> for ReflectionCaptureComponent {
+    fn from(v: crate::GpuReflectionCapture) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<ReflectionCaptureComponent> for libhelio::GpuReflectionCapture {
+impl From<ReflectionCaptureComponent> for crate::GpuReflectionCapture {
     fn from(v: ReflectionCaptureComponent) -> Self {
         bytemuck::cast(v)
     }
@@ -68,7 +68,7 @@ mod tests {
     fn layout_matches_gpu_abi() {
         assert_eq!(
             std::mem::size_of::<ReflectionCaptureComponent>(),
-            std::mem::size_of::<libhelio::GpuReflectionCapture>()
+            std::mem::size_of::<crate::GpuReflectionCapture>()
         );
     }
 }

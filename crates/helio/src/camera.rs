@@ -1,7 +1,7 @@
 //! Universal camera input for renderer frames.
 
 use glam::{Mat4, Vec3};
-use libhelio::PostProcessSettings;
+use helio_pass_postprocess::PostProcessSettings;
 
 /// Camera parameters supplied for a render frame.
 #[derive(Debug, Clone)]

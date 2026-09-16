@@ -11,9 +11,10 @@ gpu = []
 
 [dependencies]
 pulsar_reflection = { workspace = true }
-helio      = { workspace = true }
 helio-core  = { workspace = true }
-libhelio  = { workspace = true }
+helio-mats  = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
+helio-pass-radiance-cascades = { workspace = true }
 glam      = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

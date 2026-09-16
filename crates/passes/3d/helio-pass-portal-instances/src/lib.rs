@@ -51,7 +51,7 @@ struct ScreenSize {
 type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize);
 
 pub struct PortalInstancePass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
@@ -78,7 +78,7 @@ impl PortalInstancePass {
         portal_compacted_indices_buf: Arc<wgpu::Buffer>,
         portal_compacted_chains_buf: Arc<wgpu::Buffer>,
     ) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
 
         let shader_source = portal_shader_source(material_binding);
 
@@ -275,12 +275,12 @@ impl PortalInstancePass {
     }
 }
 
-fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Cow<'static, str> {
+fn portal_shader_source(material_binding: helio_mats::MaterialBindingConfig) -> Cow<'static, str> {
     let source = include_str!("../shaders/gbuffer_portal.wgsl");
     if material_binding.uses_binding_arrays() {
         Cow::Borrowed(source)
     } else {
-        Cow::Owned(libhelio::shader::apply_webgpu_material_bindings(
+        Cow::Owned(helio_mats::apply_webgpu_material_bindings(
             source,
             material_binding.max_textures,
         ))
@@ -345,17 +345,17 @@ impl RenderPass for PortalInstancePass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always `Some` when the G-buffer exists (chain fusion is decided by
         // attachment identity at lock time, not per-frame content — see
         // helio-pass-foliage-gbuffer's docs for why returning `None` here
         // conditionally would break fusion).
-        let gbuffer = resources.gbuffer.read("PortalInstance")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("PortalInstance")?;
-        let sss_target = resources.gbuffer_sss.read("PortalInstance")?;
-        let extra_target = resources.gbuffer_extra.read("PortalInstance")?;
-        let velocity_target = resources.gbuffer_velocity.read("PortalInstance")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 8>>(helio_core::ResourceKey::new("gbuffer"), "PortalInstance")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "PortalInstance")?;
+        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "PortalInstance")?;
+        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "PortalInstance")?;
+        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "PortalInstance")?;
 
         const LOAD: wgpu::Operations<wgpu::Color> = wgpu::Operations {
             load: wgpu::LoadOp::Load,
@@ -364,25 +364,25 @@ impl RenderPass for PortalInstancePass {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: gbuffer.views[0],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
+                    view: gbuffer.views[1],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
+                    view: gbuffer.views[2],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
+                    view: gbuffer.views[3],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
@@ -431,12 +431,9 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx
-            .pass_resources
-            .object_batch
-            .get()
-            .map(|b| b.draw_count)
-            .unwrap_or(0);
+        self.draw_count = ctx.pass_resources
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
+            .map(|b| b.draw_count).unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,
@@ -466,7 +463,7 @@ impl RenderPass for PortalInstancePass {
             );
             return Ok(());
         };
-        let material_textures = ctx.resources.material_textures.read("PortalInstance");
+        let material_textures = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "PortalInstance");
         if ctx.frame_num < 3 {
             log::info!(
                 "[PortalInstance] frame={} material_textures_available={}",
@@ -483,10 +480,10 @@ impl RenderPass for PortalInstancePass {
             return Ok(());
         };
 
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
@@ -628,7 +625,7 @@ impl RenderPass for PortalInstancePass {
 #[cfg(test)]
 mod tests {
     use super::portal_shader_source;
-    use libhelio::{MaterialBindingConfig, MaterialBindingMode};
+    use helio_mats::{MaterialBindingConfig, MaterialBindingMode};
 
     #[test]
     fn expanded_tier_rewrites_the_portal_material_bindings() {

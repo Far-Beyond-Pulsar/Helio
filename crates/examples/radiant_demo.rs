@@ -15,7 +15,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_external;
 use helio_pass_gbuffer::MaterialComponent;
-use libhelio::{
+use helio_mats::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,
 };
@@ -343,7 +343,7 @@ impl ApplicationHandler for App {
             tex_emissive: GpuMaterial::NO_TEXTURE,
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow: 0,
-            flags: libhelio::FLAG_TRANSPARENT_ONLY,
+            flags: helio_mats::FLAG_TRANSPARENT_ONLY,
             material_class: glass_class,
             class_params: [0.0; 4],
         }

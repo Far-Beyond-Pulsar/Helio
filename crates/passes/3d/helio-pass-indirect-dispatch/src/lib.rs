@@ -15,6 +15,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod gpu_types;
+pub use gpu_types::*;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
@@ -35,7 +38,7 @@ pub struct IndirectDispatchPass {
     uniform_buf: wgpu::Buffer,
     cull_stats_buf: wgpu::Buffer,
     /// This pass's own output -- no longer a central `GpuScene` field (see
-    /// `IndirectDispatchFrameData`'s doc in `libhelio`): frustum-culled
+    /// `IndirectDispatchFrameData`'s doc, now in this crate): frustum-culled
     /// indirect draw args, one `DrawIndexedIndirect` (20 bytes) per
     /// draw-call group.
     indirect_buf: wgpu::Buffer,
@@ -263,7 +266,7 @@ impl RenderPass for IndirectDispatchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -281,18 +284,22 @@ impl RenderPass for IndirectDispatchPass {
         builder.write_buffer("indirect_dispatch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
-        frame.indirect_dispatch.write(
-            libhelio::IndirectDispatchFrameData {
-                indirect: &self.indirect_buf,
-                compacted_indices: &self.compacted_indices_buf,
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // The pass owns these buffers for the renderer lifetime; ResourceRegistry
+        // stores borrowed views for the current frame.
+        let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.indirect_buf) };
+        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_buf) };
+        frame.write(helio_core::ResourceKey::new("indirect_dispatch"), 
+            crate::IndirectDispatchFrameData {
+                indirect,
+                compacted_indices,
             },
             "IndirectDispatch",
         );
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let Some(batch) = ctx.pass_resources.object_batch.get() else {
+        let Some(batch) = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             self.draw_count = 0;
             return Ok(());
         };
@@ -315,10 +322,10 @@ impl RenderPass for IndirectDispatchPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
             return Ok(());
         };
 

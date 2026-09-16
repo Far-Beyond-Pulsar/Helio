@@ -1,15 +1,19 @@
-//! GPU instance data for GPU-driven indirect rendering.
+//! GPU instance/draw-call/object-batch shapes.
 //!
-//! All geometry in the scene is submitted as a flat array of `GpuInstanceData`.
-//! The GPU culling compute shaders read this array and emit `DrawIndexedIndirect`
-//! commands — the CPU never iterates the draw list.
+//! Owned by `helio-pass-object-batch`, the pass that actually assembles the
+//! sorted instance/draw-call/range/shadow-partition data every
+//! geometry-drawing pass reads (see [`ObjectBatchFrameData`]'s own doc).
+//! Consumers depend on this crate for the shape rather than it being a
+//! central-crate-known "generic" type — the shape is real content this pass
+//! produces every frame, not a graph/registry mechanism.
 
 use bytemuck::{Pod, Zeroable};
 
 // ── Instance flags (`GpuInstanceData::flags`) ───────────────────────────────
 //
-// Distinct from the `FLAG_*` constants in `material`, which live in
-// `GpuMaterial::flags`. Same names, different field — check which one you are setting.
+// Distinct from a pass's own material `FLAG_*` constants (e.g.
+// `GpuMaterial::flags` in `helio-mats`). Same names, different field — check
+// which one you are setting.
 
 /// This instance contributes to the shadow atlas.
 pub const INSTANCE_FLAG_CASTS_SHADOW: u32 = 1 << 0;
@@ -46,11 +50,9 @@ pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
 /// per-frame movement bookkeeping) rather than `Static`/`Stationary`. Unset
 /// (0) is the common case and matches a `Zeroable`-default row: an instance
 /// nobody has ever tagged movable is treated as static, the cheaper and more
-/// common case for a GPU-driven object-batch pipeline (`helio-pass-object-
-/// batch`) building the shadow-partitioned indirect buffers -- see that
-/// crate's module doc for how this bit feeds the static/movable shadow split
-/// `Scene::rebuild_shadow_partition_buffers` used to compute from a CPU-side
-/// `Movability` enum per object.
+/// common case for this pass's shadow-partitioned indirect buffers -- see
+/// this crate's module doc for how this bit feeds the static/movable shadow
+/// split, computed from a CPU-side `Movability` enum per object.
 pub const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
 
 /// Bit offset of the coordinate-space id within [`GpuInstanceData::flags`].
@@ -58,24 +60,19 @@ pub const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
 /// # Coordinate spaces
 ///
 /// Every instance is drawn through `coordinate_spaces[space_id] * transform`,
-/// where `coordinate_spaces` is a small GPU array of rigid transforms
-/// (`crates/helio-core/src/scene/managers.rs::CoordinateSpaceBuffer`). Slot 0
-/// is always the identity, so an untagged instance (the overwhelming common
-/// case) pays one constant-buffer read and one extra `mat4x4` multiply per
-/// vertex — no new pass, no branch, no separate pipeline.
-///
-/// Sublevels and portals are both just consumers of this one mechanism: a
-/// sublevel assigns its members a space id once and moves the whole sublevel
-/// by writing one matrix (`Scene::move_sublevel`); a portal draws a *second*,
-/// clipped copy of nearby geometry through its own space id
-/// (the SceneDB portal projection). See `docs/` for the full design.
+/// where `coordinate_spaces` is a small GPU array of rigid transforms owned
+/// by whichever pass assembles the coordinate-space registry (portals/
+/// sublevels). Slot 0 is always the identity, so an untagged instance (the
+/// overwhelming common case) pays one constant-buffer read and one extra
+/// `mat4x4` multiply per vertex — no new pass, no branch, no separate
+/// pipeline.
 pub const INSTANCE_COORDINATE_SPACE_SHIFT: u32 = 8;
 
 /// Mask for the 8-bit coordinate-space id within [`GpuInstanceData::flags`].
 ///
-/// 256 values are encodable; [`crate::MAX_COORDINATE_SPACES`] (32) are
-/// actually backed by GPU storage, which is enough headroom that running out
-/// is not a realistic concern.
+/// 256 values are encodable; [`MAX_COORDINATE_SPACES`] (32) are actually
+/// backed by GPU storage, which is enough headroom that running out is not a
+/// realistic concern.
 pub const INSTANCE_COORDINATE_SPACE_MASK: u32 = 0xFF << INSTANCE_COORDINATE_SPACE_SHIFT;
 
 /// Number of coordinate-space slots backed by GPU storage. Slot 0 is always
@@ -160,4 +157,65 @@ pub struct GpuInstanceAabb {
     pub _pad0: f32,
     pub max: [f32; 3],
     pub _pad1: f32,
+}
+
+/// A template draw call that the GPU culling compute uses to emit indirect commands.
+///
+/// Describes one batched draw — all instances in the batch share the same mesh geometry
+/// (index range) and are stored consecutively in the instance buffer starting at
+/// `first_instance`. Identical (mesh, material) pairs are automatically merged into
+/// a single `GpuDrawCall` by this pass, enabling hardware instancing.
+///
+/// # WGSL equivalent
+/// ```wgsl
+/// struct GpuDrawCall {
+///     index_count:    u32,
+///     first_index:    u32,
+///     vertex_offset:  i32,
+///     first_instance: u32,  // first index into GpuInstance array for this batch
+///     instance_count: u32,  // number of consecutive instances in the batch
+/// }
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuDrawCall {
+    pub index_count: u32,
+    pub first_index: u32,
+    pub vertex_offset: i32,
+    /// First index into the `GpuInstance` storage buffer for this instanced batch.
+    pub first_instance: u32,
+    /// Number of instances in the batch (≥ 1). Maximises GPU hardware instancing.
+    pub instance_count: u32,
+}
+
+/// GPU-side indirect draw command (matches `wgpu::util::DrawIndexedIndirectArgs`).
+///
+/// The culling compute shader writes these. The render pass reads them via
+/// `multi_draw_indexed_indirect`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct DrawIndexedIndirectArgs {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
+    pub first_instance: u32,
+}
+
+impl DrawIndexedIndirectArgs {
+    /// Creates a culled (invisible) command — instance_count = 0.
+    pub const fn culled(
+        index_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) -> Self {
+        Self {
+            index_count,
+            instance_count: 0,
+            first_index,
+            base_vertex,
+            first_instance,
+        }
+    }
 }

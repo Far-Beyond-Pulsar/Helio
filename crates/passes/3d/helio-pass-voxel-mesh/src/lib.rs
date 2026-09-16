@@ -14,7 +14,7 @@ use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
-use libhelio::DrawIndexedIndirectArgs;
+use helio_pass_object_batch::DrawIndexedIndirectArgs;
 
 use marching_cubes::PACKED_TRI_TABLE;
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -776,13 +776,13 @@ impl RenderPass for VoxelMeshPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
             return None;
         }
 
-        let pre_aa_view = resources.pre_aa.read("VoxelMesh")?;
+        let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,

@@ -55,22 +55,22 @@ pub struct WaterHitboxComponent {
     pub params: [f32; 4],
 }
 
-impl From<libhelio::GpuWaterVolume> for WaterVolumeComponent {
-    fn from(v: libhelio::GpuWaterVolume) -> Self {
+impl From<crate::GpuWaterVolume> for WaterVolumeComponent {
+    fn from(v: crate::GpuWaterVolume) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<WaterVolumeComponent> for libhelio::GpuWaterVolume {
+impl From<WaterVolumeComponent> for crate::GpuWaterVolume {
     fn from(v: WaterVolumeComponent) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<libhelio::GpuWaterHitbox> for WaterHitboxComponent {
-    fn from(v: libhelio::GpuWaterHitbox) -> Self {
+impl From<crate::GpuWaterHitbox> for WaterHitboxComponent {
+    fn from(v: crate::GpuWaterHitbox) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<WaterHitboxComponent> for libhelio::GpuWaterHitbox {
+impl From<WaterHitboxComponent> for crate::GpuWaterHitbox {
     fn from(v: WaterHitboxComponent) -> Self {
         bytemuck::cast(v)
     }

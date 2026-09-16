@@ -162,11 +162,11 @@ pub struct HlfsPass {
     globals: wgpu::Buffer,
     shadows: wgpu::Buffer,
     config: HlfsConfig,
-    shadow_quality: libhelio::ShadowQuality,
+    shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     output_format: wgpu::TextureFormat,
     write_history: usize,
     history_valid: bool,
-    previous_camera: Option<libhelio::GpuCameraUniforms>,
+    previous_camera: Option<helio_core::GpuCameraUniforms>,
     previous_light_count: Option<u32>,
     previous_light_generation: Option<u64>,
     previous_frame: Option<u64>,
@@ -224,13 +224,13 @@ impl HlfsPass {
         let globals = uniform("HLFS globals", std::mem::size_of::<Globals>() as u64);
         let shadows = uniform(
             "HLFS shadow settings",
-            std::mem::size_of::<libhelio::ShadowConfig>() as u64,
+            std::mem::size_of::<helio_pass_shadow_matrix::ShadowConfig>() as u64,
         );
-        let shadow_quality = libhelio::ShadowQuality::High;
+        let shadow_quality = helio_pass_shadow_matrix::ShadowQuality::High;
         queue.write_buffer(
             &shadows,
             0,
-            bytemuck::bytes_of(&libhelio::ShadowConfig::from_quality(shadow_quality)),
+            bytemuck::bytes_of(&helio_pass_shadow_matrix::ShadowConfig::from_quality(shadow_quality)),
         );
         Self {
             pipelines,
@@ -271,12 +271,12 @@ impl HlfsPass {
         }
         self.invalidate_history();
     }
-    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
+    pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality, queue: &wgpu::Queue) {
         self.shadow_quality = quality;
         queue.write_buffer(
             &self.shadows,
             0,
-            bytemuck::bytes_of(&libhelio::ShadowConfig::from_quality(quality)),
+            bytemuck::bytes_of(&helio_pass_shadow_matrix::ShadowConfig::from_quality(quality)),
         );
         self.invalidate_history();
     }
@@ -499,14 +499,15 @@ impl RenderPass for HlfsPass {
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
-        frame.pre_aa.write(&self.targets.output.view, "HLFS");
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        let output: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.targets.output.view) };
+        frame.write(helio_core::ResourceKey::new("pre_aa"), output, "HLFS");
     }
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -536,7 +537,7 @@ impl RenderPass for HlfsPass {
             && self.previous_light_count == Some(light_count)
             && !ctx.resize;
         let mut ambient = [0.03, 0.03, 0.03, self.config.screen_trace_distance];
-        if let Some(environment) = ctx.pass_resources.render_environment.get() {
+        if let Some(environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")) {
             for (i, v) in ambient[..3].iter_mut().enumerate() {
                 *v = environment.ambient_color[i] * environment.ambient_intensity;
             }
@@ -550,9 +551,9 @@ impl RenderPass for HlfsPass {
             sample_size: [self.targets.sample_width, self.targets.sample_height],
             sample_scale: self.config.sample_scale,
             candidate_count: self.config.candidates_per_sample,
-            has_velocity: ctx.pass_resources.gbuffer_velocity.get().is_some() as u32,
-            surface_flags: (ctx.pass_resources.baked_lightmap.get().is_some()
-                && ctx.pass_resources.gbuffer_lightmap_uv.get().is_some())
+            has_velocity: ctx.pass_resources.read_texture_view(helio_core::ResourceKey::new("gbuffer_velocity"), "HLFS").is_some() as u32,
+            surface_flags: (ctx.pass_resources.read_texture_view(helio_core::ResourceKey::new("baked_lightmap"), "HLFS").is_some()
+                && ctx.pass_resources.read_texture_view(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "HLFS").is_some())
                 as u32
                 | (u32::from(
                     self.previous_light_generation
@@ -563,7 +564,7 @@ impl RenderPass for HlfsPass {
             exposure: self.config.pre_exposure,
             debug_mode: self.config.debug_mode as u32,
             ambient,
-            csm_splits: libhelio::CSM_SPLITS,
+            csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
             previous_view: self.previous_camera.map_or(camera.view, |c| c.view),
         };
         ctx.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
@@ -577,11 +578,11 @@ impl RenderPass for HlfsPass {
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let gbuffer = ctx.resources.gbuffer.read("HLFS").ok_or_else(|| {
+        let gbuffer = ctx.resources.read::<helio_core::ViewGroup<'_, 8>>(helio_core::ResourceKey::new("gbuffer"), "HLFS").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("HLFS requires a GBuffer".into())
         })?;
         let pre_aa =
-            ctx.resources.pre_aa.get().ok_or_else(|| {
+            ctx.resources.read_texture_view(helio_core::ResourceKey::new("pre_aa"), "HLFS").ok_or_else(|| {
                 helio_core::Error::InvalidPassConfig("HLFS requires pre_aa".into())
             })?;
         let f = &self.fallbacks;
@@ -590,43 +591,34 @@ impl RenderPass for HlfsPass {
             .get(helio_core::BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
-        let shadow_matrices_buf = ctx
-            .resources
-            .shadow_matrices
-            .get()
-            .map(|s| s.shadow_matrices)
-            .unwrap_or(ctx.camera);
+        let shadow_matrices_buf = ctx.resources.read::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices"), "HLFS").map(|s| s.shadow_matrices).unwrap_or(ctx.camera);
         let inputs = Inputs {
             camera: ctx.camera,
             lights: lights_buf,
             shadow_matrices: shadow_matrices_buf,
-            shadow_atlas: ctx.resources.shadow_atlas.get().unwrap_or(&f.shadow_view),
+            shadow_atlas: ctx.resources.read_texture_view(helio_core::ResourceKey::new("shadow_atlas"), "HLFS").unwrap_or(&f.shadow_view),
             shadow_sampler: ctx
                 .resources
-                .shadow_sampler
-                .get()
+                .read_sampler(helio_core::ResourceKey::new("shadow_sampler"), "HLFS")
                 .unwrap_or(&f.shadow_sampler),
             textures: [
-                gbuffer.albedo,
-                gbuffer.normal,
-                gbuffer.orm,
-                gbuffer.emissive,
+                gbuffer.views[0],
+                gbuffer.views[1],
+                gbuffer.views[2],
+                gbuffer.views[3],
                 ctx.depth,
                 ctx.resources
-                    .gbuffer_lightmap_uv
-                    .get()
+                    .read_texture_view(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "HLFS")
                     .unwrap_or(&f.lightmap_uv.view),
-                ctx.resources.baked_lightmap.get().unwrap_or(&f.black.view),
+                ctx.resources.read_texture_view(helio_core::ResourceKey::new("baked_lightmap"), "HLFS").unwrap_or(&f.black.view),
                 pre_aa,
                 ctx.resources
-                    .gbuffer_velocity
-                    .get()
+                    .read_texture_view(helio_core::ResourceKey::new("gbuffer_velocity"), "HLFS")
                     .unwrap_or(&f.black.view),
             ],
             lightmap_sampler: ctx
                 .resources
-                .baked_lightmap_sampler
-                .get()
+                .read_sampler(helio_core::ResourceKey::new("baked_lightmap_sampler"), "HLFS")
                 .unwrap_or(&f.linear_sampler),
         };
         self.external.update(

@@ -23,7 +23,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 
 use crate::common::{box_mesh, insert_object, make_material, point_light};
 

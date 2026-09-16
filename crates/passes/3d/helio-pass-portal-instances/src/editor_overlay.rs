@@ -165,7 +165,7 @@ impl RenderPass for PortalEditorOverlayPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always structurally participates in the pre_aa fusion chain,
         // regardless of `editor_mode` — that flag is runtime, mutable state,
@@ -174,7 +174,7 @@ impl RenderPass for PortalEditorOverlayPass {
         // would make this pass flicker in and out of the chain and could
         // break fusion for passes chained through it. `execute()` is where
         // editor_mode actually matters: no draw call, zero cost, when off.
-        let target_view = resources.pre_aa.get().unwrap_or(target);
+        let target_view = resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,

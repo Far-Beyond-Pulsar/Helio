@@ -74,7 +74,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
     .into_iter()
     .enumerate()
     {
-        let mut camera = libhelio::GpuCameraUniforms::zeroed();
+        let mut camera = helio_core::GpuCameraUniforms::zeroed();
         camera.jitter_frame = [
             expected[0] * 2.0 / size[0] as f32,
             expected[1] * 2.0 / size[1] as f32,
@@ -86,7 +86,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             device: &device,
             queue: &queue,
             scene: scene_resources,
-            pass_resources: &libhelio::PassResources::empty(),
+            pass_resources: &helio_core::ResourceRegistry::empty(),
             width: size[0],
             height: size[1],
             frame_num: frame,

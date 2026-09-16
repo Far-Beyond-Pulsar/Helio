@@ -73,11 +73,11 @@ impl App {
         Self { state: None }
     }
 
-    fn build_emitters(elapsed: f32) -> [libhelio::GpuCoronaEmitter; 4] {
+    fn build_emitters(elapsed: f32) -> [helio_pass_corona::GpuCoronaEmitter; 4] {
         let t = elapsed;
 
         // ── 1. Fountain: blue fountain bursting from origin ────────────────
-        let fountain = libhelio::CoronaEmitterDescriptor {
+        let fountain = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 262_144,
             emit_rate: 8000.0,
             lifetime: 3.0,
@@ -89,7 +89,7 @@ impl App {
             velocity: [0.0, 8.0, 0.0],
             velocity_variation: [3.0, 2.0, 3.0],
             gravity: -5.0,
-            shape: libhelio::CoronaEmitterShape::Point,
+            shape: helio_pass_corona::CoronaEmitterShape::Point,
             texture_index: -1,
             position: [0.0, 0.0, 0.0],
         };
@@ -100,7 +100,7 @@ impl App {
             2.0 + 1.5 * (t * 0.7).sin(),
             6.0 * t.sin() * 0.5,
         ];
-        let nebula = libhelio::CoronaEmitterDescriptor {
+        let nebula = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 131_072,
             emit_rate: 3000.0,
             lifetime: 6.0,
@@ -112,7 +112,7 @@ impl App {
             velocity: [0.0, 0.0, 0.0],
             velocity_variation: [0.5, 0.5, 0.5],
             gravity: 0.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 2.5 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 2.5 },
             texture_index: -1,
             position: nebula_pos,
         };
@@ -120,7 +120,7 @@ impl App {
         // ── 3. FireRing: radial burst in XZ plane ──────────────────────────
         let ring_angle = t * 0.6;
         let ring_pos = [4.0 * ring_angle.cos(), 0.5, 4.0 * ring_angle.sin()];
-        let fire = libhelio::CoronaEmitterDescriptor {
+        let fire = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 65_536,
             emit_rate: 2000.0,
             lifetime: 1.5,
@@ -132,13 +132,13 @@ impl App {
             velocity: [3.0 * ring_angle.cos(), 0.0, 3.0 * ring_angle.sin()],
             velocity_variation: [2.0, 1.0, 2.0],
             gravity: -2.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 0.8 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 0.8 },
             texture_index: -1,
             position: ring_pos,
         };
 
         // ── 4. Galaxy: spinning disk of white-blue particles ───────────────
-        let galaxy = libhelio::CoronaEmitterDescriptor {
+        let galaxy = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 131_072,
             emit_rate: 4000.0,
             lifetime: 8.0,
@@ -150,7 +150,7 @@ impl App {
             velocity: [0.0, 0.0, 0.0],
             velocity_variation: [0.0, 0.0, 0.0],
             gravity: 0.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 6.0 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 6.0 },
             texture_index: -1,
             position: [0.0, 8.0, 0.0],
         };

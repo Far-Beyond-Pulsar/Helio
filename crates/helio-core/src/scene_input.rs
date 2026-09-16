@@ -1,6 +1,6 @@
 //! Generic scene input boundary used by graph execution.
 
-use libhelio::GpuCameraUniforms;
+use crate::GpuCameraUniforms;
 pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey};
 use pulsar_scenedb::gpu::SceneGpuStore;
 use std::sync::Arc;

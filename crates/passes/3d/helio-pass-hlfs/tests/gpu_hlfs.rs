@@ -270,7 +270,7 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                 )
             })
             .collect();
-        lights.push(libhelio::GpuLight {
+        lights.push(helio_pass_forward_lit::GpuLight {
             light_type: 0,
             direction_outer: [0.0, 0.0, -1.0, 0.0],
             color_intensity: [1.0, 0.8, 0.5, 3.0],
@@ -978,7 +978,7 @@ fn reduced_resolution_tracks_camera_motion() {
                         fixture
                             .scene
                             .camera
-                            .update(libhelio::GpuCameraUniforms::new(
+                            .update(helio_core::GpuCameraUniforms::new(
                                 view, proj, position, 0.1, 10.0, frame, [0.0; 2], previous,
                             ));
                         fixture.frame();

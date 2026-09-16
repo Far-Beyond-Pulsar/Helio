@@ -615,9 +615,9 @@ impl RenderPass for VoxelRayMarchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa_view = resources.pre_aa.read("VoxelRayMarch")?;
+        let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "VoxelRayMarch")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,

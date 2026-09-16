@@ -33,7 +33,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
-use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,

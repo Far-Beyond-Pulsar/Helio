@@ -64,7 +64,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
-libhelio.workspace = true
 helio-asset-compat = { workspace = true }
 helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
 helio-pass-postprocess = { workspace = true }

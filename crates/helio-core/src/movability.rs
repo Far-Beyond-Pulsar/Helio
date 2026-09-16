@@ -15,6 +15,9 @@
 /// - Static objects provide maximum caching (shadows skip rendering when scene static)
 /// - Movable objects force cache invalidation each frame
 /// - Stationary is a middle ground (for lights: static light pos, dynamic shadow casters)
+///
+/// Generic: a mobility classification any pass may attach to any kind of
+/// object; it names no specific pass or scene-object type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Movability {

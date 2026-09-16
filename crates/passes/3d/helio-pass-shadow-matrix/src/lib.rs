@@ -6,6 +6,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod gpu_types;
+pub use gpu_types::*;
+
 const WORKGROUP_SIZE: u32 = 64;
 
 #[repr(C)]
@@ -179,7 +182,7 @@ impl RenderPass for ShadowMatrixPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

@@ -403,11 +403,17 @@ impl RenderPass for SsaoPass {
         self.resize(device, width, height);
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // The graph already populated frame.ssao with the graph-owned texture.
         // Only override if a pre-baked AO texture is in use.
+        //
+        // SAFETY: extended out of `self.baked_ao_override`, which is
+        // pass-lifetime (owned by the RenderGraph across many frames), never
+        // frame-scoped -- see `helio-pass-object-batch::publish`'s identical
+        // comment for the full reasoning.
         if let Some(ref baked) = self.baked_ao_override {
-            frame.ssao.write(baked.as_ref(), "SSAO");
+            let baked: &'a wgpu::TextureView = unsafe { std::mem::transmute(baked.as_ref()) };
+            frame.write(helio_core::ResourceKey::new("ssao"), baked, "SSAO");
         }
     }
 
@@ -415,9 +421,9 @@ impl RenderPass for SsaoPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let ssao_view = resources.ssao.read("SSAO")?;
+        let ssao_view = resources.read(helio_core::ResourceKey::new("ssao"), "SSAO")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: ssao_view,

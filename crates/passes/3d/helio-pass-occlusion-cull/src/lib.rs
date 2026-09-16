@@ -16,6 +16,8 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub use helio_pass_gbuffer::CulledBatchFrameData;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullParams {
@@ -46,7 +48,7 @@ pub struct OcclusionCullPass {
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
     /// This pass's own output -- no longer a central `GpuScene` field (see
-    /// `CulledBatchFrameData`'s doc in `libhelio`): final (frustum +
+    /// `CulledBatchFrameData`'s doc, now in this crate): final (frustum +
     /// occlusion) surviving instance slots, one `u32` per live instance
     /// (worst case).
     compacted_indices_2_buf: wgpu::Buffer,
@@ -384,19 +386,20 @@ impl RenderPass for OcclusionCullPass {
         builder.write_buffer("culled_batch");
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::PassResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // `indirect_dispatch.indirect` is mutated IN PLACE by this pass
         // (its `instance_count` field, refined from frustum-only down to
         // frustum+occlusion survivors) -- there is no separate owned
         // `indirect` buffer here, so `culled_batch` simply republishes the
         // same buffer reference `indirect_dispatch` already holds.
-        let Some(indirect_dispatch) = frame.indirect_dispatch.get() else {
+        let Some(indirect_dispatch) = frame.read::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch"), "OcclusionCull") else {
             return;
         };
-        frame.culled_batch.write(
-            libhelio::CulledBatchFrameData {
+        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
+        frame.write(helio_core::ResourceKey::new("culled_batch"), 
+            crate::CulledBatchFrameData {
                 indirect: indirect_dispatch.indirect,
-                compacted_indices: &self.compacted_indices_2_buf,
+                compacted_indices,
             },
             "OcclusionCull",
         );
@@ -406,17 +409,17 @@ impl RenderPass for OcclusionCullPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let batch = ctx.pass_resources.object_batch.get();
+        let batch = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
-        let static_hiz_available = ctx.pass_resources.static_hiz.is_some();
+        let static_hiz_available = ctx.pass_resources.read_texture_view(helio_core::ResourceKey::new("static_hiz"), "OcclusionCull").is_some();
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
@@ -438,13 +441,13 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(indirect_dispatch) = ctx.resources.indirect_dispatch.get() else {
+        let Some(indirect_dispatch) = ctx.resources.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.coordinate_spaces.get() else {
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -473,21 +476,13 @@ impl RenderPass for OcclusionCullPass {
         // Lazy bind-group rebuild: rebuild whenever any buffer pointer or the
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
         let hiz_view =
-            ctx.resources.hiz.as_ref().expect(
+            ctx.resources.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
                 "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
             );
 
         // Resolve static HiZ resources (use placeholder when no pre-baked data is loaded).
-        let static_hiz_view = ctx
-            .resources
-            .static_hiz
-            .get()
-            .unwrap_or(&self.placeholder_static_hiz_view);
-        let static_hiz_sampler = ctx
-            .resources
-            .static_hiz_sampler
-            .get()
-            .unwrap_or(&self.placeholder_static_hiz_sampler);
+        let static_hiz_view = ctx.resources.read_texture_view(helio_core::ResourceKey::new("static_hiz"), "OcclusionCull").unwrap_or(&self.placeholder_static_hiz_view);
+        let static_hiz_sampler = ctx.resources.read_sampler(helio_core::ResourceKey::new("static_hiz_sampler"), "OcclusionCull").unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (
             ctx.camera as *const _ as usize,

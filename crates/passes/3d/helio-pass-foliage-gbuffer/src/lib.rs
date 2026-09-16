@@ -568,7 +568,7 @@ impl FoliageGBufferPass {
         });
         let placeholder_wind = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FoliageGBuffer/WindPlaceholder"),
-            size: std::mem::size_of::<libhelio::wind::GpuWind>() as u64,
+            size: std::mem::size_of::<helio_pass_foliage_place::GpuWind>() as u64,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -724,10 +724,11 @@ impl FoliageGBufferPass {
         });
 
         // ── Pipeline ──────────────────────────────────────────────────────────
-        let shader = helio_core::shader::module(
+        let shader = helio_core::shader::module_with(
             device,
             "FoliageGBuffer Shader",
             include_str!("../shaders/foliage_gbuffer.wgsl"),
+            &[helio_pass_foliage_place::WIND_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FoliageGBuffer PL"),
@@ -901,7 +902,7 @@ impl RenderPass for FoliageGBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Returns `Some` whenever the G-buffer exists, regardless of whether there is
         // any foliage this frame. A pass that returns `None` on per-frame state can
@@ -911,11 +912,11 @@ impl RenderPass for FoliageGBufferPass {
         //
         // The views must be byte-identical to `GBufferPass`'s, in the same order:
         // `compute_chains` requires an exact attachment match before it will fuse.
-        let gbuffer = resources.gbuffer.read("FoliageGBuffer")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("FoliageGBuffer")?;
-        let sss_target = resources.gbuffer_sss.read("FoliageGBuffer")?;
-        let extra_target = resources.gbuffer_extra.read("FoliageGBuffer")?;
-        let velocity_target = resources.gbuffer_velocity.read("FoliageGBuffer")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "FoliageGBuffer")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "FoliageGBuffer")?;
+        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "FoliageGBuffer")?;
+        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "FoliageGBuffer")?;
+        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "FoliageGBuffer")?;
 
         // `LoadOp::Load` on all eight: this pass adds geometry to a G-buffer that
         // `GBufferPass` has already filled. A clear here would erase the scene.
@@ -930,25 +931,25 @@ impl RenderPass for FoliageGBufferPass {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: gbuffer.views[0],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
+                    view: gbuffer.views[1],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
+                    view: gbuffer.views[2],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
+                    view: gbuffer.views[3],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
@@ -1037,8 +1038,8 @@ impl RenderPass for FoliageGBufferPass {
         // forget: a published view with no published origin would bend every blade in
         // the world against a 64 m field sitting at the world origin, which looks like a
         // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.pass_resources.foliage_interaction.is_some()
-            && ctx.pass_resources.foliage_interaction_sampler.is_some()
+        let interaction_valid = ctx.pass_resources.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction")).is_some()
+            && ctx.pass_resources.get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler")).is_some()
             && self.interaction_field_published;
         let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {
@@ -1111,13 +1112,11 @@ impl RenderPass for FoliageGBufferPass {
         let (key, rebuilt) = {
             let interaction_view = ctx
                 .resources
-                .foliage_interaction
-                .get()
+                .get(helio_core::ResourceKey::new("foliage_interaction"))
                 .unwrap_or(&self.placeholder_view);
             let interaction_sampler = ctx
                 .resources
-                .foliage_interaction_sampler
-                .get()
+                .get(helio_core::ResourceKey::new("foliage_interaction_sampler"))
                 .unwrap_or(&self.placeholder_sampler);
             let wind_buffer = ctx
                 .scene_buffers

@@ -1,4 +1,11 @@
 //! GPU light types.
+//!
+//! Owned by `helio-pass-forward-lit`: forward-lit is the pass most directly
+//! tied to per-light shading data, per the project's "only individual passes
+//! know about specific types" mandate. Other passes that also shade against
+//! lights (deferred-light, light-cull, hlfs, shadow-matrix, voxel-mesh,
+//! voxel-raymarch) depend on this crate for the shape, the same way they
+//! already depend on `helio-pass-gbuffer` for materials.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -147,17 +154,4 @@ impl Default for GpuLight {
             ies_angle_offset: 0.0,
         }
     }
-}
-
-/// Per-light shadow matrix for the shadow map atlas.
-/// Layout: one `mat4x4<f32>` = 64 bytes, matching `LightMatrix` in all WGSL shaders.
-/// 6 consecutive entries per light (indices light_idx*6 .. light_idx*6+5):
-///   - Point lights: 6 cube-face view-projection matrices (+X/-X/+Y/-Y/+Z/-Z)
-///   - Spot lights:  face 0 = perspective view-proj, faces 1-5 = identity (unused)
-///   - Directional:  face 0 = ortho view-proj,       faces 1-5 = identity (unused)
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct GpuShadowMatrix {
-    /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
-    pub light_view_proj: [f32; 16],
 }

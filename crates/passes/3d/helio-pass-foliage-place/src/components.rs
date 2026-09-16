@@ -89,12 +89,12 @@ impl From<FoliageLayerComponent> for GpuFoliageLayer {
         bytemuck::cast(v)
     }
 }
-impl From<libhelio::GpuWind> for FoliageWindComponent {
-    fn from(v: libhelio::GpuWind) -> Self {
+impl From<crate::GpuWind> for FoliageWindComponent {
+    fn from(v: crate::GpuWind) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<FoliageWindComponent> for libhelio::GpuWind {
+impl From<FoliageWindComponent> for crate::GpuWind {
     fn from(v: FoliageWindComponent) -> Self {
         bytemuck::cast(v)
     }

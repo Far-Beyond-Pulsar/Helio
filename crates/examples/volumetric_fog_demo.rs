@@ -31,7 +31,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     Renderer, RendererConfig,
 };
-use libhelio::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
 use v3_demo_common::{
     build_default_renderer, box_mesh, directional_light, make_material,
     new_scene_db_with_gpu_mirror, plane_mesh, spawn_light, spawn_material,

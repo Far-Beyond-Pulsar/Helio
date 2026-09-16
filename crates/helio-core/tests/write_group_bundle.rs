@@ -78,7 +78,7 @@ impl RenderPass for StandInGBufferPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -102,7 +102,7 @@ impl RenderPass for StandInGBufferPass {
         &self,
         group_name: &'static str,
         views: &[&'a wgpu::TextureView],
-        frame: &mut libhelio::PassResources<'a>,
+        frame: &mut helio_core::ResourceRegistry<'a>,
     ) {
         if group_name != "gbuffer" {
             return;
@@ -119,13 +119,8 @@ impl RenderPass for StandInGBufferPass {
             orm.clone(),
             emissive.clone(),
         ]);
-        frame.gbuffer.write(
-            libhelio::GBufferViews {
-                albedo,
-                normal,
-                orm,
-                emissive,
-            },
+        frame.write(helio_core::ResourceKey::new("gbuffer"), 
+            helio_core::ViewGroup::<4> { views: [albedo, normal, orm, emissive] },
             "StandInGBuffer",
         );
     }
@@ -150,21 +145,19 @@ impl RenderPass for ConsumerPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        *self.seen_views.lock().unwrap() =
-            ctx.resources.gbuffer.read("StandInGBuffer").map(|views| {
-                [
-                    views.albedo.clone(),
-                    views.normal.clone(),
-                    views.orm.clone(),
-                    views.emissive.clone(),
-                ]
-            });
+        *self.seen_views.lock().unwrap() = ctx
+            .resources
+            .read::<helio_core::ViewGroup<'_, 4>>(
+                helio_core::ResourceKey::new("gbuffer"),
+                "StandInGBuffer",
+            )
+            .map(|views| views.views.map(|v| v.clone()));
         Ok(())
     }
 }

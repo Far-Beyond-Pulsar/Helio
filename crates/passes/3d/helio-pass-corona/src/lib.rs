@@ -17,11 +17,13 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use pulsar_scenedb::gpu::BufferKey;
 
 pub mod components;
+pub mod gpu_types;
 pub use components::CoronaEmitterComponent;
+pub use gpu_types::*;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_MAX_PARTICLES: u32 = libhelio::CORONA_MAX_PARTICLES;
+const DEFAULT_MAX_PARTICLES: u32 = crate::CORONA_MAX_PARTICLES;
 // Redesigned (was 64 slots + CPU-side per-frame compaction over live
 // `particle_count`/`emit_rate` values read from a renderer-owned Vec):
 // every emitter now gets a fixed, non-overlapping particle range chosen by
@@ -34,8 +36,8 @@ const DEFAULT_MAX_PARTICLES: u32 = libhelio::CORONA_MAX_PARTICLES;
 // lower emitter ceiling (4 instead of 64) unless `CORONA_MAX_PARTICLES` is
 // raised to match a higher `MAX_EMITTERS` for a future demo that needs more
 // simultaneous emitters.
-const MAX_EMITTERS: u32 = DEFAULT_MAX_PARTICLES / libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
-const SLOT_SIZE: u32 = libhelio::CORONA_MAX_PARTICLES_PER_EMITTER;
+const MAX_EMITTERS: u32 = DEFAULT_MAX_PARTICLES / crate::CORONA_MAX_PARTICLES_PER_EMITTER;
+const SLOT_SIZE: u32 = crate::CORONA_MAX_PARTICLES_PER_EMITTER;
 // corona.wgsl hardcodes this as a `const` (WGSL can't `include!` a Rust
 // constant) -- this assertion fails the build loudly if the two ever drift,
 // instead of silently mis-sizing every emitter's particle range.
@@ -171,7 +173,7 @@ impl CoronaPass {
             mapped_at_creation: false,
         });
 
-        let particle_size = std::mem::size_of::<libhelio::GpuCoronaParticle>() as u64;
+        let particle_size = std::mem::size_of::<crate::GpuCoronaParticle>() as u64;
         let particle_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Particles"),
             size: DEFAULT_MAX_PARTICLES as u64 * particle_size,
@@ -179,7 +181,7 @@ impl CoronaPass {
             mapped_at_creation: false,
         });
 
-        let emitter_size = std::mem::size_of::<libhelio::GpuCoronaEmitter>() as u64;
+        let emitter_size = std::mem::size_of::<crate::GpuCoronaEmitter>() as u64;
         let emitter_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Emitters"),
             size: MAX_EMITTERS as u64 * emitter_size,
@@ -224,7 +226,7 @@ impl CoronaPass {
         });
 
         let draw_args_size =
-            MAX_EMITTERS as u64 * std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
+            MAX_EMITTERS as u64 * std::mem::size_of::<crate::GpuCoronaDrawIndirect>() as u64;
         let draw_args_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona DrawArgs Staging"),
             size: draw_args_size,
@@ -869,9 +871,9 @@ impl RenderPass for CoronaPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let target_view = resources.pre_aa.get().unwrap_or(target);
+        let target_view = resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
@@ -1038,7 +1040,7 @@ impl RenderPass for CoronaPass {
         }
 
         // Copy STORAGE staging → INDIRECT buffer (the STORAGE+INDIRECT conflict fix).
-        let args_size = ec as u64 * std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
+        let args_size = ec as u64 * std::mem::size_of::<crate::GpuCoronaDrawIndirect>() as u64;
         unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
             &self.draw_args_staging,
             0,
@@ -1115,7 +1117,7 @@ impl RenderPass for CoronaPass {
         rp.set_bind_group(0, render_bg, &[]);
 
         // One draw_indirect per emitter — each draws only its alive, sorted particles.
-        let stride = std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
+        let stride = std::mem::size_of::<crate::GpuCoronaDrawIndirect>() as u64;
         for i in 0..ec {
             rp.draw_indirect(&self.draw_args_buf, i as u64 * stride);
         }

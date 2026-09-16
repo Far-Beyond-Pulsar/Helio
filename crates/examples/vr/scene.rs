@@ -36,7 +36,8 @@ use helio::{GpuLight, LightType, MeshUpload, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 use helio_pass_water_sim::WaterSimPass;
-use libhelio::{CoronaEmitterDescriptor, PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_corona::CoronaEmitterDescriptor;
+use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
@@ -428,7 +429,7 @@ fn bay_corona(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mu
         velocity: [0.0, 3.2, 0.0],
         velocity_variation: [1.6, 1.2, 1.6],
         gravity: -1.2,
-        shape: libhelio::CoronaEmitterShape::Point,
+        shape: helio_pass_corona::CoronaEmitterShape::Point,
         texture_index: -1,
         position: [0.0, 0.35, z],
     };

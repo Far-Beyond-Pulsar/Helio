@@ -1,10 +1,10 @@
 //! Conversion of OpenXR per-eye view poses into Helio camera uniforms.
 //!
-//! The byte layout of [`libhelio::GpuCameraUniforms`] is shared with the WGSL
+//! The byte layout of [`helio_core::GpuCameraUniforms`] is shared with the WGSL
 //! `Camera` struct; we build one per eye and upload the pair with
 //! `GpuCameraUniforms::upload_stereo`.
 
-use libhelio::GpuCameraUniforms;
+use helio_core::GpuCameraUniforms;
 
 /// A single eye's pose in the engine's world space, plus its projection FOV.
 #[derive(Debug, Clone, Copy)]

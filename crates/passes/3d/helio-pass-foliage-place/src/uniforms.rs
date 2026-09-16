@@ -1,7 +1,7 @@
 //! Uniform blocks shared with `shaders/foliage_place.wgsl` and `shaders/foliage_cull.wgsl`.
 //!
 //! Both are 64 bytes of plain scalars, and both sizes are pinned by a `const _` assert in
-//! the style of `libhelio::meshlet`. A size or field-order change that the WGSL does not
+//! the style of `helio_pass_virtual_geometry`. A size or field-order change that the WGSL does not
 //! follow does not fail loudly: the shader reads every field after the change from the
 //! wrong offset, and the symptom is grass at the wrong density in the wrong places, which
 //! reads as a placement bug rather than a layout one.

@@ -37,7 +37,7 @@ use helio::{
     SceneEntity, SublevelDescriptor,
 };
 use helio_default_graphs::build_default_graph;
-use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
+use helio_pass_object_batch::INSTANCE_FLAG_ALWAYS_VISIBLE;
 use v3_demo_common::{box_mesh, make_material, point_light};
 
 use winit::{

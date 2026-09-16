@@ -42,7 +42,7 @@ impl RenderPass for IndependentProbe {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -60,7 +60,7 @@ impl RenderPass for IndependentProbe {
         Ok(())
     }
 
-    fn publish(&self, _resources: &mut libhelio::PassResources<'_>) {
+    fn publish(&self, _resources: &mut helio_core::ResourceRegistry<'_>) {
         self.observation.lock().unwrap().published[self.slot] = true;
     }
 }

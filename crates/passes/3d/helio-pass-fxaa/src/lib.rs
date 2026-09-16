@@ -125,7 +125,7 @@ impl RenderPass for FxaaPass {
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -148,7 +148,7 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.resources.pre_aa.read("FXAA").ok_or_else(|| {
+        let input_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
         let input_key = input_view as *const _ as usize;

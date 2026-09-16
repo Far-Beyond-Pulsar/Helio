@@ -20,7 +20,7 @@ use helio::{
 };
 use helio_default_graphs::build_fxaa_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
-use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,

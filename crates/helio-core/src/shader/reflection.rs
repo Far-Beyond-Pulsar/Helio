@@ -196,7 +196,7 @@ pub fn populate_bind_group_entries<'a>(
     bindings: &[ReflectedBinding],
     group: u32,
     overrides: &crate::graph::BindingOverrideBuilder,
-    resources: &libhelio::ResourceRegistry<'a>,
+    resources: &crate::ResourceRegistry<'a>,
 ) -> Result<Vec<wgpu::BindGroupEntry<'a>>, ReflectionError> {
     bindings
         .iter()
@@ -286,7 +286,7 @@ pub fn create_reflected_bind_groups_with_layouts<'a>(
     bindings: &[ReflectedBinding],
     layouts: &[wgpu::BindGroupLayout],
     overrides: &crate::graph::BindingOverrideBuilder,
-    resources: &libhelio::ResourceRegistry<'a>,
+    resources: &crate::ResourceRegistry<'a>,
     device: &wgpu::Device,
 ) -> Result<Vec<wgpu::BindGroup>, ReflectionError> {
     layouts
@@ -313,7 +313,7 @@ pub fn create_reflected_bind_groups<'a>(
     label: &str,
     bindings: &[ReflectedBinding],
     overrides: &crate::graph::BindingOverrideBuilder,
-    resources: &libhelio::ResourceRegistry<'a>,
+    resources: &crate::ResourceRegistry<'a>,
     visibility: wgpu::ShaderStages,
 ) -> Result<(Vec<wgpu::BindGroupLayout>, Vec<wgpu::BindGroup>), ReflectionError> {
     let layouts = create_bind_group_layouts(device, label, bindings, visibility);
@@ -540,7 +540,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let resources = libhelio::ResourceRegistry::empty();
+        let resources = crate::ResourceRegistry::empty();
         let result =
             populate_bind_group_entries(&bindings, 0, &BindingOverrideBuilder::new(), &resources);
         assert!(matches!(result, Err(ReflectionError::MissingResource(name)) if name == "color"));
@@ -559,7 +559,7 @@ mod tests {
             &bindings,
             0,
             &BindingOverrideBuilder::new(),
-            &libhelio::ResourceRegistry::empty(),
+            &crate::ResourceRegistry::empty(),
         );
         assert!(
             matches!(result, Err(ReflectionError::UnsupportedBinding(name)) if name == "external")
@@ -579,7 +579,7 @@ mod tests {
             &bindings,
             0,
             &BindingOverrideBuilder::new(),
-            &libhelio::ResourceRegistry::empty(),
+            &crate::ResourceRegistry::empty(),
         );
         assert!(
             matches!(result, Err(ReflectionError::UnsupportedBinding(name)) if name == "textures")

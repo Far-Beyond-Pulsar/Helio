@@ -1,4 +1,11 @@
 //! GPU material types. Must match `helio-render-v2` layout for asset compat.
+//!
+//! Owned by `helio-mats`, the shared materials/shading contract crate: every
+//! pass that reads or writes material data (gbuffer, forward-lit, transparent,
+//! decal, virtual-geometry, portal-instances) and the host `helio::Renderer`
+//! (which must pick a `MaterialBindingConfig` before creating the device)
+//! depend on this crate for the same layout, rather than any one of them
+//! owning it and the others reaching across to a sibling pass.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -256,6 +263,15 @@ pub struct GpuMaterial {
 impl GpuMaterial {
     /// Index used to indicate "no texture bound"
     pub const NO_TEXTURE: u32 = u32::MAX;
+}
+
+/// Borrowed material-texture state for passes that sample Helio's texture table.
+#[derive(Clone, Copy)]
+pub struct MaterialTextureBindings<'a> {
+    pub material_textures: &'a wgpu::Buffer,
+    pub texture_views: &'a [&'a wgpu::TextureView],
+    pub samplers: &'a [&'a wgpu::Sampler],
+    pub version: u64,
 }
 
 #[cfg(test)]

@@ -68,6 +68,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
+helio-mats = { path = "crates/helio-mats" }
+helio-bake-types = { path = "crates/helio-bake-types" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83", features = ["gpu"] }
 pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
@@ -86,7 +88,6 @@ helio-pass-portal-instances = { path = "crates/passes/3d/helio-pass-portal-insta
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "crates/passes/3d/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }
-libhelio = { path = "crates/libhelio" }
 helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
@@ -105,6 +106,18 @@ helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simula
 helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
 helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
 helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
+helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
+helio-pass-forward-lit = { path = "crates/passes/3d/helio-pass-forward-lit" }
+helio-pass-gbuffer = { path = "crates/passes/3d/helio-pass-gbuffer" }
+helio-pass-object-batch = { path = "crates/passes/3d/helio-pass-object-batch" }
+helio-pass-occlusion-cull = { path = "crates/passes/3d/helio-pass-occlusion-cull" }
+helio-pass-indirect-dispatch = { path = "crates/passes/3d/helio-pass-indirect-dispatch" }
+helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
+helio-pass-virtual-geometry = { path = "crates/passes/3d/helio-pass-virtual-geometry" }
+helio-pass-water-sim = { path = "crates/passes/3d/helio-pass-water-sim" }
+helio-pass-transparent = { path = "crates/passes/3d/helio-pass-transparent" }
+helio-pass-radiance-cascades = { path = "crates/passes/3d/helio-pass-radiance-cascades" }
+helio-pass-hiz = { path = "crates/passes/3d/helio-pass-hiz" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
 

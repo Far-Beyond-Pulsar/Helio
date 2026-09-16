@@ -425,7 +425,7 @@ impl DebugPass {
         self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = ctx.resources.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
             } else {
                 ctx.depth
@@ -476,10 +476,10 @@ impl RenderPass for DebugPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
             } else {
                 depth

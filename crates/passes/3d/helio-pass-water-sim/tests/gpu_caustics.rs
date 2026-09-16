@@ -116,13 +116,13 @@ fn grid_mesh() -> (Vec<[f32; 3]>, Vec<u32>) {
 }
 
 /// The `indoor_cathedral_water` pool, which is the case that looked empty.
-fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> libhelio::GpuWaterVolume {
+fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> crate::GpuWaterVolume {
     let sun = {
         let (x, y, z) = (0.5f32, 1.0f32, 0.5f32);
         let l = (x * x + y * y + z * z).sqrt();
         [x / l, y / l, z / l, 0.0]
     };
-    libhelio::GpuWaterVolume {
+    crate::GpuWaterVolume {
         bounds_min: [-6.0, 0.3, -6.0, 0.0],
         bounds_max: [6.0, 2.5, 6.0, 1.8],
         wave_params: [wave_amplitude, 0.75, 3.2, 0.22],

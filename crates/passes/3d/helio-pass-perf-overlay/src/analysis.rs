@@ -32,7 +32,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -59,7 +59,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let color_texture = if let Some(pre_aa) = ctx.resources.pre_aa.get() {
+        let color_texture = if let Some(pre_aa) = ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             pre_aa
         } else {
             ctx.target
@@ -167,7 +167,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -251,8 +251,8 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
-            ctx.resources.gbuffer.get(),
-            ctx.resources.tile_light_counts.get(),
+            ctx.resources.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+            ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
             let cost_compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PerfOverlay Cost Compute BG"),
@@ -264,7 +264,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                        resource: wgpu::BindingResource::TextureView(gbuffer.views[2]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,

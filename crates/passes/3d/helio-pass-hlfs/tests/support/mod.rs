@@ -49,7 +49,7 @@ impl Fixture {
         scene.height = height;
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
         let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
-        scene.camera.update(libhelio::GpuCameraUniforms::new(
+        scene.camera.update(helio_core::GpuCameraUniforms::new(
             view,
             proj,
             Vec3::new(0.0, 0.0, 3.0),
@@ -180,29 +180,24 @@ impl Fixture {
             .unwrap()
             .set_config(&self.device, config);
     }
-    pub fn lights(&mut self, lights: Vec<libhelio::GpuLight>) {
+    pub fn lights(&mut self, lights: Vec<helio_pass_forward_lit::GpuLight>) {
         self.scene.movable_light_count = lights.len() as u32;
         self.scene.movable_lights_generation += 1;
         self.scene.lights.set_data(lights);
     }
     pub fn frame(&mut self) {
         self.scene.flush();
-        let mut resources = libhelio::PassResources::empty();
-        resources.gbuffer.write(
-            libhelio::GBufferViews {
-                albedo: &self.views[0],
-                normal: &self.views[1],
-                orm: &self.views[2],
-                emissive: &self.views[3],
-            },
+        let mut resources = helio_core::ResourceRegistry::empty();
+        resources.write(helio_core::ResourceKey::new("gbuffer"), 
+            helio_core::ViewGroup::<4> { views: [&self.views[0], &self.views[1], &self.views[2], &self.views[3]] },
             "Fixture",
         );
-        resources.pre_aa.write(&self.views[4], "Fixture");
+        resources.write(helio_core::ResourceKey::new("pre_aa"), &self.views[4], "Fixture");
         if let Some(shadow) = &self.shadow {
-            resources.shadow_atlas.write(shadow, "Fixture");
+            resources.write(helio_core::ResourceKey::new("shadow_atlas"), shadow, "Fixture");
         }
         self.graph
-            .execute_with_pass_resources(&self.scene, &self.target, &self.depth, &resources)
+            .execute_with_registry(&self.scene, &self.target, &self.depth, &resources)
             .unwrap();
         self.scene.frame_count += 1;
     }
@@ -392,7 +387,7 @@ impl Fixture {
             0.1, 0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0,
         ]);
         self.scene.shadow_matrices.set_data(vec![
-            libhelio::GpuShadowMatrix {
+            helio_pass_shadow_matrix::GpuShadowMatrix {
                 light_view_proj: matrix.to_cols_array()
             };
             6
@@ -530,7 +525,7 @@ impl helio_core::RenderPass for Timestamp {
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::PassResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -543,8 +538,8 @@ impl helio_core::RenderPass for Timestamp {
     }
 }
 
-pub fn point(position: [f32; 3], color: [f32; 3], intensity: f32) -> libhelio::GpuLight {
-    libhelio::GpuLight {
+pub fn point(position: [f32; 3], color: [f32; 3], intensity: f32) -> helio_pass_forward_lit::GpuLight {
+    helio_pass_forward_lit::GpuLight {
         position_range: [position[0], position[1], position[2], 20.0],
         color_intensity: [color[0], color[1], color[2], intensity],
         ..Default::default()

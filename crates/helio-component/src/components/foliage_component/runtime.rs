@@ -53,8 +53,8 @@ fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::component
     }
 }
 
-fn wind(component: &FoliageComponent) -> libhelio::GpuWind {
-    libhelio::Wind {
+fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::GpuWind {
+    helio_pass_foliage_place::Wind {
         direction: glam::Vec3::from_array(component.wind.wind_direction),
         speed: if component.wind.wind_enabled {
             component.wind.wind_speed

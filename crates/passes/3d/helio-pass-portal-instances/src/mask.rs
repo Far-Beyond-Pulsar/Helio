@@ -234,7 +234,7 @@ impl RenderPass for PortalMaskPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::PassResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Standalone — see `execute`, which opens its own two render passes
         // directly via `ctx.begin_render_pass`.

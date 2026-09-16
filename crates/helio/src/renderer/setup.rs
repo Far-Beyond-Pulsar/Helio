@@ -7,7 +7,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::radiant::RadiantTemplateRegistry;
+use helio_mats::radiant::RadiantTemplateRegistry;
 use helio_core::{PipelineFormatSet, RenderGraph};
 
 use super::config::RendererConfig;
@@ -153,7 +153,7 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
+        let postprocess_buf_size = std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
             size: postprocess_buf_size,
@@ -176,7 +176,7 @@ impl Renderer {
         // texture components. Material rows and their indices come from
         // SceneDB; this is only the backend descriptor fallback for an
         // untextured scene.
-        let material_binding = libhelio::MaterialBindingConfig::for_device(&device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(&device);
         let material_textures = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SceneDB Material Texture Slots"),
             size: 224,

@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
+use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 mod components;
+pub mod gpu_types;
 pub use components::{LightComponent, MAX_LIGHTS};
+pub use gpu_types::*;
 use pulsar_scenedb::gpu::BufferKey;
 
 const TILE_SIZE: u32 = 16;
@@ -38,14 +40,14 @@ struct ForwardLitGlobals {
 }
 
 pub struct ForwardLitPass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// This pass's own class-0 override (never synced from the scene).
-    local_class0: helio::radiant::RadiantTemplate,
+    local_class0: helio_mats::radiant::RadiantTemplate,
     /// User-registered custom templates (id >= 5), shared with the renderer
     /// and other passes — never deep-cloned (see `SharedTemplateRegistry`).
-    shared_registry: Option<helio::radiant::SharedTemplateRegistry>,
+    shared_registry: Option<helio_mats::radiant::SharedTemplateRegistry>,
     /// Key set as of the last sync, to detect content changes cheaply.
     last_shared_keys: Vec<u32>,
     pipeline_layout: wgpu::PipelineLayout,
@@ -64,7 +66,7 @@ pub struct ForwardLitPass {
 
 impl ForwardLitPass {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ForwardLitGlobals"),
             size: std::mem::size_of::<ForwardLitGlobals>() as u64,
@@ -185,16 +187,16 @@ impl ForwardLitPass {
                 .and_then(|i| base_src_raw[i..].find(';').map(|j| i + j + 1))
                 .unwrap_or(0);
             let mut resolved =
-                String::with_capacity(base_src_raw.len() + libhelio::shader::PBR_EVAL.len());
+                String::with_capacity(base_src_raw.len() + helio_mats::PBR_EVAL.len());
             resolved.push_str(&base_src_raw[..insert_pos]);
             resolved.push('\n');
-            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push_str(helio_mats::PBR_EVAL);
             resolved.push_str(&base_src_raw[insert_pos..]);
             Box::leak(resolved.into_boxed_str())
         } else {
             base_src_raw
         };
-        let local_class0 = helio::radiant::RadiantTemplate {
+        let local_class0 = helio_mats::radiant::RadiantTemplate {
             name: "forward_lit",
             wgsl_source,
         };
@@ -374,15 +376,15 @@ impl RenderPass for ForwardLitPass {
         builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::PassResources<'a>) {}
+    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::PassResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa_view = resources.pre_aa.read("ForwardLit")?;
+        let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "ForwardLit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
@@ -416,7 +418,7 @@ impl RenderPass for ForwardLitPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let (ambient_color, ambient_intensity) =
-            if let Some(ref environment) = ctx.pass_resources.render_environment.get().as_ref() {
+            if let Some(ref environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")).as_ref() {
                 (environment.ambient_color, environment.ambient_intensity)
             } else {
                 ([0.1, 0.1, 0.15], 0.1)
@@ -429,7 +431,7 @@ impl RenderPass for ForwardLitPass {
         // `MAX_LIGHTS`, no per-frame CPU query -- see `LightComponent`'s
         // module doc) when something has actually inserted one. Nothing in
         // `engine_backend`/`helio_component` does today -- production's real
-        // light source is `libhelio::LightsFrameData` (the `Renderer`-seeded
+        // light source is `helio_pass_forward_lit::LightsFrameData (see this pass's own frame-data note)` (the `Renderer`-seeded
         // `light_count`/`lights` bridge -- see that struct's own doc), so
         // that CPU-resolved count is the fallback, not a legacy dead end.
         let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
@@ -455,10 +457,10 @@ impl RenderPass for ForwardLitPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.object_batch.get() else {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.culled_batch.get() else {
+        let Some(culled) = ctx.resources.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -466,7 +468,7 @@ impl RenderPass for ForwardLitPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(material_textures) = ctx.resources.material_textures.read("ForwardLit") else {
+        let Some(material_textures) = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "ForwardLit") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -509,7 +511,7 @@ impl RenderPass for ForwardLitPass {
         // real Transform buffer shows up.
         let transforms_ptr = 0;
 
-        let cluster = ctx.resources.cluster_light_grid.get();
+        let cluster = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
@@ -528,7 +530,7 @@ impl RenderPass for ForwardLitPass {
             transforms_ptr,
         );
         if self.bind_group_0_key != Some(bg0_key) {
-            let cluster_ref = ctx.resources.cluster_light_grid.get();
+            let cluster_ref = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
             let fallback_buf = batch.instances; // fallback buffer for tile lists when cluster is absent
             let tile_lists = cluster_ref
                 .map(|c| c.tile_light_lists)
@@ -682,7 +684,7 @@ impl RenderPass for ForwardLitPass {
 
 fn create_material_bgl(
     device: &wgpu::Device,
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {

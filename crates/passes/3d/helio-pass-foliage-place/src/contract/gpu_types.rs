@@ -3,7 +3,7 @@
 //! These three structs are the entire contract between `FoliagePlacePass` (which writes
 //! blades and tiles) and `FoliageGBufferPass` (which reads them), and they are mirrored
 //! field-for-field in WGSL. Their sizes are asserted at compile time in the style of
-//! [`libhelio::meshlet`], because a size change that the shader does not follow does not
+//! [`helio_pass_virtual_geometry`], because a size change that the shader does not follow does not
 //! fail loudly — the shader reads every field from the wrong offset and you get a field
 //! of grass with garbage rotations, which is a full day of debugging away from "someone
 //! added a `u32`".
