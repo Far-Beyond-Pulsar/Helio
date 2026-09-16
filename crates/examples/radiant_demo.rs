@@ -163,7 +163,7 @@ impl ApplicationHandler for App {
 
         // ── Register opal template ───────────────────────────────────────────
 
-        let opal_wgsl = include_str!("../helio/templates/opal.wgsl");
+        let opal_wgsl = include_str!("../helio-mats/templates/opal.wgsl");
         let opal_class = renderer
             .template_registry_mut()
             .register_partial_str("opal", opal_wgsl.to_string());
@@ -171,7 +171,7 @@ impl ApplicationHandler for App {
 
         // ── Register glass template ─────────────────────────────────────────
 
-        let glass_wgsl = include_str!("../helio/templates/glass.wgsl");
+        let glass_wgsl = include_str!("../helio-mats/templates/glass.wgsl");
         let glass_class = renderer
             .template_registry_mut()
             .register_partial_str("glass", glass_wgsl.to_string());
@@ -182,7 +182,7 @@ impl ApplicationHandler for App {
 
         // Register transparent version at the gbuffer glass class ID so the
         // transparent pass finds the glass shader instead of falling back to default.
-        let glass_transparent_wgsl = include_str!("../helio/templates/glass_transparent.wgsl");
+        let glass_transparent_wgsl = include_str!("../helio-mats/templates/glass_transparent.wgsl");
         let glass_transparent_src = renderer
             .transparent_template_registry_mut()
             .compose_transparent_override(glass_transparent_wgsl);
@@ -196,7 +196,7 @@ impl ApplicationHandler for App {
 
         // ── Register water template ─────────────────────────────────────────
 
-        let water_wgsl = include_str!("../helio/templates/water.wgsl");
+        let water_wgsl = include_str!("../helio-mats/templates/water.wgsl");
         let water_class = renderer
             .template_registry_mut()
             .register_partial_str("water", water_wgsl.to_string());
@@ -207,7 +207,7 @@ impl ApplicationHandler for App {
 
         // Also register a transparent water template so the transparent pass
         // renders it with real alpha blending instead of the fixed overlay.
-        let water_transparent_wgsl = include_str!("../helio/templates/water_transparent.wgsl");
+        let water_transparent_wgsl = include_str!("../helio-mats/templates/water_transparent.wgsl");
         let water_transparent_class = renderer
             .transparent_template_registry_mut()
             .register_transparent_partial_str(
