@@ -1456,6 +1456,7 @@ dependencies = [
  "meshopt",
  "openxr",
  "pollster 0.4.0",
+ "pulsar_reflection",
  "pulsar_scenedb",
  "quark",
  "thiserror 2.0.20",
@@ -1600,8 +1601,9 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1612,8 +1614,9 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1647,8 +1650,9 @@ dependencies = [
  "log",
  "naga",
  "pollster 0.4.0",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1659,8 +1663,9 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1717,8 +1722,9 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1733,7 +1739,7 @@ dependencies = [
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "pulsar_scenedb_derive",
  "serde_json",
  "wgpu",
 ]
@@ -1760,7 +1766,7 @@ dependencies = [
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40)",
+ "pulsar_scenedb_derive",
  "serde_json",
  "wgpu",
 ]
@@ -1882,8 +1888,9 @@ dependencies = [
  "helio-core",
  "libhelio",
  "log",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -1908,8 +1915,9 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -2008,8 +2016,9 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -2034,7 +2043,7 @@ dependencies = [
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "pulsar_scenedb_derive",
  "serde_json",
  "wgpu",
 ]
@@ -2137,8 +2146,9 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -2184,8 +2194,9 @@ dependencies = [
  "helio-core",
  "libhelio",
  "pollster 0.4.0",
+ "pulsar_reflection",
  "pulsar_scenedb",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5)",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -3738,7 +3749,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d#27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=1c64758#1c647587eb2adf7b04c8b29cad277099de455173"
 dependencies = [
  "dashmap",
  "glam 0.33.5",
@@ -3754,7 +3765,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d#27eaaf7233522ff7d8c79cd2c76e7eeacb17d59d"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=1c64758#1c647587eb2adf7b04c8b29cad277099de455173"
 dependencies = [
  "owo-colors",
  "proc-macro2",
@@ -3765,12 +3776,12 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=8f98f83#8f98f831e53f8d85fd6e7c1abbc2206aab55c6f3"
 dependencies = [
  "ahash",
  "profiling 0.1.0",
  "pulsar_reflection",
- "pulsar_scenedb_derive 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271)",
+ "pulsar_scenedb_derive",
  "serde",
  "serde_json",
  "socket2",
@@ -3781,27 +3792,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=72291d0f211dc8826eb70339aeb0409be4270ad5#72291d0f211dc8826eb70339aeb0409be4270ad5"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pulsar_scenedb_derive"
-version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40#bbe45f3b10bb6115c7b7b55afd6789e7cbf57a40"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pulsar_scenedb_derive"
-version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f8ebfa44096451153fa238bba3bd24a00419e271#f8ebfa44096451153fa238bba3bd24a00419e271"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=8f98f83#8f98f831e53f8d85fd6e7c1abbc2206aab55c6f3"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -67,19 +67,25 @@ impl RingView {
         };
         view.magic_atomic().store(MAGIC, Ordering::Relaxed);
         view.version_atomic().store(VERSION, Ordering::Relaxed);
-        view.slot_count_atomic().store(slot_count, Ordering::Relaxed);
-        view.slot_capacity_atomic().store(slot_capacity, Ordering::Relaxed);
+        view.slot_count_atomic()
+            .store(slot_count, Ordering::Relaxed);
+        view.slot_capacity_atomic()
+            .store(slot_capacity, Ordering::Relaxed);
         for direction in [Direction::Request, Direction::Response] {
             for i in 0..slot_count {
-                view.slot_seq_atomic(direction, i).store(0, Ordering::Relaxed);
-                view.slot_len_atomic(direction, i).store(0, Ordering::Relaxed);
+                view.slot_seq_atomic(direction, i)
+                    .store(0, Ordering::Relaxed);
+                view.slot_len_atomic(direction, i)
+                    .store(0, Ordering::Relaxed);
             }
         }
         // Published last, after every slot is zeroed, so a reader that
         // sees a non-sentinel `latest_slot` can trust that slot's header
         // atomics are already initialized.
-        view.latest_slot_atomic(Direction::Request).store(u32::MAX, Ordering::Release);
-        view.latest_slot_atomic(Direction::Response).store(u32::MAX, Ordering::Release);
+        view.latest_slot_atomic(Direction::Request)
+            .store(u32::MAX, Ordering::Release);
+        view.latest_slot_atomic(Direction::Response)
+            .store(u32::MAX, Ordering::Release);
         view
     }
 
@@ -151,7 +157,12 @@ impl RingView {
         unsafe { self.atomic_u32_at(12) }
     }
     fn latest_slot_atomic(&self, direction: Direction) -> &AtomicU32 {
-        unsafe { self.atomic_u32_at(match direction { Direction::Request => 16, Direction::Response => 20 }) }
+        unsafe {
+            self.atomic_u32_at(match direction {
+                Direction::Request => 16,
+                Direction::Response => 20,
+            })
+        }
     }
 
     fn slot_offset(&self, direction: Direction, slot: u32) -> usize {
@@ -159,7 +170,8 @@ impl RingView {
             Direction::Request => 0,
             Direction::Response => self.slot_count as usize,
         };
-        HEADER_LEN + (direction_offset + slot as usize) * (SLOT_HEADER_LEN + self.slot_capacity as usize)
+        HEADER_LEN
+            + (direction_offset + slot as usize) * (SLOT_HEADER_LEN + self.slot_capacity as usize)
     }
     fn slot_seq_atomic(&self, direction: Direction, slot: u32) -> &AtomicU64 {
         unsafe { self.atomic_u64_at(self.slot_offset(direction, slot)) }
@@ -168,7 +180,10 @@ impl RingView {
         unsafe { self.atomic_u32_at(self.slot_offset(direction, slot) + 8) }
     }
     fn slot_data_ptr(&self, direction: Direction, slot: u32) -> *mut u8 {
-        unsafe { self.base.add(self.slot_offset(direction, slot) + SLOT_HEADER_LEN) }
+        unsafe {
+            self.base
+                .add(self.slot_offset(direction, slot) + SLOT_HEADER_LEN)
+        }
     }
 
     /// Writer: publish `payload` into `slot`, then point `latest_slot` at
@@ -181,12 +196,17 @@ impl RingView {
         let seq = self.slot_seq_atomic(direction, slot);
         seq.fetch_add(1, Ordering::AcqRel); // now odd: mid-write
         unsafe {
-            std::ptr::copy_nonoverlapping(payload.as_ptr(), self.slot_data_ptr(direction, slot), payload.len());
+            std::ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                self.slot_data_ptr(direction, slot),
+                payload.len(),
+            );
         }
         self.slot_len_atomic(direction, slot)
             .store(payload.len() as u32, Ordering::Release);
         seq.fetch_add(1, Ordering::AcqRel); // now even: stable, with new content
-        self.latest_slot_atomic(direction).store(slot, Ordering::Release);
+        self.latest_slot_atomic(direction)
+            .store(slot, Ordering::Release);
         true
     }
 
@@ -209,17 +229,29 @@ impl RingView {
             if slot == u32::MAX || slot >= self.slot_count {
                 return None;
             }
-            let seq0 = self.slot_seq_atomic(direction, slot).load(Ordering::Acquire);
+            let seq0 = self
+                .slot_seq_atomic(direction, slot)
+                .load(Ordering::Acquire);
             if seq0 & 1 != 0 {
                 continue; // mid-write, retry
             }
-            let len = self.slot_len_atomic(direction, slot).load(Ordering::Acquire) as usize;
-            if len > self.slot_capacity as usize { continue; }
+            let len = self
+                .slot_len_atomic(direction, slot)
+                .load(Ordering::Acquire) as usize;
+            if len > self.slot_capacity as usize {
+                continue;
+            }
             let mut buf = vec![0u8; len];
             unsafe {
-                std::ptr::copy_nonoverlapping(self.slot_data_ptr(direction, slot), buf.as_mut_ptr(), len);
+                std::ptr::copy_nonoverlapping(
+                    self.slot_data_ptr(direction, slot),
+                    buf.as_mut_ptr(),
+                    len,
+                );
             }
-            let seq1 = self.slot_seq_atomic(direction, slot).load(Ordering::Acquire);
+            let seq1 = self
+                .slot_seq_atomic(direction, slot)
+                .load(Ordering::Acquire);
             if seq0 == seq1 {
                 return Some(buf);
             }
@@ -238,4 +270,7 @@ impl RingView {
 }
 
 #[derive(Clone, Copy)]
-enum Direction { Request, Response }
+enum Direction {
+    Request,
+    Response,
+}

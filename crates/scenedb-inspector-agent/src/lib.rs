@@ -40,8 +40,6 @@ pub mod ring;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
-use std::collections::VecDeque;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -73,7 +71,9 @@ fn create_ring(shm_name: &str) -> Option<(shared_memory::Shmem, ring::RingView)>
     let shmem = match ShmemConf::new().os_id(shm_name).size(size).create() {
         Ok(s) => s,
         Err(e) => {
-            log::error!("scenedb-inspector-agent: failed to create shared memory '{shm_name}': {e}");
+            log::error!(
+                "scenedb-inspector-agent: failed to create shared memory '{shm_name}': {e}"
+            );
             return None;
         }
     };
@@ -159,70 +159,29 @@ impl Drop for InlineAgent {
     }
 }
 
-/// Install a live inspector publisher on a SceneDB world.
+/// Legacy compatibility hook for older callers.
 ///
-/// This is the common integration point for examples: it is a no-op when
-/// launched normally, and when the SceneDB Inspector launches the target it
-/// owns the publisher through the world callback. Both CPU archetypes and the
-/// SceneDB-owned GPU snapshot therefore stay in sync without Helio owning any
-/// scene state.
+/// SceneDB no longer exposes inspector callbacks or request queues. Keeping a
+/// local callback bridge here would reintroduce a second world-state path, so
+/// this function intentionally does nothing and always returns `false`.
+///
+/// Use [`maybe_start`] or [`start`] and provide a closure that calls
+/// [`pulsar_scenedb::World::telemetry_snapshot`] at the desired cadence:
+///
+/// ```ignore
+/// let _agent = maybe_start(Duration::from_millis(100), move || {
+///     world.lock().unwrap().telemetry_snapshot()
+/// });
+/// ```
+#[deprecated(
+    note = "SceneDB inspector callbacks were removed; use maybe_start/start with World::telemetry_snapshot instead"
+)]
 pub fn install_world(world: &mut pulsar_scenedb::World) -> bool {
-    if std::env::var_os(SHM_ENV_VAR).is_none() {
-        return false;
-    }
-
-    // Keep the frame boundary non-blocking. Snapshot capture happens at the
-    // explicit SceneDB boundary, while cloning, JSON serialization, and the
-    // shared-memory copy run on this worker. A capacity-one queue coalesces
-    // naturally: if the worker is busy, the new frame is dropped.
-    let (tx, rx) = mpsc::sync_channel::<WorldSnapshot>(1);
-    let (response_tx, response_rx) = mpsc::sync_channel::<Vec<u8>>(8);
-    let request_queue = Arc::new(std::sync::Mutex::new(VecDeque::<Vec<u8>>::new()));
-    let request_queue_for_thread = request_queue.clone();
-    std::thread::Builder::new()
-        .name("scenedb-inspector-publisher".into())
-        .spawn(move || {
-            let Some(mut agent) = InlineAgent::maybe_start() else {
-                return;
-            };
-            let mut last_request_id = None;
-            loop {
-                if let Some(bytes) = agent.view.read_request(1) {
-                    let request_id = serde_json::from_slice::<pulsar_scenedb::InspectorRequest>(&bytes)
-                        .ok().map(|request| request.request_id);
-                    if request_id.is_some() && request_id != last_request_id {
-                        last_request_id = request_id;
-                        let mut queue = request_queue_for_thread.lock().expect("SceneDB inspector request queue poisoned");
-                        if queue.len() >= 16 { queue.pop_front(); }
-                        queue.push_back(bytes);
-                    }
-                }
-                while let Ok(response) = response_rx.try_recv() {
-                    publish_bytes(&agent.view, &mut agent.next_slot, &response);
-                }
-                match rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                    Ok(snapshot) => agent.publish(&snapshot),
-                    Err(RecvTimeoutError::Timeout) => {},
-                    Err(RecvTimeoutError::Disconnected) => break,
-                }
-            }
-        })
-        .expect("failed to start SceneDB inspector publisher thread");
-
-    world.set_inspector_metadata_callback(Box::new(move |snapshot| {
-        match tx.try_send(snapshot.clone()) {
-            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
-        }
-    }));
-    world.set_inspector_request_queue(request_queue);
-    world.set_inspector_response_callback(Arc::new(move |bytes| {
-        let _ = response_tx.try_send(bytes);
-    }));
-    true
+    let _ = world;
+    false
 }
 
-/// Handle to a running *threaded* agent (see [`start`]/[`maybe_start`]).
-/// Dropping it stops the background thread. Keep it alive for as long as
+/// Handle to a running *threaded* agent (see [`start`]/[`maybe_start`])./// Dropping it stops the background thread. Keep it alive for as long as
 /// you want the inspector able to see this process's SceneDB state.
 pub struct InspectorAgent {
     stop: Arc<AtomicBool>,

@@ -6,6 +6,7 @@ description = "Helio 2D pass: GPU-instanced sprite batcher with texture atlasing
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
 libhelio   = { workspace = true }
 wgpu       = { workspace = true }
@@ -14,5 +15,4 @@ glam       = { workspace = true }
 log        = { workspace = true }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
-pulsar_reflection = { workspace = true }
 serde_json = { workspace = true }

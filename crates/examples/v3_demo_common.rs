@@ -25,7 +25,11 @@ pub fn new_scene_db_with_gpu_mirror(
         tombstone_headroom: 0,
         max_cells_metadata: 0,
     };
-    let gpu_store = Arc::new(pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg));
+    let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
+    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    let gpu_store = Arc::new(gpu_store);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
     scenedb_inspector_agent::install_world(&mut scene_db.world);

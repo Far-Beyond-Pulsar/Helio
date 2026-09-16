@@ -33,14 +33,17 @@ impl SceneInputAdapter {
         });
         let mut scene_db = SceneDb::new();
         let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
-        let gpu_store = Arc::new(pulsar_scenedb::gpu::SceneGpuStore::new(
+        let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(
             &ctx,
             pulsar_scenedb::gpu::SceneGpuConfig {
                 classes: Vec::new(),
                 tombstone_headroom: 0,
                 max_cells_metadata: 0,
             },
-        ));
+        );
+        // Keep the SceneDB-backed sprite storage growable while retaining the demo's established initial pool size.
+        SpriteComponent::register_gpu_columns_growable(&mut gpu_store, 4096, ctx.device());
+        let gpu_store = Arc::new(gpu_store);
         scene_db.world.attach_gpu_mirror(
             pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone()),
         );
@@ -87,7 +90,6 @@ impl SceneInputAdapter {
         let sprite_buffer_bytes = self.scene_db.world.gpu_mirror().and_then(|mirror| mirror.store().resolve_buffer(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"))).map(|(buffer, _)| buffer.size()).unwrap_or(0);
         if self.frame_count == 0 { println!("[sprite_scene_input] SceneDB sprite_instances before flush: {} bytes, {} rows", sprite_buffer_bytes, self.sprite_entities.len()); }
         let _ = self.scene_db.world.flush_gpu_mirror(&self.queue);
-        self.scene_db.world.publish_inspector_snapshot();
         self.buffers = self
             .scene_db
             .world

@@ -179,7 +179,10 @@ impl Renderer {
         let material_binding = libhelio::MaterialBindingConfig::for_device(&device);
         let material_textures = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SceneDB Material Texture Slots"),
-            size: 16,
+            size: 224,
+            // MaterialTextureData is a 224-byte storage element. Keep the
+            // fallback large enough to satisfy shader validation until the
+            // real SceneDB table is published.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

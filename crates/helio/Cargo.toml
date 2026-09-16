@@ -8,6 +8,7 @@ description = "High-level facade over helio-core for stable scene handles and O(
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+pulsar_reflection = { workspace = true }
 arrayvec = "0.7"
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true

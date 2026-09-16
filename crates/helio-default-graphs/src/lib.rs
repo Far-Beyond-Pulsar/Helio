@@ -132,14 +132,14 @@ fn add_common_early_passes(
         device,
         pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
         "SceneDB Lights",
-        16,
+        96,
     );
     let shadow_matrices_buf = scene_buffer_or_dummy(
         &scene_db,
         device,
         pulsar_scenedb::gpu::BufferKey::of("shadow_matrices"),
         "SceneDB Shadow Matrices",
-        16,
+        64,
     );
 
     // Must run before every pass below — they all read `object_batch`
@@ -376,7 +376,7 @@ fn add_late_passes(
         device,
         pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
         "SceneDB Lights",
-        16,
+        96,
     );
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
@@ -733,7 +733,7 @@ fn build_default_graph_internal(
         device,
         pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
         "SceneDB Lights",
-        16,
+        96,
     );
     graph.add_pass(Box::new(RadianceCascadesPass::new(
         device,
@@ -1021,7 +1021,7 @@ fn build_fxaa_graph_internal(
         device,
         pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
         "SceneDB Lights",
-        16,
+        96,
     );
     graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
 
@@ -1677,7 +1677,7 @@ fn build_forward_graph_internal(
         device,
         pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
         "SceneDB Lights",
-        16,
+        96,
     );
     graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
 

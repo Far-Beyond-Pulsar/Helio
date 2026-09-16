@@ -22,6 +22,7 @@ struct SpriteInstance {
     size: vec2<f32>,
     rotation: f32,
     depth: f32,
+    _pad_uv: vec2<f32>,
     uv_rect: vec4<f32>,
     color: vec4<f32>,
     atlas_layer: u32,
