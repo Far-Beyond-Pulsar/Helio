@@ -28,6 +28,7 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 
 pub mod components;
 mod coordinate_spaces_frame_data;
@@ -101,6 +102,22 @@ pub struct GBufferPass {
     pub debug_mode: u32,
     /// Lightmap atlas regions buffer (empty until bake data is loaded)
     lightmap_atlas_regions_buf: wgpu::Buffer,
+    /// Portal/sublevel-local transforms, indexed by an instance's `space_id`.
+    /// Pass-owned (not `Renderer`-owned): every consumer of `"coordinate_
+    /// spaces"` (`OcclusionCullPass`, `IndirectDispatchPass`, `ShadowPass`,
+    /// `ShadowCullPass`, both portal passes) needs `space_id 0` to always
+    /// resolve to identity even when nothing authors portal/sublevel content,
+    /// and `GBufferPass` is the one pass guaranteed present in every graph --
+    /// see `helio_pass_gbuffer::CoordinateSpacesFrameData`'s doc for the
+    /// still-pending real fix (a SceneDB-driven portal/sublevel component).
+    coordinate_spaces: wgpu::Buffer,
+    coordinate_spaces_prev: wgpu::Buffer,
+    /// Fallback `MaterialTextureData` storage buffer (352 bytes = one
+    /// zeroed slot) so `"material_textures"`' bind group stays valid before
+    /// SceneDB publishes a real table. Pass-owned because 352 is this
+    /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
+    /// generic Renderer has no business knowing it.
+    fallback_material_textures: wgpu::Buffer,
 }
 
 impl GBufferPass {
@@ -223,6 +240,27 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
+        let identity_space = glam::Mat4::IDENTITY.to_cols_array();
+        let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let coordinate_spaces_prev = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces Prev (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
+        // (48 bytes each) + a 16-byte params vec4 = 352 bytes -- see this
+        // pass's own material bind-group-1 doc above.
+        let fallback_material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fallback Material Texture Slots"),
+            size: 352,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             material_binding,
             pipelines: HashMap::new(),
@@ -241,7 +279,30 @@ impl GBufferPass {
             csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
             debug_mode: 0,
             lightmap_atlas_regions_buf,
+            coordinate_spaces,
+            coordinate_spaces_prev,
+            fallback_material_textures,
         }
+    }
+
+    /// Portal/sublevel-local transform buffer (`space_id 0` = identity).
+    /// Exposed so `Renderer::render` can publish `"coordinate_spaces"` into
+    /// the frame's `ResourceRegistry` before the graph executes -- the same
+    /// `find_pass`-based reach-in `Renderer` already uses for `PostProcessPass`.
+    pub fn coordinate_spaces_buffer(&self) -> &wgpu::Buffer {
+        &self.coordinate_spaces
+    }
+
+    /// See [`Self::coordinate_spaces_buffer`].
+    pub fn coordinate_spaces_prev_buffer(&self) -> &wgpu::Buffer {
+        &self.coordinate_spaces_prev
+    }
+
+    /// Fallback `"material_textures"` buffer. See
+    /// [`Self::coordinate_spaces_buffer`] for why `Renderer` reaches in
+    /// rather than owning this itself.
+    pub fn fallback_material_textures_buffer(&self) -> &wgpu::Buffer {
+        &self.fallback_material_textures
     }
 }
 

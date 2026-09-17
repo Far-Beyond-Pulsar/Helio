@@ -356,10 +356,49 @@ impl Renderer {
             &self.material_bindings.fallback_sampler;
             self.material_bindings.texture_count
         ];
+        // `"material_textures"`/`"coordinate_spaces"` are `GBufferPass`-owned
+        // (that pass's own `MaterialTextureData`/portal-space struct layouts
+        // -- a generic `Renderer` has no business knowing either). Reached
+        // in via `find_pass`, the same pattern already used below for
+        // `PostProcessPass`, rather than `Renderer` allocating and owning
+        // them itself. `GBufferPass` is always present in every graph this
+        // `Renderer` can build, so this is infallible in practice; the
+        // `unwrap_or` fallbacks only guard a graph that omits it entirely
+        // (e.g. a focused test graph), not a normal runtime path.
+        // Captured as raw pointers, not references: `execute_with_resources`
+        // below needs `&mut self.graph`, which would otherwise conflict with
+        // the immutable borrow `find_pass` takes on it. The pass list isn't
+        // mutated/reallocated between this lookup and that call -- only the
+        // passes' own internal buffers are read -- so these stay valid for
+        // the whole frame.
+        let (material_textures_ptr, coordinate_spaces_ptr, coordinate_spaces_prev_ptr): (
+            *const wgpu::Buffer,
+            *const wgpu::Buffer,
+            *const wgpu::Buffer,
+        ) = {
+            let gbuffer_pass = self.graph.find_pass::<helio_pass_gbuffer::GBufferPass>();
+            (
+                gbuffer_pass
+                    .map(|p| p.fallback_material_textures_buffer() as *const wgpu::Buffer)
+                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
+                gbuffer_pass
+                    .map(|p| p.coordinate_spaces_buffer() as *const wgpu::Buffer)
+                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
+                gbuffer_pass
+                    .map(|p| p.coordinate_spaces_prev_buffer() as *const wgpu::Buffer)
+                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
+            )
+        };
+        // SAFETY: see comment above -- these buffers outlive this frame's
+        // `execute_with_resources` call regardless of `self.graph`'s borrow state.
+        let material_textures_buf = unsafe { &*material_textures_ptr };
+        let coordinate_spaces_buf = unsafe { &*coordinate_spaces_ptr };
+        let coordinate_spaces_prev_buf = unsafe { &*coordinate_spaces_prev_ptr };
+
         let mut resource_registry = helio_core::ResourceRegistry::empty();
-        resource_registry.write(helio_core::ResourceKey::new("material_textures"), 
+        resource_registry.write(helio_core::ResourceKey::new("material_textures"),
             helio_mats::MaterialTextureBindings {
-                material_textures: &self.material_bindings.material_textures,
+                material_textures: material_textures_buf,
                 texture_views: &material_texture_views,
                 samplers: &material_samplers,
                 version: self.material_bindings.version,
@@ -375,7 +414,7 @@ impl Renderer {
             },
             "Renderer",
         );
-        // See `coordinate_spaces`'s doc on `Renderer`: every instance
+        // See `GBufferPass::coordinate_spaces_buffer`'s doc: every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/
         // sublevel producer exists. Without this, `OcclusionCullPass`/
         // `IndirectDispatchPass`/`ShadowPass`/`ShadowCullPass`/both portal
@@ -383,8 +422,8 @@ impl Renderer {
         // without it -- stalling the entire GPU-driven cull pipeline.
         resource_registry.write(helio_core::ResourceKey::new("coordinate_spaces"),
             helio_pass_gbuffer::CoordinateSpacesFrameData {
-                coordinate_spaces: &self.coordinate_spaces,
-                coordinate_spaces_prev: &self.coordinate_spaces_prev,
+                coordinate_spaces: coordinate_spaces_buf,
+                coordinate_spaces_prev: coordinate_spaces_prev_buf,
             },
             "Renderer",
         );

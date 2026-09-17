@@ -442,11 +442,30 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // `set_screen_size` was previously dead code -- nothing called it, so
+        // `screen_width`/`screen_height` stayed frozen at this pass's
+        // construction-time resolution forever, while the "hiz" texture it
+        // samples (graph-pooled) DID get correctly reallocated on resize by
+        // `HiZBuildPass::on_resize`/its own `ctx.resize` handling in
+        // `prepare`. The resulting mismatch corrupts `pick_mip`'s mip-level
+        // math and `screen_radius_px`'s UV footprint sizing against the
+        // pyramid's real dimensions -- mirrors `HiZBuildPass::prepare`'s own
+        // `ctx.resize` sync so both passes agree on the current resolution.
+        if ctx.resize {
+            self.set_screen_size(ctx.width.max(1), ctx.height.max(1));
+        }
+
         let batch = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
-        let static_hiz_available = ctx.pass_resources.read_texture_view(helio_core::ResourceKey::new("static_hiz"), "OcclusionCull").is_some();
+        // Plain (non-panicking) lookup: "static_hiz" is legitimately optional
+        // (only present once real baked data is loaded via `load_static_hiz`)
+        // -- `read_texture_view` falls through to a debug-only panic on a
+        // missing key, which fires before this `.is_some()` ever sees it.
+        let static_hiz_available = ctx.pass_resources.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.pass_resources.texture_binding("static_hiz"))
+            .is_some();
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
@@ -521,9 +540,16 @@ impl RenderPass for OcclusionCullPass {
                 "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
             );
 
-        // Resolve static HiZ resources (use placeholder when no pre-baked data is loaded).
-        let static_hiz_view = ctx.resources.read_texture_view(helio_core::ResourceKey::new("static_hiz"), "OcclusionCull").unwrap_or(&self.placeholder_static_hiz_view);
-        let static_hiz_sampler = ctx.resources.read_sampler(helio_core::ResourceKey::new("static_hiz_sampler"), "OcclusionCull").unwrap_or(&self.placeholder_static_hiz_sampler);
+        // Resolve static HiZ resources (use placeholder when no pre-baked data is
+        // loaded). Plain (non-panicking) lookups, same reasoning as `prepare`'s
+        // `static_hiz_available` above -- `read_texture_view`/`read_sampler` fall
+        // through to a debug-only panic on a missing key, which would fire before
+        // `unwrap_or` ever sees it, even though this resource is legitimately optional.
+        let static_hiz_view = ctx.resources.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.resources.texture_binding("static_hiz"))
+            .unwrap_or(&self.placeholder_static_hiz_view);
+        let static_hiz_sampler = ctx.resources.get(helio_core::ResourceKey::new("static_hiz_sampler"))
+            .unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (
             ctx.camera as *const _ as usize,
