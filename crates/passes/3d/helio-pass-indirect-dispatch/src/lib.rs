@@ -252,7 +252,16 @@ fn create_compacted_indices_buf(device: &wgpu::Device, capacity: u32) -> wgpu::B
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("IndirectDispatch CompactedIndices"),
         size: (capacity as u64 * 4).max(4),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        // COPY_SRC: `OcclusionCullPass`'s "no Hi-Z pyramid yet" bypass path
+        // copies this buffer straight into its own `compacted_indices_2_buf`
+        // (see that pass's `execute()`) instead of running the real Hi-Z
+        // test. That path was previously unreachable in practice (gated on
+        // `frame_num == 0`, which always saw `draw_count == 0` due to
+        // `ObjectBatchPass`'s readback lag -- see `OcclusionCullPass::
+        // hiz_warmed_up`'s doc), so this missing flag never surfaced as a
+        // validation error until that gate was fixed to actually run the
+        // bypass on the first frame with real instances.
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }
