@@ -392,6 +392,7 @@ pub mod actor;
 pub mod asset_types;
 pub mod camera;
 pub mod context;
+pub mod frame_storage;
 pub mod entity;
 pub mod error;
 pub mod graph;
@@ -421,6 +422,7 @@ pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
 // Re-export core types
 pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
+pub use frame_storage::RenderFrameStorage;
 pub use entity::Entity;
 pub use error::{Error, Result};
 pub use graph::{

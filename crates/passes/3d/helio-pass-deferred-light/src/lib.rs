@@ -959,11 +959,12 @@ impl RenderPass for DeferredLightPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "DeferredLight")?;
         let load_op = if resources.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("sky_lut")).is_some() {
@@ -972,7 +973,7 @@ impl RenderPass for DeferredLightPass {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -1494,3 +1495,5 @@ fn black_cube_texture(
     });
     (texture, view)
 }
+
+

@@ -475,3 +475,4 @@ mod tests {
         assert!(VirtualGeometryDebugStats::from_counters(&[0; 11]).is_none());
     }
 }
+

@@ -31,7 +31,8 @@ fn hash3(px: f32, py: f32, pz: f32) -> f32 {
     }
 }
 
-/// 3D value noise with quintic interpolation, matching WGSL `noise3()`.
+/// 3D value noise with quintic interpolation, matching WGSL 
+oise3()`.
 /// Returns value in [-1, 1].
 pub fn noise3(px: f32, py: f32, pz: f32) -> f32 {
     let ix = px.floor();
@@ -300,3 +301,4 @@ fn terrain_height_at(x: f32, z: f32, config: &TerrainConfig) -> f32 {
     };
     config.height + terrain_height
 }
+

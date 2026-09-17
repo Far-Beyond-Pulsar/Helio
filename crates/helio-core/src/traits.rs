@@ -471,7 +471,23 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a crate::ResourceRegistry<'a>,
-    ) -> Option<wgpu::RenderPassDescriptor<'a>>;
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
+    /// Executor-aware descriptor hook. Implementations that construct
+    /// temporary attachment slices should retain them in `storage` rather
+    /// than leaking them to obtain a `'static` lifetime.
+    fn render_pass_descriptor_with_storage<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a crate::ResourceRegistry<'a>,
+        storage: &'a mut crate::RenderFrameStorage,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let _ = storage;
+        self.render_pass_descriptor(target, depth, resources)
+    }
 
     /// Dynamic-rendering variant of [`render_pass_descriptor`](Self::render_pass_descriptor),
     /// additionally given the executor's texture registry (`pool`) so the
@@ -497,6 +513,30 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let _ = pool;
         self.render_pass_descriptor(target, depth, resources)
+    }
+
+    /// Pool-aware variant of [`render_pass_descriptor_with_storage`].
+    ///
+    /// The executor only ever calls this method (never `render_pass_
+    /// descriptor_with_storage`/`_with_pool` directly), so its default must
+    /// chain through BOTH: `_with_storage` first (every pass migrated off
+    /// leaking `Box::leak` attachment arrays overrides that one, not this
+    /// one or `_with_pool`), falling back to `_with_pool` only for a pass
+    /// that still needs pool access without owning any storage-backed
+    /// attachment slice. Defaulting straight to `_with_pool` here (as an
+    /// earlier version of this chain did) silently orphans every `_with_
+    /// storage` override -- the executor would keep constructing a *fresh*
+    /// default `None` instead of ever calling the pass's real descriptor.
+    fn render_pass_descriptor_with_pool_and_storage<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a crate::ResourceRegistry<'a>,
+        pool: &'a crate::graph::GraphTexturePool,
+        storage: &'a mut crate::RenderFrameStorage,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let _ = pool;
+        self.render_pass_descriptor_with_storage(target, depth, resources, storage)
     }
 
     /// Returns true if this pass's `execute()` never touches the main render

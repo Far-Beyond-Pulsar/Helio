@@ -34,6 +34,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -105,19 +106,28 @@ fn leak_static<T: 'static>(val: T) -> &'static T {
 }
 
 fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeTypeInfo {
+    static ENUM_TYPES: OnceLock<Mutex<HashMap<(String, Vec<String>), &'static RuntimeTypeInfo>>> =
+        OnceLock::new();
+    let key = (label.to_owned(), choices.to_vec());
+    let cache = ENUM_TYPES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(existing) = cache.lock().expect("enum type cache poisoned").get(&key) {
+        return existing;
+    }
     let variants: Vec<&'static str> = choices
         .iter()
         .map(|c| Box::leak(c.clone().into_boxed_str()) as &'static str)
         .collect();
     let variants: &'static [&'static str] = Box::leak(variants.into_boxed_slice());
-    Box::leak(Box::new(RuntimeTypeInfo {
+    let info = Box::leak(Box::new(RuntimeTypeInfo {
         type_id: TypeId::of::<u64>(),
         type_name: Box::leak(format!("enum:{label}").into_boxed_str()),
         size: 8,
         align: 8,
         structure: TypeStructure::Enum { variants },
         color: None,
-    }))
+    }));
+    cache.lock().expect("enum type cache poisoned").insert(key, info);
+    info
 }
 
 fn convert_default(_kind: &helio_asset_compat::OptionKind, dv: &helio_asset_compat::OptionValue) -> Box<dyn Any + Send> {
@@ -252,6 +262,7 @@ pub fn is_importable_model(ext: &str) -> bool {
 /// id on its next resolve rather than serving a stale one forever.
 static CONTENT_ID_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>>> =
     std::sync::OnceLock::new();
+const MAX_CONTENT_ID_CACHE_ENTRIES: usize = 4096;
 
 fn content_id_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>> {
     CONTENT_ID_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
@@ -306,7 +317,15 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
 
     let bytes = std::fs::read(&canonical).ok()?;
     let id = twox_hash::XxHash3_128::oneshot(&bytes);
-    content_id_cache().lock().expect("content id cache mutex poisoned").insert(canonical, (mtime, len, id));
+    let mut cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+    cache.insert(canonical, (mtime, len, id));
+    while cache.len() > MAX_CONTENT_ID_CACHE_ENTRIES {
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        } else {
+            break;
+        }
+    }
     Some(id)
 }
 
@@ -322,7 +341,15 @@ pub fn prime_content_id_cache(abs_path: &Path, id: u128) {
     let Ok(canonical) = std::fs::canonicalize(abs_path) else { return };
     let Ok(meta) = std::fs::metadata(&canonical) else { return };
     let Ok(mtime) = meta.modified() else { return };
-    content_id_cache().lock().expect("content id cache mutex poisoned").insert(canonical, (mtime, meta.len(), id));
+    let mut cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+    cache.insert(canonical, (mtime, meta.len(), id));
+    while cache.len() > MAX_CONTENT_ID_CACHE_ENTRIES {
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        } else {
+            break;
+        }
+    }
 }
 
 /// xxh3-128 over the SAME bytes [`encode`] writes for the geometry payload

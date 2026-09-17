@@ -150,14 +150,15 @@ impl RenderPass for DepthPrepassPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         _resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([]));
+            storage.retain_boxed_slice(Box::new([]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DepthPrepass"),
             color_attachments,
@@ -250,3 +251,5 @@ impl RenderPass for DepthPrepassPass {
         Ok(())
     }
 }
+
+

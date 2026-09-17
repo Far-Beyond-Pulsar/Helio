@@ -6,6 +6,7 @@
 //! The default template (class 0) uses ambient + normal shading.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use bytemuck::{Pod, Zeroable};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
@@ -186,18 +187,21 @@ impl TransparentPass {
         // gbuffer templates that have incompatible bind group layouts.
         let base_src = include_str!("../../../../helio-mats/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
-            let mut resolved =
-                String::with_capacity(base_src.len() + helio_mats::PBR_EVAL.len());
-            resolved.push_str(helio_mats::PBR_EVAL);
-            resolved.push('\n');
-            resolved.push_str(base_src);
-            Box::leak(resolved.into_boxed_str())
+            static RESOLVED: OnceLock<String> = OnceLock::new();
+            RESOLVED.get_or_init(|| {
+                let mut resolved =
+                    String::with_capacity(base_src.len() + helio_mats::PBR_EVAL.len());
+                resolved.push_str(helio_mats::PBR_EVAL);
+                resolved.push('\n');
+                resolved.push_str(base_src);
+                resolved
+            }).as_str()
         } else {
             base_src
         };
         let local_class0 = helio_mats::radiant::RadiantTemplate {
-            name: "transparent_base",
-            wgsl_source: resolved_src,
+            name: std::sync::Arc::from("transparent_base"),
+            wgsl_source: std::sync::Arc::from(resolved_src),
         };
 
         Self {
@@ -279,14 +283,15 @@ impl RenderPass for TransparentPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -609,3 +614,5 @@ impl TransparentPass {
         self.pipelines.get(&key).unwrap()
     }
 }
+
+

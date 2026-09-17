@@ -15,7 +15,7 @@ pub(crate) struct CachedPass {
 #[derive(Clone)]
 pub(crate) enum PrePassAction {
     Route {
-        name: String,
+        name: &'static str,
         view: wgpu::TextureView,
     },
     /// A `write_group` declaration's members, resolved to concrete views and

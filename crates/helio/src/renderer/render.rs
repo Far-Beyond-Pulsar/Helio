@@ -93,6 +93,11 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // Drive wgpu's callback and deferred-destruction queues every frame.
+        // Embedders may share the device and set `owns_device = false`; in
+        // that mode we still must poll here or completed submissions and map
+        // callbacks can accumulate in the backend indefinitely.
+        let _ = self.device.poll(wgpu::PollType::Poll);
         // Browser WebGPU buffer mapping is asynchronous. Consume the previous
         // frame's completed readback before recording a new copy.
         self.rebuild_graph_if_sky_changed();
@@ -367,6 +372,19 @@ impl Renderer {
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
                 tlas: None,
+            },
+            "Renderer",
+        );
+        // See `coordinate_spaces`'s doc on `Renderer`: every instance
+        // implicitly uses `space_id = 0` (identity) until a real portal/
+        // sublevel producer exists. Without this, `OcclusionCullPass`/
+        // `IndirectDispatchPass`/`ShadowPass`/`ShadowCullPass`/both portal
+        // passes all hard-require this resource and silently never dispatch
+        // without it -- stalling the entire GPU-driven cull pipeline.
+        resource_registry.write(helio_core::ResourceKey::new("coordinate_spaces"),
+            helio_pass_gbuffer::CoordinateSpacesFrameData {
+                coordinate_spaces: &self.coordinate_spaces,
+                coordinate_spaces_prev: &self.coordinate_spaces_prev,
             },
             "Renderer",
         );

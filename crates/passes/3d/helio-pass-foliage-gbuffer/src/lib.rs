@@ -158,7 +158,7 @@ pub const fn unpack_visible_blade(packed: u32) -> (u32, u32) {
 /// # The region layout this pass assumes
 ///
 /// `visible_blades` is one buffer holding four **equal-size, contiguous** regions, in
-/// LOD order, and region `n` begins at element `n * stride`. The stride is derived from
+/// LOD order, and region `r` begins at element `r * stride`. The stride is derived from
 /// the buffer's own size in [`FoliageGBufferPass::new`] as
 /// `buffer.size() / 4 / size_of::<u32>()`, so the producer sizes the buffer and the
 /// consumer follows — there is no third place for the two to disagree. For
@@ -898,11 +898,12 @@ impl RenderPass for FoliageGBufferPass {
         builder.read("gbuffer");
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Returns `Some` whenever the G-buffer exists, regardless of whether there is
         // any foliage this frame. A pass that returns `None` on per-frame state can
@@ -929,7 +930,7 @@ impl RenderPass for FoliageGBufferPass {
             store: wgpu::StoreOp::Store,
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -1226,3 +1227,5 @@ mod tests {
         assert_eq!(offsets, vec![0, 1024, 2048, 3072]);
     }
 }
+
+

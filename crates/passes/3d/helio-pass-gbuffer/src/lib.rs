@@ -315,11 +315,12 @@ impl RenderPass for GBufferPass {
         }
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "GBuffer")?;
         let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "GBuffer")?;
@@ -327,7 +328,7 @@ impl RenderPass for GBufferPass {
         let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "GBuffer")?;
         let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "GBuffer")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -757,22 +758,41 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let registry = self
-                .template_registry
-                .clone()
-                .expect("template registry not synced — execute() must run before draws");
-            let registry = registry.read().unwrap();
-            let template = match registry.get(key.template_id) {
-                Some(t) => t,
-                None => {
+            // The renderer only ever hands us a shared registry when a
+            // caller actually registers custom (id >= 5) templates; nothing
+            // wires that up yet (see `template_registry`'s doc). Rather than
+            // hard-require it for every draw -- panicking on the overwhelming
+            // majority of scenes that only ever use the built-in classes
+            // (0 = default_pbr .. 4 = skin) -- fall back to a local registry
+            // that has those same built-ins, mirroring TransparentPass's
+            // `local_class0` fallback for the identical situation.
+            let local_fallback;
+            let registry_guard;
+            let template = if let Some(shared) = self.template_registry.as_ref() {
+                registry_guard = shared.read().unwrap();
+                match registry_guard.get(key.template_id) {
+                    Some(t) => t,
+                    None => {
+                        log::warn!(
+                            "Radiant: template class {} not found, falling back to class 0",
+                            key.template_id,
+                        );
+                        registry_guard
+                            .get(0)
+                            .expect("Default PBR template (class 0) missing")
+                    }
+                }
+            } else {
+                local_fallback = helio_mats::radiant::RadiantTemplateRegistry::new();
+                if key.template_id != 0 {
                     log::warn!(
-                        "Radiant: template class {} not found, falling back to class 0",
+                        "Radiant: no shared template registry synced yet; class {} unavailable, using class 0",
                         key.template_id,
                     );
-                    registry
-                        .get(0)
-                        .expect("Default PBR template (class 0) missing")
                 }
+                local_fallback
+                    .get(0)
+                    .expect("Default PBR template (class 0) missing")
             };
             let module = self.shader_cache.get_or_compile(
                 device,
@@ -942,3 +962,5 @@ pub fn create_material_bgl(
         entries: &entries,
     })
 }
+
+

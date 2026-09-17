@@ -278,6 +278,8 @@ pub struct SkyPass {
     volume_views: [wgpu::TextureView; 2],
     sim_groups: [wgpu::BindGroup; 2],
     render_groups: [wgpu::BindGroup; 2],
+    /// Keeps legacy fallback bindings valid for the lifetime of the pass.
+    dummy_texture: wgpu::Texture,
     ping: usize,
     target_format: wgpu::TextureFormat,
 
@@ -607,9 +609,6 @@ impl SkyPass {
             wgpu::TextureFormat::Rgba8Unorm,
             wgpu::TextureUsages::TEXTURE_BINDING,
         );
-        // Keep texture alive by leaking into volumes? Store in dummy to prevent drop — use forget
-        // We keep dummy_tex alive via hiding in a Box leak for pipeline lifetime (simple: forget)
-        std::mem::forget(dummy_tex);
         let sim_groups = [0, 1].map(|i| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Cloud Simulation Ping-Pong Bind Group"),
@@ -1577,6 +1576,7 @@ impl SkyPass {
             volume_views,
             sim_groups,
             render_groups,
+            dummy_texture: dummy_tex,
             ping: 0,
             target_format,
             config,

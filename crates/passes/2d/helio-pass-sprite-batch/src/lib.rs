@@ -855,11 +855,12 @@ impl RenderPass for SpriteBatchPass {
         "SpriteBatch"
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
         _resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // 2D sprites are alpha-blended and GPU-sorted (see `SpriteInstance::depth`)
         // — no depth attachment. `Box::leak` here matches the convention used by
@@ -871,7 +872,7 @@ impl RenderPass for SpriteBatchPass {
             None => wgpu::LoadOp::Load,
         };
         let attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
@@ -1022,3 +1023,5 @@ impl RenderPass for SpriteBatchPass {
         Ok(())
     }
 }
+
+

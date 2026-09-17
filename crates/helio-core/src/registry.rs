@@ -273,13 +273,28 @@ impl<'a> ResourceRegistry<'a> {
 
     /// Routes a graph-owned named view through the same open typed slot path
     /// used by pass-owned ResourceKey declarations.
+    ///
+    /// This is the graph's automatic publication for a `write_color_raw`/
+    /// `write_group`-declared resource, fired once at that resource's
+    /// first-writing pass. Most consumer passes read such a resource with
+    /// `resources.get::<&wgpu::TextureView>(...)`/`.read(...)`, which only
+    /// consult the typed-slot map — so the reflected-binding write above is
+    /// not enough on its own. Also populating the typed slot here (instead of
+    /// requiring every declaring pass to redundantly call `frame.write(...)`
+    /// in its own `publish()`) keeps the two lookup paths in sync for any
+    /// resource the graph itself routes.
     pub fn route_named_texture(
         &mut self,
-        name: &str,
+        name: &'static str,
         view: &wgpu::TextureView,
         writer: &'static str,
     ) {
         self.write_texture_binding(name, view, writer);
+        // SAFETY: matches `write_texture_binding`'s own lifetime-extension
+        // immediately above -- the view is owned by the RenderGraph's pool,
+        // which outlives this per-frame registry.
+        let extended: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+        self.write(ResourceKey::new(name), extended, writer);
     }
     /// Writes a value and records its writer in debug builds.
     pub fn write<T: Copy + Send + Sync + 'a>(

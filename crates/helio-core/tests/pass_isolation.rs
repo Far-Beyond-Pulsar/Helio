@@ -10,8 +10,8 @@
 //! data shape, no `helio-pass-*` production dependency, anywhere in
 //! `helio-core`) is `scripts/core-boundary` -- run it via
 //! `cargo run --manifest-path scripts/core-boundary/Cargo.toml` from the
-//! Helio workspace root. `libhelio` (the historical second "core" crate this
-//! rule used to also cover) has been fully removed: every type it held was
+//! Helio workspace root. The historical second "core" crate this rule
+//! used to also cover has been fully removed: every type it held was
 //! either genuinely generic (moved into `helio-core` itself: the resource
 //! registry, camera, temporal jitter math, `Movability`, generic asset
 //! types) or pass-specific (moved into its owning `helio-pass-*` crate, or

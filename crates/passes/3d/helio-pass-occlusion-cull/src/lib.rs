@@ -7,9 +7,12 @@
 //! `compacted_indices_2`, writing the final per-group visible count into
 //! `indirect[slot * 5 + 1]`. Downstream draws must read `compacted_indices_2`.
 //!
-//! Frame 0 has no Hi-Z pyramid yet, so instead of testing anything it copies
-//! `compacted_indices` straight through to `compacted_indices_2` unchanged.
-//! Bind-group is rebuilt lazily when buffer pointers change (e.g. scene grows).
+//! The first frame that actually has live instances has no Hi-Z pyramid yet,
+//! so instead of testing anything it copies `compacted_indices` straight
+//! through to `compacted_indices_2` unchanged (see `hiz_warmed_up`'s doc for
+//! why this is gated on "first frame with real instances", not `frame_num ==
+//! 0` -- the two are not the same frame). Bind-group is rebuilt lazily when
+//! buffer pointers change (e.g. scene grows).
 
 use std::sync::Arc;
 
@@ -65,6 +68,29 @@ pub struct OcclusionCullPass {
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
+    /// True once this pass has actually run its real Hi-Z test against a
+    /// depth buffer built from a frame that drew real geometry. `frame_num
+    /// == 0` is NOT an equivalent condition: `batch.draw_count` comes from
+    /// `ObjectBatchPass`'s own async GPU->CPU readback of its compute
+    /// results, which lags a frame behind the GPU work that produced it --
+    /// on frame 0 it reads 0 regardless of how many objects were actually
+    /// spawned, so `execute()`'s `draw_count == 0` early-out fires before
+    /// the frame-0 bypass below ever runs. The bypass then never executes,
+    /// `compacted_indices_2_buf` stays zeroed, and the very first real
+    /// dispatch (frame 1) Hi-Z-tests against a pyramid built from frame 0's
+    /// EMPTY depth buffer (nothing was drawn, so nothing was written to
+    /// it) -- in reversed-Z that background clears to 0.0/far, so every
+    /// real object's near-depth reads as "closer than the empty
+    /// background" and gets marked occluded. Occlusion culling mutates
+    /// `indirect_dispatch.indirect` in place, so that zeroes every
+    /// instance count; the next frame's depth buffer is then ALSO empty
+    /// (nothing drew), and the cycle never recovers -- a permanent
+    /// deadlock, not a one-frame glitch. Gating the bypass on "have I ever
+    /// dispatched a real test" instead of "is this frame_num 0" fixes it:
+    /// the bypass now runs on whichever frame is actually first to see
+    /// `draw_count > 0`, guaranteeing real geometry lands in depth before
+    /// Hi-Z testing ever reads from it.
+    hiz_warmed_up: bool,
     /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view,
     /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2,
     /// coordinate_spaces)
@@ -314,6 +340,7 @@ impl OcclusionCullPass {
             static_hiz_bounds_max: [0.0; 3],
             static_hiz_grid_resolution: [0; 3],
             bind_group: None,
+            hiz_warmed_up: false,
             bind_group_key: None,
             screen_width,
             screen_height,
@@ -455,11 +482,13 @@ impl RenderPass for OcclusionCullPass {
             return Ok(());
         }
 
-        // Temporal Hi-Z: frame 0 has no valid pyramid yet — skip real occlusion
-        // testing, but downstream draws always read `compacted_indices_2`, so
-        // pass the frustum-culled list through unchanged instead of leaving it
+        // Temporal Hi-Z: the first frame with real instances has no valid
+        // pyramid yet (see `hiz_warmed_up`'s doc for why this is NOT the
+        // same as `frame_num == 0`) — skip real occlusion testing, but
+        // downstream draws always read `compacted_indices_2`, so pass the
+        // frustum-culled list through unchanged instead of leaving it
         // stale/uninitialized.
-        if ctx.frame_num == 0 {
+        if !self.hiz_warmed_up {
             let instance_count = batch.instance_count as u64;
             if instance_count > 0 {
                 unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
@@ -469,6 +498,18 @@ impl RenderPass for OcclusionCullPass {
                     0,
                     instance_count * 4,
                 );
+            }
+            // Only declare Hi-Z warmed up once real instances actually got
+            // copied through this frame -- that's what guarantees GBuffer
+            // has real geometry to write into depth this frame, which is
+            // the one thing frame N+1's Hi-Z pyramid actually needs to be
+            // valid. If `instance_count` was 0 here (draw_count > 0 but no
+            // live instances yet -- shouldn't normally happen, but this
+            // must not gamble on it), stay un-warmed and retry the bypass
+            // next frame instead of moving on to a real test with nothing
+            // real backing it either.
+            if batch.instance_count > 0 {
+                self.hiz_warmed_up = true;
             }
             return Ok(());
         }

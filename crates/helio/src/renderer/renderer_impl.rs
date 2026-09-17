@@ -90,6 +90,13 @@ pub struct Renderer {
     pub(crate) debug_camera_buffer: wgpu::Buffer,
     pub(crate) cull_stats_buffer: wgpu::Buffer,
     pub(crate) material_bindings: MaterialBindingResources,
+    /// Portal/sublevel-local transforms, indexed by an instance's `space_id`.
+    /// See `helio_pass_gbuffer::CoordinateSpacesFrameData`'s doc for why this
+    /// is still Renderer-owned. `space_id 0` is always the identity space;
+    /// every object implicitly uses it until a real portal/sublevel producer
+    /// exists.
+    pub(crate) coordinate_spaces: wgpu::Buffer,
+    pub(crate) coordinate_spaces_prev: wgpu::Buffer,
     pub(crate) ambient_color: [f32; 3],
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],

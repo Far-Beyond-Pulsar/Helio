@@ -28,3 +28,5 @@ hlfs.md
 *.bin
 *.log
 assets/sprites.png
+frame_100.png
+frame_100_depth.png

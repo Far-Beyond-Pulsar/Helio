@@ -18,7 +18,7 @@
 //!    and the surviving count is atomically accumulated directly into
 //!    [`SpriteCullPass::indirect_buf`]'s `instance_count` field.
 //! 2. `cs_prepare` (`shaders/sprite_sort.wgsl`) — a single thread. Turns that
-//!    GPU-written visible count into `num_blocks` and an indirect dispatch
+//!    GPU-written visible count into a small uniform buffer and an indirect dispatch
 //!    arg buffer for step 3, so the sort's dispatch size tracks the actual
 //!    per-frame visible count instead of the pool's worst-case capacity.
 //! 3. 32 single-bit passes of a GPU LSD radix sort (`shaders/sprite_sort.wgsl`)
@@ -756,3 +756,4 @@ impl SpriteCullPass {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
 }
+

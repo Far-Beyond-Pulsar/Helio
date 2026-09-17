@@ -1027,18 +1027,19 @@ impl RenderPass for VirtualGeometryPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer: helio_core::ViewGroup<'_, 4> = resources.read(helio_core::ResourceKey::new("gbuffer"), "VirtualGeometry")?;
         let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "VirtualGeometry")?;
         let sss = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "VirtualGeometry")?;
         let extra = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "VirtualGeometry")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -1434,3 +1435,5 @@ fn create_material_bgl(
         entries: &entries,
     })
 }
+
+

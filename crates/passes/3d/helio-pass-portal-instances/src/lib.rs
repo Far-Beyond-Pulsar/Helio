@@ -341,17 +341,18 @@ impl RenderPass for PortalInstancePass {
         &["gbuffer", "portal_mask", "object_batch", "material_textures"]
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always `Some` when the G-buffer exists (chain fusion is decided by
         // attachment identity at lock time, not per-frame content — see
         // helio-pass-foliage-gbuffer's docs for why returning `None` here
         // conditionally would break fusion).
-        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 8>>(helio_core::ResourceKey::new("gbuffer"), "PortalInstance")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PortalInstance")?;
         let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "PortalInstance")?;
         let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "PortalInstance")?;
         let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "PortalInstance")?;
@@ -362,7 +363,7 @@ impl RenderPass for PortalInstancePass {
             store: wgpu::StoreOp::Store,
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -653,3 +654,5 @@ mod tests {
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }
+
+

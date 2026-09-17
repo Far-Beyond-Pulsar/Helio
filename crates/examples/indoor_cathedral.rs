@@ -888,7 +888,14 @@ impl AppState {
             );
         }
 
-        // Scene state is persistent — no per-frame setup needed.
+        // Uploads every row queued since last frame (spawns/inserts/
+        // updates/despawns) into the GPU-mirrored buffers the renderer
+        // actually reads. Without this, CPU-side SceneDB writes are
+        // authoritative but invisible to the GPU forever -- this is the
+        // root cause of a fully black render despite correct scene data
+        // (confirmed via ObjectBatchPass reporting instance_count=0/
+        // draw_count=0 even with valid StaticObjectComponent rows present).
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)

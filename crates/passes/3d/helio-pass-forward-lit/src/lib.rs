@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use bytemuck::{Pod, Zeroable};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
@@ -186,19 +187,22 @@ impl ForwardLitPass {
                 .find("enable ")
                 .and_then(|i| base_src_raw[i..].find(';').map(|j| i + j + 1))
                 .unwrap_or(0);
-            let mut resolved =
-                String::with_capacity(base_src_raw.len() + helio_mats::PBR_EVAL.len());
-            resolved.push_str(&base_src_raw[..insert_pos]);
-            resolved.push('\n');
-            resolved.push_str(helio_mats::PBR_EVAL);
-            resolved.push_str(&base_src_raw[insert_pos..]);
-            Box::leak(resolved.into_boxed_str())
+            static RESOLVED: OnceLock<String> = OnceLock::new();
+            RESOLVED.get_or_init(|| {
+                let mut resolved =
+                    String::with_capacity(base_src_raw.len() + helio_mats::PBR_EVAL.len());
+                resolved.push_str(&base_src_raw[..insert_pos]);
+                resolved.push('\n');
+                resolved.push_str(helio_mats::PBR_EVAL);
+                resolved.push_str(&base_src_raw[insert_pos..]);
+                resolved
+            }).as_str()
         } else {
             base_src_raw
         };
         let local_class0 = helio_mats::radiant::RadiantTemplate {
-            name: "forward_lit",
-            wgsl_source,
+            name: std::sync::Arc::from("forward_lit"),
+            wgsl_source: std::sync::Arc::from(wgsl_source),
         };
 
         Self {
@@ -378,15 +382,16 @@ impl RenderPass for ForwardLitPass {
 
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "ForwardLit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -715,3 +720,5 @@ fn create_material_bgl(
         entries: &entries,
     })
 }
+
+

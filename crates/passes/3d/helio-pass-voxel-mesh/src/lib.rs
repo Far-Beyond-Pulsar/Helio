@@ -772,11 +772,12 @@ impl RenderPass for VoxelMeshPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
             return None;
@@ -784,7 +785,7 @@ impl RenderPass for VoxelMeshPass {
 
         let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -882,3 +883,5 @@ mod tests {
         assert!(needs_render_pass(AttachmentMode::Standalone, 0));
     }
 }
+
+

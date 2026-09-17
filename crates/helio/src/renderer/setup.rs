@@ -179,12 +179,39 @@ impl Renderer {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(&device);
         let material_textures = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SceneDB Material Texture Slots"),
-            size: 224,
-            // MaterialTextureData is a 224-byte storage element. Keep the
+            // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
+            // (48 bytes each) + a 16-byte params vec4 = 352 bytes. Keep the
             // fallback large enough to satisfy shader validation until the
-            // real SceneDB table is published.
+            // real SceneDB table is published -- a stale, smaller constant
+            // here (previously 224, from an older/smaller struct shape) is
+            // never caught by anything except an actual draw call, since
+            // nothing reads this buffer's content until then.
+            size: 352,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        // `CoordinateSpacesFrameData` ("coordinate_spaces"/"coordinate_spaces_prev"
+        // -- portal/sublevel-local transforms an instance's `space_id` indexes
+        // into) is documented as still Renderer-owned pending a real pass-owned
+        // relocation (see that type's doc) -- but nothing ever actually wrote
+        // it: `OcclusionCullPass`, `IndirectDispatchPass`, `ShadowPass`,
+        // `ShadowCullPass`, and both portal passes all hard-require this
+        // resource and silently no-op every frame without it (no panic, no
+        // GPU error -- they just never dispatch), which stalls the entire
+        // GPU-driven cull pipeline permanently. Every object implicitly uses
+        // `space_id = 0` until a real portal/sublevel producer exists, so a
+        // single identity space is the correct content, not just a
+        // placeholder to satisfy binding validation.
+        let identity_space = glam::Mat4::IDENTITY.to_cols_array();
+        let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let coordinate_spaces_prev = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces Prev (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let fallback_texture = device.create_texture_with_data(
             &queue,
@@ -269,6 +296,8 @@ impl Renderer {
             ies_texture_view: None,
             cull_stats_staging,
             material_bindings,
+            coordinate_spaces,
+            coordinate_spaces_prev,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::material::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
@@ -6,16 +7,20 @@ use crate::material::{
 };
 
 pub struct RadiantTemplate {
-    pub name: &'static str,
+    pub name: Arc<str>,
     /// Base WGSL source with `// RADIANT_OVERRIDE_SURFACE` markers
-    pub wgsl_source: &'static str,
+    pub wgsl_source: Arc<str>,
 }
 
 impl Clone for RadiantTemplate {
     fn clone(&self) -> Self {
         Self {
-            name: Box::leak(self.name.to_string().into_boxed_str()),
-            wgsl_source: Box::leak(self.wgsl_source.to_string().into_boxed_str()),
+            // Both fields are immutable for the lifetime of a template.  They
+            // are already static (built-ins and registered strings), so a clone
+            // can copy the references directly.  Allocating/leaking here used
+            // to make every registry clone permanently grow the process heap.
+            name: Arc::clone(&self.name),
+            wgsl_source: Arc::clone(&self.wgsl_source),
         }
     }
 }
@@ -26,7 +31,7 @@ impl RadiantTemplate {
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
         let max_tex_str = max_textures.to_string();
-        let mut src = self
+        let src = self
             .wgsl_source
             .replace(
                 "binding_array<texture_2d<f32>, 256>",
@@ -84,7 +89,10 @@ impl RadiantTemplate {
 pub struct RadiantTemplateRegistry {
     templates: HashMap<u32, RadiantTemplate>,
     next_id: u32,
+    dynamic_ids: VecDeque<u32>,
 }
+
+const MAX_DYNAMIC_TEMPLATES: usize = 1024;
 
 /// The base gbuffer.wgsl source, embedded at compile time.
 fn base_gbuffer_source() -> &'static str {
@@ -126,6 +134,7 @@ impl Clone for RadiantTemplateRegistry {
         Self {
             templates: self.templates.clone(),
             next_id: self.next_id,
+            dynamic_ids: self.dynamic_ids.clone(),
         }
     }
 }
@@ -133,13 +142,9 @@ impl Clone for RadiantTemplateRegistry {
 /// A cheaply-clonable, thread-safe handle to a registry that the renderer
 /// and its passes share instead of each keeping their own copy.
 ///
-/// `RadiantTemplate::clone()` intentionally leaks its `name`/`wgsl_source`
-/// via `Box::leak` (needed to satisfy their `&'static str` fields), so
-/// deep-cloning a whole `RadiantTemplateRegistry` — as used to happen once
-/// per rendered frame to hand it to the GPU scene and again in every pass
-/// that merged it into a local copy — leaked continuously. Sharing one
-/// instance behind `Arc<RwLock<_>>` means registration (rare) mutates it in
-/// place and nothing ever needs to clone it again.
+/// A shared registry avoids copying the template map when it is handed to
+/// multiple renderer passes. Template clones themselves only copy static
+/// references and do not allocate.
 pub type SharedTemplateRegistry = std::sync::Arc<std::sync::RwLock<RadiantTemplateRegistry>>;
 
 impl RadiantTemplateRegistry {
@@ -149,6 +154,7 @@ impl RadiantTemplateRegistry {
         Self {
             templates: HashMap::new(),
             next_id: 5,
+            dynamic_ids: VecDeque::new(),
         }
     }
 
@@ -159,15 +165,16 @@ impl RadiantTemplateRegistry {
             //   0 = default_pbr, 1 = clear_coat, 2 = subsurface,
             //   3 = anisotropic, 4 = skin
             next_id: 5,
+            dynamic_ids: VecDeque::new(),
         };
         reg.templates.insert(
             0,
             RadiantTemplate {
-                name: "default_pbr",
-                wgsl_source: include_str!(concat!(
+                name: Arc::from("default_pbr"),
+                wgsl_source: Arc::from(include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
-                )),
+                ))),
             },
         );
         reg.register_default_templates();
@@ -219,9 +226,9 @@ impl RadiantTemplateRegistry {
 
     /// Override an existing class with a new WGSL source (used by TransparentPass
     /// to replace the default gbuffer base with its own transparent base shader).
-    pub fn override_class(&mut self, class: u32, name: &'static str, wgsl_source: &'static str) {
+    pub fn override_class(&mut self, class: u32, name: &str, wgsl_source: &str) {
         self.templates
-            .insert(class, RadiantTemplate { name, wgsl_source });
+            .insert(class, RadiantTemplate { name: Arc::from(name), wgsl_source: Arc::from(wgsl_source) });
     }
 
     /// Load a template from a WGSL file on disk. The template should contain
@@ -245,10 +252,16 @@ impl RadiantTemplateRegistry {
         self.templates.insert(
             id,
             RadiantTemplate {
-                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
-                wgsl_source: Box::leak(wgsl_source.into_boxed_str()),
+                name: Arc::from(format!("Radiant:{}", name)),
+                wgsl_source: Arc::from(wgsl_source),
             },
         );
+        self.dynamic_ids.push_back(id);
+        while self.dynamic_ids.len() > MAX_DYNAMIC_TEMPLATES {
+            if let Some(oldest) = self.dynamic_ids.pop_front() {
+                self.templates.remove(&oldest);
+            }
+        }
         id
     }
 
@@ -273,8 +286,8 @@ impl RadiantTemplateRegistry {
         self.templates.insert(
             class,
             RadiantTemplate {
-                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
-                wgsl_source: Box::leak(wgsl_source.into_boxed_str()),
+                name: Arc::from(format!("Radiant:{}", name)),
+                wgsl_source: Arc::from(wgsl_source),
             },
         );
     }
@@ -297,8 +310,8 @@ impl RadiantTemplateRegistry {
         self.templates.insert(
             id,
             RadiantTemplate {
-                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
-                wgsl_source: Box::leak(composed.into_boxed_str()),
+                name: Arc::from(format!("Radiant:{}", name)),
+                wgsl_source: Arc::from(composed),
             },
         );
     }

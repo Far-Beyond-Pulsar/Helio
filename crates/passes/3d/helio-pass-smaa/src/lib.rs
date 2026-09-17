@@ -10,7 +10,8 @@
 //! `execute()` records exactly **3** `draw(0..3, 0..1)` calls regardless of scene size.
 //!
 //! ## Lazy bind groups
-//! `edge` and `neighbor` bind groups are rebuilt when `frame.pre_aa` changes pointer
+//! `edge` and 
+eighbor` bind groups are rebuilt when `frame.pre_aa` changes pointer
 //! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
 //! the internal `edge_view` which is recreated then.
 
@@ -34,7 +35,8 @@ pub struct SmaaPass {
     /// Lazy — shares the same key as `edge_bind_group`.
     neighbor_bind_group: Option<wgpu::BindGroup>,
 
-    /// Key for `edge_bind_group` / `neighbor_bind_group`: pointer to the pre_aa TextureView.
+    /// Key for `edge_bind_group` / 
+eighbor_bind_group`: pointer to the pre_aa TextureView.
     input_key: Option<usize>,
 
     pub edge_texture: wgpu::Texture,
@@ -442,3 +444,4 @@ impl RenderPass for SmaaPass {
         self.input_key = None;
     }
 }
+

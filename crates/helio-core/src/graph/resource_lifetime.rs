@@ -71,6 +71,17 @@ impl RenderGraph {
 
         for (i, builder) in builders.iter().enumerate() {
             for d in builder.declarations() {
+                // `write_buffer` declarations (format: None) track a pass's
+                // buffer/typed-value output for scheduling only -- the pass
+                // publishes it itself via `frame.write(...)`. They must not
+                // reach the pool: allocating a phantom pool texture for them
+                // used to make `allocate_textures()` fire an automatic
+                // `PrePassAction::Route` that (once the route also populated
+                // the typed slot) collided with the pass's own, differently-
+                // typed publish under the same resource name.
+                if d.format.is_none() {
+                    continue;
+                }
                 if matches!(d.access, crate::graph::ResourceAccess::Write) {
                     let fmt = d.format.map(|f| f.to_wgpu());
                     writes.push(DeclWrite {
@@ -245,6 +256,9 @@ impl RenderGraph {
 
         let mut actions: Vec<Vec<PrePassAction>> =
             (0..self.passes.len()).map(|_| Vec::new()).collect();
+        self.route_names.clear();
+        self.route_names
+            .extend(self.resources.keys().map(|name| name.clone().into_boxed_str()));
         for (name, rl) in &self.resources {
             let pi = rl.first_write_pass;
             if pi >= actions.len() {
@@ -252,7 +266,19 @@ impl RenderGraph {
             }
             if let Some(view) = self.pool.get_view(name) {
                 actions[pi].push(PrePassAction::Route {
-                    name: name.clone(),
+                    // The graph owns these names for its lifetime. This keeps
+                    // the registry's static-key API without leaking on every
+                    // graph lock or resize.
+                    name: unsafe {
+                        std::mem::transmute::<&str, &'static str>(
+                            self
+                        .route_names
+                        .iter()
+                        .find(|route_name| route_name.as_ref() == name.as_str())
+                        .map(|route_name| route_name.as_ref())
+                        .expect("route name was populated above"),
+                        )
+                    },
                     view: wgpu::TextureView::clone(view),
                 });
             }
@@ -270,7 +296,7 @@ impl RenderGraph {
             let mut members = Vec::with_capacity(member_names.len());
             for &member_name in member_names {
                 let Some(idx) = actions[pi].iter().position(
-                    |a| matches!(a, PrePassAction::Route { name, .. } if name == member_name),
+                    |a| matches!(a, PrePassAction::Route { name, .. } if *name == member_name),
                 ) else {
                     continue;
                 };

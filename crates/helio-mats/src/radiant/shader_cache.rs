@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+const MAX_SHADER_MODULES: usize = 512;
 
 /// Key for cached shader modules: (template_id, graph_hash, feature_flag_mask)
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
@@ -14,12 +16,14 @@ pub struct RadiantShaderKey {
 /// we keep the `wgpu::ShaderModule` around to avoid recompilation.
 pub struct RadiantShaderCache {
     modules: HashMap<RadiantShaderKey, wgpu::ShaderModule>,
+    insertion_order: VecDeque<RadiantShaderKey>,
 }
 
 impl RadiantShaderCache {
     pub fn new() -> Self {
         Self {
             modules: HashMap::new(),
+            insertion_order: VecDeque::new(),
         }
     }
 
@@ -28,7 +32,17 @@ impl RadiantShaderCache {
     }
 
     pub fn insert(&mut self, key: RadiantShaderKey, module: wgpu::ShaderModule) {
+        if self.modules.contains_key(&key) {
+            self.modules.insert(key, module);
+            return;
+        }
         self.modules.insert(key, module);
+        self.insertion_order.push_back(key);
+        while self.modules.len() > MAX_SHADER_MODULES {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.modules.remove(&oldest);
+            }
+        }
     }
 
     /// Get or compile a shader module for the given key.
@@ -56,7 +70,7 @@ impl RadiantShaderCache {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
-            self.modules.insert(key, module);
+            self.insert(key, module);
         }
         self.modules.get(&key).unwrap()
     }

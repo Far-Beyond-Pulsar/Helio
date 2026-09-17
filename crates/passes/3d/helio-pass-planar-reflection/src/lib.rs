@@ -172,7 +172,7 @@ impl RenderPass for PlanarReflectionPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 8>>(helio_core::ResourceKey::new("gbuffer"), "PlanarReflection") {
+        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PlanarReflection") {
             Some(g) => g,
             None => return Ok(()),
         };

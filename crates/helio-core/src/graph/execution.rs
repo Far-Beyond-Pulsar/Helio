@@ -1,7 +1,7 @@
 use crate::graph::executor::{format_bpp, format_name};
 use crate::graph::resource::GraphTexturePool;
 use crate::graph::{PipelineFormatCache, PipelineFormatSet, PipelineRegistry};
-use crate::{PassContext, PrepareContext, Profiler, RenderPass, Result, SceneInput};
+use crate::{PassContext, PrepareContext, Profiler, RenderFrameStorage, RenderPass, Result, SceneInput};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +32,10 @@ pub struct RenderGraph {
     /// iteration order. Rebuilt every `collect_declarations()`. See
     /// `docs/helio_3_0_spec.md` §5.
     pub(crate) resource_groups: Vec<(usize, &'static str, Vec<&'static str>)>,
+    /// Owned storage for dynamically declared route names. The registry API
+    /// currently uses static keys, so graph-owned names must live as long as
+    /// the graph rather than being leaked on every rebuild.
+    pub(crate) route_names: Vec<Box<str>>,
     pub(crate) pre_pass_actions: Vec<Vec<PrePassAction>>,
     pub(crate) device: std::sync::Arc<wgpu::Device>,
     pub(crate) internal_w: u32,
@@ -72,7 +76,14 @@ pub struct RenderGraph {
     /// yet. This is populated for externally-owned devices whose host drives
     /// device polling.
     pending_worker_profilers: Vec<Profiler>,
+    /// Executor-owned transient descriptor storage. Passes that build dynamic
+    /// attachment slices can retain them here for the duration of a frame.
+    pub(crate) frame_storage: RenderFrameStorage,
 }
+
+/// A failed or unavailable GPU timestamp query must not retain one profiler
+/// (and its query resources) forever when the host never polls the device.
+const MAX_PENDING_WORKER_PROFILERS: usize = 64;
 impl RenderGraph {
     fn create_reflected_groups(
         &self,
@@ -112,6 +123,7 @@ impl RenderGraph {
             reflected_pipelines: Vec::new(),
             resources: HashMap::new(),
             resource_groups: Vec::new(),
+            route_names: Vec::new(),
             pre_pass_actions: Vec::new(),
             device: device.clone(),
             internal_w: 0,
@@ -136,6 +148,7 @@ impl RenderGraph {
             graph_data: None,
             external_inputs: std::collections::HashSet::new(),
             pending_worker_profilers: Vec::new(),
+            frame_storage: RenderFrameStorage::new(),
         }
     }
 
@@ -737,9 +750,10 @@ impl RenderGraph {
                         let cpu_start = std::time::Instant::now();
                         let pass = unsafe { &mut *(pass_address as *mut Box<dyn RenderPass>) };
                         let pass_name = pass.name();
+                        let mut frame_storage = RenderFrameStorage::new();
                         local_profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                         if let Some(desc) =
-                            pass.render_pass_descriptor_with_pool(target, depth, visible_ref, pool)
+                            pass.render_pass_descriptor_with_pool_and_storage(target, depth, visible_ref, pool, &mut frame_storage)
                         {
                             let attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
                                 desc.color_attachments.iter().cloned().collect();
@@ -875,6 +889,10 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         registry: &mut crate::ResourceRegistry<'_>,
     ) -> Result<wgpu::SubmissionIndex> {
+        // Descriptor slices retained by passes are frame-scoped. Reuse the
+        // executor-owned arena before recording begins; it remains alive until
+        // this method returns and the command buffers have been submitted.
+        self.frame_storage.reset();
         assert!(
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
@@ -905,6 +923,11 @@ impl RenderGraph {
                 }
             }
             self.pending_worker_profilers = pending;
+            if self.pending_worker_profilers.len() > MAX_PENDING_WORKER_PROFILERS {
+                let drop_count = self.pending_worker_profilers.len() - MAX_PENDING_WORKER_PROFILERS;
+                self.pending_worker_profilers.drain(..drop_count);
+                eprintln!("Helio profiler backlog exceeded {MAX_PENDING_WORKER_PROFILERS}; dropping oldest worker queries");
+            }
         }
         self.profiler.clear_cpu_timings();
 
@@ -972,11 +995,12 @@ impl RenderGraph {
                     self.profiler
                         .begin_gpu_pass(&mut compute_encoder, pass_name);
 
-                    if let Some(desc) = pass.render_pass_descriptor_with_pool(
+                    if let Some(desc) = pass.render_pass_descriptor_with_pool_and_storage(
                         target,
                         depth,
                         &*registry,
                         &self.pool,
+                        &mut self.frame_storage,
                     ) {
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
                         pass_encoder.execute_bundles(std::iter::once(bundle));
@@ -1070,11 +1094,12 @@ impl RenderGraph {
                     .begin_gpu_pass(&mut compute_encoder, pass_name);
 
                 // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
-                if let Some(desc) = pass.render_pass_descriptor_with_pool(
+                if let Some(desc) = pass.render_pass_descriptor_with_pool_and_storage(
                     target,
                     depth,
                     &*registry,
                     &self.pool,
+                    &mut self.frame_storage,
                 ) {
                     let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
                     let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
@@ -1466,11 +1491,12 @@ impl RenderGraph {
             .passes
             .iter()
             .map(|pass| {
-                let desc = pass.render_pass_descriptor_with_pool(
+                let desc = pass.render_pass_descriptor_with_pool_and_storage(
                     &dummy_target,
                     &dummy_depth,
                     &canon,
                     &self.pool,
+                    &mut self.frame_storage,
                 )?;
                 let color_len = desc.color_attachments.len();
                 let mut signature: Vec<usize> = desc
@@ -1731,3 +1757,4 @@ impl RenderGraph {
             .resize(self.passes.len(), self.chain_generation);
     }
 }
+

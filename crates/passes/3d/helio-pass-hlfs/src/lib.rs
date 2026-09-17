@@ -578,7 +578,7 @@ impl RenderPass for HlfsPass {
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let gbuffer = ctx.resources.read::<helio_core::ViewGroup<'_, 8>>(helio_core::ResourceKey::new("gbuffer"), "HLFS").ok_or_else(|| {
+        let gbuffer = ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "HLFS").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("HLFS requires a GBuffer".into())
         })?;
         let pre_aa =

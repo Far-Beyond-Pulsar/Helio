@@ -369,3 +369,4 @@ mod lifecycle_tests {
         assert_eq!(world.remove::<SublevelComponent>(level), Some(s));
     }
 }
+

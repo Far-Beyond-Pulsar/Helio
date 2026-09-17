@@ -523,31 +523,35 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always returns Some, even with zero instances (execute() then draws
         // nothing) — a pass that conditionally returns None based on per-frame
         // state can never safely participate in subpass-chain fusion, since the
         // executor decides chain membership once via a lock-time probe.
+        let pre_aa = resources.get(helio_core::ResourceKey::new("pre_aa"));
         let target_view = if self.occluded_by_geometry {
-            resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target)
+            pre_aa.unwrap_or(target)
         } else {
             target
         };
 
-        let depth_view = if self.occluded_by_geometry {
+        // `pre_aa` is internal-resolution (render-scaled); `target` is full
+        // output resolution. Depth must track whichever one color actually
+        // resolved to, or wgpu rejects the pass for mismatched attachment
+        // extents whenever render_scale < 1.0.
+        let depth_view = if self.occluded_by_geometry && pre_aa.is_some() {
             depth
-        } else if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth")) {
-            frd
         } else {
-            depth
+            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -586,3 +590,5 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 }
+
+

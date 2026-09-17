@@ -161,11 +161,12 @@ impl RenderPass for PortalEditorOverlayPass {
         self.editor_mode = enabled;
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always structurally participates in the pre_aa fusion chain,
         // regardless of `editor_mode` — that flag is runtime, mutable state,
@@ -174,9 +175,19 @@ impl RenderPass for PortalEditorOverlayPass {
         // would make this pass flicker in and out of the chain and could
         // break fusion for passes chained through it. `execute()` is where
         // editor_mode actually matters: no draw call, zero cost, when off.
-        let target_view = resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target);
+        let pre_aa = resources.get(helio_core::ResourceKey::new("pre_aa"));
+        let target_view = pre_aa.unwrap_or(target);
+        // `pre_aa` is internal-resolution (render-scaled); the raw `target`
+        // fallback is full output resolution. Depth must track whichever one
+        // color actually resolved to, or wgpu rejects the pass for mismatched
+        // attachment extents whenever render_scale < 1.0.
+        let depth_view = if pre_aa.is_some() {
+            depth
+        } else {
+            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+        };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -189,7 +200,7 @@ impl RenderPass for PortalEditorOverlayPass {
             label: Some("PortalEditorOverlay"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -256,3 +267,5 @@ impl RenderPass for PortalEditorOverlayPass {
         Ok(())
     }
 }
+
+

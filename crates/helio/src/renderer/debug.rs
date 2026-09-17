@@ -468,12 +468,25 @@ impl RenderPass for DebugPass {
         "DebugDraw"
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
         resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        // `pre_aa` is internal-resolution (render-scaled); `target` is full
+        // output resolution. `use_scene_depth` wants internal-res depth
+        // paired with internal-res color, but that pairing only holds when
+        // `pre_aa` is actually available -- if it isn't, color must fall
+        // back to full-res `target` and depth must follow it to
+        // `full_res_depth`, or wgpu rejects the pass for mismatched
+        // attachment extents whenever render_scale < 1.0.
+        let pre_aa = if self.use_scene_depth {
+            resources.get(helio_core::ResourceKey::new("pre_aa"))
+        } else {
+            None
+        };
         let depth_attachment = if self.depth_test_enabled {
             // `full_res_depth` is a dummy: it is allocated so that passes
             // drawing at output resolution have a correctly-sized depth
@@ -482,7 +495,7 @@ impl RenderPass for DebugPass {
             // internal-res scene depth, which means drawing at internal res too
             // — see `use_scene_depth` and BillboardPass::occluded_by_geometry,
             // which makes the same trade.
-            let depth_view = if self.use_scene_depth {
+            let depth_view = if self.use_scene_depth && pre_aa.is_some() {
                 depth
             } else if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
@@ -502,13 +515,9 @@ impl RenderPass for DebugPass {
         };
         // Scene depth is internal-res, so the colour target must be too, or the
         // attachments disagree in size.
-        let color_view = if self.use_scene_depth {
-            resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target)
-        } else {
-            target
-        };
+        let color_view = pre_aa.unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -536,7 +545,13 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
         self.ensure_bind_group(ctx.device);
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+            // A parallel worker can legitimately reach an empty/omitted
+            // render pass when the debug targets are unavailable for this
+            // frame. Treat it as a no-op instead of poisoning the worker.
+            return Ok(());
+        };
+        let rp = unsafe { &mut *rp_ptr };
         self.draw_commands(rp);
         Ok(())
     }
@@ -750,6 +765,17 @@ impl RenderPass for DebugDrawPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         self.pass.render_pass_descriptor(target, depth, resources)
+    }
+
+    fn render_pass_descriptor_with_storage<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        self.pass
+            .render_pass_descriptor_with_storage(target, depth, resources, storage)
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

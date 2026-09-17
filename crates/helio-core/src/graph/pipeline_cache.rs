@@ -283,6 +283,8 @@ pub struct PipelineFormatCache {
     persistent_path: Option<std::path::PathBuf>,
 }
 
+const MAX_PIPELINE_VARIANTS: usize = 512;
+
 impl PipelineFormatCache {
     pub fn new() -> Self {
         Self::default()
@@ -423,6 +425,10 @@ impl PipelineFormatCache {
     where
         F: FnOnce(Option<&wgpu::PipelineCache>) -> wgpu::RenderPipeline + Send + 'static,
     {
+        // Join completed workers before adding another handle.  JoinHandles
+        // themselves are small, but retaining one per miss made this cache
+        // grow for the lifetime of a long-running editor session.
+        self.reap_finished_workers();
         if let Some(existing) = self
             .entries
             .read()
@@ -456,6 +462,14 @@ impl PipelineFormatCache {
                     .write()
                     .expect("pipeline cache poisoned")
                     .insert(key.clone(), pipeline);
+                let mut entries = entries.write().expect("pipeline cache poisoned");
+                while entries.len() > MAX_PIPELINE_VARIANTS {
+                    if let Some(old_key) = entries.keys().next().cloned() {
+                        entries.remove(&old_key);
+                    } else {
+                        break;
+                    }
+                }
             }
             pending
                 .lock()
@@ -473,6 +487,19 @@ impl PipelineFormatCache {
         None
     }
 
+    fn reap_finished_workers(&self) {
+        let mut workers = self.workers.lock().expect("pipeline worker lock poisoned");
+        let mut i = 0;
+        while i < workers.len() {
+            if workers[i].is_finished() {
+                let worker = workers.swap_remove(i);
+                let _ = worker.join();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub fn is_pending(&self, key: &PipelineFormatKey) -> bool {
         self.pending
             .lock()
@@ -485,6 +512,7 @@ impl PipelineFormatCache {
     /// yourself after a shader/layout hot-reload invalidates pipelines out
     /// from under their format keys.
     pub fn clear(&self) {
+        self.reap_finished_workers();
         self.entries
             .write()
             .expect("pipeline cache poisoned")
