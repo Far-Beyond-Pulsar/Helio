@@ -366,6 +366,14 @@ impl OcclusionCullPass {
         self.screen_height = height;
     }
 
+    /// Test-only observability for `set_screen_size`'s effect -- lets an
+    /// integration test assert this pass's cull-uniform resolution actually
+    /// tracks the graph's real resolution across a resize, instead of only
+    /// being inferable indirectly from occlusion-test outcomes.
+    pub fn screen_size(&self) -> (u32, u32) {
+        (self.screen_width, self.screen_height)
+    }
+
     /// Set the static HiZ voxel grid metadata (called when pre-baked data is loaded).
     pub fn set_static_hiz_metadata(
         &mut self,
@@ -419,7 +427,14 @@ impl RenderPass for OcclusionCullPass {
         // frustum+occlusion survivors) -- there is no separate owned
         // `indirect` buffer here, so `culled_batch` simply republishes the
         // same buffer reference `indirect_dispatch` already holds.
-        let Some(indirect_dispatch) = frame.read::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch"), "OcclusionCull") else {
+        //
+        // Plain (non-panicking) lookup: this is legitimately optional (a
+        // graph that omits `IndirectDispatchPass`, e.g. a focused test
+        // graph, has nothing to republish yet) -- the `else { return; }`
+        // below already handles absence gracefully, but `frame.read()`
+        // falls through to a debug-only panic on a missing key before ever
+        // returning `None`, defeating that.
+        let Some(indirect_dispatch) = frame.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
             return;
         };
         let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };

@@ -1856,9 +1856,12 @@ name = "helio-pass-occlusion-cull"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "helio-pass-gbuffer",
+ "helio-pass-hiz",
  "helio-pass-indirect-dispatch",
+ "helio-pass-object-batch",
  "pollster 0.4.0",
  "wgpu",
 ]

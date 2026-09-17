@@ -12,3 +12,6 @@ bytemuck = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 pollster = { workspace = true }
+helio-pass-hiz = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+glam = { workspace = true }
