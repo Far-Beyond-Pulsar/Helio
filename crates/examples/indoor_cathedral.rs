@@ -253,6 +253,40 @@ impl ApplicationHandler for App {
 
         spawn_indoor_cathedral_sky(&mut scene_db.world);
 
+        // Lights are spawned BEFORE any mesh/material/object entity, not just
+        // grouped here for readability: `LightComponent`'s "scene_lights" GPU
+        // column is a SPARSE array indexed by the owning entity's own
+        // `entity.index()` (same scheme `StaticObjectComponent`'s
+        // "static_objects" column uses), and `LightCullPass`/`DeferredLightPass`
+        // both only ever scan rows `0..MAX_LIGHTS` (64). Spawning lights last
+        // (after the ~100+ mesh/material/object entities this scene creates)
+        // put every light's row past 64 -- correctly written, completely
+        // invisible to a shader that never scans that far. Spawning lights
+        // first guarantees their entity indices land inside the scanned
+        // range. This is a per-example workaround, not a fix to the
+        // underlying sparse-index-vs-fixed-scan-bound mismatch -- that's a
+        // real architectural gap worth its own follow-up.
+        let mut chandelier_light_ids = Vec::new();
+        for &z in CHANDELIER_Z {
+            chandelier_light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
+            ));
+        }
+        // Stained glass shafts. Unlike the removed `Movability::Stationary` flag,
+        // `LightComponent` carries no per-light real-time/baked distinction, so
+        // these are spawned as ordinary lights like every other one here.
+        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+            spawn_light(&mut scene_db.world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
+        }
+        let mut candle_light_ids = Vec::new();
+        for &(x, y, z) in CANDLES {
+            candle_light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
+            ));
+        }
+
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
         let _floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 32.0));
@@ -542,27 +576,6 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
-        let mut chandelier_light_ids = Vec::new();
-        for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(spawn_light(
-                &mut scene_db.world,
-                point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
-            ));
-        }
-        // Stained glass shafts. Unlike the removed `Movability::Stationary` flag,
-        // `LightComponent` carries no per-light real-time/baked distinction, so
-        // these are spawned as ordinary lights like every other one here.
-        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            spawn_light(&mut scene_db.world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
-        }
-        let mut candle_light_ids = Vec::new();
-        for &(x, y, z) in CANDLES {
-            candle_light_ids.push(spawn_light(
-                &mut scene_db.world,
-                point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
-            ));
-        }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 

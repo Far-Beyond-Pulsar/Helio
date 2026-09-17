@@ -10,10 +10,15 @@ pub type SceneResult<T> = Result<T, &'static str>;
 /// is the sole scene authority, so no renderer in this workspace can be
 /// built without one.
 ///
-/// This demo cohort registers no `#[gpu]`-derived buffer classes up front:
-/// `LightComponent` is `#[gpu(layout = packed)]`, which auto-registers its
-/// `"scene_lights"` buffer (at `MAX_LIGHTS` capacity) on the first
-/// `World::insert` of one — see that constant's doc.
+/// `LightComponent` is `#[gpu(layout = packed)]`, which is DOCUMENTED to
+/// auto-register its `"scene_lights"` buffer (at `MAX_LIGHTS` capacity) on
+/// the first `World::insert` of one -- but that lazy, reactive path (trigger
+/// registration from inside the very dispatch call that's also supposed to
+/// write the first row) drops that first write: every demo's lights read
+/// back as all-zero forever, even after `World::flush_gpu_mirror` runs every
+/// frame. Every other `#[gpu]` type in this file sidesteps the same class of
+/// hazard by registering explicitly, up front, before any entity exists to
+/// race it -- do the same here instead of relying on the auto-register path.
 pub fn new_scene_db_with_gpu_mirror(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
@@ -29,6 +34,11 @@ pub fn new_scene_db_with_gpu_mirror(
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        helio_pass_forward_lit::MAX_LIGHTS,
+        device,
+    );
     let gpu_store = Arc::new(gpu_store);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);

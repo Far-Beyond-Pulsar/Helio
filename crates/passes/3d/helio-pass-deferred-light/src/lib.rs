@@ -926,7 +926,15 @@ impl RenderPass for DeferredLightPass {
                 .scene_buffers
                 .contains(BufferKey::of("scene_lights"))
             {
-                256
+                // Must match the buffer's REAL fixed capacity, not a guess:
+                // `helio_pass_forward_lit::LightComponent` auto-registers
+                // "scene_lights" at exactly `pulsar_scenedb::gpu::world_
+                // mirror::DEFAULT_AUTO_REGISTER_CAPACITY` rows (that
+                // constant is `MAX_LIGHTS` there). A stale/larger constant
+                // here (previously a hardcoded 256, when the real capacity
+                // is 64) makes the shader read 192 out-of-bounds/garbage
+                // "lights" past the end of the real data every frame.
+                pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY
             } else {
                 0
             }, // SceneDB owns the fixed-capacity light component buffer.
