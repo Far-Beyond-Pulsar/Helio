@@ -395,6 +395,7 @@ impl AppState {
             point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
         );
 
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

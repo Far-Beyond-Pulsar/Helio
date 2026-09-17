@@ -20,6 +20,10 @@ name = "indoor_room"
 path = "indoor_room.rs"
 
 [[bin]]
+name = "billboard_demo"
+path = "billboard_demo.rs"
+
+[[bin]]
 name = "indoor_corridor"
 path = "indoor_corridor.rs"
 
@@ -266,6 +270,7 @@ helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-corona = { workspace = true }
+helio-pass-billboard = { workspace = true }
 helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }

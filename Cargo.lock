@@ -1013,6 +1013,7 @@ dependencies = [
  "helio-core",
  "helio-default-graphs",
  "helio-mats",
+ "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",

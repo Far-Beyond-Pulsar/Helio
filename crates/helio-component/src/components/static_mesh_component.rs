@@ -370,6 +370,17 @@ pub struct StaticMeshComponent {
     #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
+
+    /// Local-space bounding sphere (xyz = center, w = radius) computed once
+    /// from `vertices`' actual positions at hydrate time -- see
+    /// `hydrate_static_mesh_component`. CPU-only (not `#[gpu]`-mirrored):
+    /// the only consumer is `sync_static_mesh_rows`, which transforms it by
+    /// each entity's world transform to build `StaticObjectComponent`'s
+    /// culling bounds. Not derived from `transform.scale` -- a thin mesh at
+    /// scale 1.0 and a cube at scale 1.0 have different real extents and
+    /// must not collapse to the same bound.
+    #[serde(skip)]
+    pub bounds_local: [f32; 4],
 }
 
 #[register_scene_props_applier]
@@ -413,6 +424,10 @@ fn hydrate_static_mesh_component(
 ) -> Result<(), String> {
     let mut parsed: StaticMeshComponent =
         serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
+    // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
+    // the safety-net minimum the old transform-scale heuristic used
+    // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
+    parsed.bounds_local = [0.0, 0.0, 0.0, 0.5];
 
     let mesh_asset = parsed.mesh_asset.as_str().trim();
     if !mesh_asset.is_empty() {
@@ -427,6 +442,7 @@ fn hydrate_static_mesh_component(
                             upload.vertices.len(),
                             upload.indices.len()
                         );
+                        parsed.bounds_local = local_bounding_sphere(&upload.vertices);
                         parsed.vertices = upload.vertices;
                         parsed.indices = upload.indices;
                     }
@@ -450,6 +466,33 @@ fn hydrate_static_mesh_component(
 
     world.insert(entity, parsed);
     Ok(())
+}
+
+/// Local-space bounding sphere (xyz = center, w = radius) from a mesh's
+/// actual vertex positions: center = AABB midpoint, radius = distance from
+/// that center to the farthest AABB corner (conservative, cheap -- no need
+/// for a tighter Ritter-style fit here). Falls back to the same 0.5 default
+/// as "no mesh loaded" if `vertices` is empty.
+fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
+    let Some(first) = vertices.first() else {
+        return [0.0, 0.0, 0.0, 0.5];
+    };
+    let mut min = first.position;
+    let mut max = first.position;
+    for v in &vertices[1..] {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(v.position[axis]);
+            max[axis] = max[axis].max(v.position[axis]);
+        }
+    }
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let extent = [max[0] - center[0], max[1] - center[1], max[2] - center[2]];
+    let radius = (extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]).sqrt();
+    [center[0], center[1], center[2], radius.max(0.001)]
 }
 
 // Phase B4 (Pulsar-Native#555): the first component migrated onto

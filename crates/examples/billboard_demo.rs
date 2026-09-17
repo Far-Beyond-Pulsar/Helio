@@ -1,4 +1,15 @@
-//! Indoor room example – simple scene, low complexity
+//! Billboard example – minimal scene to verify `BillboardComponent` /
+//! `BillboardPass` actually render, in isolation from the engine integration.
+//!
+//! As of this writing, nothing in the Pulsar-Native engine (`engine_backend`/
+//! `helio-component`) ever inserts a `BillboardComponent` row anywhere, and no
+//! other Helio example did either — `BillboardPass` is wired into the default
+//! graph (`helio-default-graphs::add_late_passes`, built-in spotlight
+//! texture) but had literally zero test coverage. This example spawns
+//! `BillboardComponent` rows directly (the same "insert the SceneDB record,
+//! SceneDB owns the deferred GPU upload" pattern already used for
+//! `DecalComponent`/`WaterVolumeComponent` in `v3_demo_common.rs`) to answer:
+//! does the pass itself work at all?
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -13,10 +24,11 @@ use helio::{
     Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external;
-use pulsar_scenedb::{Entity, SceneDb};
+use helio_pass_billboard::BillboardComponent;
+use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
 };
 
 use winit::{
@@ -29,6 +41,35 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+/// Spawns a billboard directly as a SceneDB `BillboardComponent` row --
+/// mirrors `v3_demo_common`'s `spawn_decal`/`spawn_water_hitbox` idiom
+/// (`world.spawn()` + `world.insert(entity, component)`), which no helper
+/// exists for yet since no example has used billboards before this one.
+///
+/// `scale` is the quad's world-space (or screen-space, see `screen_scale`)
+/// width/height. `screen_scale`: when true the quad keeps a constant
+/// projected size regardless of distance (see the shader's `screen_scale`
+/// branch); when false it's a normal world-space-sized quad that shrinks
+/// with distance like any other object.
+fn spawn_billboard(
+    world: &mut pulsar_scenedb::World,
+    position: [f32; 3],
+    scale: [f32; 2],
+    color: [f32; 4],
+    screen_scale: bool,
+) -> pulsar_scenedb::Entity {
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        BillboardComponent {
+            world_pos: [position[0], position[1], position[2], 0.0],
+            scale_flags: [scale[0], scale[1], if screen_scale { 1.0 } else { 0.0 }, 0.0],
+            color,
+        },
+    );
+    entity
+}
 
 fn main() {
     env_logger::init();
@@ -59,7 +100,6 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     scene_db: SceneDb,
-    overhead_light: Entity,
 }
 
 impl App {
@@ -78,7 +118,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio – Indoor Room")
+                        .with_title("Helio - Billboard Demo")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -150,90 +190,44 @@ impl ApplicationHandler for App {
             }))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
 
-        let mat = spawn_material(&mut scene_db.world, make_material(
-            [0.7, 0.68, 0.62, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        // Ground plane, purely for visual scale/reference and to give
+        // `BillboardPass::set_occluded_by_geometry(true)` (set by default in
+        // `add_late_passes`) something to occlude against.
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.5, 0.5, 0.52, 1.0], 0.9, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let _ = spawn_object(&mut scene_db.world, floor, mat, glam::Mat4::IDENTITY, 20.0);
 
-        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 4.0));
-        let ceiling = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 3.0, 0.0], 4.0));
-        let wall_n = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
-        let wall_s = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
-        let wall_e = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
-        let wall_w = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
-        let table = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.8, 0.4, 0.5]));
-        let bookcase = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 1.0, 1.2]));
-        let sofa = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.2, 0.35, 0.5]));
-
-        let _ = spawn_object(&mut scene_db.world, floor, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ = spawn_object(&mut scene_db.world, ceiling, mat, glam::Mat4::IDENTITY, 4.0);
+        // A wall segment directly between the camera's start position and one
+        // billboard, to sanity-check occlusion-by-geometry as well as plain
+        // visibility.
+        let wall = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.1]));
         let _ = spawn_object(
             &mut scene_db.world,
-            wall_n,
+            wall,
             mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, -4.0)),
-            4.0,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            wall_s,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, 4.0)),
-            4.0,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            wall_e,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(4.0, 1.5, 0.0)),
-            4.0,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            wall_w,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(-4.0, 1.5, 0.0)),
-            4.0,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            table,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(1.5, 0.4, 1.5)),
-            0.8,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            bookcase,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(-3.4, 1.0, -2.5)),
-            1.0,
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            sofa,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(-1.5, 0.35, 2.5)),
-            1.2,
+            glam::Mat4::from_translation(glam::Vec3::new(6.0, 1.5, 0.0)),
+            2.0,
         );
 
-        let overhead_pos = [0.0f32, 2.85, 0.0];
-        let overhead_light = spawn_light(
-            &mut scene_db.world,
-            point_light(overhead_pos, [1.0, 0.85, 0.6], 4.0, 7.0),
-        );
         spawn_light(
             &mut scene_db.world,
-            point_light([-2.5, 0.9, -2.5], [1.0, 0.55, 0.2], 2.5, 5.0),
+            point_light([0.0, 4.0, 0.0], [1.0, 0.95, 0.85], 3.0, 15.0),
         );
-        spawn_light(
-            &mut scene_db.world,
-            point_light([2.5, 0.9, 2.5], [1.0, 0.75, 0.35], 2.0, 4.5),
-        );
-        renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
+
+        // Five billboards: a color spread at varying distance/height, one
+        // deliberately placed behind the wall above (x=8, occluded from a
+        // camera at the origin looking down +X), one using `screen_scale` to
+        // demonstrate constant-projected-size behavior.
+        spawn_billboard(&mut scene_db.world, [3.0, 1.0, -2.0], [1.0, 1.0], [1.0, 0.2, 0.2, 1.0], false);
+        spawn_billboard(&mut scene_db.world, [3.0, 1.0, 0.0], [1.5, 1.5], [0.2, 1.0, 0.2, 1.0], false);
+        spawn_billboard(&mut scene_db.world, [3.0, 1.0, 2.0], [1.0, 1.0], [0.2, 0.4, 1.0, 1.0], false);
+        spawn_billboard(&mut scene_db.world, [8.0, 1.5, 0.0], [1.2, 1.2], [1.0, 1.0, 0.2, 1.0], false); // behind the wall
+        spawn_billboard(&mut scene_db.world, [3.0, 2.5, 0.0], [0.3, 0.3], [1.0, 0.4, 1.0, 1.0], true); // screen_scale
+
+        renderer.set_ambient([1.0, 0.97, 0.92], 0.15);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 
         self.state = Some(AppState {
@@ -245,14 +239,13 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             start_time: std::time::Instant::now(),
-            cam_pos: glam::Vec3::new(0.0, 1.6, 2.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_pos: glam::Vec3::new(0.0, 1.6, 0.0),
+            cam_yaw: 0.0,
             cam_pitch: 0.0,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             scene_db,
-            overhead_light,
         });
     }
 
@@ -390,7 +383,6 @@ impl AppState {
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time = self.start_time.elapsed().as_secs_f32();
 
         let camera = Camera::perspective_look_at(
             self.cam_pos,
@@ -402,13 +394,14 @@ impl AppState {
             100.0,
         );
 
-        // Overhead ceiling light pulses very slightly (candle-like flicker)
-        let flicker = 1.0 + (time * 11.3).sin() * 0.04 + (time * 7.7).cos() * 0.02;
-        update_light(
-            &mut self.scene_db.world,
-            self.overhead_light,
-            point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
-        );
+        // See indoor_cathedral.rs's render loop for why this is required:
+        // `#[gpu(layout = packed)]` components (BillboardComponent included)
+        // only get `mark_gpu_row_dirty`-tracked by `World::insert`/`get_mut` --
+        // the actual `queue.write_buffer` upload only happens here. Almost
+        // every other example in this crate is missing this call (see the
+        // session note filed alongside this example); without it, nothing
+        // GPU-mirrored renders, not just billboards.
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -417,7 +410,6 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

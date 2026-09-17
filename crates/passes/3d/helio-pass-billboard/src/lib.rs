@@ -273,6 +273,16 @@ impl BillboardPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
+                // Slot 0 only: the quad's per-vertex position/uv. Billboard
+                // instance data (world_pos/scale_flags/color) is read from
+                // the storage buffer bound at bind_group_0 binding 2
+                // (`instances[instance_index]` in the shader) -- there is no
+                // `@location`-based per-instance vertex input in `vs_main`
+                // (only `@builtin(vertex_index)`/`@builtin(instance_index)`),
+                // so a second, `Instance`-stepped vertex buffer slot here was
+                // stale: it made this pipeline require a vertex buffer at
+                // index 1 that `execute()` correctly never had a reason to
+                // bind, since nothing reads it.
                 buffers: &[
                     // Slot 0: per-vertex quad data  (stride 16)
                     Some(wgpu::VertexBufferLayout {
@@ -288,28 +298,6 @@ impl BillboardPass {
                                 format: wgpu::VertexFormat::Float32x2,
                                 offset: 8,
                                 shader_location: 1,
-                            },
-                        ],
-                    }),
-                    // Slot 1: per-instance billboard data  (stride 48)
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: 48,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 0,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 16,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x4,
-                                offset: 32,
-                                shader_location: 4,
                             },
                         ],
                     }),

@@ -565,6 +565,7 @@ impl AppState {
             eprintln!("Scene construction took {:.2}ms", scene_build_ms);
         }
 
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

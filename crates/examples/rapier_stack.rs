@@ -559,6 +559,7 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
