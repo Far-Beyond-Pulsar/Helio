@@ -38,7 +38,9 @@
 /// should stay byte-for-byte compatible with it.
 pub mod ring;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -159,26 +161,95 @@ impl Drop for InlineAgent {
     }
 }
 
-/// Legacy compatibility hook for older callers.
+/// Handles shared by every world this process installs the bridge on. The
+/// publisher thread (and the shared-memory segment it owns) is created once;
+/// a host that swaps its `World` (undo/redo, level load) just re-installs the
+/// callbacks on the new world and keeps publishing into the same ring.
+struct Bridge {
+    snapshots: mpsc::SyncSender<WorldSnapshot>,
+    responses: mpsc::SyncSender<Vec<u8>>,
+    requests: Arc<std::sync::Mutex<VecDeque<Vec<u8>>>>,
+}
+
+static BRIDGE: std::sync::OnceLock<Option<Bridge>> = std::sync::OnceLock::new();
+
+fn start_bridge() -> Option<Bridge> {
+    std::env::var_os(SHM_ENV_VAR)?;
+
+    // Keep the frame boundary non-blocking. Snapshot capture happens at the
+    // explicit SceneDB boundary, while cloning, JSON serialization, and the
+    // shared-memory copy run on this worker. A capacity-one queue coalesces
+    // naturally: if the worker is busy, the new frame is dropped.
+    let (snapshots, snapshot_rx) = mpsc::sync_channel::<WorldSnapshot>(1);
+    let (responses, response_rx) = mpsc::sync_channel::<Vec<u8>>(8);
+    let requests = Arc::new(std::sync::Mutex::new(VecDeque::<Vec<u8>>::new()));
+    let requests_for_thread = requests.clone();
+    std::thread::Builder::new()
+        .name("scenedb-inspector-publisher".into())
+        .spawn(move || {
+            let Some(mut agent) = InlineAgent::maybe_start() else {
+                return;
+            };
+            let mut last_request_id = None;
+            loop {
+                if let Some(bytes) = agent.view.read_request(1) {
+                    let request_id =
+                        serde_json::from_slice::<pulsar_scenedb::InspectorRequest>(&bytes)
+                            .ok()
+                            .map(|request| request.request_id);
+                    if request_id.is_some() && request_id != last_request_id {
+                        last_request_id = request_id;
+                        let mut queue = requests_for_thread
+                            .lock()
+                            .expect("SceneDB inspector request queue poisoned");
+                        if queue.len() >= 16 {
+                            queue.pop_front();
+                        }
+                        queue.push_back(bytes);
+                    }
+                }
+                while let Ok(response) = response_rx.try_recv() {
+                    publish_bytes(&agent.view, &mut agent.next_slot, &response);
+                }
+                match snapshot_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(snapshot) => agent.publish(&snapshot),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok()?;
+    Some(Bridge {
+        snapshots,
+        responses,
+        requests,
+    })
+}
+
+/// Install a live inspector publisher on a SceneDB world.
 ///
-/// SceneDB no longer exposes inspector callbacks or request queues. Keeping a
-/// local callback bridge here would reintroduce a second world-state path, so
-/// this function intentionally does nothing and always returns `false`.
-///
-/// Use [`maybe_start`] or [`start`] and provide a closure that calls
-/// [`pulsar_scenedb::World::telemetry_snapshot`] at the desired cadence:
-///
-/// ```ignore
-/// let _agent = maybe_start(Duration::from_millis(100), move || {
-///     world.lock().unwrap().telemetry_snapshot()
-/// });
-/// ```
-#[deprecated(
-    note = "SceneDB inspector callbacks were removed; use maybe_start/start with World::telemetry_snapshot instead"
-)]
+/// A no-op (returns `false`) unless the SceneDB Inspector launched this
+/// process ([`SHM_ENV_VAR`] set). Safe to call again for a replacement world.
+/// The host must then call [`pulsar_scenedb::World::publish_inspector_snapshot`]
+/// after each GPU flush; SceneDB throttles it. That publishes CPU archetype
+/// metadata plus the SceneDB-owned GPU snapshot, and serves the inspector's
+/// on-demand CPU row / GPU byte-range requests.
 pub fn install_world(world: &mut pulsar_scenedb::World) -> bool {
-    let _ = world;
-    false
+    let Some(bridge) = BRIDGE.get_or_init(start_bridge) else {
+        return false;
+    };
+    let snapshots = bridge.snapshots.clone();
+    let responses = bridge.responses.clone();
+    world.set_inspector_metadata_callback(Box::new(move |snapshot| {
+        match snapshots.try_send(snapshot.clone()) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
+    }));
+    world.set_inspector_request_queue(bridge.requests.clone());
+    world.set_inspector_response_callback(Arc::new(move |bytes| {
+        let _ = responses.try_send(bytes);
+    }));
+    true
 }
 
 /// Handle to a running *threaded* agent (see [`start`]/[`maybe_start`])./// Dropping it stops the background thread. Keep it alive for as long as

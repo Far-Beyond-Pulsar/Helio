@@ -523,6 +523,15 @@ impl Renderer {
         self.debug_state.clone()
     }
 
+    /// The scene camera buffer (`STORAGE | UNIFORM | COPY_DST`, two
+    /// `GpuCameraUniforms`) — what passes bind as *the* camera. Not to be
+    /// confused with [`Self::debug_camera_buf`], a 64-byte `UNIFORM`-only
+    /// view-projection buffer that only `DebugDrawPass` may read; binding it
+    /// where a pass declares a storage camera fails wgpu validation.
+    pub fn camera_buf(&self) -> &wgpu::Buffer {
+        &self.camera_buffer
+    }
+
     pub fn debug_camera_buf(&self) -> &wgpu::Buffer {
         &self.debug_camera_buffer
     }
