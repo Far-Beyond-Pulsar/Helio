@@ -90,6 +90,7 @@ impl SceneInputAdapter {
         let sprite_buffer_bytes = self.scene_db.world.gpu_mirror().and_then(|mirror| mirror.store().resolve_buffer(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"))).map(|(buffer, _)| buffer.size()).unwrap_or(0);
         if self.frame_count == 0 { println!("[sprite_scene_input] SceneDB sprite_instances before flush: {} bytes, {} rows", sprite_buffer_bytes, self.sprite_entities.len()); }
         let _ = self.scene_db.world.flush_gpu_mirror(&self.queue);
+        self.scene_db.world.publish_inspector_snapshot();
         self.buffers = self
             .scene_db
             .world

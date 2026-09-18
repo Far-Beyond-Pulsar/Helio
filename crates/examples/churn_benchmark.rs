@@ -710,7 +710,7 @@ impl AppState {
         // root cause of a fully black render despite correct scene data
         // (confirmed via ObjectBatchPass reporting instance_count=0/
         // draw_count=0 even with valid StaticObjectComponent rows present).
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)

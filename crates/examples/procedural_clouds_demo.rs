@@ -609,7 +609,7 @@ impl AppState {
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

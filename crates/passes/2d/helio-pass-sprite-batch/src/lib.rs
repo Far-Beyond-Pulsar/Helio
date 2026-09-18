@@ -137,7 +137,7 @@ impl SpriteInstance {
 /// [`SpriteInstance`] and `shaders/sprite.wgsl`; cull/sort/indirect buffers
 /// remain renderer-derived state.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, pulsar_reflection::Reflectable, SceneStore, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, SceneStore, bytemuck::Pod, bytemuck::Zeroable)]
 #[gpu(layout = packed, buffer = "sprite_instances")]
 pub struct SpriteComponent {
     #[gpu]

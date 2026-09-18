@@ -125,3 +125,15 @@ microfont = "3.7.8"
 tiny_http = "0.12"
 ratatui = "0.29"
 crossterm = "0.28"
+
+# SceneDB inspector + reflection: route `pulsar_scenedb` (and its derive, which
+# the passes depend on directly) through the pushed `main` rev carrying the
+# batched `cpu_ranges` protocol and the `#[derive(SceneStore)]` -> `Reflectable`
+# registration. Mirrors Pulsar-Native/Cargo.toml's
+# `[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]`. Remove once Helio's
+# own `pulsar_scenedb`/`pulsar_scenedb_derive` pins are bumped to this rev.
+# The patch VALUE uses the `//`-spelled URL: cargo refuses a patch that points
+# at the exact source the manifest pins (same URL, even at a different rev).
+[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]
+pulsar_scenedb = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "214cb5319fcef099f2413005e472d86aaf1046b3" }
+pulsar_scenedb_derive = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "214cb5319fcef099f2413005e472d86aaf1046b3" }

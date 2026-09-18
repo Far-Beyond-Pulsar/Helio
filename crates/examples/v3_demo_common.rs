@@ -46,6 +46,23 @@ pub fn new_scene_db_with_gpu_mirror(
     scene_db
 }
 
+/// Frame-boundary SceneDB sync shared by every demo's render loop.
+///
+/// [`pulsar_scenedb::World::flush_gpu_mirror`] uploads every CPU-side row
+/// queued since the last frame (spawns/inserts/updates/despawns) into the
+/// GPU-mirrored buffers the renderer actually reads -- without it, CPU-side
+/// SceneDB writes are authoritative but invisible to the GPU.
+///
+/// [`pulsar_scenedb::World::publish_inspector_snapshot`] then feeds any
+/// attached `scenedb_inspector` client. It is throttled inside SceneDB and a
+/// no-op unless the inspector launched this process, so it is always safe to
+/// call. `scenedb_inspector_agent::install_world` only *installs* the bridge;
+/// the host must publish after each flush for the inspector to see any data.
+pub fn flush_scene_db(scene_db: &pulsar_scenedb::SceneDb, queue: &wgpu::Queue) {
+    scene_db.world.flush_gpu_mirror(queue);
+    scene_db.world.publish_inspector_snapshot();
+}
+
 /// The `SceneDbHandle` (`GpuMirrorHandle`) to pass to `RendererBuilder::new`
 /// for a `SceneDb` created via [`new_scene_db_with_gpu_mirror`].
 pub fn scene_db_handle(scene_db: &pulsar_scenedb::SceneDb) -> SceneDbHandle {

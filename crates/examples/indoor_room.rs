@@ -417,7 +417,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

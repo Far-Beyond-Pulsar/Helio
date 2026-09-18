@@ -2,7 +2,6 @@
 //!
 //! The gbuffer/cull passes project these rows into transient instance and
 //! coordinate-space inputs. No renderer-side group registry is authoritative.
-use pulsar_reflection::Reflectable;
 use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 use std::marker::PhantomData;
@@ -26,7 +25,7 @@ pub struct MeshComponent {
 /// migration step, but its lifetime and updates are now owned by the World.
 /// Render passes resolve the packed `"materials"` buffer by key; no renderer
 /// material table publication is required for the row itself.
-#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "materials")]
 pub struct MaterialComponent {
@@ -97,7 +96,7 @@ impl MaterialComponent {
 }
 
 /// Stable group membership. `group_mask == 0` means always visible.
-#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "render_groups")]
 pub struct RenderGroupComponent {
@@ -108,7 +107,7 @@ pub struct RenderGroupComponent {
 /// A movable SceneDB sublevel. The matrix is copied into the transient
 /// coordinate-space projection by the render bridge; it is not a renderer
 /// scene record.
-#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "sublevels")]
 pub struct SublevelComponent {
@@ -123,7 +122,7 @@ pub struct SublevelComponent {
 /// owning SceneDB entity (`SectionedMeshComponent`/`MeshObjectComponent`).
 /// This small packed row is the only persistent GPU-facing state needed by
 /// the sectioned-object pass.
-#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "sectioned_objects")]
 pub struct SectionedObjectComponent {
@@ -171,7 +170,7 @@ pub struct SectionedObjectComponent {
 /// consumer must still assemble those arrays itself from a `World` query
 /// over this component (a per-frame CPU cost, same category as the
 /// pre-existing shadow-atlas scoring — tracked, not silently hidden).
-#[derive(SceneStore, Reflectable, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "static_objects")]
 pub struct StaticObjectComponent {

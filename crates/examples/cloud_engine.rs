@@ -1867,7 +1867,7 @@ impl State {
         // forever -- a fully black render despite correct scene data. Every
         // v3_demo_common-based example needs this call once per frame; see
         // World::flush_gpu_mirror's own doc.
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
 
         let (run_simulation, dt) = self.update();
         let (forward, _, up) = self.camera_basis();

@@ -401,7 +401,7 @@ impl AppState {
         // every other example in this crate is missing this call (see the
         // session note filed alongside this example); without it, nothing
         // GPU-mirrored renders, not just billboards.
-        self.scene_db.world.flush_gpu_mirror(&self.queue);
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
