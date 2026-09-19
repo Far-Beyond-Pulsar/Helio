@@ -2,7 +2,7 @@
 
 September 12, 2026. Implementation continues in [PR #248](https://github.com/Far-Beyond-Pulsar/Helio/pull/248), with [issue #247](https://github.com/Far-Beyond-Pulsar/Helio/issues/247) still in progress. The research document remains the design record; this is the first executable opaque-triangle control.
 
-Latest continuation: the [directional-budget optimization](directional-budget.md) reduces the release synthetic 1440p reconstructed median from 11.99 to 9.78 ms across three repeated blocks. The 3-4 ms target remains unmet; earlier development-build timing below is retained as historical evidence.
+Latest continuation: [guide scoring and confidence work](guide-scoring.md) reduces the release synthetic 1440p reconstructed median from 9.30 to 8.75 ms across three fresh repeated blocks (5.93%). It builds on the earlier [directional-budget optimization](directional-budget.md); timings from different dates are not matched comparisons. The 3-4 ms target remains unmet; earlier timing below is retained as historical evidence.
 
 ## Implemented
 

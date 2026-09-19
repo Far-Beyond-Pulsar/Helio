@@ -1,0 +1,61 @@
+
+running 5 tests
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test missing_tlas_errors_and_mode_switch_preserves_output ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test offscreen_shadow_does_not_require_an_atlas_slot_and_removal_clears_it ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+camera=Vec3(0.0, 0.0, 0.0) distance=10 lit=122.380554 receiver=122.380554
+camera=Vec3(0.0, 0.0, 0.0) distance=30 lit=13.598895 receiver=13.598895
+camera=Vec3(0.0, 0.0, 0.0) distance=60 lit=3.3772209 receiver=3.3772209
+camera=Vec3(0.0, 0.0, 0.0) distance=83.7 lit=1.6929322 receiver=1.6929322
+camera=Vec3(0.0, 0.0, 0.0) distance=100 lit=1.1417651 receiver=1.1417651
+camera=Vec3(0.0, 0.0, 0.0) distance=150 lit=0.3435539 receiver=0.3435539
+camera=Vec3(2.0, 2.0, 24.0) distance=10 lit=121.241905 receiver=121.241905
+camera=Vec3(2.0, 2.0, 24.0) distance=30 lit=13.472928 receiver=13.472928
+camera=Vec3(2.0, 2.0, 24.0) distance=60 lit=3.3464794 receiver=3.3464794
+camera=Vec3(2.0, 2.0, 24.0) distance=83.7 lit=1.6765524 receiver=1.6765524
+camera=Vec3(2.0, 2.0, 24.0) distance=100 lit=1.1298767 receiver=1.1298767
+camera=Vec3(2.0, 2.0, 24.0) distance=150 lit=0.33796188 receiver=0.33796188
+test perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test reduced_resolution_repair_uses_hardware_visibility_in_every_phase ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test unsupported_mode_change_is_rejected_without_changing_the_pass ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.93s

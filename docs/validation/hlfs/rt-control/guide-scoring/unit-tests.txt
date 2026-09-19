@@ -1,0 +1,57 @@
+warning: variable does not need to be mutable
+   --> crates\helio-core\src\graph\resource_lifetime.rs:119:13
+    |
+119 |         let mut chain_group_gen: u32 = 0;
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `chain_group_gen`
+   --> crates\helio-core\src\graph\resource_lifetime.rs:119:13
+    |
+119 |         let mut chain_group_gen: u32 = 0;
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chain_group_gen`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\helio-core\src\profiling\mod.rs:204:18
+    |
+204 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    |                  ^^^^^^^^^                         ^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+204 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
+    |                                                              ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\helio-core\src\profiling\cpu.rs:121:18
+    |
+121 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    |                  ^^^^^^^^^                         ^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+121 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
+    |                                                              ++++
+
+warning: `helio-core` (lib) generated 4 warnings (run `cargo fix --lib -p helio-core` to apply 4 suggestions)
+   Compiling helio-pass-hlfs v0.1.0 (C:\Users\thiag\Documents\GitHub\Helio\crates\passes\3d\helio-pass-hlfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.59s
+     Running unittests src\lib.rs (target\debug\deps\helio_pass_hlfs-421921bf5a98783a.exe)
+
+running 2 tests
+test tests::quality_and_reference_settings_retain_screen_space_mode ... ok
+test tests::all_wgsl_stages_validate ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s

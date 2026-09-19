@@ -194,6 +194,41 @@ impl Fixture {
             shadow: None,
         }
     }
+    pub fn material(&mut self, albedo: [f32; 4], orm: [f32; 4]) {
+        for (index, color) in [(0, albedo), (2, orm)] {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("HLFS audit material"),
+                size: wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let values: Vec<u16> = color
+                .into_iter()
+                .map(|value| half::f16::from_f32(value).to_bits())
+                .cycle()
+                .take((self.width * self.height * 4) as usize)
+                .collect();
+            self.queue.write_texture(
+                texture.as_image_copy(),
+                bytemuck::cast_slice(&values),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.width * 8),
+                    rows_per_image: Some(self.height),
+                },
+                texture.size(),
+            );
+            self.views[index] = texture.create_view(&Default::default());
+        }
+    }
     pub fn config(&mut self, config: HlfsConfig) {
         self.graph
             .find_pass_mut::<HlfsPass>()

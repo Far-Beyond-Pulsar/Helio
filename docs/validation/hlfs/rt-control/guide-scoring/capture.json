@@ -1,0 +1,16 @@
+{
+  "date": "2026-09-19",
+  "frame": 31,
+  "resolution": [
+    2560,
+    1440
+  ],
+  "mode": "RayTraced sampled",
+  "lights": 17,
+  "sha256": "e1009a7c0773f06a811a13cf8f3a4abc131046d8fa1cd46b2983ac5695f1002f",
+  "baseline_png": "../directional-budget/1440p-sampled.png",
+  "bit_identical_to_baseline": true,
+  "example_executable_sha256": "0988002fe4651413d911366e1e8ef6b09b0bf03f7d9ef93d3913a8648aeaccd5",
+  "final_shader_embedded": true,
+  "visual_inspection": "Unchanged dark cathedral; not a visual acceptance pass or many-light performance evidence."
+}

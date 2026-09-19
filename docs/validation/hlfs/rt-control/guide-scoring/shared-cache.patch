@@ -1,0 +1,43 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+index c62d7348..1829ffe0 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+@@ -9,6 +9,9 @@ var<workgroup> seen_weights: array<f32,256>;
+ var<workgroup> slot_ids: array<u32,64>;
+ var<workgroup> slot_weights: array<f32,64>;
+ var<workgroup> sorted_ids: array<u32,16>;
++// Each lane owns one column. Reuse scores across samples without a private
++// array per invocation; no barrier is needed for a lane reading its own writes.
++var<workgroup> guide_scores: array<f32,1024>;
+ var<workgroup> confidence_bits: array<atomic<u32>,2>;
+ 
+ struct Reservoir { selected: u32, importance_value: f32, weight_sum: f32, random_value: f32, }
+@@ -99,12 +102,13 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                 // The guide and surface are shared by every sample. Preserve
+                 // their accumulation order without rescoring the same lights.
+                 var guided_directional_weight=0.0; var guided_local_weight=0.0;
+-                // Directional lights intersect every coarse tile, including
+-                // overflow tiles. With none, guide budget scores are unused too.
+-                if grid[tile].has_directional!=0u {
+-                    for(var i=0u;i<guide_count;i++) {
+-                        let id=previous_visible[guide_tile].indices[i];
+-                        let proxy=importance(id,s);
++                // Score each guide light once for the surface. Only mixed-light
++                // tiles need to accumulate directional/local budget totals.
++                for(var i=0u;i<guide_count;i++) {
++                    let id=previous_visible[guide_tile].indices[i];
++                    let proxy=importance(id,s);
++                    guide_scores[i*64u+lane]=proxy;
++                    if grid[tile].has_directional!=0u {
+                         if lights[id].light_type==0u { guided_directional_weight+=proxy; }
+                         else { guided_local_weight+=proxy; }
+                     }
+@@ -134,7 +138,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
+                     var hidden_reservoir=Reservoir(INVALID_LIGHT,0.0,0.0,(f32(sample)+stbn(gid.xy,3u))/f32(globals.sample_count));
+                     for(var i=0u;i<guide_count;i++) {
+                         let id=previous_visible[guide_tile].indices[i];
+-                        var proxy=importance(id,s);
++                        var proxy=guide_scores[i*64u+lane];
+                         if lights[id].light_type==0u { proxy*=directional_scale; }
+                         reservoir_add(&visible_reservoir,id,proxy,proxy);
+                     }

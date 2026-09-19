@@ -1,0 +1,10 @@
+{
+  "A3": {
+    "shader_sha256": "1fcaaea30ab907e7a0ab98158fcafca88fc6407d375462157e6f3e022ca50e64",
+    "entire_shader_embedded": true
+  },
+  "E2": {
+    "shader_sha256": "2ca5baa546e75771cf2a2adf514101a566fa22dbefbfb197d2d3a405b4f93da8",
+    "entire_shader_embedded": true
+  }
+}

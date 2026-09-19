@@ -1,0 +1,557 @@
+warning: variable does not need to be mutable
+   --> crates\helio-core\src\graph\resource_lifetime.rs:119:13
+    |
+119 |         let mut chain_group_gen: u32 = 0;
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `chain_group_gen`
+   --> crates\helio-core\src\graph\resource_lifetime.rs:119:13
+    |
+119 |         let mut chain_group_gen: u32 = 0;
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_chain_group_gen`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\helio-core\src\profiling\mod.rs:204:18
+    |
+204 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    |                  ^^^^^^^^^                         ^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+204 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
+    |                                                              ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> crates\helio-core\src\profiling\cpu.rs:121:18
+    |
+121 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    |                  ^^^^^^^^^                         ^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+121 |     pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
+    |                                                              ++++
+
+warning: `helio-core` (lib) generated 4 warnings (run `cargo fix --lib -p helio-core` to apply 4 suggestions)
+   Compiling helio-pass-hlfs v0.1.0 (C:\Users\thiag\Documents\GitHub\Helio\crates\passes\3d\helio-pass-hlfs)
+warning: use of deprecated associated function `glam::Mat4::look_at_rh`: use the `glam::camera::rh::view::look_at_mat4` function instead
+  --> crates\passes\3d\helio-pass-hlfs\tests\support\mod.rs:70:26
+   |
+70 |         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+   |                          ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `glam::Mat4::orthographic_rh`: use the `glam::camera::rh::proj::directx::orthographic` function instead
+  --> crates\passes\3d\helio-pass-hlfs\tests\support\mod.rs:71:26
+   |
+71 |         let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+   |                          ^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::orthographic_rh`: use the `glam::camera::rh::proj::directx::orthographic` function instead
+   --> crates\passes\3d\helio-pass-hlfs\tests\gpu_hlfs.rs:964:34
+    |
+964 |                 let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+    |                                  ^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::look_at_rh`: use the `glam::camera::rh::view::look_at_mat4` function instead
+   --> crates\passes\3d\helio-pass-hlfs\tests\gpu_hlfs.rs:966:34
+    |
+966 |                     proj * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
+    |                                  ^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::look_at_rh`: use the `glam::camera::rh::view::look_at_mat4` function instead
+   --> crates\passes\3d\helio-pass-hlfs\tests\gpu_hlfs.rs:976:38
+    |
+976 |                     let view = Mat4::look_at_rh(position, Vec3::new(x, 0.0, 0.0), Vec3::Y);
+    |                                      ^^^^^^^^^^
+
+warning: associated items `new_rt` and `material` are never used
+   --> crates\passes\3d\helio-pass-hlfs\tests\support\mod.rs:24:18
+    |
+ 20 | impl Fixture {
+    | ------------ associated items in this implementation
+...
+ 24 |     pub async fn new_rt(width: u32, height: u32) -> Self {
+    |                  ^^^^^^
+...
+197 |     pub fn material(&mut self, albedo: [f32; 4], orm: [f32; 4]) {
+    |            ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-hlfs` (test "gpu_hlfs") generated 6 warnings
+    Finished `release` profile [optimized] target(s) in 8.56s
+     Running tests\gpu_hlfs.rs (target\release\deps\gpu_hlfs-30937b6d253f9b54.exe)
+
+running 14 tests
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+Confidence balanced=0.0025 dominant=0.9534091
+test confidence_tracks_visible_energy_coverage ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+1080p full allocation_bytes=109511904
+1080p half allocation_bytes=43619424
+test creates_pipelines_on_available_adapter ... ok
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 1, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 4, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+test half_resolution_keeps_isolated_one_pixel_geometry_lit ... ok
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 1, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+Strong hidden light visibility=0: reference=0.089137584 measured=0.08426345 relative_error=0.054681003
+Strong hidden light visibility=1: reference=4.7470217 measured=4.750763 relative_error=0.00078812876
+test hidden_strong_light_is_discovered_after_occlusion_changes ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+reference mean=0.5914922, unfiltered mean=0.5916837
+mixed lights scale=1 samples=2 compact=false: relative mean error=0.0019662236, normalized RMSE=0.0370946
+mixed lights scale=2 samples=2 compact=false: relative mean error=0.0007491239, normalized RMSE=0.03953231
+mixed lights scale=2 samples=4 compact=false: relative mean error=0.0008014235, normalized RMSE=0.027550435
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+mixed lights scale=2 samples=2 compact=true: relative mean error=0.009301874, normalized RMSE=0.039178446
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+mixed lights scale=2 samples=4 compact=true: relative mean error=0.006772447, normalized RMSE=0.02950845
+test mixed_lighting_converges_at_full_and_half_resolution ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test offscreen_lights_and_minimal_targets_remain_valid ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+1080p performance allocation_bytes=35325024
+test packed_grid_overflow_and_compact_output_preserve_energy ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test packed_hdr_rounding_preserves_energy_and_subnormals ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=0 mean=0.13644959 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=3 mean=0.13595961 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=15 mean=0.1370313 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=31 mean=0.13755067 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=63 mean=0.13665475 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Unfiltered frame=95 mean=0.13619743 reference=0.13644959
+PROBE_AVG size=65x49 scale=1 spp=2 mode=Unfiltered mean=0.13615923 reference=0.13644959 relative_error=-0.0021279948
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=0 mean=0.13642123 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=3 mean=0.13630769 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=15 mean=0.13636886 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=31 mean=0.13619766 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=63 mean=0.13618053 reference=0.13644959
+PROBE size=65x49 scale=1 spp=2 mode=Final frame=95 mean=0.13625546 reference=0.13644959
+PROBE_AVG size=65x49 scale=1 spp=2 mode=Final mean=0.13616207 reference=0.13644959 relative_error=-0.0021071364
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=0 mean=0.13633461 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=3 mean=0.1375531 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=15 mean=0.13730149 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=31 mean=0.13943574 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=63 mean=0.13707352 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Unfiltered frame=95 mean=0.14033593 reference=0.13644959
+PROBE_AVG size=65x49 scale=2 spp=2 mode=Unfiltered mean=0.13657995 reference=0.13644959 relative_error=0.00095533713
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=0 mean=0.13611063 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=3 mean=0.13624349 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=15 mean=0.13634612 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=31 mean=0.13631898 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=63 mean=0.13622107 reference=0.13644959
+PROBE size=65x49 scale=2 spp=2 mode=Final frame=95 mean=0.13634402 reference=0.13644959
+PROBE_AVG size=65x49 scale=2 spp=2 mode=Final mean=0.13626891 reference=0.13644959 relative_error=-0.001324127
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=0 mean=0.13633461 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=3 mean=0.13409854 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=15 mean=0.138115 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=31 mean=0.13896346 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=63 mean=0.13916884 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Unfiltered frame=95 mean=0.13732922 reference=0.13644959
+PROBE_AVG size=65x49 scale=2 spp=4 mode=Unfiltered mean=0.13626882 reference=0.13644959 relative_error=-0.0013247821
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=0 mean=0.13611063 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=3 mean=0.13588804 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=15 mean=0.1361995 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=31 mean=0.13620773 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=63 mean=0.13602923 reference=0.13644959
+PROBE size=65x49 scale=2 spp=4 mode=Final frame=95 mean=0.1361461 reference=0.13644959
+PROBE_AVG size=65x49 scale=2 spp=4 mode=Final mean=0.13606738 reference=0.13644959 relative_error=-0.0028011429
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=0 mean=0.13638332 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=3 mean=0.13580039 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=15 mean=0.13898762 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=31 mean=0.14258562 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=63 mean=0.13846676 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Unfiltered frame=95 mean=0.13949211 reference=0.13644351
+PROBE_AVG size=64x48 scale=2 spp=2 mode=Unfiltered mean=0.13691665 reference=0.13644351 relative_error=0.0034676744
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=0 mean=0.13627073 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=3 mean=0.13589828 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=15 mean=0.13596588 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=31 mean=0.13678074 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=63 mean=0.13677369 reference=0.13644351
+PROBE size=64x48 scale=2 spp=2 mode=Final frame=95 mean=0.13656706 reference=0.13644351
+PROBE_AVG size=64x48 scale=2 spp=2 mode=Final mean=0.13671903 reference=0.13644351 relative_error=0.0020193153
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=0 mean=0.13638332 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=3 mean=0.13461529 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=15 mean=0.13852103 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=31 mean=0.1397322 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=63 mean=0.13757992 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Unfiltered frame=95 mean=0.13933176 reference=0.13644351
+PROBE_AVG size=64x48 scale=2 spp=4 mode=Unfiltered mean=0.13625741 reference=0.13644351 relative_error=-0.0013639388
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=0 mean=0.13627073 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=3 mean=0.13605902 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=15 mean=0.13632505 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=31 mean=0.13635366 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=63 mean=0.13617049 reference=0.13644351
+PROBE size=64x48 scale=2 spp=4 mode=Final frame=95 mean=0.13644817 reference=0.13644351
+PROBE_AVG size=64x48 scale=2 spp=4 mode=Final mean=0.1362181 reference=0.13644351 relative_error=-0.001652038
+test raw_and_filtered_energy_match_at_odd_and_even_sizes ... ok
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+lights=0 reference=0.012410481 sampled=0.012410481 relative mean error=0
+lights=1 reference=0.13643324 sampled=0.13650095 relative mean error=0.00049629307
+lights=2 reference=0.13643354 sampled=0.1364612 relative mean error=0.00020271083
+lights=65 reference=0.13643529 sampled=0.13600056 relative mean error=0.00318632
+lights=257 reference=0.13644576 sampled=0.13623762 relative mean error=0.0015254371
+lights=1024 reference=0.13643911 sampled=0.13630927 relative mean error=0.0009516972
+Low pre-exposure direct reference=0.000073567964 final=0.00007358007
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+Strong hidden light visibility=0: reference=0.088622026 measured=0.0834124 relative_error=0.058784764
+Strong hidden light visibility=1: reference=4.7167354 measured=4.6941867 relative_error=0.004780568
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 4, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+lights=0 reference=0.012410481 sampled=0.012410481 relative mean error=0
+lights=1 reference=0.13643324 sampled=0.13650095 relative mean error=0.00049629307
+lights=2 reference=0.13643354 sampled=0.1364612 relative mean error=0.00020271083
+lights=65 reference=0.13643529 sampled=0.13610798 relative mean error=0.002398969
+lights=257 reference=0.13644576 sampled=0.13609351 relative mean error=0.0025816013
+lights=1024 reference=0.13643911 sampled=0.13600868 relative mean error=0.0031547768
+Low pre-exposure direct reference=0.000073567964 final=0.00007358007
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 4, candidates_per_sample: 8, sample_scale: 2, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+Strong hidden light visibility=0: reference=0.088622026 measured=0.08366755 relative_error=0.055905737
+Strong hidden light visibility=1: reference=4.7167354 measured=4.700564 relative_error=0.0034285272
+test reduced_resolution_preserves_energy_and_discovers_hidden_lights ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+MOTION size=65x49 spp=2 worst_mean_error=0.061198764 worst_nrmse=0.12504634
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+MOTION size=65x49 spp=4 worst_mean_error=0.06141307 worst_nrmse=0.12099332
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+MOTION size=128x96 spp=2 worst_mean_error=0.022254867 worst_nrmse=0.049206283
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+MOTION size=128x96 spp=4 worst_mean_error=0.021928877 worst_nrmse=0.04599677
+test reduced_resolution_tracks_camera_motion ... ok
+Dynamic preset: HlfsConfig { mode: ScreenSpace, samples_per_pixel: 2, candidates_per_sample: 8, sample_scale: 1, max_history_frames: 16, discovery_fraction: 0.2, pre_exposure: 1.0, screen_trace_distance: 0.5, ray_trace_distance: 10000.0, debug_mode: Final }
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+lights=0 reference=0.012475873 sampled=0.012475873 relative mean error=0
+lights=1 reference=0.13721737 sampled=0.13721737 relative mean error=0
+lights=2 reference=0.13722073 sampled=0.13722073 relative mean error=0
+lights=65 reference=0.13722327 sampled=0.13681453 relative mean error=0.0029786408
+lights=257 reference=0.13723037 sampled=0.13674602 relative mean error=0.0035294474
+lights=1024 reference=0.13722934 sampled=0.13679655 relative mean error=0.0031537667
+Low pre-exposure direct reference=0.00009023305 final=0.00009023305
+test rendered_energy_survives_light_growth_overflow_and_removal ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+Contact region unshadowed=5.803787 occluded=3.6282349
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+Contact region unshadowed=5.772949 occluded=3.8701172
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+[RenderGraph] 1 passes, 0 chain(s):
+   0. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+test screen_contacts_follow_current_depth_and_clear_after_motion ... ok
+HLFS adapter: AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+[RenderGraph] 3 passes, 0 chain(s):
+   0. HLFS timestamp start         W: –  R: –
+
+   1. HLFS                         W: pre_aa  R: gbuffer,pre_aa
+
+   2. HLFS timestamp end           W: –  R: –
+
+test shadows_use_atlas_layers_independently_of_light_index ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 30.77s

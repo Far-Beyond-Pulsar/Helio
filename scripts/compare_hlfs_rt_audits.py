@@ -25,8 +25,9 @@ def read(path):
 def compare(baseline, candidate):
     result = {}
     names = ["local-grid", "local-overflow", "mixed-grid", "mixed-overflow"]
-    if any((p / "packed-id-overflow.f32").exists() for p in (baseline, candidate)):
-        names.append("packed-id-overflow")
+    for optional in ("packed-id-overflow", "hdr-material-overflow"):
+        if any((p / f"{optional}.f32").exists() for p in (baseline, candidate)):
+            names.append(optional)
     for name in names:
         a, av = read(baseline / f"{name}.f32")
         b, bv = read(candidate / f"{name}.f32")

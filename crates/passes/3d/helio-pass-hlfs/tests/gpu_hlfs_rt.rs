@@ -528,6 +528,10 @@ fn benchmark_rt_resolution_and_acceleration() {
 #[ignore = "explicit cross-build GPU output audit; requires HLFS_RT_AUDIT_OUTPUT"]
 fn benchmark_candidate_output_audit() {
     let directory = std::env::var("HLFS_RT_AUDIT_OUTPUT").expect("audit output directory");
+    let samples = std::env::var("HLFS_RT_AUDIT_SAMPLES")
+        .map(|value| value.parse::<u32>().expect("audit sample count"))
+        .unwrap_or(2);
+    assert!((1..=4).contains(&samples), "audit samples must be 1..=4");
     std::fs::create_dir_all(&directory).unwrap();
     pollster::block_on(async {
         for (case, count, mixed, scale, candidates) in [
@@ -536,11 +540,16 @@ fn benchmark_candidate_output_audit() {
             ("mixed-overflow", 1024, true, 2, 16),
             ("mixed-grid", 48, true, 1, 1),
             ("packed-id-overflow", 65536, true, 2, 8),
+            ("hdr-material-overflow", 1024, false, 2, 8),
         ] {
             let mut f = Fixture::new_rt(65, 49).await;
+            if case == "hdr-material-overflow" {
+                f.material([2.0, 0.5, 1.4, 1.0], [1.0, 0.7, 0.5, 1.0]);
+            }
             f.config(HlfsConfig {
                 mode: HlfsMode::RayTraced,
                 sample_scale: scale,
+                samples_per_pixel: samples,
                 candidates_per_sample: candidates,
                 ..Default::default()
             });
@@ -593,7 +602,10 @@ fn benchmark_candidate_output_audit() {
                         "{case}: nonzero direct light required"
                     );
                 }
-                eprintln!("RT_AUDIT case={case} frame={frame} mean={}", mean(&pixels));
+                eprintln!(
+                    "RT_AUDIT case={case} spp={samples} frame={frame} mean={}",
+                    mean(&pixels)
+                );
                 bytes.extend_from_slice(bytemuck::cast_slice(&pixels));
             }
             std::fs::write(
