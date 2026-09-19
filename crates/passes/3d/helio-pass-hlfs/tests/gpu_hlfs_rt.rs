@@ -174,6 +174,42 @@ fn reduced_resolution_repair_uses_hardware_visibility_in_every_phase() {
 }
 
 #[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn uncovered_thin_edges_do_not_expose_small_population_sampling_noise() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(65, 49).await;
+        empty_scene(&mut f);
+        let center = 24 * 65 + 32;
+        let mut depths = vec![1.0; 65 * 49];
+        depths[center] = (3.0 - 0.1) / (10.0 - 0.1);
+        f.depth_values(&depths);
+        f.lights((0..17).map(|i| {
+            let mut l = point([i as f32 - 8.0, 2.0, 2.0],
+                [0.2 + (i % 3) as f32 * 0.4, 0.7, 0.3], 20.0 + i as f32 * 30.0);
+            l.set_ray_traced_shadows(true);
+            l
+        }).collect());
+        f.config(HlfsConfig { mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+        f.frame();
+        let reference = f.read()[center];
+        f.config(HlfsConfig::ray_traced_presampled());
+        // This one-pixel surface is absent from the half-resolution samples
+        // in phases 1/2/3. No history can hide the raw repair estimator's noise.
+        for frame in (1..32).filter(|frame| frame % 4 != 0) {
+            f.scene.frame_count = frame;
+            f.graph.find_pass_mut::<HlfsPass>().unwrap().invalidate_history();
+            f.frame();
+            let actual = f.read()[center];
+            for channel in 0..3 {
+                assert!((actual[channel] - reference[channel]).abs() < reference[channel] * 0.03 + 0.001,
+                    "thin edge frame {frame}: {actual:?}, reference {reference:?}");
+            }
+        }
+    });
+}
+
+#[test]
 #[ignore = "requires a GPU; ray-query support is intentionally not requested"]
 fn unsupported_mode_change_is_rejected_without_changing_the_pass() {
     pollster::block_on(async {

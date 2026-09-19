@@ -75,21 +75,32 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     }
     if weight_sum==0.0 && globals.light_count>0u {
         // Thin surfaces may have no matching half-resolution sample. Shade
-        // those pixels directly with the same bounded candidate/shadow budget.
+        // those pixels directly; larger populations keep the bounded ray budget.
         var rng=hash_u32(u32(pixel.x)+u32(pixel.y)*globals.screen_size.x+globals.frame*0x9e3779b9u);
-        for(var sample=0u;sample<globals.sample_count;sample++) {
-            var selected=INVALID_LIGHT; var selected_target=0.0; var total=0.0;
-            for(var candidate=0u;candidate<globals.candidate_count;candidate++) {
-                let id=min(u32(random(&rng)*f32(globals.light_count)),globals.light_count-1u);
+        // These pixels are shaded after denoising. Small light populations can
+        // be evaluated exactly here instead of exposing raw reservoir variance
+        // as bright, one-pixel seams along thin geometry.
+        if USE_TILE_PRESAMPLING && globals.light_count<=64u {
+            for(var id=0u;id<globals.light_count;id++) {
                 if id==key { continue; }
-                let proxy=importance(id,s); total+=proxy;
-                if proxy>0.0 && random(&rng)*total<proxy { selected=id; selected_target=proxy; }
+                let light=evaluate_light(id,s,shadow_factor(id,s.position,s.normal,fragment.xy,globals.frame));
+                diffuse+=light.diffuse; specular+=light.specular;
             }
-            if selected!=INVALID_LIGHT {
-                let visibility=shadow_factor(selected,s.position,s.normal,fragment.xy,globals.frame);
-                let light=evaluate_light(selected,s,visibility);
-                let normalization=total*f32(globals.light_count)/(selected_target*f32(globals.candidate_count*globals.sample_count));
-                diffuse+=light.diffuse*normalization; specular+=light.specular*normalization;
+        } else {
+            for(var sample=0u;sample<globals.sample_count;sample++) {
+                var selected=INVALID_LIGHT; var selected_target=0.0; var total=0.0;
+                for(var candidate=0u;candidate<globals.candidate_count;candidate++) {
+                    let id=min(u32(random(&rng)*f32(globals.light_count)),globals.light_count-1u);
+                    if id==key { continue; }
+                    let proxy=importance(id,s); total+=proxy;
+                    if proxy>0.0 && random(&rng)*total<proxy { selected=id; selected_target=proxy; }
+                }
+                if selected!=INVALID_LIGHT {
+                    let visibility=shadow_factor(selected,s.position,s.normal,fragment.xy,globals.frame);
+                    let light=evaluate_light(selected,s,visibility);
+                    let normalization=total*f32(globals.light_count)/(selected_target*f32(globals.candidate_count*globals.sample_count));
+                    diffuse+=light.diffuse*normalization; specular+=light.specular*normalization;
+                }
             }
         }
     }
