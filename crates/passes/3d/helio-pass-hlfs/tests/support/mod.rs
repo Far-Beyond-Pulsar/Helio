@@ -6,6 +6,7 @@ use scene::TestScene;
 use std::sync::Arc;
 
 pub struct Fixture {
+    pub ambient: [f32; 3],
     pub publish_ray_frame: bool,
     pub ray_frame: helio_core::FrameAcceleration,
     pub device: Arc<wgpu::Device>,
@@ -185,6 +186,7 @@ impl Fixture {
         }
         graph.lock(width, height);
         Self {
+            ambient: [0.03; 3],
             publish_ray_frame: true,
             ray_frame: Default::default(),
             device,
@@ -260,7 +262,7 @@ impl Fixture {
             helio_core::ResourceKey::new("render_environment"),
             helio_core::RenderEnvironment {
                 clear_color: [0.0; 4],
-                ambient_color: [0.03; 3],
+                ambient_color: self.ambient,
                 ambient_intensity: 1.0,
                 tlas: self.ray_frame.tlas(self.scene.frame_count),
             },

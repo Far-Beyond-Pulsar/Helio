@@ -3,7 +3,7 @@
 //!
 //! Templates are composed with `transparent_base.wgsl` (shared in the `helio`
 //! crate) and registered via `renderer.transparent_template_registry_mut()`.
-//! The default template (class 0) uses ambient + normal shading.
+//! The default template (class 0) reads SceneDB material tint, alpha and PBR properties.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -65,9 +65,10 @@ pub struct TransparentPass {
     bind_group_key: Option<(usize, usize)>,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
+    pre_aa_target: bool,
 }
 
 impl TransparentPass {
@@ -173,6 +174,16 @@ impl TransparentPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -219,7 +230,15 @@ impl TransparentPass {
             bind_group_1_key: None,
             globals_buf,
             surface_format,
+            pre_aa_target: false,
         }
+    }
+
+    /// Blend into the graph's linear lighting target before tonemapping.
+    /// `surface_format` supplied to `new` must match that lighting target.
+    pub fn with_pre_aa_target(mut self) -> Self {
+        self.pre_aa_target = true;
+        self
     }
 }
 
@@ -228,11 +247,10 @@ impl RenderPass for TransparentPass {
         "TransparentPass"
     }
 
-    fn chain_transparent(&self) -> bool {
-        true
-    }
-
     fn reads(&self) -> &'static [&'static str] {
+        if self.pre_aa_target {
+            return &["pre_aa", "depth", "cluster_light_grid", "object_batch", "culled_batch"];
+        }
         &[
             "depth",
             "cluster_light_grid",
@@ -241,7 +259,12 @@ impl RenderPass for TransparentPass {
         ]
     }
 
+    fn writes(&self) -> &'static [&'static str] {
+        if self.pre_aa_target { &["pre_aa"] } else { &[] }
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        if self.pre_aa_target { builder.read("pre_aa"); }
         builder.read("depth");
         builder.read("cluster_light_grid");
         builder.read("object_batch");
@@ -290,6 +313,10 @@ impl RenderPass for TransparentPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa = if self.pre_aa_target {
+            resources.get(helio_core::ResourceKey::new("pre_aa"))
+        } else { None };
+        let target = pre_aa.unwrap_or(target);
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
@@ -300,7 +327,9 @@ impl RenderPass for TransparentPass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
-        let depth_view = resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth);
+        let depth_view = if pre_aa.is_some() { depth } else {
+            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+        };
         Some(wgpu::RenderPassDescriptor {
             label: Some("Transparent"),
             color_attachments,
@@ -331,7 +360,7 @@ impl RenderPass for TransparentPass {
             draw_count,
             batch.transparent_ranges
         );
-        if draw_count == 0 {
+        if draw_count == 0 || batch.transparent_ranges.is_empty() {
             return Ok(());
         }
 
@@ -360,6 +389,10 @@ impl RenderPass for TransparentPass {
             .get(BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
+        let Some(materials_handle) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
+            return Ok(());
+        };
+        let materials_buf = &materials_handle.buffer;
         let lights_ptr = lights_buf as *const _ as usize;
         let light_entity_indices_ptr = 0;
         let tile_lists_ptr = cluster
@@ -375,6 +408,7 @@ impl RenderPass for TransparentPass {
             tile_lists_ptr,
             tile_counts_ptr,
             transforms_ptr,
+            materials_buf as *const _ as usize,
         );
         if self.bind_group_1_key != Some(bg1_key) {
             let fallback = batch.instances;
@@ -409,6 +443,10 @@ impl RenderPass for TransparentPass {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: transforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: materials_buf.as_entire_binding(),
                     },
                 ],
             }));
@@ -452,41 +490,22 @@ impl RenderPass for TransparentPass {
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = batch.transparent_ranges;
-        if ranges.is_empty() {
-            let pipeline = self.get_or_create_pipeline(
-                &ctx.device,
-                RadiantShaderKey {
-                    template_id: 0,
-                    graph_hash: 0,
-                    feature_flags: 0,
-                },
-                "",
-            );
+        for &(class, graph_hash, start, count) in ranges {
+            if count == 0 {
+                continue;
+            }
+            let key = RadiantShaderKey {
+                template_id: class,
+                graph_hash,
+                feature_flags: 0,
+            };
+            let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
             #[cfg(not(target_arch = "wasm32"))]
-            rp.multi_draw_indexed_indirect(indirect, 0, draw_count);
+            rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
             #[cfg(target_arch = "wasm32")]
-            for i in 0..draw_count {
+            for i in start..start + count {
                 rp.draw_indexed_indirect(indirect, i as u64 * 20);
-            }
-        } else {
-            for &(class, graph_hash, start, count) in ranges {
-                if count == 0 {
-                    continue;
-                }
-                let key = RadiantShaderKey {
-                    template_id: class,
-                    graph_hash,
-                    feature_flags: 0,
-                };
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
-                rp.set_pipeline(pipeline);
-                #[cfg(not(target_arch = "wasm32"))]
-                rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
-                #[cfg(target_arch = "wasm32")]
-                for i in start..start + count {
-                    rp.draw_indexed_indirect(indirect, i as u64 * 20);
-                }
             }
         }
         Ok(())

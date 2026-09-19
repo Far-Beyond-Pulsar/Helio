@@ -129,6 +129,11 @@ fn finite_color(v: vec3<f32>) -> vec3<f32> {
     // Keep pre-exposed lighting finite within the packed HDR representation.
     return min(select(vec3<f32>(0.0), v, v >= vec3<f32>(0.0)), vec3<f32>(60000.0));
 }
+fn normal_weight(value: f32) -> f32 {
+    let x=max(value,0.0);
+    let p2=x*x; let p4=p2*p2; let p8=p4*p4; let p16=p8*p8;
+    return p16*p16;
+}
 
 // Unsigned floats use five exponent bits and five or six mantissa bits.
 // Stochastic rounding preserves the expectation between adjacent values,
@@ -187,7 +192,7 @@ fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
 }
 
-struct LightProposal { id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32, total_weight: f32, }
+struct LightProposal { id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32, total_weight: f32, key_light: u32, }
 fn proposal_weight(light: GpuLight, center: vec3<f32>) -> f32 {
     let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
     if power<=0.0 { return 0.0; }

@@ -61,32 +61,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
         let mut scene_db = crate::v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate(&mut scene_db.world);
         if ray_traced {
-            let ids: Vec<_> = scene_db
-                .world
-                .query::<(&helio_pass_forward_lit::LightComponent,)>()
-                .map(|(id, _)| id)
-                .collect();
-            for id in ids {
-                let mut component = scene_db
-                    .world
-                    .get_mut::<helio_pass_forward_lit::LightComponent>(id)
-                    .unwrap();
-                let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
-                light.set_ray_traced_shadows(std::env::var_os("HLFS_UNSHADOWED").is_none());
-                *component = light.into();
-            }
-            let ids: Vec<_> = scene_db
-                .world
-                .query::<(&helio_pass_gbuffer::StaticObjectComponent,)>()
-                .map(|(id, _)| id)
-                .collect();
-            for id in ids {
-                scene_db
-                    .world
-                    .get_mut::<helio_pass_gbuffer::StaticObjectComponent>(id)
-                    .unwrap()
-                    .flags |= helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW;
-            }
+            enable_ray_shadows(&mut scene_db.world);
         }
         let mut acceleration =
             helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone());
@@ -101,6 +76,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
                     }
                 }))
                 .build(device.clone(), queue.clone(), width, height, format);
+        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cathedral capture"),
             size: wgpu::Extent3d {
@@ -137,7 +113,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
                             helio_pass_hlfs::HlfsDebugMode::Final
                         },
                         samples_per_pixel: sample_count.unwrap_or(if presampled {
-                            1
+                            helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel
                         } else if performance {
                             4
                         } else {
@@ -230,4 +206,45 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
         eprintln!("Serialized frame latency (CPU + GPU, excluding capture readback): median_ms={:.3} p95_ms={:.3}", frame_times[frame_times.len()/2], frame_times[frame_times.len()*95/100]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });
+}
+
+/// Mark only opaque geometry as binary RT casters; panes still render through
+/// the transparent pass, without claiming coloured ray transmission.
+pub fn enable_ray_shadows(world: &mut World) {
+    let ids: Vec<_> = world
+        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .map(|(id, _)| id)
+        .collect();
+    for id in ids {
+        let mut component = world
+            .get_mut::<helio_pass_forward_lit::LightComponent>(id)
+            .unwrap();
+        let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
+        light.set_ray_traced_shadows(std::env::var_os("HLFS_UNSHADOWED").is_none());
+        *component = light.into();
+    }
+    let ids: Vec<_> = world
+        .query::<(&helio_pass_gbuffer::StaticObjectComponent,)>()
+        .map(|(id, _)| id)
+        .collect();
+    for id in ids {
+        let object = world
+            .get::<helio_pass_gbuffer::StaticObjectComponent>(id)
+            .unwrap();
+        let transparent = world
+            .query::<(&helio_pass_gbuffer::MaterialComponent,)>()
+            .any(|(entity, (material,))| {
+                entity.index() == object.material_slot
+                    && material.flags & helio_mats::FLAG_ALPHA_BLEND != 0
+            });
+        // Alpha-blended panes are rasterized, but binary opaque ray
+        // queries cannot model their transmission. Only opaque
+        // architecture enters this capture's RT caster set.
+        if !transparent {
+            world
+                .get_mut::<helio_pass_gbuffer::StaticObjectComponent>(id)
+                .unwrap()
+                .flags |= helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW;
+        }
+    }
 }

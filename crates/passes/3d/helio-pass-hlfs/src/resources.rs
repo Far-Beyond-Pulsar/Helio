@@ -150,9 +150,9 @@ impl Targets {
                 device,
                 "HLFS tile proposals",
                 if config.tile_presampling {
-                    tile_count(width, height, COARSE_TILE_SIZE) * 64 * 20
+                    (tile_count(width, height, COARSE_TILE_SIZE) * 256 + 1) * 24
                 } else {
-                    20
+                    24
                 },
             ),
             grid: buffer(

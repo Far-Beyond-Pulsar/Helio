@@ -1,0 +1,19 @@
+
+running 14 tests
+test confidence_tracks_visible_energy_coverage ... ok
+test creates_pipelines_on_available_adapter ... ok
+test half_resolution_keeps_isolated_one_pixel_geometry_lit ... ok
+test hidden_strong_light_is_discovered_after_occlusion_changes ... ok
+test mixed_lighting_converges_at_full_and_half_resolution ... ok
+test offscreen_lights_and_minimal_targets_remain_valid ... ok
+test packed_grid_overflow_and_compact_output_preserve_energy ... ok
+test packed_hdr_rounding_preserves_energy_and_subnormals ... ok
+test raw_and_filtered_energy_match_at_odd_and_even_sizes ... ok
+test reduced_resolution_preserves_energy_and_discovers_hidden_lights ... ok
+test reduced_resolution_tracks_camera_motion ... ok
+test rendered_energy_survives_light_growth_overflow_and_removal ... ok
+test screen_contacts_follow_current_depth_and_clear_after_motion ... ok
+test shadows_use_atlas_layers_independently_of_light_index ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 29.61s
+

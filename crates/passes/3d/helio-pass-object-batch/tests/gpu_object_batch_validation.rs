@@ -426,22 +426,11 @@ fn gpu_object_batch_matches_cpu_reference() {
         }
     }
 
-    // Shading flags are deliberately a function of (class, graph_hash), not
-    // of the material index -- two DIFFERENT materials that happen to share
-    // a (class, graph_hash) pair (entirely possible with only
-    // `class_count * hash_count` combinations spread over `material_count`
-    // materials) end up in the SAME range regardless of which specific
-    // material each of their groups came from, and that range's bucket is
-    // decided by whichever group sorts first within it -- a documented,
-    // accepted ambiguity (see `compute_sort_key`'s doc in `object_batch
-    // .wgsl`), not something this test should be asserting a specific
-    // tie-break for. Keeping shading consistent per (class, graph_hash)
-    // removes the ambiguity from the test scenario instead of asserting
-    // undefined behavior.
+    // Different materials can share a shader class/hash while requiring
+    // different passes. Shading must split the range at these transitions.
     let materials: Vec<TestMaterial> = (0..material_count)
         .map(|i| {
-            let (class, hash) = class_and_hash_by_material[i as usize];
-            let bucket = class as u64 ^ hash;
+            let bucket = i as u64;
             let mut flags = 0u32;
             if bucket % 5 == 0 {
                 flags |= FLAG_TRANSPARENT_ONLY;

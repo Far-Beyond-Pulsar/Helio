@@ -68,6 +68,36 @@ fn light() -> helio_pass_forward_lit::GpuLight {
 
 #[test]
 #[ignore = "requires Vulkan hardware ray queries"]
+fn sparse_scenedb_light_slots_do_not_consume_the_sampling_budget() {
+    pollster::block_on(async {
+        for config in [
+            HlfsConfig { mode: HlfsMode::RayTraced, ..Default::default() },
+            HlfsConfig::ray_traced_presampled(),
+        ] {
+            let mut f = Fixture::new_rt(65, 49).await;
+            f.config(config);
+            empty_scene(&mut f);
+            f.lights(vec![light()]);
+            for _ in 0..8 { f.frame(); }
+            let dense = mean(&f.read());
+            // Empty packed SceneDB rows have type zero (directional) and zero
+            // power. The sole active light deliberately sits near the end.
+            let mut inactive = light();
+            inactive.color_intensity = [0.0; 4];
+            inactive.light_type = 0;
+            let mut sparse = vec![inactive; 64];
+            sparse[61] = light();
+            f.lights(sparse);
+            for _ in 0..8 { f.frame(); }
+            let actual = mean(&f.read());
+            assert!(dense > 1.0 && (actual / dense - 1.0).abs() < 0.01,
+                "empty light slots changed illumination: {dense} -> {actual}");
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
 fn offscreen_shadow_does_not_require_an_atlas_slot_and_removal_clears_it() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(65, 49).await;
@@ -354,6 +384,9 @@ fn benchmark_rt_resolution_and_acceleration() {
         assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
         let tile_presampling = std::env::var_os("HLFS_RT_PROBE_PRESAMPLE").is_some();
         let reactive_history = std::env::var_os("HLFS_RT_PROBE_REACTIVE").is_some();
+        let dense_geometry = std::env::var_os("HLFS_RT_PROBE_DENSE_GEOMETRY").is_some();
+        let instance_count = if dense_geometry { 10_000u32 } else { 256 };
+        let side = if dense_geometry { 100u32 } else { 16 };
         let warmup = if focus.is_some() { 120 } else { 16 };
         let measured = if focus.is_some() { 600 } else { 40 };
         for (width, height, scale, candidates) in [
@@ -370,6 +403,9 @@ fn benchmark_rt_resolution_and_acceleration() {
             let candidates = candidate_override.unwrap_or(candidates);
             let mut f = Fixture::new_rt(width, height).await;
             f.compact_output();
+            let glossy = std::env::var_os("HLFS_RT_PROBE_GLOSSY").is_some();
+            let dominant = std::env::var_os("HLFS_RT_PROBE_DOMINANT").is_some();
+            if glossy { f.material([0.7,0.4,0.2,1.0], [1.0,0.1,0.9,1.0]); }
             f.config(HlfsConfig {
                 mode: HlfsMode::RayTraced,
                 sample_scale: scale,
@@ -385,13 +421,24 @@ fn benchmark_rt_resolution_and_acceleration() {
                 .find_pass_mut::<HlfsPass>()
                 .unwrap()
                 .enable_timing(&f.device));
+            // 100 non-overlapping triangles per shared mesh, 10,000 rigid
+            // instances: one million instanced triangles, not unique triangles.
+            let caster_vertices: Vec<f32> = if dense_geometry {
+                (0..100)
+                    .flat_map(|i| {
+                        let x = (i % 10) as f32 * 0.004;
+                        let y = (i / 10) as f32 * 0.004;
+                        [x, y, 0.5, x + 0.0038, y, 0.5, x, y + 0.0038, 0.5]
+                    })
+                    .collect()
+            } else {
+                vec![-0.1, -0.1, 0.5, 0.1, -0.1, 0.5, 0.0, 0.1, 0.5]
+            };
             let vertices = f
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("benchmark caster"),
-                    contents: bytemuck::cast_slice(&[
-                        -0.1f32, -0.1, 0.5, 0.1, -0.1, 0.5, 0.0, 0.1, 0.5,
-                    ]),
+                    contents: bytemuck::cast_slice(&caster_vertices),
                     usage: wgpu::BufferUsages::BLAS_INPUT,
                 });
             let mut encoder = f.device.create_command_encoder(&Default::default());
@@ -404,7 +451,7 @@ fn benchmark_rt_resolution_and_acceleration() {
                         revision: 0,
                         vertices: &vertices,
                         first_vertex: 0,
-                        vertex_count: 3,
+                        vertex_count: caster_vertices.len() as u32 / 3,
                         vertex_stride: 12,
                         indices: None,
                         first_index: 0,
@@ -444,25 +491,25 @@ fn benchmark_rt_resolution_and_acceleration() {
                                     2.0,
                                 ],
                                 [1.0, 0.8, 0.5],
-                                16.0 / 1024.0,
+                                if dominant && i == 0 { 8.0 } else { 16.0 / 1024.0 },
                             );
                             light.set_ray_traced_shadows(true);
                             light
                         })
                         .collect(),
                 );
-                let instances: Vec<_> = (0..256)
+                let instances: Vec<_> = (0..instance_count)
                     .map(|i| TlasInstanceInput {
                         mesh_id: 1,
                         transform: [
                             1.0,
                             0.0,
                             0.0,
-                            (i % 16) as f32 / 4.0 - 2.0 + shift,
+                            (i % side) as f32 * 4.0 / side as f32 - 2.0 + shift,
                             0.0,
                             1.0,
                             0.0,
-                            (i / 16) as f32 / 4.0 - 2.0,
+                            (i / side) as f32 * 4.0 / side as f32 - 2.0,
                             0.0,
                             0.0,
                             1.0,
@@ -539,7 +586,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             totals.sort_by(f64::total_cmp);
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
-            eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+            eprintln!("RT_PROBE glossy={glossy} dominant={dominant} resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances={instance_count} unique_triangles={} instanced_triangles={} median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",caster_vertices.len()/9,instance_count as usize*caster_vertices.len()/9,totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
         }
     });
 }
@@ -651,21 +698,64 @@ fn benchmark_rt_quality_frontier() {
     assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
     let tile_presampling = std::env::var_os("HLFS_RT_QUALITY_PRESAMPLE").is_some();
     let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
+    let glossy_motion = std::env::var_os("HLFS_RT_QUALITY_GLOSSY_MOTION").is_some();
+    // Freeze an additional validation fixture; do not replace the original.
+    // Constant-depth plane stays geometrically valid under lateral camera motion.
+    let camera_at = |frame: u32| {
+        let x = if frame >= 64 {
+            ((frame - 64) as f32 * 0.2).sin() * 0.8
+        } else {
+            0.0
+        };
+        let eye = glam::Vec3::new(x, 0.0, 3.0);
+        let view = glam::Mat4::look_at_rh(eye, glam::Vec3::new(x, 0.0, 0.0), glam::Vec3::Y);
+        (eye, view)
+    };
+    let update_camera = |f: &mut Fixture, frame: u32| {
+        if !glossy_motion {
+            return;
+        }
+        let (eye, view) = camera_at(frame);
+        let (_, previous) = camera_at(frame.saturating_sub(1));
+        let proj = glam::Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+        f.scene.camera.update(helio_core::GpuCameraUniforms::new(
+            view,
+            proj,
+            eye,
+            0.1,
+            10.0,
+            frame,
+            [0.0; 2],
+            proj * previous,
+        ));
+    };
     let selected_setting = std::env::var("HLFS_RT_QUALITY_SETTING").ok();
-    if let Some(setting) = &selected_setting {
-        assert!(["1:4", "1:8", "2:4", "2:8", "4:8"].contains(&setting.as_str()));
-    }
+    let settings = if let Some(setting) = &selected_setting {
+        let (samples,candidates)=setting.split_once(':').expect("samples:candidates");
+        let samples=samples.parse::<u32>().unwrap();
+        let candidates=candidates.parse::<u32>().unwrap();
+        assert!((1..=4).contains(&samples) && (1..=16).contains(&candidates));
+        vec![(samples,candidates)]
+    } else { vec![(1,4),(1,8),(2,4),(2,8),(4,8)] };
     std::fs::create_dir_all(&directory).unwrap();
     pollster::block_on(async {
         let checkpoints = [
             0u32, 1, 3, 7, 15, 31, 63, 64, 65, 67, 71, 79, 80, 81, 83, 87, 95,
         ];
         let mut csv = String::from("seed,samples,candidates,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
-        let seeds = if std::env::var_os("HLFS_RT_QUALITY_HELD_OUT").is_some() {
+        let mut final_failures = 0usize;
+        // Fixed regression seeds. Both sets have now been exercised during
+        // development; they are not an untouched holdout. Keep thresholds fixed.
+        let seeds = if std::env::var_os("HLFS_RT_QUALITY_REVIEW_SEEDS").is_some() {
+            [307u32,401,503,601]
+        } else if std::env::var_os("HLFS_RT_QUALITY_HELD_OUT").is_some() {
             [101u32, 131, 173, 211]
         } else {
             [11u32, 29, 47, 71]
         };
+        let seeds = std::env::var("HLFS_RT_QUALITY_SEED")
+            .map(|value| vec![value.parse::<u32>().expect("quality seed")])
+            .unwrap_or_else(|_| seeds.to_vec());
         for seed in seeds {
             let lights_at = |frame: u32| {
                 (0..1024)
@@ -688,14 +778,26 @@ fn benchmark_rt_quality_frontier() {
                                 0.8 + ((i + seed) % 5) as f32 * 0.4,
                             ],
                             color,
-                            if i == 0 { 8.0 } else { 0.025 },
+                            if i == (if frame >= 80 && std::env::var_os("HLFS_RT_QUALITY_SWITCH_KEY").is_some() { 31 } else { 0 }) {
+                                8.0
+                            } else { 0.025 },
                         );
                         light.set_ray_traced_shadows(true);
                         light
                     })
                     .collect::<Vec<_>>()
             };
-            let mut oracle = Fixture::new_rt(129, 73).await;
+            let (width, height) = match std::env::var("HLFS_RT_QUALITY_RESOLUTION").as_deref() {
+                Ok("1440p") => (2560, 1440),
+                Ok("4k") => (3840, 2160),
+                Ok(other) => panic!("unknown quality resolution: {other}"),
+                Err(_) => if glossy_motion { (257, 145) } else { (129, 73) },
+            };
+            let mut oracle = Fixture::new_rt(width, height).await;
+            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { oracle.ambient = [0.0; 3]; }
+            if glossy_motion {
+                oracle.material([0.7, 0.4, 0.2, 1.0], [1.0, 0.1, 0.9, 1.0]);
+            }
             oracle.config(HlfsConfig {
                 mode: HlfsMode::RayTraced,
                 debug_mode: HlfsDebugMode::Reference,
@@ -704,6 +806,7 @@ fn benchmark_rt_quality_frontier() {
             let mut references = Vec::new();
             for frame in checkpoints {
                 oracle.scene.frame_count = frame as u64;
+                update_camera(&mut oracle, frame);
                 oracle.lights(lights_at(frame));
                 if (64..80).contains(&frame) {
                     blocker(&mut oracle, 0.35);
@@ -717,15 +820,13 @@ fn benchmark_rt_quality_frontier() {
                 |p: &[f32; 3]| p[0] as f64 * 0.2126 + p[1] as f64 * 0.7152 + p[2] as f64 * 0.0722;
             let initial: Vec<_> = references[0].iter().map(luminance).collect();
             let peak = initial.iter().copied().fold(0.0, f64::max);
-            let mut f = Fixture::new_rt(129, 73).await;
+            let mut f = Fixture::new_rt(width, height).await;
+            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { f.ambient = [0.0; 3]; }
+            if glossy_motion {
+                f.material([0.7, 0.4, 0.2, 1.0], [1.0, 0.1, 0.9, 1.0]);
+            }
             f.compact_output();
-            for (samples, candidates) in [(1, 4), (1, 8), (2, 4), (2, 8), (4, 8)] {
-                if selected_setting
-                    .as_ref()
-                    .is_some_and(|setting| setting != &format!("{samples}:{candidates}"))
-                {
-                    continue;
-                }
+            for &(samples, candidates) in &settings {
                 for mode in [HlfsDebugMode::Final, HlfsDebugMode::Unfiltered] {
                     f.config(HlfsConfig {
                         mode: HlfsMode::RayTraced,
@@ -741,6 +842,7 @@ fn benchmark_rt_quality_frontier() {
                     f.scene.frame_count = 0;
                     empty_scene(&mut f);
                     for frame in 0..96u32 {
+                        update_camera(&mut f, frame);
                         f.lights(lights_at(frame));
                         if frame == 64 {
                             blocker(&mut f, 0.35);
@@ -757,7 +859,10 @@ fn benchmark_rt_quality_frontier() {
                         let reference = &references[reference_index];
                         let pixels = f.read();
                         assert!(pixels.iter().flatten().all(|v| v.is_finite()));
-                        for mask in ["all", "changed"] {
+                        for mask in ["all", "changed", "glossy"] {
+                            if mask == "glossy" && !glossy_motion {
+                                continue;
+                            }
                             let mut count = 0u32;
                             let mut sum = 0.0;
                             let mut ref_sum = 0.0;
@@ -767,6 +872,9 @@ fn benchmark_rt_quality_frontier() {
                                 let a = luminance(a);
                                 let b = luminance(b);
                                 if mask == "changed" && (b - initial[index]).abs() <= peak * 0.1 {
+                                    continue;
+                                }
+                                if mask == "glossy" && b <= peak * 0.2 {
                                     continue;
                                 }
                                 count += 1;
@@ -782,6 +890,10 @@ fn benchmark_rt_quality_frontier() {
                                 (sum - ref_sum).abs() / ref_sum.abs().max(1e-6 * count as f64);
                             let nrmse = (squared / ref_squared.max(1e-12 * count as f64)).sqrt();
                             let pass = mean_error < 0.08 && nrmse < 0.20;
+                            if mode == HlfsDebugMode::Final && !pass {
+                                final_failures += 1;
+                                eprintln!("QUALITY_FAIL seed={seed} frame={frame} mask={mask} signed_mean={} nrmse={nrmse}", (sum-ref_sum)/ref_sum.max(1e-12));
+                            }
                             csv.push_str(&format!("{seed},{samples},{candidates},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
                         }
                         if mode == HlfsDebugMode::Final && [63, 65, 95].contains(&frame) {
@@ -803,6 +915,14 @@ fn benchmark_rt_quality_frontier() {
             eprintln!("RT_QUALITY completed seed={seed}");
         }
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
+        // Write all failures before returning a failing gate, never a misleading
+        // successful test exit for the new review-acceptance fixture.
+        if glossy_motion || selected_setting.is_some() {
+            assert_eq!(
+                final_failures, 0,
+                "final-output quality gate failed; see quality.csv"
+            );
+        }
     });
 }
 

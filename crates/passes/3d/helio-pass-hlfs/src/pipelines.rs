@@ -232,6 +232,7 @@ pub(crate) struct Pipelines {
     pub composite_bgl: wgpu::BindGroupLayout,
     pub depth_reduce: wgpu::ComputePipeline,
     pub coarse: wgpu::ComputePipeline,
+    pub select_key: wgpu::ComputePipeline,
     pub fine: wgpu::ComputePipeline,
     pub visibility: VisibilityPipelines,
     pub temporal: wgpu::ComputePipeline,
@@ -371,11 +372,13 @@ impl Pipelines {
         let composite_bgl = bgl(
             device,
             "HLFS composite layout",
-            &(0..5)
+            &(0..6)
                 .map(|i| {
                     entry(
                         i,
-                        if i == 2 {
+                        if i == 5 {
+                            storage(true)
+                        } else if i == 2 {
                             texture(D::D2, false)
                         } else {
                             uint_texture()
@@ -413,6 +416,13 @@ impl Pipelines {
             &layout("HLFS depth", &depth_bgl, None),
         );
         let grid_layout = layout("HLFS grid", &grid_bgl, None);
+        let select_key = compute(
+            device,
+            "HLFS dominant light",
+            &grid_shader,
+            "select_key",
+            &grid_layout,
+        );
         let coarse = compute(
             device,
             "HLFS coarse culling",
@@ -471,6 +481,7 @@ impl Pipelines {
             composite_bgl,
             depth_reduce,
             coarse,
+            select_key,
             fine,
             visibility,
             temporal,

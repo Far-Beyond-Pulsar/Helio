@@ -1,0 +1,9 @@
+
+running 4 tests
+test indexed_suballocations_and_invalid_replacements ... ok
+test padded_pool_vertices_copy_the_complete_stride ... ok
+test tlas_growth_removal_empty_and_missing_mesh_never_leave_stale_casters ... ok
+test versioned_gpu_geometry_changes_actual_ray_visibility ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.65s
+

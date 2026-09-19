@@ -55,11 +55,12 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
         textureStore(out_geometry,p,vec4<u32>(0u)); return;
     }
     let normal=safe_normalize(textureLoad(gbuf_normal,vec2<i32>(full),0).xyz);
+    let glossy=(globals.surface_flags&4u)!=0u && textureLoad(gbuf_orm,vec2<i32>(full),0).g<0.2;
     let position=world_position(vec2<f32>(full)+0.5,depth);
     let z=-(cameras[0].view*vec4<f32>(position,1.0)).z;
     let tile=(full.y/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+full.x/TILE_SIZE;
     let count=grid[tile].count;
-    let exact=select(count,globals.light_count,count>GRID_CAPACITY)<=globals.sample_count || globals.debug_mode==1u;
+    let exact=select(count,globals.light_count,count>GRID_CAPACITY)<=select(globals.sample_count,4u,glossy) || globals.debug_mode==1u;
     let diff=vec4<f32>(load_radiance(raw_lighting,p,0u),select(0.0,1.0,exact));
     let spec=vec4<f32>(load_radiance(raw_lighting,p,1u),0.0);
     var result_diff=vec4<f32>(diff.rgb,moment(diff.rgb));
@@ -67,13 +68,15 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
     // An age above the configured cap marks an exactly evaluated light set.
     var age=select(1.0,globals.max_history+1.0,diff.a>=1.0);
     let uv=previous_uv(full,position);
-    if globals.history_valid!=0u && diff.a<1.0 && globals.debug_mode==0u && all(uv>=vec2<f32>(0.0)) && all(uv<vec2<f32>(1.0)) {
+    let residual_tile=(gid.y/TILE_SIZE)*div_ceil(globals.sample_size,TILE_SIZE).x+gid.x/TILE_SIZE;
+    let same_residual=(globals.surface_flags&4u)==0u || visible[residual_tile].count==0u;
+    if globals.history_valid!=0u && same_residual && diff.a<1.0 && globals.debug_mode==0u && all(uv>=vec2<f32>(0.0)) && all(uv<vec2<f32>(1.0)) {
         let old=vec2<i32>(sample_position_from_uv(uv));
         let previous_z=-(globals.previous_view*vec4<f32>(position,1.0)).z;
         let geo=load_geometry(history_geometry,old);
         if geometry_matches(geo,normal,previous_z) {
             var mean_d=vec3<f32>(0.0); var mean_s=vec3<f32>(0.0);
-            var squared_d=vec3<f32>(0.0); var squared_s=vec3<f32>(0.0); var count=0.0;
+            var squared_d=vec3<f32>(0.0); var squared_s=vec3<f32>(0.0); var count=0.0; var specular_count=0.0;
             // Geometry-aware 5x5 moments prevent bright neighbors leaking across edges.
             for(var y=-2;y<=2;y++) { for(var x=-2;x<=2;x++) {
                 let index=(lane/8u+u32(y+2))*12u+lane%8u+u32(x+2);
@@ -84,11 +87,14 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
                 if d>=1.0 || dot(n,normal)<0.9 || abs(dot(wp-position,normal))>max(0.02,abs(z)*0.01) { continue; }
                 let cd=neighborhood_diffuse[index];
                 let cs=neighborhood_specular[index];
-                mean_d+=cd; mean_s+=cs; squared_d+=cd*cd; squared_s+=cs*cs; count+=1.0;
+                mean_d+=cd; squared_d+=cd*cd; count+=1.0;
+                if !glossy || (abs(x)<=1 && abs(y)<=1) {
+                    mean_s+=cs; squared_s+=cs*cs; specular_count+=1.0;
+                }
             }}
-            mean_d/=max(count,1.0); mean_s/=max(count,1.0);
+            mean_d/=max(count,1.0); mean_s/=max(specular_count,1.0);
             let extent_d=2.0*sqrt(max(squared_d/max(count,1.0)-mean_d*mean_d,vec3<f32>(0.0))/select(1.0,max(count,1.0),globals.ray_settings.z>0.5));
-            let extent_s=2.0*sqrt(max(squared_s/max(count,1.0)-mean_s*mean_s,vec3<f32>(0.0))/select(1.0,max(count,1.0),globals.ray_settings.z>0.5));
+            let extent_s=2.0*sqrt(max(squared_s/max(specular_count,1.0)-mean_s*mean_s,vec3<f32>(0.0))/select(1.0,max(specular_count,1.0),globals.ray_settings.z>0.5));
             age=min(geo.w+1.0,globals.max_history);
             result_diff=filtered_history(diff.rgb,vec4<f32>(load_radiance(history_lighting,old,0u),load_moments(history_geometry,old).x),mean_d,extent_d,age-1.0);
             result_spec=filtered_history(spec.rgb,vec4<f32>(load_radiance(history_lighting,old,1u),load_moments(history_geometry,old).y),mean_s,extent_s,age-1.0);

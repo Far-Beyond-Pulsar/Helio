@@ -484,6 +484,7 @@ impl ObjectBatchPass {
                     bgl_entry_storage(3, cs, true),
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
+                    bgl_entry_storage(6, cs, true),
                 ],
             }),
             range_block_scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -893,6 +894,7 @@ impl ObjectBatchPass {
                 bg_entry(3, &s.group_graph_hash_hi),
                 bg_entry(4, &s.local_range_rank),
                 bg_entry(5, &s.block_range_totals),
+                bg_entry(6, &s.group_shading),
             ],
         }));
 

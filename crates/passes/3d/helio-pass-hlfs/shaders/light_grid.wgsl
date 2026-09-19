@@ -3,12 +3,14 @@
 @group(2) @binding(1) var<storage, read_write> fine_grid: array<LightTile>;
 @group(2) @binding(2) var depth_bounds: texture_storage_2d<r32float,write>;
 @group(2) @binding(3) var<storage,read_write> tile_proposals: array<LightProposal>;
-var<workgroup> proposal_weights: array<f32,64>;
-var<workgroup> alias_probabilities: array<f32,64>;
-var<workgroup> alias_indices: array<u32,64>;
-var<workgroup> small_aliases: array<u32,64>;
-var<workgroup> large_aliases: array<u32,64>;
+var<workgroup> proposal_weights: array<f32,256>;
+var<workgroup> alias_probabilities: array<f32,256>;
+var<workgroup> alias_indices: array<u32,256>;
+var<workgroup> small_aliases: array<u32,512>;
+var<workgroup> large_aliases: array<u32,512>;
+var<workgroup> alias_counts: array<atomic<u32>,4>;
 var<workgroup> proposal_total: f32;
+var<workgroup> key_light: u32;
 var<workgroup> accepted: atomic<u32>;
 var<workgroup> has_directional: atomic<u32>;
 var<workgroup> min_depth: atomic<u32>;
@@ -16,6 +18,9 @@ var<workgroup> max_depth: atomic<u32>;
 var<workgroup> packed: array<u32, 256>;
 
 fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi: f32) -> bool {
+    // SceneDB buffers are sparse: unoccupied rows are zeroed, including
+    // light_type (directional). They must not fill every tile or force overflow.
+    if light.color_intensity.w<=0.0 || all(light.color_intensity.rgb<=vec3<f32>(0.0)) { return false; }
     if light.light_type == 0u { return true; }
     if light.position_range.w <= 0.0 { return false; }
     let m = cameras[0].view_proj;
@@ -37,7 +42,39 @@ fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi: 
     }
     return true;
 }
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
+fn select_key(@builtin(local_invocation_index) lane: u32) {
+    let presample=(globals.surface_flags&4u)!=0u;
+    // Split one globally dominant emitter from the stochastic residual. The
+    // same identity is used by every tile so filtering never crosses different
+    // decompositions. Composition evaluates this emitter exactly at full size.
+    if lane==0u { key_light=INVALID_LIGHT; }
+    if presample && globals.debug_mode!=1u && globals.light_count>GRID_CAPACITY && globals.light_count<=65535u {
+        var power_sum=0.0; var maximum=0.0; var best=INVALID_LIGHT;
+        for(var i=lane;i<globals.light_count;i+=256u) {
+            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
+            power_sum+=power;
+            if power>maximum { maximum=power; best=i; }
+        }
+        proposal_weights[lane]=power_sum;
+        alias_probabilities[lane]=maximum;
+        alias_indices[lane]=best;
+        workgroupBarrier();
+        if lane==0u {
+            var total=0.0; var peak=0.0; var id=INVALID_LIGHT;
+            for(var i=0u;i<256u;i++) {
+                total+=proposal_weights[i];
+                if alias_probabilities[i]>peak || (alias_probabilities[i]==peak && alias_indices[i]<id) {
+                    peak=alias_probabilities[i]; id=alias_indices[i];
+                }
+            }
+            if peak>16.0*total/f32(globals.light_count) { key_light=id; }
+        }
+    }
+    workgroupBarrier();
+    if lane==0u { tile_proposals[arrayLength(&tile_proposals)-1u]=LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,key_light); }
+}
+@compute @workgroup_size(256)
 fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
     if lane == 0u { atomicStore(&accepted,0u); atomicStore(&has_directional,0u); }
     workgroupBarrier();
@@ -54,14 +91,16 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     }
     let proposal_index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
     let presample=(globals.surface_flags&4u)!=0u;
+    if lane==0u { key_light=INVALID_LIGHT; if presample { key_light=tile_proposals[arrayLength(&tile_proposals)-1u].key_light; } }
+    workgroupBarrier();
     let center=min(lo+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
     var center_position=vec3<f32>(0.0);
     if presample { center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0)); }
     var selected=INVALID_LIGHT; var selected_weight=0.0; var weight_sum=0.0;
-    var rng=hash_u32(proposal_index*64u+lane+globals.frame*0x9e3779b9u);
-    for (var i=lane; i<globals.light_count; i+=64u) {
+    var rng=hash_u32(proposal_index*256u+lane+globals.frame*0x9e3779b9u);
+    for (var i=lane; i<globals.light_count; i+=256u) {
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
-            if presample {
+            if presample && i!=key_light {
                 let weight=proposal_weight(lights[i],center_position);
                 if weight>0.0 {
                     weight_sum+=weight;
@@ -69,8 +108,13 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
                 }
             }
             if lights[i].light_type==0u { atomicStore(&has_directional,1u); }
-            let slot=atomicAdd(&accepted,1u);
-            if slot<COARSE_CAPACITY { packed[slot]=i; }
+            // Once overflow is established, the consumer uses the global set.
+            // Preserve every light's proposal work without serializing more
+            // atomic increments for a count whose exact value is unused.
+            if atomicLoad(&accepted)<=COARSE_CAPACITY {
+                let slot=atomicAdd(&accepted,1u);
+                if slot<COARSE_CAPACITY { packed[slot]=i; }
+            }
         }
     }
     if presample {
@@ -78,17 +122,40 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
         workgroupBarrier();
         if lane==0u {
             var total=0.0;
-            for(var i=0u;i<64u;i++) { total+=proposal_weights[i]; }
+            for(var i=0u;i<256u;i++) { total+=proposal_weights[i]; }
             proposal_total=total;
-            var small_count=0u; var large_count=0u;
-            for(var i=0u;i<64u;i++) {
-                alias_probabilities[i]=1.0; alias_indices[i]=i;
-                if total>0.0 {
-                    proposal_weights[i]=proposal_weights[i]*64.0/total;
-                    if proposal_weights[i]<1.0 { small_aliases[small_count]=i; small_count++; }
-                    else { large_aliases[large_count]=i; large_count++; }
-                }
+            for(var i=0u;i<4u;i++) { atomicStore(&alias_counts[i],0u); }
+        }
+        workgroupBarrier();
+        alias_probabilities[lane]=1.0; alias_indices[lane]=lane;
+        proposal_weights[lane]=proposal_weights[lane]*256.0/max(proposal_total,1e-20);
+        if proposal_weights[lane]<1.0 { small_aliases[atomicAdd(&alias_counts[0],1u)]=lane; }
+        else { large_aliases[atomicAdd(&alias_counts[1],1u)]=lane; }
+        workgroupBarrier();
+        // Pair disjoint small/large entries in parallel. A bounded number of
+        // rounds avoids pathological barrier counts for very skewed weights;
+        // the short remainder uses the ordinary exact alias construction.
+        for(var round=0u;round<4u;round++) {
+            let old=(round&1u)*2u; let next=((round+1u)&1u)*2u;
+            let base=(round&1u)*256u; let next_base=((round+1u)&1u)*256u;
+            let ns=atomicLoad(&alias_counts[old]); let nl=atomicLoad(&alias_counts[old+1u]);
+            let pairs=min(ns,nl);
+            if lane==0u { atomicStore(&alias_counts[next],0u); atomicStore(&alias_counts[next+1u],0u); }
+            workgroupBarrier();
+            if lane<pairs {
+                let a=small_aliases[base+lane]; let b=large_aliases[base+lane];
+                alias_probabilities[a]=proposal_weights[a]; alias_indices[a]=b;
+                proposal_weights[b]=(proposal_weights[b]+proposal_weights[a])-1.0;
+                if proposal_weights[b]<1.0 { small_aliases[next_base+atomicAdd(&alias_counts[next],1u)]=b; }
+                else { large_aliases[next_base+atomicAdd(&alias_counts[next+1u],1u)]=b; }
+            } else {
+                if lane<ns { small_aliases[next_base+atomicAdd(&alias_counts[next],1u)]=small_aliases[base+lane]; }
+                if lane<nl { large_aliases[next_base+atomicAdd(&alias_counts[next+1u],1u)]=large_aliases[base+lane]; }
             }
+            workgroupBarrier();
+        }
+        if lane==0u {
+            var small_count=atomicLoad(&alias_counts[0]); var large_count=atomicLoad(&alias_counts[1]);
             while small_count>0u && large_count>0u {
                 small_count--; large_count--;
                 let a=small_aliases[small_count]; let b=large_aliases[large_count];
@@ -99,13 +166,13 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
             }
         }
         workgroupBarrier();
-        tile_proposals[proposal_index*64u+lane]=LightProposal(selected,proposal_total/max(selected_weight,1e-20),alias_indices[lane],alias_probabilities[lane],proposal_total);
+        tile_proposals[proposal_index*256u+lane]=LightProposal(selected,proposal_total/max(selected_weight,1e-20),alias_indices[lane],alias_probabilities[lane],proposal_total,key_light);
     }
     workgroupBarrier();
     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
     let count=atomicLoad(&accepted);
     if lane==0u { coarse_grid[index].count=count; coarse_grid[index].has_directional=atomicLoad(&has_directional); }
-    for(var i=lane;i<(min(count,COARSE_CAPACITY)+1u)/2u;i+=64u) {
+    for(var i=lane;i<(min(count,COARSE_CAPACITY)+1u)/2u;i+=256u) {
         coarse_grid[index].indices[i]=packed[2u*i]|(select(65535u,packed[2u*i+1u],2u*i+1u<count)<<16u);
     }
 }
@@ -138,8 +205,10 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
         for(var i=lane;i<coarse_count;i+=64u) {
             let id=(coarse_grid[ci].indices[i/2u]>>(16u*(i&1u)))&65535u;
             if sphere_in_tile(lights[id],lo,lo+TILE_SIZE,zlo,zhi) {
-                let slot=atomicAdd(&accepted,1u);
-                if slot<GRID_CAPACITY { packed[slot]=id; }
+                if atomicLoad(&accepted)<=GRID_CAPACITY {
+                    let slot=atomicAdd(&accepted,1u);
+                    if slot<GRID_CAPACITY { packed[slot]=id; }
+                }
             }
         }
     }

@@ -59,9 +59,10 @@ pub enum HlfsDebugMode {
 pub struct HlfsConfig {
     /// Visibility backend, independent of sampling quality and debug output.
     pub mode: HlfsMode,
-    /// Shadowed light samples per shading pixel, clamped to 1..=4.
+    /// Base shadowed light samples per shading pixel, clamped to 1..=4.
+    /// Presampling raises glossy pixels to four and may add a full-size key query.
     pub samples_per_pixel: u32,
-    /// Experimental coarse-tile importance proposals for overflow populations.
+    /// Experimental coarse-tile importance proposals, including sparse light sets.
     pub tile_presampling: bool,
     /// Experimental confidence-of-the-mean history clipping.
     pub reactive_history: bool,
@@ -101,15 +102,17 @@ impl Default for HlfsConfig {
     }
 }
 impl HlfsConfig {
-    /// Experimental one-sample tier with eight candidates and half-width/height
-    /// shading. Uses current-frame coarse-tile proposals and reactive history.
+    /// Experimental two-sample tier with two candidates and half-width/height
+    /// shading. Glossy surfaces use four samples with sixteen independent candidates.
+    /// A dominant emitter, when present, is shaded separately at full resolution.
+    /// Uses current-frame coarse-tile proposals and reactive history.
     /// Requires hardware ray queries. The 1440p timing target is validated only
     /// on the documented synthetic workload, not general scene complexity.
     pub fn ray_traced_presampled() -> Self {
         Self {
             mode: HlfsMode::RayTraced,
-            samples_per_pixel: 1,
-            candidates_per_sample: 8,
+            samples_per_pixel: 2,
+            candidates_per_sample: 2,
             sample_scale: 2,
             tile_presampling: true,
             reactive_history: true,
@@ -478,6 +481,9 @@ impl HlfsPass {
             pass.dispatch_workgroups(x, y, 1);
         };
         timestamp(encoder, 0);
+        if self.config.tile_presampling {
+            dispatch(encoder, "HLFS dominant light", &p.select_key, &self.internal.grid, 1, 1, None);
+        }
         dispatch(
             encoder,
             "HLFS coarse light cull",

@@ -1,0 +1,122 @@
+{
+  "timings": [
+    {
+      "case": "1440p-run1",
+      "frames": 600,
+      "median_ms": 3.9055360000000006,
+      "p95_ms": 4.583424000000001,
+      "p99_ms": 4.8281600000000005
+    },
+    {
+      "case": "1440p-run2",
+      "frames": 600,
+      "median_ms": 3.919872,
+      "p95_ms": 4.5946880000000005,
+      "p99_ms": 4.793344
+    },
+    {
+      "case": "1440p-run3",
+      "frames": 600,
+      "median_ms": 3.9014399999999996,
+      "p95_ms": 4.523008,
+      "p99_ms": 4.732927999999999
+    },
+    {
+      "case": "native",
+      "frames": 600,
+      "median_ms": 11.023359999999998,
+      "p95_ms": 12.155904,
+      "p99_ms": 23.360512
+    },
+    {
+      "case": "4k",
+      "frames": 600,
+      "median_ms": 8.23296,
+      "p95_ms": 8.963072,
+      "p99_ms": 9.242624
+    },
+    {
+      "case": "glossy-key",
+      "frames": 600,
+      "median_ms": 9.447424000000002,
+      "p95_ms": 10.676224000000001,
+      "p99_ms": 30.998528000000004
+    }
+  ],
+  "quality": [
+    {
+      "case": "development-glossy",
+      "checks": 175,
+      "failures": 0,
+      "max_mean_error": 0.04298171210411804,
+      "max_nrmse": 0.12211416693715497
+    },
+    {
+      "case": "development-rough",
+      "checks": 90,
+      "failures": 0,
+      "max_mean_error": 0.0352600766084622,
+      "max_nrmse": 0.136099653779595
+    },
+    {
+      "case": "primary1440-direct-glossy",
+      "checks": 44,
+      "failures": 0,
+      "max_mean_error": 0.0175959820612788,
+      "max_nrmse": 0.11085087411752592
+    },
+    {
+      "case": "replacement-key-glossy",
+      "checks": 171,
+      "failures": 0,
+      "max_mean_error": 0.03818050367464881,
+      "max_nrmse": 0.15548995986622682
+    },
+    {
+      "case": "review-glossy",
+      "checks": 175,
+      "failures": 0,
+      "max_mean_error": 0.03818050367464881,
+      "max_nrmse": 0.15548995986622682
+    },
+    {
+      "case": "review-rough",
+      "checks": 91,
+      "failures": 0,
+      "max_mean_error": 0.053013081253641375,
+      "max_nrmse": 0.13529141082653356
+    }
+  ],
+  "cathedral_display_comparisons": [
+    {
+      "resolution": "1440p",
+      "frame": 0,
+      "display_rgb_nrmse": null,
+      "status": "black warmup frame before batch metadata publication"
+    },
+    {
+      "resolution": "1440p",
+      "frame": 31,
+      "display_rgb_nrmse": 0.10586759110690873
+    },
+    {
+      "resolution": "1440p",
+      "frame": 63,
+      "display_rgb_nrmse": 0.10316293576985512
+    },
+    {
+      "resolution": "1440p",
+      "frame": 99,
+      "display_rgb_nrmse": 0.0841174617143285
+    },
+    {
+      "resolution": "4k",
+      "frame": 31,
+      "display_rgb_nrmse": 0.08707557412959141
+    }
+  ],
+  "glass_alpha_validation": {
+    "changed_pixels": 80071,
+    "fraction_between_endpoints": 1.0
+  }
+}

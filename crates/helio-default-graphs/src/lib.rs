@@ -1198,6 +1198,11 @@ fn build_hlfs_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
+    // Blend transparent surfaces in the same linear HDR target as HLFS.
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
+        device, lighting_format,
+    ).with_pre_aa_target()));
+
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
     if let Some(quality) = config.tsr_quality {

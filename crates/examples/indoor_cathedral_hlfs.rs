@@ -1,10 +1,9 @@
 //! Indoor cathedral example with HLFS ScreenSpace visibility
 //!
-//! A large Gothic cathedral interior: a 60 m nave flanked by two side aisles,
-//! 12 stone columns, a raised altar platform with a cross, carved stone pews
-//! in 6 rows on each side, three ornate chandeliers, stained-glass window
-//! shafts casting coloured light at intervals along both walls, and candle
-//! clusters near the altar.
+//! A Gothic interior with ribbed vaults, clustered limestone piers, marble
+//! paving, carved oak pews, bronze chandeliers and leaded stained glass.
+//! Panes use alpha blending; coloured transmission and refraction are not
+//! simulated by the opaque RT shadow path.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
 //! temporal/spatial filtering with a bounded shadow budget per shading pixel.
@@ -17,6 +16,7 @@
 //!   Escape      — release cursor / exit
 
 mod hlfs_capture;
+mod cathedral_detail;
 mod v3_demo_common;
 
 use helio::{
@@ -27,9 +27,9 @@ use helio_default_graphs::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, update_light,
+    new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light,
+    update_light,
 };
 
 use std::io::{self, BufRead};
@@ -55,14 +55,14 @@ const COLUMN_Z: &[f32] = &[-22.0, -14.0, -6.0, 2.0, 10.0, 18.0];
 // Positive x = right-side windows, negative = left-side; placed just inside the wall
 const GLASS_LIGHTS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // Left wall (x ≈ -10.5), windows between columns
-    (-10.3, 9.0, -18.0, 0.8, 0.2, 1.0), // violet
+    (-10.3, 9.0, -22.0, 0.8, 0.2, 1.0), // violet
     (-10.3, 9.0, -6.0, 0.2, 0.7, 1.0),  // sky blue
-    (-10.3, 9.0, 6.0, 0.2, 1.0, 0.4),   // emerald
+    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),   // emerald
     (-10.3, 9.0, 18.0, 1.0, 0.7, 0.1),  // gold
     // Right wall (x ≈ +10.5)
-    (10.3, 9.0, -18.0, 1.0, 0.2, 0.3), // ruby
+    (10.3, 9.0, -22.0, 1.0, 0.2, 0.3), // ruby
     (10.3, 9.0, -6.0, 1.0, 0.5, 0.1),  // amber
-    (10.3, 9.0, 6.0, 0.1, 0.8, 0.9),   // teal
+    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),   // teal
     (10.3, 9.0, 18.0, 0.9, 0.1, 0.7),  // magenta
     // Rose window above entrance (back wall, z ≈ +28)
     (0.0, 13.0, 27.0, 1.0, 0.75, 0.3), // warm gold
@@ -79,13 +79,6 @@ const CANDLES: &[(f32, f32, f32)] = &[
     (1.5, 1.6, -23.0),
     (3.0, 1.6, -23.5),
 ];
-
-// Pew rows: 6 per side, spaced 2.4 m apart starting at z = -20
-const PEW_Z_START: f32 = -20.0;
-const PEW_Z_STEP: f32 = 3.2;
-const PEW_COUNT: usize = 6;
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
     env_logger::init();
@@ -129,6 +122,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
+    acceleration: Option<helio_pass_hlfs::SceneDbRayTracing>,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
@@ -217,7 +211,18 @@ impl ApplicationHandler for App {
             .with_editor_mode(true)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
-        renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        let acceleration = if std::env::var_os("HLFS_RT").is_some() {
+            hlfs_capture::enable_ray_shadows(&mut scene_db.world);
+            let config = if std::env::var_os("HLFS_PRESAMPLED").is_some() {
+                helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
+            } else {
+                helio_pass_hlfs::HlfsConfig { mode: helio_pass_hlfs::HlfsMode::RayTraced, ..Default::default() }
+            };
+            renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass")
+                .set_config(&device, config);
+            Some(helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone()))
+        } else { None };
+        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let renderer = Arc::new(Mutex::new(renderer));
@@ -251,6 +256,7 @@ impl ApplicationHandler for App {
             action_rx,
             last_frame: std::time::Instant::now(),
             scene_db,
+            acceleration,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
             cam_yaw: std::f32::consts::PI,
@@ -500,13 +506,17 @@ impl AppState {
         // Candle flicker — more pronounced
         let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
 
+        let with_shadows = |mut light: helio::GpuLight| {
+            light.set_ray_traced_shadows(self.acceleration.is_some());
+            light
+        };
         // Update flickering chandelier intensities
         for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
             let z = CHANDELIER_Z[i];
             update_light(
                 &mut self.scene_db.world,
                 id,
-                point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0),
+                with_shadows(point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 160.0 * flicker, 22.0)),
             );
         }
         // Update flickering candle intensities
@@ -515,7 +525,7 @@ impl AppState {
             update_light(
                 &mut self.scene_db.world,
                 id,
-                point_light([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0),
+                with_shadows(point_light([x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0)),
             );
         }
 
@@ -528,6 +538,11 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+        if let Some(acceleration) = &mut self.acceleration {
+            let frame = acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
+            renderer.set_ray_tracing_frame(Some(frame));
+        }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
@@ -536,324 +551,26 @@ impl AppState {
 }
 
 fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    let mat = spawn_material(
-        world,
-        make_material(
-            [0.75, 0.72, 0.68, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ),
-    );
-
     spawn_indoor_cathedral_sky(world);
-
-    // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
-    // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-    let _floor = spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 32.0));
-    let _wall_back = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [11.0, 10.5, 0.25],
-        ));
-    let _wall_front = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [11.0, 10.5, 0.25],
-        ));
-    let _aisle_ceil_l = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [2.5, 0.15, 28.0],
-        ));
-    let _nave_ceiling = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [6.0, 0.18, 28.0],
-        ));
-    let _aisle_ceil_r = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [2.5, 0.15, 28.0],
-        ));
-    let _wall_left_outer = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.25, 7.0, 28.0],
-        ));
-    let _wall_right_outer = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.25, 7.0, 28.0],
-        ));
-    let _ = spawn_object(
-            world, _floor, mat, glam::Mat4::IDENTITY, 11.0);
-    let _ = spawn_object(
-            world,
-        _nave_ceiling,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 21.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _aisle_ceil_l,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(-8.5, 11.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _aisle_ceil_r,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(8.5, 11.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_left_outer,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(-11.0, 7.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_right_outer,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(11.0, 7.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_front,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, 28.0)),
-        11.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_back,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, -28.0)),
-        11.0,
-    );
-
-    // Colonnade: short wall segments between columns (between column z-positions)
-    // 7 segments per side: before first col, between each pair, after last col
-    let col_z_all: Vec<f32> = {
-        let mut v = vec![-28.0_f32]; // south wall
-        v.extend_from_slice(COLUMN_Z);
-        v.push(28.0); // north wall
-        v
-    };
-    let _colonnade_l: Vec<Entity> = col_z_all
-        .windows(2)
-        .map(|w| {
-            let mid_z = (w[0] + w[1]) * 0.5;
-            let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.25, 5.5, half_len.max(0.1)],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
-                5.5,
-            );
-            id
-        })
-        .collect();
-    let _colonnade_r: Vec<Entity> = col_z_all
-        .windows(2)
-        .map(|w| {
-            let mid_z = (w[0] + w[1]) * 0.5;
-            let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.25, 5.5, half_len.max(0.1)],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
-                5.5,
-            );
-            id
-        })
-        .collect();
-
-    // Columns: 0.65 m square, 20 m tall, at x = ±5.5
-    let _columns: Vec<Entity> = COLUMN_Z
-        .iter()
-        .flat_map(|&z| {
-            let l = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.65, 10.0, 0.65],
-                ));
-            let _ = spawn_object(
-            world,
-                l,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
-                10.0,
-            );
-            let r = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.65, 10.0, 0.65],
-                ));
-            let _ = spawn_object(
-            world,
-                r,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
-                10.0,
-            );
-            [l, r]
-        })
-        .collect();
-
-    // Altar: at far end (z = -26)
-    let _altar_step = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [5.5, 0.20, 3.0],
-        ));
-    let _altar_plinth = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [3.0, 0.45, 1.5],
-        ));
-    let _cross_vert = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.18, 2.2, 0.18],
-        ));
-    let _cross_horiz = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [1.0, 0.18, 0.18],
-        ));
-    let _ = spawn_object(
-            world,
-        _altar_step,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.2, -24.5)),
-        5.5,
-    );
-    let _ = spawn_object(
-            world,
-        _altar_plinth,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.65, -25.5)),
-        3.0,
-    );
-    let _ = spawn_object(
-            world,
-        _cross_vert,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.2, -25.8)),
-        2.2,
-    );
-    let _ = spawn_object(
-            world,
-        _cross_horiz,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.5, -25.8)),
-        1.0,
-    );
-
-    // Pews: long narrow rect3d per row, 6 rows each side
-    let _pews_left: Vec<Entity> = (0..PEW_COUNT)
-        .map(|i| {
-            let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.45, 0.5],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
-                1.5,
-            );
-            id
-        })
-        .collect();
-    let _pews_right: Vec<Entity> = (0..PEW_COUNT)
-        .map(|i| {
-            let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.45, 0.5],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
-                1.5,
-            );
-            id
-        })
-        .collect();
-
-    // Chandeliers: vertical chain + horizontal ring at each Z
-    let chandelier_mat = spawn_material(
-        world,
-        make_material(
-            [0.3, 0.28, 0.25, 1.0],
-            0.5,
-            0.8,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ),
-    );
-    let _chandelier_chains: Vec<Entity> = CHANDELIER_Z
-        .iter()
-        .map(|&z| {
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.06, 2.0, 0.06],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                chandelier_mat,
-                glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
-                2.0,
-            );
-            id
-        })
-        .collect();
-    let _chandelier_rings: Vec<Entity> = CHANDELIER_Z
-        .iter()
-        .map(|&z| {
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.2, 0.12, 1.2],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                chandelier_mat,
-                glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
-                1.2,
-            );
-            id
-        })
-        .collect();
+    cathedral_detail::populate(world);
 
     // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
     let mut chandelier_light_ids = Vec::new();
     for &z in CHANDELIER_Z {
         chandelier_light_ids.push(spawn_light(
             world,
-            point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
+            point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 160.0, 22.0),
         ));
     }
     // Stained glass shafts — static, no need to store ids
     for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-        spawn_light(world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
+        spawn_light(world, point_light([x, y, z], [r, g, b], 35.0, 10.0));
     }
     let mut candle_light_ids = Vec::new();
     for &(x, y, z) in CANDLES {
         candle_light_ids.push(spawn_light(
             world,
-            point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
+            point_light([x, y, z], [1.0, 0.6, 0.15], 8.0, 4.0),
         ));
     }
 

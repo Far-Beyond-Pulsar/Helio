@@ -38,7 +38,8 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
         textureStore(spatial_lighting,center,textureLoad(filtered_lighting,center,0)); return;
     } else {
         // One sparse rotated filter, with a narrow footprint for stable signals.
-        let radius=select(1,2,variance>select(0.02,0.05,confidence) || age<4.0);
+        let glossy=(globals.surface_flags&4u)!=0u && s.roughness<0.2;
+        let radius=select(1,2,!glossy && (variance>select(0.02,0.05,confidence) || age<4.0));
         let phase=globals.frame&3u;
         for(var y=-2;y<=2;y++) { for(var x=-2;x<=2;x++) {
             if abs(x)>radius || abs(y)>radius { continue; }
@@ -52,7 +53,7 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
             if !(diffuse_age.w>0.0 && alignment>0.9 && abs(normal_depth.w-z)<max(0.02,abs(z)*0.01)) { continue; }
             let offset=vec2<f32>(p)-sample_pos;
             let spatial=exp(-dot(offset,offset)/f32(radius*radius));
-            let weight=spatial*pow(max(alignment,0.0),32.0);
+            let weight=spatial*normal_weight(alignment);
             let d=diffuse_age.xyz; let sp=neighborhood_specular[index];
             // Tonemapped accumulation for disocclusions suppresses sparse fireflies.
             if age<4.0 {

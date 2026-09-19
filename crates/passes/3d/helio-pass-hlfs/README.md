@@ -3,6 +3,9 @@
 HLFS shades the deferred GBuffer using visibility-guided light sampling. Its
 output is linear HDR; the render graph supplies tone mapping and antialiasing.
 
+Current RT measurements, quality gates, cathedral captures, and reproduction commands
+are in the [review validation report](tests/validation/review-20260919/README.md).
+
 ## Visibility mode
 
 `HlfsConfig::mode` defaults to `HlfsMode::ScreenSpace`. Both `HlfsPass::new`
@@ -33,15 +36,20 @@ reservoirs, history, spatial filtering and composition. Masked materials and the
 larger production acceptance suite remain outside the validated RT scope.
 
 `HlfsConfig::ray_traced_presampled()` explicitly opts into the experimental
-one-sample/eight-candidate tier, shading at half the output width and height.
-It builds 64 current-frame weighted proposals per coarse tile, samples a weighted
+two-sample/two-candidate tier, shading at half the output width and height.
+It builds 256 current-frame weighted proposals per coarse tile, samples a weighted
 alias table mixed with uniform discovery, and uses reactive history clipping.
+Glossy surfaces use four samples with sixteen independent candidates each.
+They bypass shared tile proposals to avoid coherent errors on narrow highlights. A globally dominant emitter is split out and evaluated with
+an additional full-resolution visibility query; this is extra work, not part of
+the base two-sample budget. Reconstruction blends valid bilinear neighbours.
 This changes the estimator and denoising; it is not an exact-output replacement
 for `compact()`. The regular presets and defaults retain the original sampler.
 Changing the proposal mode specializes the visibility pipelines and resets history.
 
 See [retained validation evidence](https://github.com/Far-Beyond-Pulsar/Helio/blob/4d56b104a442382449f7f2563773313621511d8f/docs/validation/hlfs/rt-control/scenedb/report.md)
-for synthetic 1440p measurements and quality limits. These are direct-lighting GPU
+for historical synthetic 1440p measurements of the previous one-sample tier,
+not measurements of the current candidate. These are direct-lighting GPU
 costs, including per-frame TLAS work, not whole-frame or general-scene guarantees.
 The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this preset.
 
