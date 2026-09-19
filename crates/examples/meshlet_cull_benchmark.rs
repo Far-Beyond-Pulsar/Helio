@@ -12,9 +12,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use libhelio::{
-    GpuCameraUniforms, GpuInstanceData, GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
-    VG_CULL_MESHLETS_PER_WORK_ITEM,
+use helio_core::GpuCameraUniforms;
+use helio_pass_object_batch::GpuInstanceData;
+use helio_pass_virtual_geometry::{
+    GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;

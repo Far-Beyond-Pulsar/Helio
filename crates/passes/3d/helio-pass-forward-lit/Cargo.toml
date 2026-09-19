@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
-helio = { path = "../../../helio" }
-libhelio = { workspace = true }
+helio-mats = { workspace = true }
+helio-pass-gbuffer = { workspace = true }
+helio-pass-light-cull = { workspace = true }
 wgpu = { workspace = true }
-bytemuck = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
+serde_json = { workspace = true }

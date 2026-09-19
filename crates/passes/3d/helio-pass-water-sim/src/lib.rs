@@ -6,6 +6,13 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
+pub mod components;
+pub mod gpu_types;
+pub use components::{WaterHitboxComponent, WaterVolumeComponent};
+pub use gpu_types::*;
+
+use pulsar_scenedb::gpu::BufferKey;
+
 /// Simple fullscreen blit: copies a texture to the render target as-is.
 const BLIT_WGSL: &str = "
 @group(0) @binding(0) var blit_tex:  texture_2d<f32>;
@@ -26,6 +33,12 @@ const CAUSTICS_SIZE: u32 = 256;
 const MAX_DROPS_BUFFERED: usize = 16;
 pub(crate) const CASCADE_COUNT: usize = 3;
 pub(crate) const MAX_SIM_VOLUMES: u32 = 8;
+/// Fixed capacity for the `"water_hitboxes"` SceneDB buffer, mirroring
+/// `MAX_SIM_VOLUMES` above: this pass always reads exactly this many rows
+/// (zeroed/absent hitboxes are inert -- a degenerate zero-extent AABB
+/// displaces nothing), so no per-frame CPU count of live hitboxes is ever
+/// needed to drive this pass's dispatch/draw bounds.
+pub(crate) const MAX_WATER_HITBOXES: u32 = 32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
 
 // ---- Clipmap ring structure --------------------------------------------------------
@@ -527,7 +540,7 @@ impl RenderPass for WaterSimPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -558,10 +571,6 @@ impl RenderPass for WaterSimPass {
             "gbuffer",
             "depth",
             "pre_aa",
-            "water_hitbox_count",
-            "water_hitboxes",
-            "water_volume_count",
-            "water_volumes",
             "water_caustics",
             // Min-reduced depth pyramid, marched for water reflections. Built
             // by HiZBuildPass from `depth` alone, so it is available here.
@@ -577,18 +586,27 @@ impl RenderPass for WaterSimPass {
         ]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        let view = if self.front_per_layer[0] {
-            &self.sim_layer_views_a[0]
-        } else {
-            &self.sim_layer_views_b[0]
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // SAFETY: every borrow below is extended out of `self`, which is
+        // pass-lifetime (owned by the RenderGraph across many frames), never
+        // frame-scoped -- `'a` is always shorter than these fields' real
+        // lifetime. `publish(&self, ..)` (not `&'a self`) cannot express that
+        // relationship, so the borrow checker sees an unrelated, shorter
+        // lifetime here instead; matches `ResourceRegistry::
+        // write_texture_binding`'s own transmute for the same reason.
+        let view: &'a wgpu::TextureView = unsafe {
+            std::mem::transmute(if self.front_per_layer[0] {
+                &self.sim_layer_views_a[0]
+            } else {
+                &self.sim_layer_views_b[0]
+            })
         };
-        frame.water_sim_texture.write(view, "WaterSim");
-        frame
-            .water_sim_sampler
-            .write(&self.output_sampler, "WaterSim");
+        frame.write(helio_core::ResourceKey::new("water_sim_texture"), view, "WaterSim");
+        let sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&self.output_sampler) };
+        frame.write(helio_core::ResourceKey::new("water_sim_sampler"), sampler, "WaterSim");
         if let Some(view) = &self.water_output_view {
-            frame.pre_aa.write(view, "WaterSim");
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+            frame.write(helio_core::ResourceKey::new("pre_aa"), view, "WaterSim");
         }
     }
 
@@ -612,12 +630,15 @@ impl RenderPass for WaterSimPass {
             ctx.write_buffer(&self.normal_bufs[ci], 0, bytemuck::bytes_of(&delta));
         }
 
-        let count = ctx.frame_resources.water_hitbox_count;
+        // Fixed capacity, not a live count: `"water_hitboxes"` is a SceneDB
+        // buffer read directly by `execute()`/the hitbox shader (see
+        // `MAX_WATER_HITBOXES`'s doc) -- no per-frame CPU scan of the World
+        // is ever needed to produce this number.
         ctx.write_buffer(
             &self.hitbox_count_buf,
             0,
             bytemuck::bytes_of(&simulation::HitboxCountUniform {
-                count,
+                count: MAX_WATER_HITBOXES,
                 _pad: [0; 3],
             }),
         );
@@ -632,7 +653,32 @@ impl RenderPass for WaterSimPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let volume_count = ctx.resources.water_volume_count.max(1);
+        // `"water_volumes"`/`"water_hitboxes"` are resolved fresh from the
+        // SceneDB mirror by key every frame -- no Renderer method, no
+        // Scene-owned arena, no CPU-tracked dirty range. Both buffers are
+        // fixed-capacity (`MAX_SIM_VOLUMES`/`MAX_WATER_HITBOXES` rows): a row
+        // with no live entity behind it is `Zeroable`-default, which every
+        // consuming shader stage below treats as inert (see each constant's
+        // doc and `surface.wgsl`'s `1e-4`-guarded extent/`hitbox.frag.wgsl`'s
+        // `strength == 0` short-circuit).
+        let water_volumes_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("water_volumes"))
+            .map(|handle| &handle.buffer);
+        let water_hitboxes_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("water_hitboxes"))
+            .map(|handle| &handle.buffer);
+        let volume_count = if water_volumes_buf.is_some() {
+            MAX_SIM_VOLUMES
+        } else {
+            0
+        };
+        let hitbox_count = if water_hitboxes_buf.is_some() {
+            MAX_WATER_HITBOXES
+        } else {
+            0
+        };
         let total_layers = volume_count * CASCADE_COUNT as u32;
 
         let layer_view = |layer: usize, front: bool| -> &wgpu::TextureView {
@@ -644,8 +690,8 @@ impl RenderPass for WaterSimPass {
         };
 
         // ---- 1. Hitbox displacement (cascade 0 for all volumes) ------------
-        if ctx.resources.water_hitbox_count > 0 {
-            if let Some(hitboxes_buf) = ctx.resources.water_hitboxes.get() {
+        if hitbox_count > 0 {
+            if let Some(hitboxes_buf) = water_hitboxes_buf {
                 for vol_idx in 0..volume_count {
                     let layer = (vol_idx * CASCADE_COUNT as u32) as usize;
                     let src = layer_view(layer, self.front_per_layer[layer]);
@@ -775,7 +821,7 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 3 & 4. Cascade wave propagation + normal recomputation --------
-        if ctx.resources.water_volume_count > 0 || ctx.resources.water_hitbox_count > 0 {
+        if volume_count > 0 || hitbox_count > 0 {
             for vol_idx in 0..volume_count {
                 let base = (vol_idx * CASCADE_COUNT as u32) as usize;
                 for ci in 0..CASCADE_COUNT {
@@ -943,8 +989,8 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 5. Caustics projection (cascade 0, volume 0) -----------------
-        if ctx.resources.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.resources.water_volumes.get() {
+        if volume_count > 0 {
+            if let Some(vols_buf) = water_volumes_buf {
                 let vols_key = vols_buf as *const wgpu::Buffer as usize;
                 let sim_key = &self.sim_array_view_a as *const wgpu::TextureView as usize;
                 let new_key = (vols_key, sim_key);
@@ -974,7 +1020,7 @@ impl RenderPass for WaterSimPass {
                     self.caustics_bg_key = Some(new_key);
                 }
 
-                let caustics_view = ctx.resources.water_caustics.read("WaterSim").unwrap();
+                let caustics_view = ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap();
                 let cau_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: caustics_view,
                     resolve_target: None,
@@ -1012,8 +1058,7 @@ impl RenderPass for WaterSimPass {
             .expect("water_output view from graph");
         let scene_view: &wgpu::TextureView = ctx
             .resources
-            .pre_aa
-            .get()
+            .get(helio_core::ResourceKey::new("pre_aa"))
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
@@ -1058,13 +1103,12 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 7. Water surface render -> water_output --------------------------
-        if ctx.resources.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.resources.water_volumes.get() {
+        if volume_count > 0 {
+            if let Some(vols_buf) = water_volumes_buf {
                 let gbuffer_normal_view = ctx
                     .resources
-                    .gbuffer
-                    .get()
-                    .map(|gb| gb.normal)
+                    .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"))
+                    .map(|gb| gb.views[1])
                     .unwrap_or(&self.gbuffer_fallback_view);
                 let depth_view = ctx.depth;
 
@@ -1096,7 +1140,7 @@ impl RenderPass for WaterSimPass {
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: ctx.scene.camera.as_entire_binding(),
+                                    resource: ctx.camera.as_entire_binding(),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
@@ -1115,7 +1159,7 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.resources.water_caustics.read("WaterSim").unwrap(),
+                                        ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -1191,11 +1235,7 @@ impl RenderPass for WaterSimPass {
                     // Top face: instance_count = water_volume_count
                     pass.set_vertex_buffer(0, self.top_vbuf.slice(..));
                     pass.set_index_buffer(self.top_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(
-                        0..self.top_index_count,
-                        0,
-                        0..ctx.resources.water_volume_count,
-                    );
+                    pass.draw_indexed(0..self.top_index_count, 0, 0..volume_count);
 
                     // Static box sides/bottom
                     pass.set_vertex_buffer(0, self.static_box_vbuf.slice(..));
@@ -1203,11 +1243,7 @@ impl RenderPass for WaterSimPass {
                         self.static_box_ibuf.slice(..),
                         wgpu::IndexFormat::Uint32,
                     );
-                    pass.draw_indexed(
-                        0..self.static_box_index_count,
-                        0,
-                        0..ctx.resources.water_volume_count,
-                    );
+                    pass.draw_indexed(0..self.static_box_index_count, 0, 0..volume_count);
                 }
 
                 // 3. Underwater effect
@@ -1227,7 +1263,7 @@ impl RenderPass for WaterSimPass {
                                 entries: &[
                                     wgpu::BindGroupEntry {
                                         binding: 0,
-                                        resource: ctx.scene.camera.as_entire_binding(),
+                                        resource: ctx.camera.as_entire_binding(),
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 1,
@@ -1270,7 +1306,7 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 8,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.resources.water_caustics.read("WaterSim").unwrap(),
+                                            ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                         ),
                                     },
                                 ],

@@ -9,7 +9,7 @@
 //! this closes is purely the author-facing `#[engine_class]` wrapper, same
 //! as every component migrated in Phase B4/B5.
 //!
-//! `libhelio::ReflectionCaptureShape`/`ReflectionCaptureMobility` aren't
+//! `helio_pass_deferred_light::ReflectionCaptureShape`/`ReflectionCaptureMobility` aren't
 //! re-exported from `helio`'s own crate root and aren't reflection-friendly
 //! (no `Serialize`/`Deserialize`) even if they were, so this module defines
 //! its own mirrored enums rather than reusing them directly or editing the
@@ -18,32 +18,72 @@
 //!
 //! Unlike `StaticMeshComponent`/`LightComponent`/`PortalComponent`, this
 //! goes through `Scene::insert_reflection_capture`/etc. directly rather than
-//! `SceneActor::reflection_capture(..)` + `Scene::insert_actor`: those
-//! components need the `SceneActor`/tag machinery specifically for
+//! `SceneEntity::reflection_capture(..)` + `Scene::insert_entity`: those
+//! components need the `SceneEntity`/tag machinery specifically for
 //! click-to-select picking, which reflection captures don't have wired up
 //! yet (deferred, along with gizmo interaction, for a follow-up — this pass
 //! is the data-sync mechanism, not full editor interaction). The direct
 //! `Scene` methods hand back the typed `ReflectionCaptureId` this
 //! component's own cache needs anyway.
 
+use crate::subsystems::PendingWorldWrites;
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{ReflectionCaptureDescriptor, Renderer};
-use libhelio::{
-    ReflectionCaptureMobility as HelioReflectionCaptureMobility,
-    ReflectionCaptureShape as HelioReflectionCaptureShape,
-};
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable,
     RuntimeComponentOwner,
 };
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
+use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
+use pulsar_scenedb_derive::SceneStore;
 
-use crate::subsystems::ReflectionCaptureCache;
 
 pub const REFLECTION_CAPTURE_CLASS_NAME: &str = "ReflectionCaptureComponent";
 
-/// Influence-volume shape. Mirrors `libhelio::ReflectionCaptureShape`.
+/// Packed SceneDB projection for a reflection probe.
+///
+/// `ReflectionCaptureComponent` remains the author-facing value.  This
+/// companion is the GPU-facing row and deliberately contains no Helio arena
+/// handle or renderer-owned lifetime.  Probe cubemap residency is frame
+/// derived; `cubemap_index == -1` means that no resident layer is available.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "reflection_captures")]
+pub struct ReflectionCaptureGpuComponent {
+    #[gpu] pub position_radius: [f32; 4],
+    #[gpu] pub extents_transition: [f32; 4],
+    #[gpu] pub world_to_local: [[f32; 4]; 4],
+    #[gpu] pub cubemap_index: i32,
+    #[gpu] pub shape: u32,
+    #[gpu] pub mobility: u32,
+    #[gpu] pub brightness: f32,
+}
+
+impl From<helio_pass_deferred_light::GpuReflectionCapture> for ReflectionCaptureGpuComponent {
+    fn from(value: helio_pass_deferred_light::GpuReflectionCapture) -> Self { bytemuck::cast(value) }
+}
+
+impl From<ReflectionCaptureGpuComponent> for helio_pass_deferred_light::GpuReflectionCapture {
+    fn from(value: ReflectionCaptureGpuComponent) -> Self { bytemuck::cast(value) }
+}
+
+#[derive(Clone)]
+pub struct ReflectionCaptureSceneBinding {
+    handle: BufferHandle,
+    _record: PhantomData<ReflectionCaptureGpuComponent>,
+}
+
+impl ReflectionCaptureSceneBinding {
+    pub fn resolve(mirror: &GpuMirrorHandle) -> Option<Self> {
+        mirror.store().resolve_buffer_handle(BufferKey::of("reflection_captures"))
+            .map(|handle| Self { handle, _record: PhantomData })
+    }
+    pub fn buffer(&self) -> &wgpu::Buffer { &self.handle.buffer }
+    pub fn epoch(&self) -> u64 { self.handle.epoch }
+}
+
+/// Influence-volume shape. Mirrors `helio_pass_deferred_light::ReflectionCaptureShape`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum ReflectionCaptureShape {
     /// Radial influence, faded over the outer 10% of `influence_radius`.
@@ -60,7 +100,7 @@ impl Default for ReflectionCaptureShape {
 }
 
 /// How the capture's cubemap pixels are produced. Mirrors
-/// `libhelio::ReflectionCaptureMobility`.
+/// `helio_pass_deferred_light::ReflectionCaptureMobility`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum ReflectionCaptureMobility {
     /// Pre-filtered offline by the probe baker. The only mode that
@@ -68,7 +108,7 @@ pub enum ReflectionCaptureMobility {
     Static,
     /// Re-rendered at runtime rather than baked. **Not implemented in Helio
     /// yet** — a `Dynamic` capture is inert (never assigned a cubemap
-    /// layer), see `libhelio::ReflectionCaptureMobility::Dynamic`'s own doc.
+    /// layer), see `helio_pass_deferred_light::ReflectionCaptureMobility::Dynamic`'s own doc.
     /// Exposed now for forward compatibility, not because it does anything.
     Dynamic,
 }
@@ -129,21 +169,22 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
         component: &Self,
         context: &mut dyn ComponentRuntimeContext,
     ) {
-        // Phase 1: consult the cache and release its borrow immediately --
-        // a `ComponentRuntimeContext` can't hand out two simultaneous
-        // mutable subsystem borrows (same constraint `PortalComponent`
-        // documents for the same reason).
-        let cached_id = get_subsystem!(context, ReflectionCaptureCache).get(owner.scene_object_id);
-
+        // SceneDB-only: `helio_pass_deferred_light::ReflectionCaptureComponent`
+        // is the only thing `DeferredLightPass` reads. Queued via
+        // `PendingWorldWrites` -- see that type's doc for why `sync_component`
+        // can't `World::insert` directly.
+        let Some(entity) = context
+            .subsystems_mut()
+            .get_mut::<pulsar_scenedb::Entity>()
+            .copied()
+        else {
+            return;
+        };
+        let writes = get_subsystem!(context, PendingWorldWrites);
         if !component.enabled {
-            if let Some(id) = cached_id {
-                let removed = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .remove_reflection_capture(id);
-                if removed {
-                    get_subsystem!(context, ReflectionCaptureCache).remove(owner.scene_object_id);
-                }
-            }
+            writes.push(move |world| {
+                world.remove::<helio_pass_deferred_light::ReflectionCaptureComponent>(entity);
+            });
             return;
         }
 
@@ -162,38 +203,27 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
         );
         let transform = Mat4::from_rotation_translation(rotation, Vec3::from_array(owner.position));
 
-        let descriptor = ReflectionCaptureDescriptor {
+        let packed = helio_pass_deferred_light::ReflectionCaptureComponent {
+            position_radius: [owner.position[0], owner.position[1], owner.position[2], component.influence_radius],
+            extents_transition: [component.extents[0], component.extents[1], component.extents[2], component.transition_distance],
+            world_to_local: match component.shape {
+                ReflectionCaptureShape::Sphere => Mat4::IDENTITY.to_cols_array_2d(),
+                ReflectionCaptureShape::Box => transform.inverse().to_cols_array_2d(),
+            },
+            cubemap_index: -1,
             shape: match component.shape {
-                ReflectionCaptureShape::Sphere => HelioReflectionCaptureShape::Sphere,
-                ReflectionCaptureShape::Box => HelioReflectionCaptureShape::Box,
+                ReflectionCaptureShape::Sphere => 0,
+                ReflectionCaptureShape::Box => 1,
             },
             mobility: match component.mobility {
-                ReflectionCaptureMobility::Static => HelioReflectionCaptureMobility::Static,
-                ReflectionCaptureMobility::Dynamic => HelioReflectionCaptureMobility::Dynamic,
+                ReflectionCaptureMobility::Static => 0,
+                ReflectionCaptureMobility::Dynamic => 1,
             },
-            transform,
-            influence_radius: component.influence_radius,
-            extents: component.extents,
-            transition_distance: component.transition_distance,
             brightness: component.brightness,
         };
-
-        match cached_id {
-            Some(id) => {
-                let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .update_reflection_capture(id, &descriptor);
-            }
-            None => {
-                let inserted = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .insert_reflection_capture(descriptor);
-                if let Ok(id) = inserted {
-                    get_subsystem!(context, ReflectionCaptureCache)
-                        .insert(owner.scene_object_id.to_string(), id);
-                }
-            }
-        }
+        writes.push(move |world| {
+            world.insert(entity, packed);
+        });
     }
 }
 
@@ -244,7 +274,6 @@ mod tests {
     #[test]
     fn disabling_a_never_inserted_capture_is_a_quiet_no_op() {
         let mut subsystems = Subsystems::new();
-        subsystems.register(ReflectionCaptureCache::new());
         let mut context = TestRuntimeContext {
             project_root: PathBuf::from("."),
             subsystems,

@@ -1,8 +1,9 @@
 //! Deterministic offscreen camera path through a populated scene.
-use helio::{Camera, LightId, Renderer, RendererBuilder, RendererConfig};
+use helio::{Camera, RendererBuilder, RendererConfig};
+use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
-pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<LightId>)) {
+pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>)) {
     let capture_frames = std::env::var("HLFS_CAPTURE_FRAMES")
         .map(|value| {
             value
@@ -20,6 +21,7 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         !presampled || ray_traced,
         "HLFS_PRESAMPLED requires HLFS_RT"
     );
+
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
     let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
     let sample_count = std::env::var("HLFS_SAMPLE_COUNT").ok().map(|value| {
@@ -56,49 +58,49 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let config = RendererConfig::new(width, height, format)
             .with_shadow_quality(helio::ShadowQuality::High);
-        let mut renderer = RendererBuilder::new(config)
-            .with_editor_mode(true)
-            .with_graph(Box::new(move |d, q, s, c, ds, cb, cs| {
-                if fxaa {
-                    helio_default_graphs::build_fxaa_hlfs_graph(d, q, s, c, ds, cb, cs, None)
-                } else {
-                    helio_default_graphs::build_hlfs_graph(d, q, s, c, ds, cb, cs, None)
-                }
-            }))
-            .build(device.clone(), queue.clone(), width, height, format);
-        let _ = populate(&mut renderer);
-        // Diagnostic control: preserve light energy and geometry while bypassing
-        // visibility, to distinguish scene lighting from occlusion errors.
-        if std::env::var_os("HLFS_UNSHADOWED").is_some() {
-            let lights: Vec<_> = renderer
-                .scene()
-                .iter_lights()
-                .map(|(id, light, _)| (id, *light))
+        let mut scene_db = crate::v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
+        let (chandelier_light_ids, candle_light_ids) = populate(&mut scene_db.world);
+        if ray_traced {
+            let ids: Vec<_> = scene_db
+                .world
+                .query::<(&helio_pass_forward_lit::LightComponent,)>()
+                .map(|(id, _)| id)
                 .collect();
-            for (id, mut light) in lights {
-                light.shadow_index = u32::MAX;
-                light.set_ray_traced_shadows(false);
-                renderer.scene_mut().update_light(id, light).unwrap();
+            for id in ids {
+                let mut component = scene_db
+                    .world
+                    .get_mut::<helio_pass_forward_lit::LightComponent>(id)
+                    .unwrap();
+                let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
+                light.set_ray_traced_shadows(std::env::var_os("HLFS_UNSHADOWED").is_none());
+                *component = light.into();
+            }
+            let ids: Vec<_> = scene_db
+                .world
+                .query::<(&helio_pass_gbuffer::StaticObjectComponent,)>()
+                .map(|(id, _)| id)
+                .collect();
+            for id in ids {
+                scene_db
+                    .world
+                    .get_mut::<helio_pass_gbuffer::StaticObjectComponent>(id)
+                    .unwrap()
+                    .flags |= helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW;
             }
         }
-        renderer.set_editor_mode(false);
-        // Populate before rebuilding so passes see the actual scene resources.
-        let build_graph = if fxaa {
-            helio_default_graphs::build_fxaa_hlfs_graph
-        } else {
-            helio_default_graphs::build_hlfs_graph
-        };
-        let graph = build_graph(
-            &device,
-            &queue,
-            renderer.scene(),
-            config,
-            renderer.debug_state(),
-            renderer.debug_camera_buf(),
-            renderer.cull_stats_buf(),
-            None,
-        );
-        renderer.set_graph(graph);
+        let mut acceleration =
+            helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone());
+        let mut renderer =
+            RendererBuilder::new(config, crate::v3_demo_common::scene_db_handle(&scene_db))
+                .with_editor_mode(false)
+                .with_pass_build_context(Box::new(move |ctx| {
+                    if fxaa {
+                        helio_default_graphs::build_fxaa_hlfs_graph_with_context(ctx)
+                    } else {
+                        helio_default_graphs::build_hlfs_graph_with_context(ctx)
+                    }
+                }))
+                .build(device.clone(), queue.clone(), width, height, format);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cathedral capture"),
             size: wgpu::Extent3d {
@@ -163,6 +165,13 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
                 200.0,
             );
             let start = std::time::Instant::now();
+            crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
+            if ray_traced {
+                let tlas = acceleration
+                    .prepare(&scene_db.world)
+                    .expect("SceneDB RT geometry");
+                renderer.set_ray_tracing_frame(Some(tlas));
+            }
             renderer.render(&camera, &view).expect("cathedral frame");
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             if frame >= 16 {
@@ -170,9 +179,9 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
             }
             if frame == 0 {
                 eprintln!(
-                    "Scene: {} lights, {} movable",
-                    renderer.scene().gpu_scene().lights.len(),
-                    renderer.scene().gpu_scene().movable_light_count
+                    "Scene: {} chandelier lights, {} candle lights",
+                    chandelier_light_ids.len(),
+                    candle_light_ids.len()
                 );
             }
             if [0, 31, 63, 99].contains(&frame) {

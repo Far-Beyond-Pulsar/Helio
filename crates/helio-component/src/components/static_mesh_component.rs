@@ -359,7 +359,7 @@ pub struct StaticMeshComponent {
     /// site changes -- `..._gpu_handle` accessors keep their exact
     /// signature and now transparently resolve to a range shared with every
     /// other entity referencing the same asset.
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
     /// See [`Self::vertices`] -- same rules, the index half of the same
@@ -367,9 +367,20 @@ pub struct StaticMeshComponent {
     /// pool from `vertices`' own -- see `gpu::interned_pool`'s module doc
     /// on why sharing an id across two pools needs no coordination between
     /// them).
-    #[gpu(mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
+
+    /// Local-space bounding sphere (xyz = center, w = radius) computed once
+    /// from `vertices`' actual positions at hydrate time -- see
+    /// `hydrate_static_mesh_component`. CPU-only (not `#[gpu]`-mirrored):
+    /// the only consumer is `sync_static_mesh_rows`, which transforms it by
+    /// each entity's world transform to build `StaticObjectComponent`'s
+    /// culling bounds. Not derived from `transform.scale` -- a thin mesh at
+    /// scale 1.0 and a cube at scale 1.0 have different real extents and
+    /// must not collapse to the same bound.
+    #[serde(skip)]
+    pub bounds_local: [f32; 4],
 }
 
 #[register_scene_props_applier]
@@ -404,7 +415,7 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
 /// `sync_component`'s existing "no mesh_asset" tolerance -- the component
 /// still hydrates, just with empty `vertices`/`indices` (a real, if
-/// invisible, entity, same as today's `insert_actor`-based path leaves an
+/// invisible, entity, same as today's `insert_entity`-based path leaves an
 /// object with no mesh assigned).
 fn hydrate_static_mesh_component(
     world: &mut pulsar_scenedb::World,
@@ -413,6 +424,10 @@ fn hydrate_static_mesh_component(
 ) -> Result<(), String> {
     let mut parsed: StaticMeshComponent =
         serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
+    // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
+    // the safety-net minimum the old transform-scale heuristic used
+    // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
+    parsed.bounds_local = [0.0, 0.0, 0.0, 0.5];
 
     let mesh_asset = parsed.mesh_asset.as_str().trim();
     if !mesh_asset.is_empty() {
@@ -427,6 +442,7 @@ fn hydrate_static_mesh_component(
                             upload.vertices.len(),
                             upload.indices.len()
                         );
+                        parsed.bounds_local = local_bounding_sphere(&upload.vertices);
                         parsed.vertices = upload.vertices;
                         parsed.indices = upload.indices;
                     }
@@ -452,6 +468,33 @@ fn hydrate_static_mesh_component(
     Ok(())
 }
 
+/// Local-space bounding sphere (xyz = center, w = radius) from a mesh's
+/// actual vertex positions: center = AABB midpoint, radius = distance from
+/// that center to the farthest AABB corner (conservative, cheap -- no need
+/// for a tighter Ritter-style fit here). Falls back to the same 0.5 default
+/// as "no mesh loaded" if `vertices` is empty.
+fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
+    let Some(first) = vertices.first() else {
+        return [0.0, 0.0, 0.0, 0.5];
+    };
+    let mut min = first.position;
+    let mut max = first.position;
+    for v in &vertices[1..] {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(v.position[axis]);
+            max[axis] = max[axis].max(v.position[axis]);
+        }
+    }
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let extent = [max[0] - center[0], max[1] - center[1], max[2] - center[2]];
+    let radius = (extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]).sqrt();
+    [center[0], center[1], center[2], radius.max(0.001)]
+}
+
 // Phase B4 (Pulsar-Native#555): the first component migrated onto
 // pulsar_world_registry's World bridge -- proves the pattern before B5
 // rolls it out to the rest. `#[register_world_component]` must be written
@@ -470,7 +513,7 @@ impl ComponentRuntimeBehavior for StaticMeshComponent {
     ) {
         // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
         // to load `mesh_asset` itself and call `Renderer::scene_mut()
-        // .insert_actor(SceneActor::mesh(upload))` -- a second, independent
+        // .insert_entity(SceneEntity::mesh(upload))` -- a second, independent
         // copy of the mesh data in Helio's own mesh pool, loaded from disk a
         // second time every dirty pass, on top of what `hydrate_static_mesh_component`
         // already does (loads the file once, populates this component's own

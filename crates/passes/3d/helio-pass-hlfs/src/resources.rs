@@ -169,6 +169,8 @@ impl Targets {
 }
 
 pub(crate) struct Fallbacks {
+    pub empty_lights: wgpu::Buffer,
+    pub empty_shadow_matrices: wgpu::Buffer,
     pub black: Image,
     pub lightmap_uv: Image,
     pub _shadow: Image,
@@ -283,6 +285,18 @@ impl Fallbacks {
             ..Default::default()
         });
         Self {
+            empty_lights: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS empty lights"),
+                size: 128,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            empty_shadow_matrices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS empty shadow matrices"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             black,
             lightmap_uv,
             _shadow: shadow,

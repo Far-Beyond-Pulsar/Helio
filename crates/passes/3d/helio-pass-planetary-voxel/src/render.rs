@@ -8,14 +8,14 @@ use crate::{
     TransvoxelTransitionGpuError, REGULAR_EXTRACTION_INDIRECT_OFFSETS, TERRAIN_MESHLET_BUILD_WGSL,
     TERRAIN_MESHLET_CULL_WGSL, TRANSITION_EXTRACTION_INDIRECT_OFFSETS,
 };
+use crate::{
+    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
+    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+};
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
     graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
-};
-use helio_planet_voxel_core::{
-    ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
-    PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1994,14 +1994,14 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             "Planetary Surface Visibility",
         );
 
-        let camera_key = ctx.scene.camera as *const _ as usize;
+        let camera_key = ctx.camera as *const _ as usize;
         if self.render_camera_key != Some(camera_key) {
             self.regular_meshlet_cull_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Planetary Regular Meshlet Cull Bind Group"),
                     layout: &self.regular_meshlet_cull_pipeline.get_bind_group_layout(0),
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.regular_cull_uniform),
                         buffer_entry(2, &self.state_buffer),
                         buffer_entry(3, &self.draw_page_buffer),
@@ -2019,7 +2019,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                         .transition_meshlet_cull_pipeline
                         .get_bind_group_layout(0),
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.transition_cull_uniform),
                         buffer_entry(2, &self.state_buffer),
                         buffer_entry(3, &self.draw_page_buffer),
@@ -2036,7 +2036,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     label: Some("Planetary Regular Surface Draw Bind Group"),
                     layout: &self.render_bind_group_layout,
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.draw_page_buffer),
                         buffer_entry(2, &self.regular_meshlet_draws),
                         buffer_entry(3, &self.debug_uniform),
@@ -2047,7 +2047,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     label: Some("Planetary Transition Surface Draw Bind Group"),
                     layout: &self.render_bind_group_layout,
                     entries: &[
-                        buffer_entry(0, ctx.scene.camera),
+                        buffer_entry(0, ctx.camera),
                         buffer_entry(1, &self.draw_page_buffer),
                         buffer_entry(2, &self.transition_meshlet_draws),
                         buffer_entry(3, &self.debug_uniform),
@@ -2171,13 +2171,14 @@ impl RenderPass for PlanetaryVoxelRenderPass {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa = resources.pre_aa.read("PlanetaryVoxel")?;
+        let pre_aa = resources.read(helio_core::ResourceKey::new("pre_aa"), "PlanetaryVoxel")?;
         let color_load = match self.attachment_mode {
             AttachmentMode::Standalone => wgpu::LoadOp::Clear(wgpu::Color {
                 r: 0.004,
@@ -2192,7 +2193,7 @@ impl RenderPass for PlanetaryVoxelRenderPass {
             AttachmentMode::Composited => wgpu::LoadOp::Load,
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa,
                 resolve_target: None,
                 depth_slice: None,
@@ -2342,9 +2343,9 @@ pub enum PlanetaryRenderError {
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error(transparent)]
-    Address(#[from] helio_planet_voxel_core::AddressError),
+    Address(#[from] crate::AddressError),
     #[error(transparent)]
-    Metadata(#[from] helio_planet_voxel_core::GpuPageMetaError),
+    Metadata(#[from] crate::GpuPageMetaError),
     #[error(transparent)]
     RegularExtraction(#[from] TransvoxelGpuError),
     #[error(transparent)]
@@ -2481,10 +2482,8 @@ mod tests {
     fn dependency_invalidations_wait_for_bounded_queue_capacity() {
         let planet = PlanetId([9; 16]);
         let generation = SourceGeneration::new(3, 7);
-        let first =
-            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [-1, 0, 0]));
-        let second =
-            PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(0, [0, 0, 0]));
+        let first = PlanetPageKey::new(planet, crate::PageKey::new(0, [-1, 0, 0]));
+        let second = PlanetPageKey::new(planet, crate::PageKey::new(0, [0, 0, 0]));
         let request = |key| PlanetarySurfaceRequest {
             key,
             generation,
@@ -2513,7 +2512,7 @@ mod tests {
     fn invalidation_does_not_duplicate_or_revive_stale_surface_requests() {
         let planet = PlanetId([4; 16]);
         let generation = SourceGeneration::new(1, 2);
-        let key = PlanetPageKey::new(planet, helio_planet_voxel_core::PageKey::new(1, [-2, 3, 5]));
+        let key = PlanetPageKey::new(planet, crate::PageKey::new(1, [-2, 3, 5]));
         let request = PlanetarySurfaceRequest {
             key,
             generation,
@@ -2539,3 +2538,5 @@ mod tests {
         assert!(invalidated.is_empty());
     }
 }
+
+

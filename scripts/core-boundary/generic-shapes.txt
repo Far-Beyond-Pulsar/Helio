@@ -1,0 +1,79 @@
+helio-core/src/acceleration.rs::BlasManager | struct  { blas_map: HashMap < u64 , wgpu :: Blas >, device: Arc < wgpu :: Device >, rt_available: bool }
+helio-core/src/acceleration.rs::TlasInstanceInput | struct  { mesh_id: u64, transform: [f32 ; 12] }
+helio-core/src/acceleration.rs::TlasManager | struct  { tlas: Option < wgpu :: Tlas >, device: Arc < wgpu :: Device >, max_instances: u32, rt_available: bool }
+helio-core/src/asset_types.rs::MeshUpload | struct  { vertices: Vec < PackedVertex >, indices: Vec < u32 > }
+helio-core/src/asset_types.rs::PackedVertex | struct  { position: [f32 ; 3], bitangent_sign: f32, tex_coords0: [f32 ; 2], tex_coords1: [f32 ; 2], normal: u32, tangent: u32 }
+helio-core/src/asset_types.rs::SectionedMeshUpload | struct  { vertices: Vec < PackedVertex >, sections: Vec < Vec < u32 > > }
+helio-core/src/camera.rs::GpuCameraUniforms | struct  { view: [f32 ; 16], proj: [f32 ; 16], view_proj: [f32 ; 16], inv_view_proj: [f32 ; 16], position_near: [f32 ; 4], forward_far: [f32 ; 4], jitter_frame: [f32 ; 4], prev_view_proj: [f32 ; 16] }
+helio-core/src/context.rs::PassContext | struct < 'a > { chain_transparent: bool, encoder_ptr: * mut wgpu :: CommandEncoder, compute_encoder_ptr: * mut wgpu :: CommandEncoder, target: & 'a wgpu :: TextureView, depth: & 'a wgpu :: TextureView, camera: & 'a wgpu :: Buffer, camera_data: & 'a GpuCameraUniforms, camera_generation: u64, scene_buffers: & 'a SceneBufferProjection, profiler: & 'a mut Profiler, frame_num: u64, width: u32, height: u32, device: & 'a wgpu :: Device, resources: & 'a crate :: ResourceRegistry < 'a >, registry: & 'a crate :: ResourceRegistry < 'a >, subpass_index: u32, subpass_count: u32, owns_device: bool, resource_pool: & 'a crate :: graph :: GraphTexturePool, active_render_pass: Option < * mut wgpu :: RenderPass < 'static > >, active_compute_pass: Option < * mut wgpu :: ComputePass < 'static > >, pipeline_cache: & 'a crate :: graph :: PipelineFormatCache, pipelines: & 'a PipelineRegistry, reflected_bind_groups: & 'a [wgpu :: BindGroup], reflected_pipeline: Option < & 'a crate :: shader :: ReflectedPipeline > }
+helio-core/src/context.rs::PrepareContext | struct < 'a > { device: & 'a wgpu :: Device, queue: & 'a wgpu :: Queue, frame_num: u64, camera: & 'a wgpu :: Buffer, camera_data: & 'a GpuCameraUniforms, camera_generation: u64, scene_buffers: & 'a SceneBufferProjection, pass_resources: & 'a crate :: ResourceRegistry < 'a >, registry: & 'a crate :: ResourceRegistry < 'a >, resize: bool, width: u32, height: u32, delta_time: f32 }
+helio-core/src/entity.rs::Entity | struct  { 0: u64 }
+helio-core/src/error.rs::Error | enum  { Gpu(0: String), ShaderCompilation(0: String), ResourceNotFound(0: String), InvalidPassConfig(0: String), Profiling(0: String) }
+helio-core/src/error.rs::Result | type < T > = std :: result :: Result < T , Error >
+helio-core/src/graph/attachments.rs::AttachmentSlot | enum  { Target(), Depth(), Named(0: & 'static str) }
+helio-core/src/graph/attachments.rs::ColorAttachmentIntent | struct  { slot: AttachmentSlot, load: wgpu :: LoadOp < wgpu :: Color >, store: wgpu :: StoreOp }
+helio-core/src/graph/attachments.rs::DepthAttachmentIntent | struct  { slot: AttachmentSlot, depth_load: wgpu :: LoadOp < f32 >, depth_store: wgpu :: StoreOp }
+helio-core/src/graph/execution.rs::RenderGraph | struct  { passes: Vec < Box < dyn RenderPass > >, pass_index_map: HashMap < TypeId , usize >, profiler: Profiler, pool: GraphTexturePool, pipeline_cache: PipelineFormatCache, pipeline_formats: Vec < PipelineFormatSet >, pipeline_registries: Vec < PipelineRegistry >, reflected_pipelines: Vec < Option < crate :: shader :: ReflectedPipeline > >, resources: HashMap < String , ResourceLifetime >, resource_groups: Vec < (usize , & 'static str , Vec < & 'static str >) >, pre_pass_actions: Vec < Vec < PrePassAction > >, device: std :: sync :: Arc < wgpu :: Device >, internal_w: u32, internal_h: u32, output_w: u32, output_h: u32, delta_time: f32, owns_device: bool, gpu_render_bundles: Vec < Option < wgpu :: RenderBundle > >, resources_allocated: bool, subpass_chains: Vec < std :: ops :: Range < usize > >, parallel_layers: Vec < Vec < usize > >, chain_membership: Vec < bool >, prev_chain_membership: Vec < bool >, chain_generation: u64, last_bundle_chain_gen: Vec < u64 >, locked: bool, xr_active: bool, pass_cache: Vec < Option < CachedPass > >, frame_count: u64, resize_pending: bool, graph_data: Option < Box < dyn std :: any :: Any + Send + Sync > >, external_inputs: std :: collections :: HashSet < & 'static str >, pending_worker_profilers: Vec < Profiler > }
+helio-core/src/graph/executor.rs::DebugPassInfo | struct  { index: usize, name: String, kind: String, writes: Vec < String >, reads: Vec < String >, chain_marker: String, parallel_layer: usize }
+helio-core/src/graph/executor.rs::DebugResourceInfo | struct  { name: String, width: u32, height: u32, layers: u32, format_name: String, size_kb: u64, alias: String, chain_local: bool, first_write_pass: usize, last_read_pass: usize }
+helio-core/src/graph/executor.rs::FrameDebugData | struct  { resources: Vec < DebugResourceInfo >, total_vram_kb: u64, physical_vram_kb: u64, passes: Vec < DebugPassInfo >, subpass_chains: Vec < String >, frame_count: u64, delta_time: f32 }
+helio-core/src/graph/executor.rs::GraphTimelineData | struct  { frame_count: u64, total_vram_kb: u64, physical_vram_kb: u64, passes: Vec < GraphTimelinePass >, resources: Vec < DebugResourceInfo > }
+helio-core/src/graph/executor.rs::GraphTimelinePass | struct  { index: usize, name: String, reads: Vec < String >, writes: Vec < String >, cpu_ms: Option < f32 >, gpu_ms: Option < f32 >, parallel_layer: usize, chain_marker: String }
+helio-core/src/graph/pipeline_cache.rs::BindingOverrideBuilder | struct  { entries: HashMap < & 'static str , & 'static str > }
+helio-core/src/graph/pipeline_cache.rs::PipelineFormatCache | struct  { entries: Arc < RwLock < HashMap < PipelineFormatKey , Arc < wgpu :: RenderPipeline > > > >, build_lock: Arc < Mutex < () > >, pending: Arc < Mutex < HashSet < PipelineFormatKey > > >, workers: Mutex < Vec < std :: thread :: JoinHandle < () > > >, driver_cache: Option < Arc < wgpu :: PipelineCache > >, persistent_path: Option < std :: path :: PathBuf > }
+helio-core/src/graph/pipeline_cache.rs::PipelineFormatKey | struct  { pass: & 'static str, color_formats: Vec < wgpu :: TextureFormat >, depth_format: Option < wgpu :: TextureFormat >, variant: u64 }
+helio-core/src/graph/pipeline_cache.rs::PipelineFormatSet | struct  { color_formats: Vec < wgpu :: TextureFormat >, depth_format: Option < wgpu :: TextureFormat > }
+helio-core/src/graph/pipeline_cache.rs::PipelineHandle | type  = u32
+helio-core/src/graph/pipeline_cache.rs::PipelineRecipe | struct  { handle: PipelineHandle, key: PipelineFormatKey, build: Arc < dyn Fn (& wgpu :: Device , & PipelineFormatKey , Option < & wgpu :: PipelineCache > ,) -> wgpu :: RenderPipeline + Send + Sync , > }
+helio-core/src/graph/pipeline_cache.rs::PipelineRecipeBuilder | struct  { recipes: Vec < PipelineRecipe > }
+helio-core/src/graph/pipeline_cache.rs::PipelineRegistry | struct  { entries: HashMap < PipelineHandle , Arc < wgpu :: RenderPipeline > > }
+helio-core/src/graph/resource.rs::GraphTexture | struct  { texture: wgpu :: Texture, view: wgpu :: TextureView, desc: TextureDescriptor, allocation_id: usize }
+helio-core/src/graph/resource.rs::GraphTexturePool | struct  { textures: Vec < GraphTexture >, name_map: HashMap < String , usize >, alias_refs: HashMap < String , u32 >, physical_allocations: usize, xr_active: bool }
+helio-core/src/graph/resource.rs::ResSize | enum  { Internal(), Output(), Absolute(0: u32, 1: u32) }
+helio-core/src/graph/resource.rs::ResourceAccess | enum  { Read(), Write() }
+helio-core/src/graph/resource.rs::ResourceAllocator | struct  { pool: GraphTexturePool, internal_w: u32, internal_h: u32, output_w: u32, output_h: u32 }
+helio-core/src/graph/resource.rs::ResourceBuilder | struct  { declarations: Vec < ResourceDecl > }
+helio-core/src/graph/resource.rs::ResourceDecl | struct  { name: & 'static str, format: Option < ResourceFormat >, size: Option < ResourceSize >, access: ResourceAccess, layers: u32, extra_usage: wgpu :: TextureUsages, group: Option < & 'static str > }
+helio-core/src/graph/resource.rs::ResourceFormat | enum  { Rgba16Float(), Rg11b10Ufloat(), Rgba8UnormSrgb(), Bgra8Unorm(), Bgra8UnormSrgb(), R16Float(), R32Float(), R8Unorm(), Rgba8Unorm(), Rg16Float(), Depth32Float(), R32Uint() }
+helio-core/src/graph/resource.rs::ResourceHandle | struct  {  }
+helio-core/src/graph/resource.rs::ResourceSize | enum  { MatchSurface(), Output(), Absolute(width: u32, height: u32), Scaled(divisor: u32), ScaledInternal(divisor: u32) }
+helio-core/src/graph/resource.rs::TextureDescriptor | struct  { name: String, format: wgpu :: TextureFormat, width: u32, height: u32, depth_or_array_layers: u32, mip_level_count: u32, sample_count: u32, usage: wgpu :: TextureUsages, alias_group: Option < String > }
+helio-core/src/graph/resource_lifetime.rs::AliasGroup | struct  { name: String, chain_local: bool, format: wgpu :: TextureFormat, width: u32, height: u32, depth_or_array_layers: u32, mip_level_count: u32, extra_usage: wgpu :: TextureUsages, last_read_pass: usize }
+helio-core/src/graph/resource_lifetime.rs::DeclWrite | struct  { name: String, format: Option < wgpu :: TextureFormat >, size: crate :: graph :: ResourceSize, pass_index: usize, layers: u32, extra_usage: wgpu :: TextureUsages }
+helio-core/src/graph/resource_lifetime.rs::ResourceLifetime | struct  { first_write_pass: usize, last_read_pass: usize, format: wgpu :: TextureFormat, width: u32, height: u32, depth_or_array_layers: u32, mip_level_count: u32, extra_usage: wgpu :: TextureUsages, alias_group: Option < String >, chain_local: bool }
+helio-core/src/graph/scheduling.rs::CachedPass | struct  { store_ops: Vec < Option < wgpu :: StoreOp > >, subpass_index: u32, subpass_count: u32, chain_range: std :: ops :: Range < usize > }
+helio-core/src/graph/scheduling.rs::PrePassAction | enum  { Route(name: String, view: wgpu :: TextureView), Group(name: & 'static str, members: Vec < (& 'static str , wgpu :: TextureView) >) }
+helio-core/src/movability.rs::Movability | enum  { Static(), Stationary(), Movable() }
+helio-core/src/profiling/cpu.rs::CpuProfiler | struct  { timings: HashMap < & 'static str , Duration > }
+helio-core/src/profiling/cpu.rs::ScopeGuard | struct < 'a > { start: Instant, profiler: & 'a mut CpuProfiler, name: & 'static str, _phantom: std :: marker :: PhantomData < & 'a () > }
+helio-core/src/profiling/gpu.rs::GpuProfiler | struct  { query_set: Option < wgpu :: QuerySet >, query_buffer: Option < wgpu :: Buffer >, readback_slots: Vec < ReadbackSlot >, pending_queries: VecDeque < QueryRange >, next_index: u32, last_timings: Vec < GpuTimestamp >, last_completed_frame: Option < u64 >, dropped_readbacks: u64, query_overflows: u64, timestamp_period: f32 }
+helio-core/src/profiling/gpu.rs::GpuTimestamp | struct  { name: & 'static str, duration_ns: u64 }
+helio-core/src/profiling/gpu.rs::QueryRange | type  = (& 'static str , u32 , u32)
+helio-core/src/profiling/gpu.rs::ReadbackSlot | struct  { buffer: wgpu :: Buffer, state: ReadbackState, map_completion: Arc < AtomicU8 >, queries: Vec < QueryRange >, frame_index: u64 }
+helio-core/src/profiling/gpu.rs::ReadbackState | enum  { Idle(), CopySubmitted(), Mapping() }
+helio-core/src/profiling/mod.rs::GpuTimingAvailability | enum  { Disabled(), Unsupported(), Pending(), Available(), Backpressured() }
+helio-core/src/profiling/mod.rs::PassTiming | struct  { name: String, cpu_ms: f32, gpu_ms: f32 }
+helio-core/src/profiling/mod.rs::Profiler | struct  { cpu: CpuProfiler, gpu: GpuProfiler, enabled: bool, snapshot: RenderTimingSnapshot, gpu_frame_ms: Option < f32 > }
+helio-core/src/profiling/mod.rs::RenderPassTiming | struct  { name: & 'static str, cpu_ms: Option < f32 >, gpu_ms: Option < f32 > }
+helio-core/src/profiling/mod.rs::RenderTimingSnapshot | struct  { generation: u64, cpu_frame_index: u64, gpu_frame_index: Option < u64 >, gpu_lag_frames: Option < u64 >, gpu_availability: GpuTimingAvailability, total_cpu_ms: Option < f32 >, total_gpu_ms: Option < f32 >, readback_drops: u64, query_overflows: u64, passes: Vec < RenderPassTiming > }
+helio-core/src/registry.rs::ResourceKey | struct < T > { name: & 'static str, type_tag: fn () -> & 'static str, _marker: std :: marker :: PhantomData < fn () -> T > }
+helio-core/src/registry.rs::ResourceRegistry | struct < 'a > { slots: HashMap < & 'static str , Box < dyn ErasedResourceSlot + 'a > >, bindings: HashMap < String , wgpu :: BindingResource < 'a > >, graph_bindings: HashSet < String > }
+helio-core/src/registry.rs::Tracked | struct < T > { value: Option < T >, written_by: Option < & 'static str > }
+helio-core/src/registry.rs::TypedResourceSlot | struct < T > { value: Option < T >, written_by: Option < & 'static str > }
+helio-core/src/registry.rs::ViewGroup | struct < 'a , const N : usize > { views: [& 'a wgpu :: TextureView ; N] }
+helio-core/src/render_environment.rs::RenderEnvironment | struct < 'a > { clear_color: [f32 ; 4], ambient_color: [f32 ; 3], ambient_intensity: f32, tlas: Option < & 'a wgpu :: Tlas > }
+helio-core/src/scene_input.rs::SceneBufferProjection | struct  { entries: Vec < (BufferKey , BufferHandle) > }
+helio-core/src/shader/directives.rs::BlendDirective | enum  { Alpha(), Additive(), Replace() }
+helio-core/src/shader/directives.rs::CompareDirective | enum  { Never(), Less(), LessEqual(), Equal(), GreaterEqual(), Greater(), Always() }
+helio-core/src/shader/directives.rs::CullDirective | enum  { None(), Front(), Back() }
+helio-core/src/shader/directives.rs::DirectiveError | struct  { line: usize, message: String }
+helio-core/src/shader/directives.rs::PipelineDirectives | struct  { blend: Option < BlendDirective >, depth_compare: Option < CompareDirective >, depth_write: Option < bool >, cull: Option < CullDirective >, topology: Option < TopologyDirective > }
+helio-core/src/shader/directives.rs::TopologyDirective | enum  { Point(), Line(), Triangle() }
+helio-core/src/shader/mod.rs::ShaderSnippet | struct  { marker: & 'static str, source: & 'static str }
+helio-core/src/shader/reflection.rs::BindingKind | enum  { UniformBuffer(), StorageBuffer(), SampledTexture(), DepthTexture(), StorageTexture(), Sampler(), Other() }
+helio-core/src/shader/reflection.rs::ReflectedBinding | struct  { name: String, group: u32, binding: u32, kind: BindingKind, layout: ReflectedLayout }
+helio-core/src/shader/reflection.rs::ReflectedLayout | enum  { UniformBuffer(), StorageBuffer(read_only: bool), Sampler(comparison: bool), SampledTexture(dimension: naga :: ImageDimension, arrayed: bool, multisampled: bool, kind: naga :: ScalarKind), DepthTexture(dimension: naga :: ImageDimension, arrayed: bool, multisampled: bool), StorageTexture(dimension: naga :: ImageDimension, arrayed: bool, format: naga :: StorageFormat, access: naga :: StorageAccess), Other() }
+helio-core/src/shader/reflection.rs::ReflectedPipeline | struct  { bindings: Vec < ReflectedBinding >, layouts: Vec < wgpu :: BindGroupLayout >, pipeline_layout: wgpu :: PipelineLayout, directives: crate :: shader :: PipelineDirectives, overrides: crate :: graph :: BindingOverrideBuilder }
+helio-core/src/shader/reflection.rs::ReflectedShader | struct < 'a > { source: & 'a str, visibility: wgpu :: ShaderStages }
+helio-core/src/shader/reflection.rs::ReflectionError | enum  { Parse(0: String), Validation(0: String), MissingResource(0: String), UnsupportedBinding(0: String) }
+helio-core/src/traits.rs::DebugViewDescriptor | struct  { name: & 'static str, debug_mode: u32, description: & 'static str }

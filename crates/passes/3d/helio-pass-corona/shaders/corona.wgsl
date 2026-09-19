@@ -18,6 +18,12 @@ const INV_MAX_U32: f32 = 1.0 / 4294967295.0;
 // above the representable range in Dawn's strict WebGPU WGSL parser.
 const F32_MAX:     f32 = 3.4028234e38;
 const WG:          u32 = 256u;
+// Fixed particle range per emitter slot -- MUST match Rust's `SLOT_SIZE`
+// (`libhelio::CORONA_MAX_PARTICLES_PER_EMITTER`). Every emitter's
+// `particle_offset` is this times its own slot index (`e`/`eidx` below),
+// never an authored/stored value -- see corresponding Rust-side doc on
+// `MAX_EMITTERS` for why the layout is fixed instead of CPU-compacted.
+const SLOT_SIZE:   u32 = 262144u;
 
 // ── Structs ───────────────────────────────────────────────────────────────────
 
@@ -92,6 +98,12 @@ struct CameraUniforms {
 @group(0) @binding(8)  var<storage, read_write>  block_sums_buf:    array<u32>;
 // view-space depth key per compact_buf slot; reset to -F32_MAX, then written by cs_scatter
 @group(0) @binding(9)  var<storage, read_write>  sort_key_buf:      array<f32>;
+// Per-emitter-slot spawn cursor -- purely transient, pass-owned GPU state,
+// deliberately NOT part of `EmitterDef`/`emitters` (see the Rust side's
+// `spawn_cursor_buf` doc for why: that buffer is SceneDB-authored and gets
+// its whole row re-uploaded on any authored change, which would stomp an
+// in-place cursor advance living in the same row).
+@group(0) @binding(12) var<storage, read_write>  spawn_cursors:     array<u32>;
 
 // ── Workgroup shared memory ───────────────────────────────────────────────────
 
@@ -142,7 +154,8 @@ fn cs_simulate(@builtin(global_invocation_id) id: vec3<u32>) {
 
     for (var e = 0u; e < uniforms.emitter_count; e++) {
         let em = emitters[e];
-        if idx >= em.particle_offset && idx < em.particle_offset + em.particle_count {
+        let em_offset = e * SLOT_SIZE;
+        if idx >= em_offset && idx < em_offset + em.particle_count {
             grav      = em.emit_params.w;
             start_col = em.start_color;
             end_col   = em.end_color;
@@ -170,24 +183,25 @@ fn cs_emit(@builtin(workgroup_id) id: vec3<u32>) {
     let eidx = id.x;
     if eidx >= uniforms.emitter_count { return; }
 
-    var em = emitters[eidx];
+    let em = emitters[eidx];
     if em.extras.w < 0.5 { return; }
 
     let count = u32(em.emit_params.x * uniforms.delta_time);
     if count == 0u { return; }
 
-    let base   = em.particle_offset;
+    let base   = eidx * SLOT_SIZE;
     let range  = max(em.particle_count, 1u);
     let origin = em.transform[3].xyz;
     let etype  = u32(em.extras.x);
     let radius = em.extras.y;
     let seed   = eidx * 997u + uniforms.frame_count * 7919u;
 
+    var cursor = spawn_cursors[eidx];
     for (var i = 0u; i < count; i++) {
-        let cursor = em.spawn_cursor;
-        em.spawn_cursor = (cursor + 1u) % range;
+        let this_cursor = cursor;
+        cursor = (cursor + 1u) % range;
 
-        let pidx = base + cursor;
+        let pidx = base + this_cursor;
         let s    = seed + i * 1013u;
 
         var spawn_pos: vec3<f32>;
@@ -221,7 +235,7 @@ fn cs_emit(@builtin(workgroup_id) id: vec3<u32>) {
         particles[pidx] = p;
     }
 
-    emitters[eidx].spawn_cursor = em.spawn_cursor;
+    spawn_cursors[eidx] = cursor;
 }
 
 // ── cs_scan_local ─────────────────────────────────────────────────────────────
@@ -286,8 +300,9 @@ fn cs_scan_blocks(@builtin(workgroup_id) wid: vec3<u32>) {
     if eidx >= uniforms.emitter_count { return; }
 
     let em       = emitters[eidx];
-    let block_lo = em.particle_offset / WG;
-    let block_hi = (em.particle_offset + em.particle_count + WG - 1u) / WG;
+    let em_offset = eidx * SLOT_SIZE;
+    let block_lo = em_offset / WG;
+    let block_hi = (em_offset + em.particle_count + WG - 1u) / WG;
 
     var cumsum = 0u;
     for (var b = block_lo; b < block_hi; b++) {
@@ -318,12 +333,13 @@ fn cs_scatter(
 
     for (var e = 0u; e < uniforms.emitter_count; e++) {
         let em = emitters[e];
-        if idx >= em.particle_offset && idx < em.particle_offset + em.particle_count {
+        let em_offset = e * SLOT_SIZE;
+        if idx >= em_offset && idx < em_offset + em.particle_count {
             // Position within this emitter's compact sub-range:
             //   block_sums_buf[wid.x] = alive count in emitter blocks before this one.
             //   prefix_buf[idx]       = alive count before idx in this block.
             let pos_in_emitter = block_sums_buf[wid.x] + prefix_buf[idx];
-            let compact_pos    = em.particle_offset + pos_in_emitter;
+            let compact_pos    = em_offset + pos_in_emitter;
 
             compact_buf[compact_pos] = idx;
 
@@ -342,12 +358,11 @@ fn cs_scatter(
 fn cs_build_multi(@builtin(workgroup_id) wid: vec3<u32>) {
     let eidx = wid.x;
     if eidx >= uniforms.emitter_count { return; }
-    let em    = emitters[eidx];
     let alive = emitter_alive[eidx];
     draw_args_staging[eidx].vertex_count   = 6u;
     draw_args_staging[eidx].instance_count = alive;
     draw_args_staging[eidx].first_vertex   = 0u;
-    draw_args_staging[eidx].first_instance = em.particle_offset;
+    draw_args_staging[eidx].first_instance = eidx * SLOT_SIZE;
 }
 
 // ── cs_sort_local ─────────────────────────────────────────────────────────────

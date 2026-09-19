@@ -1,7 +1,7 @@
 //! Uniform blocks shared with `shaders/foliage_place.wgsl` and `shaders/foliage_cull.wgsl`.
 //!
 //! Both are 64 bytes of plain scalars, and both sizes are pinned by a `const _` assert in
-//! the style of `libhelio::meshlet`. A size or field-order change that the WGSL does not
+//! the style of `helio_pass_virtual_geometry`. A size or field-order change that the WGSL does not
 //! follow does not fail loudly: the shader reads every field after the change from the
 //! wrong offset, and the symptom is grass at the wrong density in the wrong places, which
 //! reads as a placement bug rather than a layout one.
@@ -18,7 +18,7 @@ use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct PlaceUniforms {
-    /// Edge length of one tile in metres — [`helio_foliage_core::FOLIAGE_TILE_SIZE_METERS`].
+    /// Edge length of one tile in metres — [`crate::FOLIAGE_TILE_SIZE_METERS`].
     pub tile_size: f32,
 
     /// Resolution `G` of the stratified candidate grid; the shader evaluates `G²`
@@ -46,7 +46,7 @@ pub struct PlaceUniforms {
     /// `max_tiles_per_frame`.
     pub queued_tile_count: u32,
 
-    /// [`helio_foliage_core::FoliageQuality::density_multiplier`].
+    /// [`crate::FoliageQuality::density_multiplier`].
     pub density_multiplier: f32,
 
     /// `max(type.density) * density_multiplier` over the registered types.
@@ -113,7 +113,7 @@ pub struct FoliageCullUniforms {
     /// reason.
     pub hiz_valid: u32,
 
-    /// Blades per cull cluster — [`helio_foliage_core::FoliageQuality::cluster_granularity`].
+    /// Blades per cull cluster — [`crate::FoliageQuality::cluster_granularity`].
     pub cluster_size: u32,
     /// `ceil(slab_capacity / cluster_size)`; the cluster index space per tile.
     pub clusters_per_tile: u32,
@@ -124,7 +124,7 @@ pub struct FoliageCullUniforms {
 
     /// Edge length of one tile in metres.
     pub tile_size: f32,
-    /// [`helio_foliage_core::FoliageQuality::lod_distance_scale`], the `quality_scale`
+    /// [`crate::FoliageQuality::lod_distance_scale`], the `quality_scale`
     /// argument to `select_blade_lod`.
     pub lod_quality_scale: f32,
     /// Number of valid entries in the foliage type table.

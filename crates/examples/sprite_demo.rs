@@ -24,9 +24,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use helio_core::{GpuScene, RenderGraph};
+use helio_core::RenderGraph;
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 use helio_pass_sprite_cull::SpriteCullPass;
+
+mod sprite_scene_input;
+use sprite_scene_input::SceneInputAdapter;
 
 use winit::{
     application::ApplicationHandler,
@@ -59,10 +62,11 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     graph: RenderGraph,
-    /// `RenderGraph::execute()` takes a `&GpuScene` for its API shape only —
-    /// `SpriteBatchPass` never reads it. Constructed once and otherwise
-    /// ignored, so this demo can skip `helio::Renderer`/`Scene` entirely.
-    scene: GpuScene,
+    /// `RenderGraph::execute()` takes a `&dyn SceneInput` for its API shape
+    /// only — `SpriteBatchPass` never reads it. Constructed once and
+    /// otherwise ignored, so this demo can skip `helio::Renderer`/SceneDB
+    /// entirely.
+    scene: SceneInputAdapter,
     dummy_depth_view: wgpu::TextureView,
     start_time: Instant,
     last_stats_log: Instant,
@@ -245,7 +249,7 @@ impl ApplicationHandler for App {
         graph.add_pass(Box::new(sprite_pass));
         graph.lock(size.width.max(1), size.height.max(1));
 
-        let scene = GpuScene::new(device.clone(), queue.clone());
+        let scene = SceneInputAdapter::new(device.clone(), queue.clone());
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
             size: wgpu::Extent3d {

@@ -1,0 +1,16 @@
+[package]
+name = "scenedb-inspector-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Opt-in in-process debug agent: streams a live pulsar_scenedb::World snapshot into shared memory for the scenedb_inspector egui client."
+
+[dependencies]
+pulsar_scenedb = { workspace = true, features = ["telemetry"] }
+pulsar_reflection = { workspace = true }
+wgpu = { workspace = true }
+shared_memory = "0.12"
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

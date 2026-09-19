@@ -41,7 +41,8 @@ struct SkyUniforms {
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
-@group(1) @binding(0) var<uniform> sky:    SkyUniforms;
+@group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
+var<private> sky: SkyUniforms;
 
 // ── Vertex: full-screen triangle ─────────────────────────────────────────────
 
@@ -152,6 +153,7 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    sky = sky_rows[0];
     let uv = in.uv; // [0,1]²
 
     // Decode direction from panoramic UV

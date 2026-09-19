@@ -2,12 +2,14 @@
 name = "helio-default-graphs"
 version = "0.1.0"
 edition = "2021"
+workspace = "../../"
 description = "Default render graph builders for Helio — depends on all pass crates"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio = { path = "../helio" }
 helio-core = { workspace = true }
+pulsar_scenedb = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
@@ -18,7 +20,6 @@ helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
-helio-foliage-core = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "../passes/3d/helio-pass-foliage-gbuffer" }
@@ -26,6 +27,7 @@ helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
+helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
 helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
 helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }

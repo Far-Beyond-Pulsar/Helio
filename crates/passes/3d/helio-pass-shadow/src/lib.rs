@@ -47,7 +47,7 @@
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -428,7 +428,7 @@ impl RenderPass for ShadowPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -442,6 +442,7 @@ impl RenderPass for ShadowPass {
         builder.with_layers(self.atlas_layers);
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
         builder.with_layers(self.atlas_layers);
+        builder.read("object_batch");
     }
 
     fn name(&self) -> &'static str {
@@ -449,25 +450,34 @@ impl RenderPass for ShadowPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["object_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
         &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let face_count = (ctx.scene.shadow_count as usize)
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(shadow_data) = ctx.resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")) else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+            return Ok(());
+        };
+        let face_count = (shadow_data.shadow_count as usize)
             .min(self.atlas_layers as usize)
             .min(MAX_SHADOW_FACES);
-        let static_draw_count = ctx.scene.shadow_static_draw_count;
-        let movable_draw_count = ctx.scene.shadow_movable_draw_count;
+        let static_draw_count = batch.shadow_static_draw_count;
+        let movable_draw_count = batch.shadow_movable_draw_count;
 
         // ── Lazily initialize per-face views from graph-owned textures ─────────
         if self.face_views.is_empty() {
@@ -491,8 +501,8 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let static_gen = ctx.scene.static_objects_generation;
-        let shadow_count = ctx.scene.shadow_count;
+        let static_gen = batch.shadow_static_generation;
+        let shadow_count = shadow_data.shadow_count;
         let caster_count = (face_count / 6).min(42);
 
         let need_static = self.static_atlas_cache_gen != Some(static_gen)
@@ -503,31 +513,41 @@ impl RenderPass for ShadowPass {
         let mut dirty_casters = [false; 42];
         let mut any_dirty_caster = false;
         for slot in 0..caster_count {
-            if ctx.scene.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
+            if shadow_data.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
                 dirty_casters[slot] = true;
                 any_dirty_caster = true;
             }
         }
 
         // O(1) CPU gate: did any movable object move this frame?
-        let objects_moved = ctx.scene.movable_objects_generation != self.last_movable_objects_gen;
+        let objects_moved = shadow_data.movable_objects_generation != self.last_movable_objects_gen;
 
         if !need_static && !any_dirty_caster && !objects_moved {
             return Ok(());
         }
 
-        let main_scene = ctx.resources.main_scene.read("Shadow").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
-        })?;
-
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
+        let vertices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "ShadowPass requires builtin_mesh_vertex".into(),
+                )
+            })?;
+        let indices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "ShadowPass requires builtin_mesh_index".into(),
+                )
+            })?;
 
         // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances as *const _ as usize;
-        let cs_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
+        let inst_ptr = batch.instances as *const _ as usize;
+        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
         let key = (sm_ptr, inst_ptr, cs_ptr);
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -536,11 +556,11 @@ impl RenderPass for ShadowPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        resource: shadow_data.shadow_matrices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -552,7 +572,7 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));
@@ -564,7 +584,7 @@ impl RenderPass for ShadowPass {
 
         // ── Static atlas render ────────────────────────────────────────────────
         if need_static || any_dirty_caster {
-            let static_indirect = ctx.scene.shadow_static_indirect;
+            let static_indirect = batch.shadow_static_indirect;
             if static_draw_count > 0 {
                 for face in 0..face_count {
                     let caster_slot = face / 6;
@@ -594,8 +614,8 @@ impl RenderPass for ShadowPass {
                     );
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, bg, &[dyn_offset]);
-                    pass.set_vertex_buffer(0, vertices.slice(..));
-                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                    pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     #[cfg(not(target_arch = "wasm32"))]
                     pass.multi_draw_indexed_indirect(static_indirect, 0, static_draw_count);
                     #[cfg(target_arch = "wasm32")]
@@ -654,8 +674,6 @@ impl RenderPass for ShadowPass {
         //     clean faces.  The loop runs for all active faces but clean faces produce
         //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
         if any_dirty_caster || objects_moved {
-            let _movable_indirect = ctx.scene.shadow_movable_indirect;
-
             for face in 0..face_count {
                 let caster_slot = face / 6;
                 let light_dirty = caster_slot < 42 && dirty_casters[caster_slot];
@@ -686,8 +704,8 @@ impl RenderPass for ShadowPass {
                     if movable_draw_count > 0 {
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, bg, &[dyn_offset]);
-                        pass.set_vertex_buffer(0, vertices.slice(..));
-                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                        pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                         let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                         #[cfg(not(target_arch = "wasm32"))]
                         if self.supports_multi_draw_count {
@@ -756,8 +774,8 @@ impl RenderPass for ShadowPass {
                             // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.slice(..));
-                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                             let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect_count(
                                 &self.face_cull_indirect,
@@ -791,8 +809,8 @@ impl RenderPass for ShadowPass {
                         if movable_draw_count > 0 {
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.slice(..));
-                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                             let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect(
                                 &self.face_cull_indirect,
@@ -807,11 +825,11 @@ impl RenderPass for ShadowPass {
             // Update per-caster gen tracking (light movement only).
             for slot in 0..caster_count {
                 if dirty_casters[slot] {
-                    self.per_caster_last_gen[slot] = ctx.scene.per_caster_dirty_gen[slot];
+                    self.per_caster_last_gen[slot] = shadow_data.per_caster_dirty_gen[slot];
                 }
             }
 
-            self.last_movable_objects_gen = ctx.scene.movable_objects_generation;
+            self.last_movable_objects_gen = shadow_data.movable_objects_generation;
         }
 
         Ok(())

@@ -1,13 +1,17 @@
-use serde::{Deserialize, Serialize};
 use nebula_core::{error::NebulaError, traits::BakeOutput};
 use nebula_serialize::chunk::ChunkTag;
+use serde::{Deserialize, Serialize};
 
 /// Chunk tag for baked Potentially Visible Set data.
 pub const CHUNK_TAG: ChunkTag = ChunkTag::from_bytes(*b"PVSS");
 
 /// A 3-D grid cell index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CellIndex { pub x: i32, pub y: i32, pub z: i32 }
+pub struct CellIndex {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
 
 /// Baked PVS output.
 ///
@@ -45,7 +49,7 @@ impl PvsOutput {
     #[inline]
     pub fn is_visible(&self, from_cell: usize, to_cell: usize) -> bool {
         let word = from_cell * self.words_per_cell as usize + to_cell / 64;
-        let bit  = to_cell % 64;
+        let bit = to_cell % 64;
         self.bits.get(word).map_or(false, |w| (w >> bit) & 1 == 1)
     }
 
@@ -56,13 +60,17 @@ impl PvsOutput {
         let dy = ((p[1] - self.world_min[1]) / self.cell_size).floor() as i32;
         let dz = ((p[2] - self.world_min[2]) / self.cell_size).floor() as i32;
         let [gx, gy, gz] = self.grid_dims.map(|d| d as i32);
-        if dx < 0 || dy < 0 || dz < 0 || dx >= gx || dy >= gy || dz >= gz { return None; }
+        if dx < 0 || dy < 0 || dz < 0 || dx >= gx || dy >= gy || dz >= gz {
+            return None;
+        }
         Some((dz as usize * gy as usize + dy as usize) * gx as usize + dx as usize)
     }
 }
 
 impl BakeOutput for PvsOutput {
-    fn kind_name() -> &'static str { "pvs" }
+    fn kind_name() -> &'static str {
+        "pvs"
+    }
 }
 
 impl PvsOutput {

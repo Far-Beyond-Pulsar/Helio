@@ -15,11 +15,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light,
+    box_mesh, cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror,
+    plane_mesh, point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh,
+    spawn_object, update_light,
 };
 
 use winit::{
@@ -54,6 +57,8 @@ struct AppState {
     last_frame: std::time::Instant,
     start_time: std::time::Instant,
 
+    scene_db: SceneDb,
+
     cam_pos: glam::Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -62,10 +67,10 @@ struct AppState {
     mouse_delta: (f32, f32),
     sun_angle: f32,
 
-    sun_light_id: LightId,
-    fire_light_id: LightId,
-    _moon_light_id: LightId,
-    _ember_ids: Vec<LightId>,
+    sun_light_id: Entity,
+    fire_light_id: Entity,
+    _moon_light_id: Entity,
+    _ember_ids: Vec<Entity>,
 }
 
 impl App {
@@ -143,292 +148,201 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
+
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
+                [0.72, 0.58, 0.42, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ),
         );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
+        let fire_mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
+                [0.3, 0.1, 0.05, 1.0],
+                0.9,
+                0.0,
+                [1.0, 0.4, 0.05],
+                4.0,
+            ),
         );
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.72, 0.58, 0.42, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let fire_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.1, 0.05, 1.0],
-            0.9,
-            0.0,
-            [1.0, 0.4, 0.05],
-            4.0,
-        ));
-
-        let valley_floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 35.0)))
-            .as_mesh()
-            .unwrap();
-        let wall_l1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+        let valley_floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 35.0));
+        let wall_l1 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.0, 30.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_l2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let wall_l2 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 8.0, 25.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_l3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let wall_l3 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 14.0, 20.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_r1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let wall_r1 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 4.0, 30.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_r2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let wall_r2 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 8.0, 25.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_r3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let wall_r3 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 14.0, 20.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let terrace_l1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let terrace_l1 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 12.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let terrace_l2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let terrace_l2 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 8.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let terrace_r1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let terrace_r1 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 12.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let terrace_r2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let terrace_r2 = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.5, 0.2, 8.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let mesa = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let mesa = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [10.0, 12.0, 8.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let tent_a = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let tent_a = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.8, 0.6, 1.2],
-            )))
-            .as_mesh()
-            .unwrap();
-        let tent_b = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let tent_b = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.9, 0.7, 1.3],
-            )))
-            .as_mesh()
-            .unwrap();
-        let tent_c = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let tent_c = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.7, 0.55, 1.1],
-            )))
-            .as_mesh()
-            .unwrap();
-        let firepit = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.2)))
-            .as_mesh()
-            .unwrap();
+            ));
+        let firepit = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.2));
 
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             valley_floor,
             mat,
             glam::Mat4::IDENTITY,
             35.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_l1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-12.0, 4.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_l2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-18.0, 8.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_l3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-24.0, 14.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_r1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(12.0, 4.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_r2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(18.0, 8.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_r3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(24.0, 14.0, 0.0)),
             20.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             terrace_l1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-13.5, 8.1, -2.0)),
             10.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             terrace_l2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-19.5, 16.1, -4.0)),
             8.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             terrace_r1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(13.5, 8.1, -2.0)),
             10.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             terrace_r2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(19.5, 16.1, -4.0)),
             8.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             mesa,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(3.0, 12.0, -38.0)),
             14.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             tent_a,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.5, 0.6, 8.0)),
             1.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             tent_b,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.7, 7.5)),
             1.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             tent_c,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.8, 0.55, 8.5)),
             1.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             firepit,
             fire_mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.15, 9.5)),
@@ -437,54 +351,26 @@ impl ApplicationHandler for App {
 
         let fire_pos = [0.0f32, 0.5, 9.5];
         let moon_dir = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
-        let sun_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
-                [-0.0, -1.0, -0.5],
-                [1.0, 0.9, 0.7],
-                0.005,
-            )))
-            .as_light()
-            .unwrap();
-        let fire_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                fire_pos,
-                [1.0, 0.45, 0.1],
-                5.0,
-                12.0,
-            )))
-            .as_light()
-            .unwrap();
-        let ember_a_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-0.4, 0.4, 9.2],
-                [1.0, 0.35, 0.05],
-                1.5,
-                5.0,
-            )))
-            .as_light()
-            .unwrap();
-        let ember_b_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [0.4, 0.4, 9.8],
-                [1.0, 0.35, 0.05],
-                1.5,
-                5.0,
-            )))
-            .as_light()
-            .unwrap();
-        let moon_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(directional_light(
-                [moon_dir.x, moon_dir.y, moon_dir.z],
-                [0.5, 0.65, 1.0],
-                0.05,
-            )))
-            .as_light()
-            .unwrap();
+        let sun_light_id = spawn_light(
+            &mut scene_db.world,
+            directional_light([-0.0, -1.0, -0.5], [1.0, 0.9, 0.7], 0.005),
+        );
+        let fire_light_id = spawn_light(
+            &mut scene_db.world,
+            point_light(fire_pos, [1.0, 0.45, 0.1], 5.0, 12.0),
+        );
+        let ember_a_id = spawn_light(
+            &mut scene_db.world,
+            point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0),
+        );
+        let ember_b_id = spawn_light(
+            &mut scene_db.world,
+            point_light([0.4, 0.4, 9.8], [1.0, 0.35, 0.05], 1.5, 5.0),
+        );
+        let moon_light_id = spawn_light(
+            &mut scene_db.world,
+            directional_light([moon_dir.x, moon_dir.y, moon_dir.z], [0.5, 0.65, 1.0], 0.05),
+        );
         renderer.set_ambient([0.6, 0.55, 0.45], 0.08);
         renderer.set_clear_color([0.45, 0.6, 0.85, 1.0]);
 
@@ -497,6 +383,7 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             start_time: std::time::Instant::now(),
+            scene_db,
             cam_pos: glam::Vec3::new(0.0, 4.0, 25.0),
             cam_yaw: 0.0,
             cam_pitch: -0.15,
@@ -682,11 +569,13 @@ impl AppState {
         let flicker = 1.0 + (time * 13.1).sin() * 0.08 + (time * 7.3).cos() * 0.05;
         let fire_pos = [0.0f32, 0.5, 9.5];
 
-        let _ = self.renderer.scene_mut().update_light(
+        update_light(
+            &mut self.scene_db.world,
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.4).max(0.005)),
         );
-        let _ = self.renderer.scene_mut().update_light(
+        update_light(
+            &mut self.scene_db.world,
             self.fire_light_id,
             point_light(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0),
         );
@@ -698,6 +587,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

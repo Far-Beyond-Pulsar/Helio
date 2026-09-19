@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-shadow-matrix = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }

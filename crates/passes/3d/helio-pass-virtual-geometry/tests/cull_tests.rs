@@ -100,7 +100,7 @@ fn browser_shader_variants_parse_and_validate() {
                 "binding_array<sampler, 256>",
                 &format!("binding_array<sampler, {MAX_TEXTURES}>"),
             );
-        libhelio::shader::apply_webgpu_material_bindings(&source, MAX_TEXTURES)
+        helio_mats::apply_webgpu_material_bindings(&source, MAX_TEXTURES)
     };
 
     let gbuffer = fix_material_shader(include_str!(

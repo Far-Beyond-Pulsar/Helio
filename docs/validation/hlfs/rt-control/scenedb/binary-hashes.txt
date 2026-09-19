@@ -1,0 +1,8 @@
+
+Algorithm : SHA256
+Hash      : 9FD4D587DB46DE18018463C77ED12054E9603D26C3E5C5ED33E44D825848567F
+Path      : C:\Users\thiag\Documents\GitHub\Helio\target\rt-presampled-final.exe
+
+Algorithm : SHA256
+Hash      : 4FF0D1202B572DB10BFD57197997BA8EC9E052461C2A9BBBA90CB5DA5D222F82
+Path      : C:\Users\thiag\Documents\GitHub\Helio\target\rt-scenedb-final.exe

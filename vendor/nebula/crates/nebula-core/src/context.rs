@@ -5,7 +5,7 @@ use std::sync::Arc;
 /// based on the GPU vendor / limits without holding a reference to the adapter.
 #[derive(Clone, Debug)]
 pub struct AdapterInfo {
-    pub name:   String,
+    pub name: String,
     pub vendor: u32,
     pub limits: wgpu::Limits,
 }
@@ -13,7 +13,7 @@ pub struct AdapterInfo {
 impl AdapterInfo {
     fn from_wgpu(info: &wgpu::AdapterInfo, limits: wgpu::Limits) -> Self {
         Self {
-            name:   info.name.clone(),
+            name: info.name.clone(),
             vendor: info.vendor,
             limits,
         }
@@ -35,8 +35,8 @@ impl AdapterInfo {
 /// ```
 #[derive(Clone)]
 pub struct BakeContext {
-    pub device:       Arc<wgpu::Device>,
-    pub queue:        Arc<wgpu::Queue>,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     pub adapter_info: AdapterInfo,
 }
 
@@ -59,28 +59,26 @@ impl BakeContext {
             .await
             .map_err(|e| NebulaError::Gpu(e.to_string()))?;
 
-        let adapter_info       = adapter.get_info();
-        let adapter_limits     = adapter.limits();
+        let adapter_info = adapter.get_info();
+        let adapter_limits = adapter.limits();
 
         let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label:                Some("nebula-bake-device"),
-                    required_features:    wgpu::Features::TEXTURE_BINDING_ARRAY
-                        | wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
-                        | wgpu::Features::BUFFER_BINDING_ARRAY,
-                    required_limits:      adapter_limits.clone(),
-                    memory_hints:         wgpu::MemoryHints::Performance,
-                    experimental_features: Default::default(),
-                    trace:                wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("nebula-bake-device"),
+                required_features: wgpu::Features::TEXTURE_BINDING_ARRAY
+                    | wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
+                    | wgpu::Features::BUFFER_BINDING_ARRAY,
+                required_limits: adapter_limits.clone(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                experimental_features: Default::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(|e: wgpu::RequestDeviceError| NebulaError::Gpu(e.to_string()))?;
 
         Ok(Self {
-            device:       Arc::new(device),
-            queue:        Arc::new(queue),
+            device: Arc::new(device),
+            queue: Arc::new(queue),
             adapter_info: AdapterInfo::from_wgpu(&adapter_info, adapter_limits),
         })
     }
@@ -88,16 +86,20 @@ impl BakeContext {
     /// Borrow an existing renderer device instead of creating a new one.
     /// This is the preferred path when running inside the Helio editor.
     pub fn from_wgpu(
-        device:       Arc<wgpu::Device>,
-        queue:        Arc<wgpu::Queue>,
-        name:   String,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        name: String,
         vendor: u32,
         limits: wgpu::Limits,
     ) -> Self {
         Self {
             device,
             queue,
-            adapter_info: AdapterInfo { name, vendor, limits },
+            adapter_info: AdapterInfo {
+                name,
+                vendor,
+                limits,
+            },
         }
     }
 }

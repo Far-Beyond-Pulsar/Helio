@@ -5,10 +5,20 @@ edition = "2021"
 description = "Helio render pass: helio-pass-gbuffer"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
-helio      = { workspace = true }
+pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
-libhelio  = { workspace = true }
+helio-mats  = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
+helio-pass-radiance-cascades = { workspace = true }
+glam      = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 log       = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
+serde_json = { workspace = true }

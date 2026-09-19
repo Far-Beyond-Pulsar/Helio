@@ -6,7 +6,12 @@ description = "Helio render pass: helio-pass-deferred-light"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
-libhelio  = { workspace = true }
+helio-mats  = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
+helio-pass-radiance-cascades = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }

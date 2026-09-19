@@ -27,13 +27,13 @@
 //! placement. Deferred, not overlooked.
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use helio::{Renderer, WaterVolumeDescriptor};
+use helio_pass_water_sim::GpuWaterVolume;
 use pulsar_reflection::{
     get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::subsystems::WaterVolumeCache;
+use crate::subsystems::PendingWorldWrites;
 
 pub const WATER_VOLUME_CLASS_NAME: &str = "WaterVolumeComponent";
 
@@ -235,47 +235,26 @@ impl Default for WaterVolumeComponent {
 }
 
 impl WaterVolumeComponent {
-    fn to_descriptor(&self, owner: &RuntimeComponentOwner) -> WaterVolumeDescriptor {
+    fn to_gpu(&self, owner: &RuntimeComponentOwner) -> GpuWaterVolume {
         let [cx, cy, cz] = owner.position;
         let [sx, sy, sz] = self.size;
-        WaterVolumeDescriptor {
-            bounds_min: [cx - sx * 0.5, cy - sy * 0.5, cz - sz * 0.5],
-            bounds_max: [cx + sx * 0.5, cy + sy * 0.5, cz + sz * 0.5],
-            surface_height: cy + self.surface_height_offset,
-            wave_amplitude: self.wave_amplitude,
-            wave_frequency: self.wave_frequency,
-            wave_speed: self.wave_speed,
-            wave_direction: [self.wave_direction_x, self.wave_direction_z],
-            wave_steepness: self.wave_steepness,
-            water_color: self.water_color,
-            extinction: self.extinction,
-            foam_threshold: self.foam_threshold,
-            foam_amount: self.foam_amount,
-            reflection_strength: self.reflection_strength,
-            refraction_strength: self.refraction_strength,
-            fresnel_power: self.fresnel_power,
-            caustics_enabled: self.caustics_enabled,
-            caustics_intensity: self.caustics_intensity,
-            caustics_scale: self.caustics_scale,
-            caustics_speed: self.caustics_speed,
-            fog_density: self.fog_density,
-            god_rays_intensity: self.god_rays_intensity,
-            ssr_enabled: self.ssr_enabled,
-            ssr_steps: self.ssr_steps.max(0) as u32,
-            ssr_step_size: self.ssr_step_size,
-            ssr_thickness: self.ssr_thickness,
-            ior: self.ior,
-            fresnel_min: self.fresnel_min,
-            density: self.density,
-            shadow_rim: self.shadow_rim,
-            shadow_hitbox: self.shadow_hitbox,
-            shadow_ao: self.shadow_ao,
-            sun_direction: self.sun_direction,
-            wave_spring: self.wave_spring,
-            wave_damping: self.wave_damping,
-            wind_direction: [self.wind_direction_x, self.wind_direction_z],
-            wind_strength: self.wind_strength,
-            wave_scale: self.wave_scale,
+        GpuWaterVolume {
+            bounds_min: [cx - sx * 0.5, cy - sy * 0.5, cz - sz * 0.5, 0.0],
+            bounds_max: [cx + sx * 0.5, cy + sy * 0.5, cz + sz * 0.5, cy + self.surface_height_offset],
+            wave_params: [self.wave_amplitude, self.wave_frequency, self.wave_speed, self.wave_steepness],
+            wave_direction: [self.wave_direction_x, self.wave_direction_z, 0.0, 0.0],
+            water_color: [self.water_color[0], self.water_color[1], self.water_color[2], self.foam_threshold],
+            extinction: [self.extinction[0], self.extinction[1], self.extinction[2], self.foam_amount],
+            reflection_refraction: [self.reflection_strength, self.refraction_strength, self.fresnel_power, 0.0],
+            caustics_params: [self.caustics_enabled as u32 as f32, self.caustics_intensity, self.caustics_scale, self.caustics_speed],
+            fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
+            sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
+            shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
+            sun_direction: [self.sun_direction[0], self.sun_direction[1], self.sun_direction[2], 0.0],
+            ssr_params: [self.ssr_enabled as u32 as f32, self.ssr_steps.max(0) as f32, self.ssr_step_size, self.ssr_thickness],
+            sim_dynamics: [self.wave_spring, self.wave_damping, 0.0, 0.0],
+            wind_params: [self.wind_direction_x, self.wind_direction_z, self.wind_strength, 0.0],
+            _pad6: [0.0; 4],
         }
     }
 }
@@ -291,34 +270,30 @@ impl ComponentRuntimeBehavior for WaterVolumeComponent {
         component: &Self,
         context: &mut dyn ComponentRuntimeContext,
     ) {
-        let cached_id = get_subsystem!(context, WaterVolumeCache).get(owner.scene_object_id);
-
+        // SceneDB-only: `helio_pass_water_sim::WaterVolumeComponent` is the
+        // only thing `WaterSimPass`/`DeferredLightPass` read. Queued via
+        // `PendingWorldWrites` -- see that type's doc for why `sync_component`
+        // can't `World::insert` directly (it runs under the sync pass's read
+        // lock).
+        let Some(entity) = context
+            .subsystems_mut()
+            .get_mut::<pulsar_scenedb::Entity>()
+            .copied()
+        else {
+            return;
+        };
+        let writes = get_subsystem!(context, PendingWorldWrites);
         if !component.enabled {
-            if let Some(id) = cached_id {
-                let removed = get_subsystem!(context, Renderer).scene_mut().remove_water_volume(id);
-                if removed.is_ok() {
-                    get_subsystem!(context, WaterVolumeCache).remove(owner.scene_object_id);
-                }
-            }
+            writes.push(move |world| {
+                world.remove::<helio_pass_water_sim::WaterVolumeComponent>(entity);
+            });
             return;
         }
-
-        let descriptor = component.to_descriptor(owner);
-
-        match cached_id {
-            Some(id) => {
-                let _ = get_subsystem!(context, Renderer)
-                    .scene_mut()
-                    .update_water_volume(id, descriptor);
-            }
-            None => {
-                let inserted = get_subsystem!(context, Renderer).scene_mut().insert_water_volume(descriptor);
-                if let Ok(id) = inserted {
-                    get_subsystem!(context, WaterVolumeCache)
-                        .insert(owner.scene_object_id.to_string(), id);
-                }
-            }
-        }
+        let gpu = component.to_gpu(owner);
+        let packed = helio_pass_water_sim::WaterVolumeComponent::from(gpu);
+        writes.push(move |world| {
+            world.insert(entity, packed);
+        });
     }
 }
 
@@ -373,17 +348,16 @@ mod tests {
         let mut o = owner(&props);
         o.position = [5.0, 1.0, -5.0];
 
-        let descriptor = component.to_descriptor(&o);
+        let descriptor = component.to_gpu(&o);
 
-        assert_eq!(descriptor.bounds_min, [0.0, -1.0, -10.0]);
-        assert_eq!(descriptor.bounds_max, [10.0, 3.0, 0.0]);
-        assert_eq!(descriptor.surface_height, 1.0);
+        assert_eq!(&descriptor.bounds_min[0..3], &[0.0, -1.0, -10.0]);
+        assert_eq!(&descriptor.bounds_max[0..3], &[10.0, 3.0, 0.0]);
+        assert_eq!(descriptor.bounds_max[3], 1.0);
     }
 
     #[test]
     fn disabling_a_never_inserted_volume_is_a_quiet_no_op() {
         let mut subsystems = Subsystems::new();
-        subsystems.register(WaterVolumeCache::new());
         let mut context = TestRuntimeContext {
             project_root: PathBuf::from("."),
             subsystems,

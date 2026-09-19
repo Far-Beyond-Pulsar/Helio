@@ -32,13 +32,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use helio_core::{GpuScene, RenderGraph};
+use helio_core::RenderGraph;
 use helio_pass_radiance_cascades_2d::{
     RadianceCascades2DPass, RadianceCascadesCompositePass, RadianceCascadesConfig,
 };
 use helio_pass_sprite_batch::{SpriteBatchPass, SpriteHandle, SpriteInstance};
 use helio_pass_sprite_cull::SpriteCullPass;
 use image::RgbaImage;
+
+mod sprite_scene_input;
+use sprite_scene_input::SceneInputAdapter;
 
 use winit::{
     application::ApplicationHandler,
@@ -834,7 +837,7 @@ struct HotbarSlot {
 }
 
 fn place_prop(
-    sprite_pass: &mut SpriteBatchPass,
+    scene: &mut SceneInputAdapter,
     atlas: &HashMap<String, PackedSprite>,
     atlas_layer: u32,
     objects: &mut HashMap<SpriteHandle, Breakable>,
@@ -849,7 +852,7 @@ fn place_prop(
     let top = surface_top_world_y(col);
     let uv = if flip { flip_u(s.uv) } else { s.uv };
     let pos = [x, top + s.h * 0.5 + y_offset];
-    let handle = sprite_pass.insert_sprite(
+    let handle = scene.insert_sprite(
         SpriteInstance::new(pos, [s.w, s.h])
             .with_uv_rect(uv)
             .with_depth(depth)
@@ -873,7 +876,7 @@ fn place_prop(
 /// listed sprite appears exactly once, never overlapping its neighbor.
 /// Returns the cursor position after the last item, for chaining rows.
 fn lay_row(
-    sprite_pass: &mut SpriteBatchPass,
+    scene: &mut SceneInputAdapter,
     atlas: &HashMap<String, PackedSprite>,
     atlas_layer: u32,
     objects: &mut HashMap<SpriteHandle, Breakable>,
@@ -887,7 +890,7 @@ fn lay_row(
         let s = atlas[name];
         cursor += s.w * 0.5;
         place_prop(
-            sprite_pass,
+            scene,
             atlas,
             atlas_layer,
             objects,
@@ -908,7 +911,7 @@ fn lay_row(
 /// category stays visually grouped where it thematically belongs.
 #[allow(clippy::too_many_arguments)]
 fn scatter_band(
-    sprite_pass: &mut SpriteBatchPass,
+    scene: &mut SceneInputAdapter,
     atlas: &HashMap<String, PackedSprite>,
     atlas_layer: u32,
     objects: &mut HashMap<SpriteHandle, Breakable>,
@@ -938,7 +941,7 @@ fn scatter_band(
                 let flip = rng.bool();
                 let uv = if flip { flip_u(s.uv) } else { s.uv };
                 let pos = [x, top + s.h * 0.5];
-                let handle = sprite_pass.insert_sprite(
+                let handle = scene.insert_sprite(
                     SpriteInstance::new(pos, [s.w, s.h])
                         .with_uv_rect(uv)
                         .with_depth(depth)
@@ -961,7 +964,7 @@ fn scatter_band(
                     .get(&frames[0])
                     .expect("critter frame missing from atlas");
                 let base_pos = [x, top + s.h * 0.5];
-                let handle = sprite_pass.insert_sprite(
+                let handle = scene.insert_sprite(
                     SpriteInstance::new(base_pos, [s.w, s.h])
                         .with_uv_rect(s.uv)
                         .with_depth(depth)
@@ -989,7 +992,7 @@ fn scatter_band(
             Animated::Item => {
                 let s = atlas[name];
                 let base_pos = [x, top + s.h * 0.5 + 10.0];
-                let handle = sprite_pass.insert_sprite(
+                let handle = scene.insert_sprite(
                     SpriteInstance::new(base_pos, [s.w, s.h])
                         .with_uv_rect(s.uv)
                         .with_depth(depth)
@@ -1020,7 +1023,7 @@ fn scatter_band(
 /// Places one complete tree by rendering its three depth layers (suffix _0/_1/_2)
 /// at the same world XY position, back-to-front (depth 0.02 apart).
 fn place_tree(
-    sprite_pass: &mut SpriteBatchPass,
+    scene: &mut SceneInputAdapter,
     atlas: &HashMap<String, PackedSprite>,
     atlas_layer: u32,
     objects: &mut HashMap<SpriteHandle, Breakable>,
@@ -1037,7 +1040,7 @@ fn place_tree(
         let uv = if flip { flip_u(s.uv) } else { s.uv };
         let pos = [x, top + s.h * 0.5];
         let layer_depth = depth + (2 - i) as f32 * 0.01;
-        let handle = sprite_pass.insert_sprite(
+        let handle = scene.insert_sprite(
             SpriteInstance::new(pos, [s.w, s.h])
                 .with_uv_rect(uv)
                 .with_depth(layer_depth)
@@ -1062,7 +1065,7 @@ fn place_tree(
 /// Scatters trees from `base_names` across `[col_start, col_end)` using `place_tree`.
 #[allow(clippy::too_many_arguments)]
 fn scatter_trees(
-    sprite_pass: &mut SpriteBatchPass,
+    scene: &mut SceneInputAdapter,
     atlas: &HashMap<String, PackedSprite>,
     atlas_layer: u32,
     objects: &mut HashMap<SpriteHandle, Breakable>,
@@ -1083,7 +1086,7 @@ fn scatter_trees(
         let base = base_names[rng.range_usize(base_names.len())];
         let flip = rng.bool();
         place_tree(
-            sprite_pass,
+            scene,
             atlas,
             atlas_layer,
             objects,
@@ -1157,7 +1160,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     graph: RenderGraph,
-    scene: GpuScene,
+    scene: SceneInputAdapter,
     dummy_depth_view: wgpu::TextureView,
 
     atlas: HashMap<String, PackedSprite>,
@@ -1296,6 +1299,7 @@ impl ApplicationHandler for App {
 
         let mut graph = RenderGraph::new(&device, &queue);
         let mut sprite_pass = SpriteBatchPass::new(&device, &queue, format);
+        let mut scene = SceneInputAdapter::new(device.clone(), queue.clone());
         sprite_pass.set_clear_color(Some(wgpu::Color {
             r: 0.42,
             g: 0.70,
@@ -1371,7 +1375,7 @@ impl ApplicationHandler for App {
             } else {
                 (grass_uv, "tile_1_1")
             };
-            let handle = sprite_pass.insert_sprite(
+            let handle = scene.insert_sprite(
                 SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
                     .with_uv_rect(surface_uv)
                     .with_color([jitter, jitter, jitter, 1.0])
@@ -1410,7 +1414,7 @@ impl ApplicationHandler for App {
                     let j = 0.9 + hash01(col as u32 * 17 + r as u32 * 53) * 0.2;
                     [j, j, j, 1.0]
                 };
-                let handle = sprite_pass.insert_sprite(
+                let handle = scene.insert_sprite(
                     SpriteInstance::new(pos, [TILE + 1.0, TILE + 1.0])
                         .with_uv_rect(uv)
                         .with_color(color)
@@ -1452,7 +1456,7 @@ impl ApplicationHandler for App {
         macro_rules! scatter {
             ($start:expr, $end:expr, $step:expr, $names:expr, $anim:expr, $depth:expr) => {
                 scatter_band(
-                    &mut sprite_pass,
+                    &mut scene,
                     &atlas,
                     atlas_layer,
                     &mut objects,
@@ -1476,7 +1480,7 @@ impl ApplicationHandler for App {
         // ── Forest A: green trees spaced generously (they are wide clusters),
         // bushy ground cover, and a little wildlife.
         scatter_trees(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1508,7 +1512,7 @@ impl ApplicationHandler for App {
         let village_x = VILLAGE_COL as f32 * TILE;
         let cabin_spr = atlas["cabin"];
         let building = place_prop(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1519,7 +1523,7 @@ impl ApplicationHandler for App {
             -TILE,
         );
         lay_row(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1531,7 +1535,7 @@ impl ApplicationHandler for App {
 
         // ── Mining zone: dark trees and bushes (no structures).
         scatter_trees(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1553,7 +1557,7 @@ impl ApplicationHandler for App {
 
         // ── Monster den: dark + red trees for atmosphere, mobs.
         scatter_trees(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1576,7 +1580,7 @@ impl ApplicationHandler for App {
         // ── Forest B: a second, wilder patch of woods with a big green
         // landmark tree centred on the hut column.
         scatter_trees(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1604,7 +1608,7 @@ impl ApplicationHandler for App {
             0.3
         );
         place_tree(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1616,7 +1620,7 @@ impl ApplicationHandler for App {
 
         // ── Market / tail: golden and yellow autumn trees + bushes.
         scatter_trees(
-            &mut sprite_pass,
+            &mut scene,
             &atlas,
             atlas_layer,
             &mut objects,
@@ -1717,7 +1721,7 @@ impl ApplicationHandler for App {
             spawn_col as f32 * TILE,
             surface_top_world_y(spawn_col) + player_spr.h * PLAYER_SCALE * 0.5,
         ];
-        let player_handle = sprite_pass.insert_sprite(
+        let player_handle = scene.insert_sprite(
             SpriteInstance::new(
                 player_pos,
                 [player_spr.w * PLAYER_SCALE, player_spr.h * PLAYER_SCALE],
@@ -1734,7 +1738,7 @@ impl ApplicationHandler for App {
         let bg_spr = atlas["background"];
         let bg_scale = (size.height as f32 / bg_spr.h).max(2.0) * 1.1;
         let bg_draw = [bg_spr.w * bg_scale, bg_spr.h * bg_scale];
-        let bg_handle = sprite_pass.insert_sprite(
+        let bg_handle = scene.insert_sprite(
             SpriteInstance::new([bg_draw[0] * 0.5, size.height as f32 * 0.5], bg_draw)
                 .with_uv_rect(bg_spr.uv)
                 .with_depth(-10.0)
@@ -1748,7 +1752,7 @@ impl ApplicationHandler for App {
         graph.add_pass(Box::new(radiance_composite));
         graph.lock(size.width.max(1), size.height.max(1));
 
-        let scene = GpuScene::new(device.clone(), queue.clone());
+        scene.sync();
         let dummy_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Dummy Depth (unused by 2D passes)"),
             size: wgpu::Extent3d {
@@ -1870,11 +1874,7 @@ impl ApplicationHandler for App {
                 (MouseButton::Left, ElementState::Released) => {
                     if let Some(b) = state.breaking.take() {
                         if let Some(ch) = b.crack_handle {
-                            state
-                                .graph
-                                .find_pass_mut::<SpriteBatchPass>()
-                                .expect("sprite batch pass missing from graph")
-                                .remove_sprite(ch);
+                            state.scene.remove_sprite(ch);
                         }
                     }
                 }
@@ -1892,11 +1892,7 @@ impl ApplicationHandler for App {
                         };
                         let snapped = [(world[0] / TILE).round() * TILE, world[1]];
                         let atlas_layer = state.atlas_layer;
-                        let sprite_pass = state
-                            .graph
-                            .find_pass_mut::<SpriteBatchPass>()
-                            .expect("sprite batch pass missing from graph");
-                        let handle = sprite_pass.insert_sprite(
+                        let handle = state.scene.insert_sprite(
                             SpriteInstance::new(snapped, [w, h])
                                 .with_uv_rect(uv)
                                 .with_depth(0.2)
@@ -1915,7 +1911,7 @@ impl ApplicationHandler for App {
                         state.hotbar[sel].count -= 1;
                         if state.hotbar[sel].count == 0 {
                             let removed = state.hotbar.remove(sel);
-                            sprite_pass.remove_sprite(removed.handle);
+                            state.scene.remove_sprite(removed.handle);
                             if state.hotbar_selected >= state.hotbar.len() {
                                 state.hotbar_selected = state.hotbar.len().saturating_sub(1);
                             }
@@ -1943,11 +1939,6 @@ impl ApplicationHandler for App {
                 let dt = (now - state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
                 let time = state.start_time.elapsed().as_secs_f32();
-
-                let sprite_pass = state
-                    .graph
-                    .find_pass_mut::<SpriteBatchPass>()
-                    .expect("sprite batch pass missing from graph");
                 let atlas_layer = state.atlas_layer;
 
                 // ── Mining: advance the crack overlay, or finalize a break.
@@ -1966,9 +1957,9 @@ impl ApplicationHandler for App {
                                     .with_depth(breaking.target.depth + 0.01)
                                     .with_atlas_layer(atlas_layer);
                             match breaking.crack_handle {
-                                Some(ch) => sprite_pass.update_sprite(ch, inst),
+                                Some(ch) => state.scene.update_sprite(ch, inst),
                                 None => {
-                                    breaking.crack_handle = Some(sprite_pass.insert_sprite(inst))
+                                    breaking.crack_handle = Some(state.scene.insert_sprite(inst))
                                 }
                             }
                         }
@@ -1977,9 +1968,9 @@ impl ApplicationHandler for App {
                 }
                 if should_finish {
                     let breaking = state.breaking.take().unwrap();
-                    sprite_pass.remove_sprite(breaking.handle);
+                    state.scene.remove_sprite(breaking.handle);
                     if let Some(ch) = breaking.crack_handle {
-                        sprite_pass.remove_sprite(ch);
+                        state.scene.remove_sprite(ch);
                     }
                     state.objects.remove(&breaking.handle);
                     state.critters.retain(|c| c.handle != breaking.handle);
@@ -2016,7 +2007,7 @@ impl ApplicationHandler for App {
                             index,
                             index + 1,
                         );
-                        let handle = sprite_pass.insert_sprite(
+                        let handle = state.scene.insert_sprite(
                             SpriteInstance::new(pos, [HOTBAR_ICON_SIZE, HOTBAR_ICON_SIZE])
                                 .with_uv_rect(s.uv)
                                 .with_depth(0.9)
@@ -2102,7 +2093,7 @@ impl ApplicationHandler for App {
                     flip_u(spr.uv)
                 };
                 let player_pos = state.player_pos;
-                sprite_pass.update_sprite(
+                state.scene.update_sprite(
                     state.player_handle,
                     SpriteInstance::new(player_pos, [spr.w * PLAYER_SCALE, spr.h * PLAYER_SCALE])
                         .with_uv_rect(uv)
@@ -2115,7 +2106,7 @@ impl ApplicationHandler for App {
                     let spr = state.atlas[&c.frames[frame_idx]];
                     let mut pos = c.base_pos;
                     pos[1] += (time * 2.0 + c.phase).sin() * 6.0;
-                    sprite_pass.update_sprite(
+                    state.scene.update_sprite(
                         c.handle,
                         SpriteInstance::new(pos, [spr.w, spr.h])
                             .with_uv_rect(spr.uv)
@@ -2126,7 +2117,7 @@ impl ApplicationHandler for App {
                 for it in &state.items {
                     let mut pos = it.base_pos;
                     pos[1] += (time * 1.5 + it.phase).sin() * 4.0;
-                    sprite_pass.update_sprite(
+                    state.scene.update_sprite(
                         it.handle,
                         SpriteInstance::new(pos, [it.spr.w, it.spr.h])
                             .with_uv_rect(it.spr.uv)
@@ -2155,7 +2146,7 @@ impl ApplicationHandler for App {
                     // upper ~35 % of the screen (Y-up: add half window height)
                     state.camera_center[1] + state.window_size.1 as f32 * 0.35,
                 ];
-                sprite_pass.update_sprite(
+                state.scene.update_sprite(
                     state.bg_handle,
                     SpriteInstance::new(bg_pos, bg_size)
                         .with_uv_rect(state.bg_uv)
@@ -2174,7 +2165,7 @@ impl ApplicationHandler for App {
                     } else {
                         [1.0, 1.0, 1.0, 1.0]
                     };
-                    sprite_pass.update_sprite(
+                    state.scene.update_sprite(
                         slot.handle,
                         SpriteInstance::new(pos, [HOTBAR_ICON_SIZE, HOTBAR_ICON_SIZE])
                             .with_uv_rect(slot.uv)
@@ -2184,6 +2175,10 @@ impl ApplicationHandler for App {
                     );
                 }
 
+                let sprite_pass = state
+                    .graph
+                    .find_pass_mut::<SpriteBatchPass>()
+                    .expect("sprite batch pass missing from graph");
                 let (win_w, win_h) = state.window_size;
                 sprite_pass.set_camera(
                     state.camera_center,
@@ -2228,6 +2223,7 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = output.texture.create_view(&Default::default());
+                state.scene.sync();
                 if let Err(e) = state
                     .graph
                     .execute(&state.scene, &view, &state.dummy_depth_view)

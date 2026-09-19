@@ -23,4 +23,4 @@ wgpu = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-libhelio = { workspace = true }
+helio-core = { workspace = true }

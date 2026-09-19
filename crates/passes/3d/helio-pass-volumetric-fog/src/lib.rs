@@ -35,6 +35,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod components;
+pub use components::{FogComponent, FogSceneBinding};
+
 /// Froxel grid dimensions.
 ///
 /// 160x90 keeps the 16:9 aspect so froxels stay roughly square on screen; 64
@@ -274,7 +277,7 @@ impl VolumetricFogPass {
 
         let fog_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Volumetric Fog Uniforms"),
-            size: libhelio::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
+            size: helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -358,19 +361,18 @@ impl RenderPass for VolumetricFogPass {
         &["fog_accum"]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // The graph's pool is 2D-only, so this texture is pass-owned and handed
         // over here rather than routed by name.
-        frame
-            .fog_accum
-            .write(&self.integrated_view, "VolumetricFogPass");
+        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.integrated_view) };
+        frame.write_texture_view(helio_core::ResourceKey::new("fog_accum"), view, "VolumetricFogPass");
     }
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -384,8 +386,15 @@ impl RenderPass for VolumetricFogPass {
         self.frame = ctx.frame_num as u32;
 
         let globals = FogGlobals {
-            csm_splits: libhelio::CSM_SPLITS,
-            light_count: ctx.scene.lights.len() as u32,
+            csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
+            light_count: if ctx
+                .scene_buffers
+                .contains(helio_core::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
@@ -396,28 +405,28 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(postprocess_buf) = ctx.resources.postprocess_uniforms.get() else {
+        let Some(postprocess_buf) = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
-        let Some(shadow_atlas) = ctx.resources.shadow_atlas.get() else {
+        let Some(shadow_atlas) = ctx.resources.get(helio_core::ResourceKey::new("shadow_atlas")) else {
             return Ok(());
         };
 
-        let camera_buf = ctx.scene.camera;
-        let lights_buf = ctx.scene.lights;
-        let shadow_matrices = ctx.scene.shadow_matrices;
+        let camera_buf = ctx.camera;
+        let lights_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(ctx.camera);
+        let shadow_matrices = ctx.resources.read::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices"), "VolumetricFogPass").map(|s| s.shadow_matrices).unwrap_or(ctx.camera);
 
         // Swap the ping-pong: last frame's write target is this frame's history.
         self.write_idx ^= 1;
         let write_idx = self.write_idx;
         let history_idx = 1 - write_idx;
 
-        let depth_tex = ctx.resources.depth_texture.get().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "VolumetricFogPass requires depth_texture".to_string(),
-            )
-        })?;
-        let depth_tex_ptr = depth_tex as *const _ as usize;
+        let depth_view = ctx.depth;
+        let depth_tex_ptr = depth_view as *const _ as usize;
         let key = (
             shadow_atlas as *const _ as usize,
             lights_buf as *const _ as usize,
@@ -431,7 +440,6 @@ impl RenderPass for VolumetricFogPass {
         }
 
         if self.inject_bg[write_idx].is_none() {
-            let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.inject_bg[write_idx] =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Volumetric Fog Inject BG"),
@@ -540,10 +548,10 @@ impl RenderPass for VolumetricFogPass {
         // keeping PostProcessSettings the single source of truth.
         unsafe { &mut *ce }.copy_buffer_to_buffer(
             postprocess_buf,
-            libhelio::GpuPostProcessUniforms::FOG_BLOCK_OFFSET,
+            helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET,
             &self.fog_uniform_buf,
             0,
-            libhelio::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
+            helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
         );
 
         {

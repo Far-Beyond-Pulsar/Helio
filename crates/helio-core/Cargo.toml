@@ -11,15 +11,21 @@ wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 thiserror = { workspace = true }
-libhelio = { workspace = true }
-helio-voxel-core = { workspace = true }
+pulsar_scenedb = { workspace = true }
+naga = { version = "30.0.0", features = ["wgsl-in"] }
+
+# Pulsar-Profiling fork scopes (same instrumentation the engine flamegraph
+# collects). The fork is std-only, so it is excluded on wasm targets. The
+# module code gates every `profiling::profile_scope!` site with the same cfg.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+profiling = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
-# Matches the naga inside wgpu 30, so tests/wgsl_validation.rs validates shaders
-# exactly as create_shader_module would at runtime.
-naga = { version = "30.0.0", features = ["wgsl-in"] }
+helio-mats = { workspace = true }
+helio-pass-hiz = { workspace = true }
+helio-pass-foliage-place = { workspace = true }
 
 [features]
 default = ["profiling"]
-profiling = []
+profiling = ["dep:profiling"]

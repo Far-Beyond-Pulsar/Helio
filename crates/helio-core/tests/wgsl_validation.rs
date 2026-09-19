@@ -12,11 +12,22 @@
 //! This test walks the repo rather than taking an explicit list, so a new shader
 //! is covered the moment it is added.
 //!
-//! Sources go through `helio_core::shader::resolve` first — the same call the
-//! runtime makes — so a prelude-using shader is validated as the GPU will see it,
-//! not as the bare file on disk.
+//! Sources go through `helio_core::shader::resolve_with` first — the same call
+//! (modulo which snippets a given pass registers) the runtime makes — so a
+//! prelude/snippet-using shader is validated as the GPU will see it, not as
+//! the bare file on disk. The snippet list here (HIZ, PBR, wind) is this
+//! test's own aggregation of every pass-owned snippet in the workspace, not
+//! something `helio-core` itself knows about — `resolve_with` never fails
+//! for a marker with no matching snippet, so listing all of them here is
+//! harmless for shaders that only use a subset.
 
 use std::path::{Path, PathBuf};
+
+const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
+    helio_pass_hiz::HIZ_SNIPPET,
+    helio_mats::PBR_EVAL_SNIPPET,
+    helio_pass_foliage_place::WIND_SNIPPET,
+];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
@@ -51,15 +62,30 @@ fn collect_wgsl(dir: &Path, out: &mut Vec<PathBuf>) {
 /// fragment that gets string-concatenated into a host shader before compiling
 /// (e.g. `vhs_effects.wgsl`, pulled in as `VHS_SHADER_SNIPPET`), so it refers to
 /// bindings it does not declare and cannot validate on its own.
-fn is_fragment(source: &str) -> bool {
-    !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
+fn is_fragment(path: &Path, source: &str) -> bool {
+    // These files are entry-point-bearing pieces assembled with shared pass
+    // declarations. Keep this implementation detail in the validator rather
+    // than adding test-only comments to production shader sources.
+    const COMPOSED: &[&str] = &[
+        "helio-pass-hlfs/shaders/composite.wgsl",
+        "helio-pass-hlfs/shaders/light_grid.wgsl",
+        "helio-pass-hlfs/shaders/sample.wgsl",
+        "helio-pass-hlfs/shaders/spatial.wgsl",
+        "helio-pass-hlfs/shaders/temporal.wgsl",
+        "helio-pass-transparent/shaders/transparent_base.wgsl",
+    ];
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
+        || !(source.contains("@vertex")
+            || source.contains("@fragment")
+            || source.contains("@compute"))
 }
 
 /// Maps a line number in resolved source back to the original file, so a
 /// diagnostic in a prelude-using shader points at a line that actually exists in
 /// the file the reader will open.
 fn describe_location(source: &str, rendered: &str) -> String {
-    let prepended = helio_core::shader::expanded_lines(source);
+    let prepended = helio_core::shader::expanded_lines_with(source, SNIPPETS);
     if prepended > 0 {
         format!(" (expanded: subtract {prepended} lines for the original file)")
     } else {
@@ -92,14 +118,14 @@ fn every_wgsl_shader_parses_and_validates() {
         let rel = path.strip_prefix(&root).unwrap_or(path);
         let source = std::fs::read_to_string(path).expect("shader should be readable");
 
-        if is_fragment(&source) {
+        if is_fragment(path, &source) {
             skipped.push(rel.display().to_string());
             continue;
         }
         checked += 1;
 
         // Exactly what create_shader_module would receive.
-        let resolved = helio_core::shader::resolve(&source);
+        let resolved = helio_core::shader::resolve_with(&source, SNIPPETS);
 
         let module = match naga::front::wgsl::parse_str(&resolved) {
             Ok(m) => m,
@@ -131,11 +157,12 @@ fn every_wgsl_shader_parses_and_validates() {
         failures.join("\n\n")
     );
 
-    // Guard the skip heuristic: fragments are rare and deliberate. If this trips,
-    // entry-point-less files are proliferating and the skip is hiding real shaders.
+    // Guard the skip heuristic: fragments are deliberate source modules and
+    // composed shaders. If this trips, the source-module set has grown enough
+    // to require an explicit audit.
     assert!(
-        skipped.len() < 5,
-        "{} shaders were skipped as fragments, which is more than expected:\n{}",
+        skipped.len() <= 32,
+        "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")
     );

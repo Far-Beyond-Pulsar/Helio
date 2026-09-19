@@ -1,5 +1,5 @@
+use crate::{GpuPageMeta, ResidencyConfig, PAGE_CELL_BYTES};
 use crate::{GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform};
-use helio_planet_voxel_core::{GpuPageMeta, ResidencyConfig, PAGE_CELL_BYTES};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanetaryVoxelGpuConfig {
@@ -200,7 +200,7 @@ pub struct GpuAtlasTexturePlan {
 
 impl GpuAtlasTexturePlan {
     fn new(max_resident_pages: u32, max_dimension: u32) -> Result<Self, GpuConfigError> {
-        let page_edge = helio_planet_voxel_core::PAGE_EDGE as u32;
+        let page_edge = crate::PAGE_EDGE as u32;
         let max_tiles = max_dimension / page_edge;
         if max_tiles == 0 {
             return Err(GpuConfigError::DeviceCannotFitPageTexture {
@@ -258,7 +258,7 @@ impl GpuAtlasTexturePlan {
         let tile_x = slot % tiles_x;
         let tile_y = (slot / tiles_x) % tiles_y;
         let tile_z = slot / (tiles_x * tiles_y);
-        let edge = helio_planet_voxel_core::PAGE_EDGE as u32;
+        let edge = crate::PAGE_EDGE as u32;
         Some([tile_x * edge, tile_y * edge, tile_z * edge])
     }
 }

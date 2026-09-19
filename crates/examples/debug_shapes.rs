@@ -1,20 +1,25 @@
-//! Debug Shapes — helio v3
+//! Infinite Grid Debug Scene — helio v3
 //!
 //! The v2 debug drawing primitives (debug_line, debug_sphere, etc.) are
 //! not available in helio v3.  This demo instead displays a gallery of
-//! richly coloured solid-geometry props that showcase the material/light
-//! system while still serving as a visual debugging reference.
+//! richly coloured debug props that showcase the procedural infinite grid,
+//! depth occlusion, world axes, and logarithmic grid LOD.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly  (5 m/s)
 //!   Mouse drag           — look (click to grab cursor)
+//!   The grid is enabled automatically; fly away from the origin to exercise
+//!   its continuous LOD transitions.
 //!   Escape               — release cursor / exit
+
+mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use v3_demo_common::{build_default_renderer, new_scene_db_with_gpu_mirror};
+use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -45,6 +50,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -65,7 +71,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio Debug Shapes (v3)")
+                        .with_title("Helio Infinite Grid Debug Scene")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -120,46 +126,8 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
         renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
         renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
         renderer.set_editor_mode(true);
@@ -171,6 +139,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 3.0, 10.0),
             cam_yaw: 0.0,
@@ -328,8 +297,17 @@ impl AppState {
 
         // Sphere
         let sphere_center = glam::Vec3::new((t * 0.6).cos() * 3.0, 1.0, (t * 0.6).sin() * 3.0);
+            self.renderer
+                .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+
+        // A small depth-occlusion gallery: the grid must disappear behind
+        // these props while remaining visible through the spaces between them.
         self.renderer
-            .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+            .debug_filled_box([-4.0, 1.0, -3.0], 1.0, [0.22, 0.35, 0.85, 0.9]);
+        self.renderer
+            .debug_filled_box([4.0, 1.5, -7.0], 1.5, [0.85, 0.28, 0.22, 0.9]);
+        self.renderer
+            .debug_filled_box([0.0, 0.5, -12.0], 0.5, [0.25, 0.75, 0.35, 0.9]);
 
         // Torus
         let torus_center = glam::Vec3::new((t * 0.4).sin() * 3.0, 1.5, (t * 0.4).cos() * 3.0);
@@ -451,6 +429,7 @@ impl AppState {
             1000.0,
         );
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("render: {:?}", e);
         }

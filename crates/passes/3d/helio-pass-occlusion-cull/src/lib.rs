@@ -7,14 +7,19 @@
 //! `compacted_indices_2`, writing the final per-group visible count into
 //! `indirect[slot * 5 + 1]`. Downstream draws must read `compacted_indices_2`.
 //!
-//! Frame 0 has no Hi-Z pyramid yet, so instead of testing anything it copies
-//! `compacted_indices` straight through to `compacted_indices_2` unchanged.
-//! Bind-group is rebuilt lazily when buffer pointers change (e.g. scene grows).
+//! The first frame that actually has live instances has no Hi-Z pyramid yet,
+//! so instead of testing anything it copies `compacted_indices` straight
+//! through to `compacted_indices_2` unchanged (see `hiz_warmed_up`'s doc for
+//! why this is gated on "first frame with real instances", not `frame_num ==
+//! 0` -- the two are not the same frame). Bind-group is rebuilt lazily when
+//! buffer pointers change (e.g. scene grows).
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+pub use helio_pass_gbuffer::CulledBatchFrameData;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -35,12 +40,22 @@ struct CullParams {
     world_bounds_max_z: f32,
 }
 
+/// Below this many instances, `compacted_indices_2_buf` still allocates at
+/// this floor -- matches `ObjectBatchPass`'s own `MIN_SCRATCH_CAPACITY` idiom.
+const MIN_CAPACITY: u32 = 256;
+
 pub struct OcclusionCullPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
+    /// This pass's own output -- no longer a central `GpuScene` field (see
+    /// `CulledBatchFrameData`'s doc, now in this crate): final (frustum +
+    /// occlusion) surviving instance slots, one `u32` per live instance
+    /// (worst case).
+    compacted_indices_2_buf: wgpu::Buffer,
+    instance_capacity: u32,
 
     /// Placeholder 3D texture used when no static HiZ is loaded.
     placeholder_static_hiz_view: wgpu::TextureView,
@@ -53,6 +68,29 @@ pub struct OcclusionCullPass {
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
+    /// True once this pass has actually run its real Hi-Z test against a
+    /// depth buffer built from a frame that drew real geometry. `frame_num
+    /// == 0` is NOT an equivalent condition: `batch.draw_count` comes from
+    /// `ObjectBatchPass`'s own async GPU->CPU readback of its compute
+    /// results, which lags a frame behind the GPU work that produced it --
+    /// on frame 0 it reads 0 regardless of how many objects were actually
+    /// spawned, so `execute()`'s `draw_count == 0` early-out fires before
+    /// the frame-0 bypass below ever runs. The bypass then never executes,
+    /// `compacted_indices_2_buf` stays zeroed, and the very first real
+    /// dispatch (frame 1) Hi-Z-tests against a pyramid built from frame 0's
+    /// EMPTY depth buffer (nothing was drawn, so nothing was written to
+    /// it) -- in reversed-Z that background clears to 0.0/far, so every
+    /// real object's near-depth reads as "closer than the empty
+    /// background" and gets marked occluded. Occlusion culling mutates
+    /// `indirect_dispatch.indirect` in place, so that zeroes every
+    /// instance count; the next frame's depth buffer is then ALSO empty
+    /// (nothing drew), and the cycle never recovers -- a permanent
+    /// deadlock, not a one-frame glitch. Gating the bypass on "have I ever
+    /// dispatched a real test" instead of "is this frame_num 0" fixes it:
+    /// the bypass now runs on whichever frame is actually first to see
+    /// `draw_count > 0`, guaranteeing real geometry lands in depth before
+    /// Hi-Z testing ever reads from it.
+    hiz_warmed_up: bool,
     /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view,
     /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2,
     /// coordinate_spaces)
@@ -286,28 +324,54 @@ impl OcclusionCullPass {
             cache: None,
         });
 
+        let compacted_indices_2_buf = create_compacted_indices_2_buf(device, MIN_CAPACITY);
+
         Self {
             pipeline,
             bgl,
             cull_params_buf,
             hiz_sampler,
             cull_stats_buf,
+            compacted_indices_2_buf,
+            instance_capacity: MIN_CAPACITY,
             placeholder_static_hiz_view,
             placeholder_static_hiz_sampler,
             static_hiz_bounds_min: [0.0; 3],
             static_hiz_bounds_max: [0.0; 3],
             static_hiz_grid_resolution: [0; 3],
             bind_group: None,
+            hiz_warmed_up: false,
             bind_group_key: None,
             screen_width,
             screen_height,
         }
     }
 
+    /// Grows `compacted_indices_2_buf` to at least `instance_count` rows
+    /// (next-power-of-two, floor `MIN_CAPACITY`). Returns `true` if it
+    /// reallocated (the caller must then rebuild the bind group).
+    fn ensure_capacity(&mut self, device: &wgpu::Device, instance_count: u32) -> bool {
+        if instance_count <= self.instance_capacity {
+            return false;
+        }
+        self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
+        self.compacted_indices_2_buf =
+            create_compacted_indices_2_buf(device, self.instance_capacity);
+        true
+    }
+
     /// Update internal-resolution dimensions used by cull uniforms.
     pub fn set_screen_size(&mut self, width: u32, height: u32) {
         self.screen_width = width;
         self.screen_height = height;
+    }
+
+    /// Test-only observability for `set_screen_size`'s effect -- lets an
+    /// integration test assert this pass's cull-uniform resolution actually
+    /// tracks the graph's real resolution across a resize, instead of only
+    /// being inferable indirectly from occlusion-test outcomes.
+    pub fn screen_size(&self) -> (u32, u32) {
+        (self.screen_width, self.screen_height)
     }
 
     /// Set the static HiZ voxel grid metadata (called when pre-baked data is loaded).
@@ -323,30 +387,104 @@ impl OcclusionCullPass {
     }
 }
 
+fn create_compacted_indices_2_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("OcclusionCull CompactedIndices2"),
+        size: (capacity as u64 * 4).max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 impl RenderPass for OcclusionCullPass {
     fn name(&self) -> &'static str {
         "OcclusionCull"
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz", "static_hiz", "static_hiz_sampler"]
+        &[
+            "hiz",
+            "static_hiz",
+            "static_hiz_sampler",
+            "object_batch",
+            "indirect_dispatch",
+        ]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["culled_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+        builder.read("indirect_dispatch");
+        builder.write_buffer("culled_batch");
+    }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // `indirect_dispatch.indirect` is mutated IN PLACE by this pass
+        // (its `instance_count` field, refined from frustum-only down to
+        // frustum+occlusion survivors) -- there is no separate owned
+        // `indirect` buffer here, so `culled_batch` simply republishes the
+        // same buffer reference `indirect_dispatch` already holds.
+        //
+        // Plain (non-panicking) lookup: this is legitimately optional (a
+        // graph that omits `IndirectDispatchPass`, e.g. a focused test
+        // graph, has nothing to republish yet) -- the `else { return; }`
+        // below already handles absence gracefully, but `frame.read()`
+        // falls through to a debug-only panic on a missing key before ever
+        // returning `None`, defeating that.
+        let Some(indirect_dispatch) = frame.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+            return;
+        };
+        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
+        frame.write(helio_core::ResourceKey::new("culled_batch"), 
+            crate::CulledBatchFrameData {
+                indirect: indirect_dispatch.indirect,
+                compacted_indices,
+            },
+            "OcclusionCull",
+        );
     }
 
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let static_hiz_available = ctx.frame_resources.static_hiz.is_some();
+        // `set_screen_size` was previously dead code -- nothing called it, so
+        // `screen_width`/`screen_height` stayed frozen at this pass's
+        // construction-time resolution forever, while the "hiz" texture it
+        // samples (graph-pooled) DID get correctly reallocated on resize by
+        // `HiZBuildPass::on_resize`/its own `ctx.resize` handling in
+        // `prepare`. The resulting mismatch corrupts `pick_mip`'s mip-level
+        // math and `screen_radius_px`'s UV footprint sizing against the
+        // pyramid's real dimensions -- mirrors `HiZBuildPass::prepare`'s own
+        // `ctx.resize` sync so both passes agree on the current resolution.
+        if ctx.resize {
+            self.set_screen_size(ctx.width.max(1), ctx.height.max(1));
+        }
+
+        let batch = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
+        let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
+        self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
+
+        // Plain (non-panicking) lookup: "static_hiz" is legitimately optional
+        // (only present once real baked data is loaded via `load_static_hiz`)
+        // -- `read_texture_view` falls through to a debug-only panic on a
+        // missing key, which fires before this `.is_some()` ever sees it.
+        let static_hiz_available = ctx.pass_resources.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.pass_resources.texture_binding("static_hiz"))
+            .is_some();
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
-            draw_count: ctx.scene.draw_calls.len() as u32,
+            draw_count,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
             static_hiz_available: if static_hiz_available { 1 } else { 0 },
             grid_resolution_x: self.static_hiz_grid_resolution[0],
@@ -364,25 +502,48 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(indirect_dispatch) = ctx.resources.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
 
-        // Temporal Hi-Z: frame 0 has no valid pyramid yet — skip real occlusion
-        // testing, but downstream draws always read `compacted_indices_2`, so
-        // pass the frustum-culled list through unchanged instead of leaving it
+        // Temporal Hi-Z: the first frame with real instances has no valid
+        // pyramid yet (see `hiz_warmed_up`'s doc for why this is NOT the
+        // same as `frame_num == 0`) — skip real occlusion testing, but
+        // downstream draws always read `compacted_indices_2`, so pass the
+        // frustum-culled list through unchanged instead of leaving it
         // stale/uninitialized.
-        if ctx.frame_num == 0 {
-            let instance_count = ctx.scene.instance_count as u64;
+        if !self.hiz_warmed_up {
+            let instance_count = batch.instance_count as u64;
             if instance_count > 0 {
                 unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
-                    ctx.scene.compacted_indices,
+                    indirect_dispatch.compacted_indices,
                     0,
-                    ctx.scene.compacted_indices_2,
+                    &self.compacted_indices_2_buf,
                     0,
                     instance_count * 4,
                 );
+            }
+            // Only declare Hi-Z warmed up once real instances actually got
+            // copied through this frame -- that's what guarantees GBuffer
+            // has real geometry to write into depth this frame, which is
+            // the one thing frame N+1's Hi-Z pyramid actually needs to be
+            // valid. If `instance_count` was 0 here (draw_count > 0 but no
+            // live instances yet -- shouldn't normally happen, but this
+            // must not gamble on it), stay un-warmed and retry the bypass
+            // next frame instead of moving on to a real test with nothing
+            // real backing it either.
+            if batch.instance_count > 0 {
+                self.hiz_warmed_up = true;
             }
             return Ok(());
         }
@@ -390,34 +551,33 @@ impl RenderPass for OcclusionCullPass {
         // Lazy bind-group rebuild: rebuild whenever any buffer pointer or the
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
         let hiz_view =
-            ctx.resources.hiz.as_ref().expect(
+            ctx.resources.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
                 "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
             );
 
-        // Resolve static HiZ resources (use placeholder when no pre-baked data is loaded).
-        let static_hiz_view = ctx
-            .resources
-            .static_hiz
-            .get()
+        // Resolve static HiZ resources (use placeholder when no pre-baked data is
+        // loaded). Plain (non-panicking) lookups, same reasoning as `prepare`'s
+        // `static_hiz_available` above -- `read_texture_view`/`read_sampler` fall
+        // through to a debug-only panic on a missing key, which would fire before
+        // `unwrap_or` ever sees it, even though this resource is legitimately optional.
+        let static_hiz_view = ctx.resources.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.resources.texture_binding("static_hiz"))
             .unwrap_or(&self.placeholder_static_hiz_view);
-        let static_hiz_sampler = ctx
-            .resources
-            .static_hiz_sampler
-            .get()
+        let static_hiz_sampler = ctx.resources.get(helio_core::ResourceKey::new("static_hiz_sampler"))
             .unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.instances as *const _ as usize,
-            ctx.scene.draw_calls as *const _ as usize,
-            ctx.scene.indirect as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            batch.instances as *const _ as usize,
+            batch.draw_calls as *const _ as usize,
+            indirect_dispatch.indirect as *const _ as usize,
             hiz_view as *const _ as usize,
             static_hiz_view as *const _ as usize,
             static_hiz_sampler as *const _ as usize,
             &self.cull_stats_buf as *const _ as usize,
-            ctx.scene.compacted_indices as *const _ as usize,
-            ctx.scene.compacted_indices_2 as *const _ as usize,
-            ctx.scene.coordinate_spaces as *const _ as usize,
+            indirect_dispatch.compacted_indices as *const _ as usize,
+            &self.compacted_indices_2_buf as *const _ as usize,
+            coord_data.coordinate_spaces as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -426,7 +586,7 @@ impl RenderPass for OcclusionCullPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -434,11 +594,11 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                        resource: batch.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -450,7 +610,7 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.indirect.as_entire_binding(),
+                        resource: indirect_dispatch.indirect.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
@@ -466,15 +626,15 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                        resource: indirect_dispatch.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 11,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: self.compacted_indices_2_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 12,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

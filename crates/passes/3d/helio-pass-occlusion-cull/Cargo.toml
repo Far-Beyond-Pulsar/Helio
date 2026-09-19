@@ -5,9 +5,13 @@ edition = "2021"
 
 [dependencies]
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-pass-gbuffer = { workspace = true }
+helio-pass-indirect-dispatch = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 pollster = { workspace = true }
+helio-pass-hiz = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+glam = { workspace = true }

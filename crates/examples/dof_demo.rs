@@ -18,12 +18,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
 use v3_demo_common::{
-    box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, sphere_mesh,
+    box_mesh, build_default_renderer, cube_mesh, directional_light, make_material,
+    new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle, sphere_mesh, spawn_light,
+    spawn_material, spawn_mesh, spawn_object,
 };
+use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -56,6 +58,7 @@ struct AppState {
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: glam::Vec3,
@@ -160,85 +163,47 @@ impl ApplicationHandler for App {
 
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
 
         // ── Materials ───────────────────────────────────────────────────
 
-        let red_mat = renderer.scene_mut().insert_material(make_material(
+        let red_mat = spawn_material(&mut scene_db.world, make_material(
             [0.9, 0.15, 0.15, 1.0],
             0.4,
             0.6,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let green_mat = renderer.scene_mut().insert_material(make_material(
+        let green_mat = spawn_material(&mut scene_db.world, make_material(
             [0.15, 0.9, 0.15, 1.0],
             0.4,
             0.6,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let blue_mat = renderer.scene_mut().insert_material(make_material(
+        let blue_mat = spawn_material(&mut scene_db.world, make_material(
             [0.15, 0.3, 0.9, 1.0],
             0.4,
             0.6,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let yellow_mat = renderer.scene_mut().insert_material(make_material(
+        let yellow_mat = spawn_material(&mut scene_db.world, make_material(
             [0.9, 0.85, 0.15, 1.0],
             0.4,
             0.6,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let white_mat = renderer.scene_mut().insert_material(make_material(
+        let white_mat = spawn_material(&mut scene_db.world, make_material(
             [0.85, 0.85, 0.9, 1.0],
             0.7,
             0.3,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let floor_mat = renderer.scene_mut().insert_material(make_material(
+        let floor_mat = spawn_material(&mut scene_db.world, make_material(
             [0.25, 0.25, 0.27, 1.0],
             0.9,
             0.0,
@@ -247,16 +212,12 @@ impl ApplicationHandler for App {
         ));
 
         // ── Floor ───────────────────────────────────────────────────────
-        let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh(
-                [0.0, 0.0, 0.0],
-                SCENE_HALF_Z,
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor = spawn_mesh(&mut scene_db.world, plane_mesh(
+            [0.0, 0.0, 0.0],
+            SCENE_HALF_Z,
+        ));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor,
             floor_mat,
             glam::Mat4::IDENTITY,
@@ -264,16 +225,12 @@ impl ApplicationHandler for App {
         );
 
         // ── Tabletop ────────────────────────────────────────────────────
-        let table = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [8.0, 0.15, SCENE_HALF_Z - 2.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let table = spawn_mesh(&mut scene_db.world, box_mesh(
+            [0.0, 0.0, 0.0],
+            [8.0, 0.15, SCENE_HALF_Z - 2.0],
+        ));
+        let _ = spawn_object(
+            &mut scene_db.world,
             table,
             white_mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, TABLE_Y, 0.0)),
@@ -281,16 +238,8 @@ impl ApplicationHandler for App {
         );
 
         // ── Objects at varying depths ───────────────────────────────────
-        let sphere_m = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0; 3], 0.6)))
-            .as_mesh()
-            .unwrap();
-        let box_m = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0; 3], 0.6)))
-            .as_mesh()
-            .unwrap();
+        let sphere_m = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0; 3], 0.6));
+        let box_m = spawn_mesh(&mut scene_db.world, cube_mesh([0.0; 3], 0.6));
 
         let z_positions: [f32; 9] = [-20.0, -15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0];
         let colors = [&red_mat, &green_mat, &blue_mat, &yellow_mat, &white_mat];
@@ -300,8 +249,8 @@ impl ApplicationHandler for App {
             let mat = colors[i % colors.len()];
             let mesh = shapes[i % shapes.len()];
             let x_offset = ((i as f32) - 4.0) * 1.5;
-            let _ = insert_object(
-                &mut renderer,
+            let _ = spawn_object(
+                &mut scene_db.world,
                 mesh,
                 *mat,
                 glam::Mat4::from_translation(glam::Vec3::new(x_offset, TABLE_Y + 0.7, z)),
@@ -311,10 +260,7 @@ impl ApplicationHandler for App {
 
         // ── Light ───────────────────────────────────────────────────────
         let sun = directional_light([0.5, -1.0, -0.3], [1.0, 0.95, 0.9], 3.0);
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(sun));
-        renderer.set_ambient([0.12, 0.12, 0.15], 0.1);
+        spawn_light(&mut scene_db.world, sun);
 
         print_help();
 
@@ -324,6 +270,7 @@ impl ApplicationHandler for App {
             device,
             surface_format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 1.8, 2.0),
             cam_yaw: 0.0,

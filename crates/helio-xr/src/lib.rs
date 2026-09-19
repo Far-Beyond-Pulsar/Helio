@@ -10,7 +10,7 @@
 //!   runtime's `VkImage`s as wgpu textures.
 //! - [`graphics`]: the [`openxr::Graphics`] trait implementation that ties the
 //!   Vulkan handles managed by wgpu into OpenXR.
-//! - [`camera`]: conversion of per-eye view poses into [`libhelio::GpuCameraUniforms`].
+//! - [`camera`]: conversion of per-eye view poses into [`helio_core::GpuCameraUniforms`].
 //!
 //! The `openxr` crate (0.21) has no built-in wgpu module, so [`graphics`]
 //! implements [`openxr::Graphics`] against the raw Vulkan handles extracted

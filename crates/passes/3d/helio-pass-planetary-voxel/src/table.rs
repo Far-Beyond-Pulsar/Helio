@@ -1,5 +1,5 @@
+use crate::{AddressError, PageKey, PlanetId, PlanetPageKey};
 use bytemuck::{Pod, Zeroable};
-use helio_planet_voxel_core::{AddressError, PageKey, PlanetId, PlanetPageKey};
 
 pub const PAGE_TABLE_EMPTY: u32 = 0;
 pub const PAGE_TABLE_OCCUPIED: u32 = 1;

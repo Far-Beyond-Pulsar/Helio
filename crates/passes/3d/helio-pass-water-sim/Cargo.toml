@@ -3,11 +3,18 @@ name = "helio-pass-water-sim"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
+pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-pass-hiz = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

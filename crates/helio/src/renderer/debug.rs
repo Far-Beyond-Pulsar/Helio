@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use bytemuck::{Pod, Zeroable};
+
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 use super::renderer_impl::{DebugBatch, DebugVertex, Renderer};
@@ -421,7 +423,10 @@ impl DebugPass {
         self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = ctx
+                .resources
+                .get(helio_core::ResourceKey::new("full_res_depth"))
+            {
                 frd
             } else {
                 ctx.depth
@@ -468,12 +473,25 @@ impl RenderPass for DebugPass {
         "DebugDraw"
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        // `pre_aa` is internal-resolution (render-scaled); `target` is full
+        // output resolution. `use_scene_depth` wants internal-res depth
+        // paired with internal-res color, but that pairing only holds when
+        // `pre_aa` is actually available -- if it isn't, color must fall
+        // back to full-res `target` and depth must follow it to
+        // `full_res_depth`, or wgpu rejects the pass for mismatched
+        // attachment extents whenever render_scale < 1.0.
+        let pre_aa = if self.use_scene_depth {
+            resources.get(helio_core::ResourceKey::new("pre_aa"))
+        } else {
+            None
+        };
         let depth_attachment = if self.depth_test_enabled {
             // `full_res_depth` is a dummy: it is allocated so that passes
             // drawing at output resolution have a correctly-sized depth
@@ -482,9 +500,10 @@ impl RenderPass for DebugPass {
             // internal-res scene depth, which means drawing at internal res too
             // — see `use_scene_depth` and BillboardPass::occluded_by_geometry,
             // which makes the same trade.
-            let depth_view = if self.use_scene_depth {
+            let depth_view = if self.use_scene_depth && pre_aa.is_some() {
                 depth
-            } else if let Some(frd) = resources.full_res_depth.get() {
+            } else if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth"))
+            {
                 frd
             } else {
                 depth
@@ -502,13 +521,9 @@ impl RenderPass for DebugPass {
         };
         // Scene depth is internal-res, so the colour target must be too, or the
         // attachments disagree in size.
-        let color_view = if self.use_scene_depth {
-            resources.pre_aa.get().unwrap_or(target)
-        } else {
-            target
-        };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_view = pre_aa.unwrap_or(target);
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -536,7 +551,13 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
         self.ensure_bind_group(ctx.device);
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+            // A parallel worker can legitimately reach an empty/omitted
+            // render pass when the debug targets are unavailable for this
+            // frame. Treat it as a no-op instead of poisoning the worker.
+            return Ok(());
+        };
+        let rp = unsafe { &mut *rp_ptr };
         self.draw_commands(rp);
         Ok(())
     }
@@ -546,11 +567,14 @@ pub struct DebugDrawPass {
     pass: DebugPass,
     state: Arc<Mutex<DebugDrawState>>,
     editor_mode: bool,
+    grid_pipeline: wgpu::RenderPipeline,
+    grid_uniform: wgpu::Buffer,
+    grid_bind_group: wgpu::BindGroup,
+    grid_depth_test: bool,
     cached_line_gen: u64,
     cached_tri_gen: u64,
-    editor_grid_cache: Vec<DebugVertex>,
+    editor_volume_cache: Vec<DebugVertex>,
     editor_marker_lines: [DebugVertex; 6],
-    editor_last_key: Option<(bool, i32, i32, i32)>,
     editor_last_cam: Option<[f32; 3]>,
     editor_last_volume_gen: Option<u64>,
 }
@@ -568,137 +592,137 @@ impl DebugDrawPass {
         // The editor overlay is meant to sit inside the scene, so it occludes
         // against real geometry rather than painting over it.
         pass.set_use_scene_depth(editor_mode && depth_test);
+
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Infinite Debug Grid Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../shaders/infinite_grid.wgsl").into(),
+            ),
+        });
+        let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Infinite Debug Grid BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let grid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Infinite Debug Grid Pipeline Layout"),
+            bind_group_layouts: &[Some(&grid_bgl)],
+            immediate_size: 0,
+        });
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Infinite Debug Grid Pipeline"),
+            layout: Some(&grid_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            // `infinite_grid.wgsl` writes `frag_depth`, so this pipeline must
+            // always declare a depth attachment. It is only submitted by the
+            // editor pass, whose render-pass descriptor supplies the matching
+            // depth view. The ordinary debug pass constructs this pipeline but
+            // never uses it.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: -1.0,
+                    clamp: -1.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let grid_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Infinite Debug Grid Uniform"),
+            size: std::mem::size_of::<InfiniteGridUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Infinite Debug Grid Bind Group"),
+            layout: &grid_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: grid_uniform.as_entire_binding(),
+            }],
+        });
         Self {
             pass,
             state,
             editor_mode,
+            grid_pipeline,
+            grid_uniform,
+            grid_bind_group,
+            grid_depth_test: depth_test,
             cached_line_gen: u64::MAX,
             cached_tri_gen: u64::MAX,
-            editor_grid_cache: Vec::new(),
+            editor_volume_cache: Vec::new(),
             editor_marker_lines: [DebugVertex {
                 position: [0.0, 0.0, 0.0],
                 _pad: 0.0,
                 color: [0.0, 1.0, 1.0, 1.0],
             }; 6],
-            editor_last_key: None,
             editor_last_cam: None,
             editor_last_volume_gen: None,
         }
+    }
+
+    fn update_infinite_grid(&self, ctx: &PrepareContext) {
+        let camera = ctx.camera_data;
+        let uniform = InfiniteGridUniform {
+            inv_view_proj: camera.inv_view_proj,
+            view_proj: camera.view_proj,
+            camera_position: camera.position_near,
+            viewport: [ctx.width as f32, ctx.height as f32, 0.0, 0.0],
+        };
+        ctx.write_buffer(&self.grid_uniform, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    fn draw_infinite_grid(&self, ctx: &mut PassContext) {
+        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+            return;
+        };
+        let rp = unsafe { &mut *rp_ptr };
+        rp.set_pipeline(&self.grid_pipeline);
+        rp.set_bind_group(0, &self.grid_bind_group, &[]);
+        rp.draw(0..3, 0..1);
     }
 
     pub fn set_depth_test(&mut self, enabled: bool) {
         self.pass.set_depth_test(enabled);
     }
 
-    fn rebuild_editor_grid_cache(
-        &mut self,
-        center_x: f32,
-        center_z: f32,
-        grid_step: f32,
-        color_blind_mode: u8,
-    ) {
-        self.editor_grid_cache.clear();
-
-        let minor_color: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
-        let major_color: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
-        let (axis_color_x, axis_color_z, origin_color) = match color_blind_mode {
-            1 | 2 => (
-                [1.0, 0.6, 0.0, 1.0],
-                [0.0, 0.5, 1.0, 1.0],
-                [1.0, 1.0, 0.0, 1.0],
-            ),
-            3 => (
-                [1.0, 0.2, 0.2, 1.0],
-                [0.0, 0.7, 0.3, 1.0],
-                [1.0, 0.5, 0.0, 1.0],
-            ),
-            4 => (
-                [0.0, 0.0, 0.0, 1.0],
-                [0.5, 0.5, 0.5, 1.0],
-                [1.0, 1.0, 1.0, 1.0],
-            ),
-            _ => (
-                [1.0, 0.2, 0.2, 1.0],
-                [0.2, 1.0, 0.2, 1.0],
-                [1.0, 1.0, 0.0, 1.0],
-            ),
-        };
-
-        let range: f32 = 40.0;
-        let count = (range / grid_step).ceil() as i32;
-
-        for i in -count..=count {
-            let x = center_x + i as f32 * grid_step;
-            let z = center_z + i as f32 * grid_step;
-            let x_color = if i.rem_euclid(5) == 0 {
-                major_color
-            } else {
-                minor_color
-            };
-            let z_color = if i.rem_euclid(5) == 0 {
-                major_color
-            } else {
-                minor_color
-            };
-
-            self.editor_grid_cache.push(DebugVertex {
-                position: [x, 0.0, center_z - range],
-                _pad: 0.0,
-                color: if x.abs() < 0.01 {
-                    axis_color_x
-                } else {
-                    x_color
-                },
-            });
-            self.editor_grid_cache.push(DebugVertex {
-                position: [x, 0.0, center_z + range],
-                _pad: 0.0,
-                color: if x.abs() < 0.01 {
-                    axis_color_x
-                } else {
-                    x_color
-                },
-            });
-            self.editor_grid_cache.push(DebugVertex {
-                position: [center_x - range, 0.0, z],
-                _pad: 0.0,
-                color: if z.abs() < 0.01 {
-                    axis_color_z
-                } else {
-                    z_color
-                },
-            });
-            self.editor_grid_cache.push(DebugVertex {
-                position: [center_x + range, 0.0, z],
-                _pad: 0.0,
-                color: if z.abs() < 0.01 {
-                    axis_color_z
-                } else {
-                    z_color
-                },
-            });
-        }
-
-        self.editor_grid_cache.push(DebugVertex {
-            position: [-3.0, 0.0, 0.0],
-            _pad: 0.0,
-            color: origin_color,
-        });
-        self.editor_grid_cache.push(DebugVertex {
-            position: [3.0, 0.0, 0.0],
-            _pad: 0.0,
-            color: origin_color,
-        });
-        self.editor_grid_cache.push(DebugVertex {
-            position: [0.0, 0.0, -3.0],
-            _pad: 0.0,
-            color: origin_color,
-        });
-        self.editor_grid_cache.push(DebugVertex {
-            position: [0.0, 0.0, 3.0],
-            _pad: 0.0,
-            color: origin_color,
-        });
+    fn rebuild_editor_volume_cache(&mut self, volume_lines: &[DebugVertex]) {
+        // The grid is generated only by `infinite_grid.wgsl`. This cache is
+        // exclusively for finite scene-volume bounds, which remain ordinary
+        // debug geometry and must not be folded into the grid draw.
+        self.editor_volume_cache.clear();
+        self.editor_volume_cache.extend_from_slice(volume_lines);
     }
 
     fn update_editor_marker(&mut self, cam: glam::Vec3) {
@@ -747,9 +771,20 @@ impl RenderPass for DebugDrawPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         self.pass.render_pass_descriptor(target, depth, resources)
+    }
+
+    fn render_pass_descriptor_with_storage<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        self.pass
+            .render_pass_descriptor_with_storage(target, depth, resources, storage)
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -766,76 +801,49 @@ impl RenderPass for DebugDrawPass {
                     self.pass.update_lines(ctx.queue, &[]);
                     self.cached_line_gen = 0;
                 }
-                self.editor_last_key = None;
                 self.editor_last_cam = None;
                 self.pass.update_tris(ctx.queue, &[]);
                 self.cached_tri_gen = 0;
                 return Ok(());
             }
 
-            let cam_dist = cam.length();
-            let (grid_step, step_index) = if cam_dist < 20.0_f32 {
-                (1.0_f32, 0)
-            } else if cam_dist < 60.0_f32 {
-                (2.0_f32, 1)
-            } else if cam_dist < 150.0_f32 {
-                (5.0_f32, 2)
-            } else if cam_dist < 300.0_f32 {
-                (10.0_f32, 3)
-            } else {
-                (20.0_f32, 4)
-            };
+            // The grid itself is procedural and is drawn as a single
+            // fullscreen triangle. Only bounds and the camera marker remain
+            // in the transient debug line buffer.
+            self.update_infinite_grid(ctx);
 
-            let center_x = (cam.x / grid_step).round() * grid_step;
-            let center_z = (cam.z / grid_step).round() * grid_step;
-            let key = (
-                true,
-                step_index,
-                (center_x * 1000.0) as i32,
-                (center_z * 1000.0) as i32,
-            );
-            // Grid and volume bounds both change rarely, so they share one
-            // cached prefix and the per-frame camera marker gets patched in
-            // after them.
-            let mut grid_rebuilt = false;
-            if self.editor_last_key != Some(key) || self.editor_last_volume_gen != Some(volume_gen)
-            {
-                self.rebuild_editor_grid_cache(
-                    center_x,
-                    center_z,
-                    grid_step,
-                    state.color_blind_mode,
-                );
-                self.editor_grid_cache
-                    .extend_from_slice(&state.editor_volume_lines);
-                self.editor_last_key = Some(key);
+            // Camera movement only updates the procedural grid uniform and
+            // the camera marker. No CPU grid is rebuilt or uploaded.
+            let mut volume_rebuilt = false;
+            if self.editor_last_volume_gen != Some(volume_gen) {
+                self.rebuild_editor_volume_cache(&state.editor_volume_lines);
                 self.editor_last_volume_gen = Some(volume_gen);
-                grid_rebuilt = true;
+                volume_rebuilt = true;
             }
             drop(state);
 
             let cam_arr = [cam.x, cam.y, cam.z];
             if self.editor_last_cam != Some(cam_arr)
                 || self.cached_line_gen == u64::MAX
-                || grid_rebuilt
+                || volume_rebuilt
             {
                 self.update_editor_marker(cam);
 
-                if grid_rebuilt || self.cached_line_gen == u64::MAX {
+                if volume_rebuilt || self.cached_line_gen == u64::MAX {
                     let mut lines = Vec::with_capacity(
-                        self.editor_grid_cache.len() + self.editor_marker_lines.len(),
+                        self.editor_volume_cache.len() + self.editor_marker_lines.len(),
                     );
-                    lines.extend_from_slice(&self.editor_grid_cache);
+                    lines.extend_from_slice(&self.editor_volume_cache);
                     lines.extend_from_slice(&self.editor_marker_lines);
                     self.pass.update_lines(ctx.queue, &lines);
                 } else {
                     self.pass.update_lines_at(
                         ctx.queue,
-                        self.editor_grid_cache.len(),
+                        self.editor_volume_cache.len(),
                         &self.editor_marker_lines,
                     );
                     self.pass.set_line_vertex_count(
-                        self.editor_grid_cache.len() + self.editor_marker_lines.len(),
+                        self.editor_volume_cache.len() + self.editor_marker_lines.len(),
                     );
                 }
 
@@ -869,8 +877,28 @@ impl RenderPass for DebugDrawPass {
         // from render_pass_descriptor() by this point, so reassigning
         // ctx.target would change nothing. Where this draws is decided purely
         // by where the pass sits in the graph.
-        self.pass.execute(ctx)
+        self.pass.execute(ctx)?;
+        if self.editor_mode {
+            let enabled = self
+                .state
+                .lock()
+                .map(|state| state.editor_enabled)
+                .unwrap_or(false);
+            if enabled && self.grid_depth_test {
+                self.draw_infinite_grid(ctx);
+            }
+        }
+        Ok(())
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct InfiniteGridUniform {
+    inv_view_proj: [f32; 16],
+    view_proj: [f32; 16],
+    camera_position: [f32; 4],
+    viewport: [f32; 4],
 }
 
 impl Renderer {

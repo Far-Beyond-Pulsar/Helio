@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "Per-portal GPU frustum culling: selects which instances get a duplicate draw through each active portal"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
+pulsar_reflection = { workspace = true }
+glam = { workspace = true }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-pass-gbuffer = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }

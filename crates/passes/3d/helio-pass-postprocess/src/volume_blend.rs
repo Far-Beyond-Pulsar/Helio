@@ -17,12 +17,18 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PostProcessVolumeBlendPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     /// cs_volume_blend writes here; execute() then copies it over the uniform buffer.
     blend_output_buf: wgpu::Buffer,
+    /// Bound in place of `"post_process_volumes"` when no
+    /// `PostProcessVolumeComponent` has ever been inserted -- SceneDB is the
+    /// only post-process-volume source this pass reads. The early return in
+    /// `execute()` below means this is never actually dispatched against.
+    fallback_pp_volumes: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(usize, usize, usize)>,
 }
@@ -98,8 +104,14 @@ impl PostProcessVolumeBlendPass {
 
         let blend_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Blend Output"),
-            size: std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64,
+            size: std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let fallback_pp_volumes = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PostProcess Fallback Volumes"),
+            size: std::mem::size_of::<crate::GpuPostProcessVolume>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -107,6 +119,7 @@ impl PostProcessVolumeBlendPass {
             pipeline,
             bgl,
             blend_output_buf,
+            fallback_pp_volumes,
             bind_group: None,
             bind_group_key: None,
         }
@@ -124,7 +137,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -137,17 +150,24 @@ impl RenderPass for PostProcessVolumeBlendPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // No volumes: the camera defaults the renderer already uploaded are the
         // final config, so there is nothing to blend and nothing to copy.
-        if ctx.resources.pp_volume_count == 0 {
+        // SceneDB is the only post-process-volume source -- no Renderer
+        // method, no CPU-tracked count, resolved fresh by key every frame.
+        if !ctx
+            .scene_buffers
+            .contains(BufferKey::of("post_process_volumes"))
+        {
             return Ok(());
         }
 
-        let Some(postprocess_buf) = ctx.resources.postprocess_uniforms.get() else {
+        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
-        let Some(pp_volumes_buf) = ctx.resources.pp_volumes.get() else {
-            return Ok(());
-        };
-        let camera_buf = ctx.scene.camera;
+        let pp_volumes_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("post_process_volumes"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_pp_volumes);
+        let camera_buf = ctx.camera;
 
         let key = (
             postprocess_buf as *const _ as usize,
@@ -200,7 +220,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             0,
             postprocess_buf,
             0,
-            std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64,
+            std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
         );
 
         Ok(())

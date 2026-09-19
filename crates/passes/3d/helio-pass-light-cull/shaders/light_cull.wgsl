@@ -37,7 +37,11 @@ struct LightCullParams {
     num_lights:    u32,
     screen_width:  u32,
     screen_height: u32,
-    _pad0:         u32,
+    // 1 when `lights[i]`/`transforms[i]` share the same raw entity index
+    // (SceneDB-direct); 0 when `lights` is `ctx.scene.lights`, a freshly
+    // rebuilt dense array needing `light_entity_indices[i]`. See that
+    // binding's doc.
+    light_mode_direct_index: u32,
     _pad1:         u32,
     _pad2:         u32,
 }
@@ -72,9 +76,25 @@ struct GpuLight {
 }
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 
+// SceneDB's `Transform` component, entity-indexed the same way `lights` is
+// (both are `#[gpu(layout = packed)]` SceneDB buffers: row `i` is whichever
+// entity has raw index `i`) -- see `helio_pass_forward_lit`'s own `Transform`
+// binding doc for the exact byte-layout reasoning and why `light.position_
+// range.xyz` itself is a stale/zeroed placeholder, not real position data.
+struct Transform {
+    position: array<f32, 3>,
+    rotation: array<f32, 3>,
+    scale:    array<f32, 3>,
+}
+@group(0) @binding(3) var<storage, read> transforms: array<Transform>;
+// Parallel to `lights` when `params.light_mode_direct_index == 0` -- entry
+// `i` is the real SceneDB entity index `lights[i]` was built from this frame.
+// Ignored (identity) when `light_mode_direct_index == 1`.
+@group(0) @binding(4) var<storage, read> light_entity_indices: array<u32>;
+
 // Output: flat arrays, one slot per tile
-@group(0) @binding(3) var<storage, read_write> tile_light_lists:  array<u32>;
-@group(0) @binding(4) var<storage, read_write> tile_light_counts: array<u32>;
+@group(0) @binding(5) var<storage, read_write> tile_light_lists:  array<u32>;
+@group(0) @binding(6) var<storage, read_write> tile_light_counts: array<u32>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -155,6 +175,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < params.num_lights; i++) {
         let light = lights[i];
 
+        // Skip never-written slots. The direct-index path always iterates
+        // the SceneDB buffer's full fixed capacity (`params.num_lights` ==
+        // `MAX_LIGHTS`), not just the slots an entity has actually claimed
+        // -- `LightComponent` derives `bytemuck::Zeroable`, so an unclaimed
+        // row reads back as all-zero, which means `light_type == 0u` (the
+        // SAME value as a real `LightType::Directional`). Without this
+        // check every unclaimed slot gets treated as an always-visible
+        // directional light with a zero-length `direction_outer` -- and
+        // normalizing a zero vector in the shading pass produces NaN, which
+        // then poisons the entire lighting sum for every pixel every tile
+        // touches, silently blacking out lighting everywhere regardless of
+        // whether the real lights are correctly culled.
+        if light.color_intensity.w <= 0.0 {
+            continue;
+        }
+
         // Directional lights have infinite range — always visible.
         if light.light_type == 0u {
             if count < MAX_LIGHTS_PER_TILE {
@@ -164,8 +200,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        // Transform light position to view space.
-        let pos_vs = (cameras[0].view * vec4<f32>(light.position_range.xyz, 1.0)).xyz;
+        // World-space light position. The direct-index (`scene_lights`) path
+        // authors `helio_pass_forward_lit::LightComponent` rows with position
+        // already baked into `position_range.xyz` at spawn/update time (see
+        // that component's module doc: "no per-frame CPU touch at all, not
+        // even a live-count read") -- these light entities never get a
+        // separate `Transform` component, so indexing `transforms[]` at this
+        // light's row for them silently reads an unrelated/never-written
+        // (all-zero) row instead of the light's real position, and every
+        // point/spot light then culls out of every tile it should actually
+        // be visible in. Only the CPU-resolved path (`light_mode_direct_index
+        // == 0u`, `helio_component::LightComponent` via `light_entity_
+        // indices`) needs the separate Transform combine -- that mirror has
+        // no position of its own (see `LightComponentGpuMirror::
+        // to_helio_gpu_light`'s doc).
+        var world_pos = light.position_range.xyz;
+        if params.light_mode_direct_index == 0u {
+            let entity_idx = light_entity_indices[i];
+            let t = transforms[entity_idx];
+            world_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
+        }
+        let pos_vs = (cameras[0].view * vec4<f32>(world_pos, 1.0)).xyz;
         let range  = light.position_range.w;
 
         if sphere_inside_tile_frustum(pos_vs, range, planes) {

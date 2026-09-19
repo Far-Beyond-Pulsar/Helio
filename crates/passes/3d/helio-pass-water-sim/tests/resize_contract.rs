@@ -18,11 +18,12 @@ impl RenderPass for PreAaProducer {
         );
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         color_only_descriptor(
             "Pre-AA Producer",
@@ -49,17 +50,18 @@ impl RenderPass for PreAaDepthConsumer {
         builder.read("pre_aa");
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa = resources
             .pre_aa
             .read(self.name())
             .expect("pre_aa is published");
-        let color_attachments = Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
             view: pre_aa,
             resolve_target: None,
             depth_slice: None,
@@ -155,7 +157,7 @@ fn color_only_descriptor<'a>(
     label: &'static str,
     view: &'a wgpu::TextureView,
 ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-    let color_attachments = Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+    let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
         view,
         resolve_target: None,
         depth_slice: None,
@@ -229,3 +231,5 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
     }
     None
 }
+
+

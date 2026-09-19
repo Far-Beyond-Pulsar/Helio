@@ -23,6 +23,11 @@ use bytemuck;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+mod components;
+pub mod gpu_types;
+pub use components::PostProcessVolumeComponent;
+pub use gpu_types::*;
+
 mod volume_blend;
 pub use volume_blend::PostProcessVolumeBlendPass;
 
@@ -35,8 +40,15 @@ const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
 const WG_EXPOSURE_X: u32 = 16;
 const WG_EXPOSURE_Y: u32 = 16;
-#[allow(dead_code)]
-const MAX_PP_VOLUMES: u32 = 256;
+/// Fixed capacity for the `"post_process_volumes"` SceneDB buffer, kept
+/// equal to `DEFAULT_AUTO_REGISTER_CAPACITY` -- same reasoning as
+/// `helio_pass_forward_lit::MAX_LIGHTS` (was `256` when this was a
+/// Renderer-owned CPU arena; SceneDB's auto-register capacity is what
+/// governs it now, so this stays in lockstep with that by construction).
+/// Also hardcoded into `postprocess.wgsl`'s own `MAX_PP_VOLUMES` -- the
+/// assertion below keeps the two from drifting apart.
+pub const MAX_PP_VOLUMES: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
+const _: () = assert!(MAX_PP_VOLUMES == 64);
 
 /// Position in the uber-shader effect chain where a user effect is injected.
 #[repr(u32)]
@@ -1057,7 +1069,7 @@ impl RenderPass for PostProcessPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -1159,24 +1171,24 @@ impl RenderPass for PostProcessPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let pre_aa_view = match ctx.resources.pre_aa.get() {
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let postprocess_buf = match ctx.resources.postprocess_uniforms.get() {
+        let postprocess_buf = match ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        let camera_buf = ctx.scene.camera;
+        let camera_buf = ctx.camera;
 
         // None when no VolumetricFogPass is in the graph; rebuild_bind_groups then
         // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
         // added, removed, or resized rebuilds the group instead of leaving b17
         // pointing at a stale view.
-        let fog_view = ctx.resources.fog_accum.get();
-        let velocity_view = ctx.resources.gbuffer_velocity.get();
-        let lut_view = ctx.resources.color_grading_lut.get();
+        let fog_view = ctx.resources.get(helio_core::ResourceKey::new("fog_accum"));
+        let velocity_view = ctx.resources.get(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx.resources.get(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
             pre_aa_view as *const _ as usize,
@@ -1315,9 +1327,12 @@ impl RenderPass for PostProcessPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         if let Some(view) = &self.pre_dof_view {
-            frame.pre_dof.write(view, "PostProcess");
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+            frame.write(helio_core::ResourceKey::new("pre_dof"), view, "PostProcess");
         }
     }
 }
+
+

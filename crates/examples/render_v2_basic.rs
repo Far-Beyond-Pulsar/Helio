@@ -9,11 +9,15 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{cube_mesh, make_material, plane_mesh, point_light};
+use helio_default_graphs::build_default_graph_with_context;
+use pulsar_scenedb::SceneDb;
+use v3_demo_common::{
+    cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -25,6 +29,24 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+#[cfg(test)]
+mod scene_light_tests {
+    use super::*;
+
+    #[test]
+    fn projection_reads_current_scene_db_positions() {
+        let mut world = World::new();
+        let entity = spawn_light(
+            &mut world,
+            point_light([7.0, 8.0, 9.0], [1.0, 1.0, 1.0], 4.0, 5.0),
+        );
+        let light = world
+            .get::<helio_pass_forward_lit::LightComponent>(entity)
+            .expect("SceneDB light missing");
+        assert_eq!(&light.position_range[..3], &[7.0, 8.0, 9.0]);
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -58,8 +80,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    // Scene state
-    light_p0_id: LightId,
+    // Authoritative scene state; Helio receives transient pass projections.
+    scene_db: SceneDb,
+    light_p0_entity: pulsar_scenedb::Entity,
 }
 
 impl App {
@@ -143,51 +166,21 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        // Features — data-free: all content comes from the Scene
+        // SceneDB owns authored entities; Helio receives only its GPU mirror.
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
-        renderer.set_editor_mode(true);
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_editor_mode(true)
+            .with_pass_build_context(Box::new(build_default_graph_with_context))
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
 
-        let mat = renderer.scene_mut().insert_material(make_material(
+        let mat = spawn_material(&mut scene_db.world, make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -195,81 +188,59 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
-            .as_mesh()
-            .unwrap();
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube1,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
             0.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube2,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
             0.4,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             cube3,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            ground,
+            mat,
+            glam::Mat4::IDENTITY,
+            5.0,
+        );
 
         // p0 bobs up/down (animated), p1 and p2 are static
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p0_init,
-                [1.0, 0.55, 0.15],
-                6.0,
-                5.0,
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p1,
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p2,
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        let light_p0_entity = {
+            let p0 = spawn_light(
+                &mut scene_db.world,
+                point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0),
+            );
+            spawn_light(
+                &mut scene_db.world,
+                point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0),
+            );
+            spawn_light(
+                &mut scene_db.world,
+                point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0),
+            );
+            p0
+        };
         self.state = Some(AppState {
             window,
             surface,
@@ -285,7 +256,8 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            light_p0_id,
+            scene_db,
+            light_p0_entity,
         });
     }
 
@@ -468,11 +440,18 @@ impl AppState {
 
         // p0 bobs up/down per-frame
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.scene_mut().update_light(
-            self.light_p0_id,
-            point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
-        );
-
+        {
+            self.scene_db
+                .world
+                .get_mut::<helio_pass_forward_lit::LightComponent>(self.light_p0_entity)
+                .expect("SceneDB animated light disappeared")
+                .clone_from(&helio_pass_forward_lit::LightComponent::from(point_light(
+                    p0,
+                    [1.0, 0.55, 0.15],
+                    6.0,
+                    5.0,
+                )));
+        }
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

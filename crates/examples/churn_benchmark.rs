@@ -10,15 +10,17 @@
 
 mod v3_demo_common;
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh,
-    point_light,
+    box_mesh, cube_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, update_object_transform,
 };
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, MaterialId, MeshId, ObjectId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
 use rapier3d::prelude::*;
 
 use crate::nalgebra::UnitQuaternion;
@@ -38,12 +40,12 @@ const MIN_SPAWN_RATE: usize = 1;
 const MAX_SPAWN_RATE: usize = 64;
 
 struct SpawnedObject {
-    id: ObjectId,
+    id: Entity,
     seed: f32,
     speed: f32,
     scale: f32,
-    mesh: MeshId,
-    material: MaterialId,
+    mesh: Entity,
+    material: Entity,
     body_handle: RigidBodyHandle,
     collider_handle: ColliderHandle,
 }
@@ -81,6 +83,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
     frame_count: u64,
 
@@ -93,8 +96,8 @@ struct AppState {
 
     spawn_rate: usize,
     dynamic_objects: Vec<SpawnedObject>,
-    meshes: Vec<MeshId>,
-    materials: Vec<MaterialId>,
+    meshes: Vec<Entity>,
+    materials: Vec<Entity>,
     rng: SimpleRng,
     collisions_enabled: bool,
 
@@ -112,6 +115,8 @@ struct AppState {
     physics_ccd_solver: CCDSolver,
 
     time_redraw_requested: Option<std::time::Instant>,
+
+    inspector_agent: Option<scenedb_inspector_agent::InlineAgent>,
 }
 
 fn main() {
@@ -174,7 +179,9 @@ impl ApplicationHandler for App {
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                // COPY_SRC so the debug frame-dump (see dump_frame_png) can
+                // read the actual presented swapchain texture back.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 format: fmt,
                 width: size.width,
                 height: size.height,
@@ -187,91 +194,49 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
 
-        let mat_floor = renderer.scene_mut().insert_material(make_material(
-            [0.25, 0.25, 0.30, 1.0],
-            0.85,
-            0.03,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_red = renderer.scene_mut().insert_material(make_material(
-            [0.85, 0.12, 0.12, 1.0],
-            0.65,
-            0.00,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_green = renderer.scene_mut().insert_material(make_material(
-            [0.17, 0.82, 0.28, 1.0],
-            0.60,
-            0.00,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_blue = renderer.scene_mut().insert_material(make_material(
-            [0.16, 0.40, 0.90, 1.0],
-            0.70,
-            0.00,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_steel = renderer.scene_mut().insert_material(make_material(
-            [0.7, 0.7, 0.75, 1.0],
-            0.15,
-            0.80,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat_floor = spawn_material(
+            &mut scene_db.world,
+            make_material([0.25, 0.25, 0.30, 1.0], 0.85, 0.03, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_red = spawn_material(
+            &mut scene_db.world,
+            make_material([0.85, 0.12, 0.12, 1.0], 0.65, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.17, 0.82, 0.28, 1.0], 0.60, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_blue = spawn_material(
+            &mut scene_db.world,
+            make_material([0.16, 0.40, 0.90, 1.0], 0.70, 0.00, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_steel = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.75, 1.0], 0.15, 0.80, [0.0, 0.0, 0.0], 0.0),
+        );
 
-        let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
+        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
+        let _ = spawn_object(
+            &mut scene_db.world,
             floor_mesh,
             mat_floor,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.01, 0.0)),
@@ -279,55 +244,25 @@ impl ApplicationHandler for App {
         );
 
         let mut mesh_list = Vec::new();
-        mesh_list.push(
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.35)))
-                .as_mesh()
-                .unwrap(),
-        );
-        mesh_list.push(
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.15, 0.65, 0.15],
-                )))
-                .as_mesh()
-                .unwrap(),
-        );
-        mesh_list.push(
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.60, 0.20, 0.20],
-                )))
-                .as_mesh()
-                .unwrap(),
-        );
+        mesh_list.push(spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.35)));
+        mesh_list.push(spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.15, 0.65, 0.15]),
+        ));
+        mesh_list.push(spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.60, 0.20, 0.20]),
+        ));
 
         let offset = 20.0;
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-offset, 5.0, -offset],
-                [0.8, 0.7, 0.55],
-                7.0,
-                40.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [offset, 5.0, offset],
-                [0.5, 0.7, 1.0],
-                7.0,
-                40.0,
-            )))
-            .as_light()
-            .unwrap();
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-offset, 5.0, -offset], [0.8, 0.7, 0.55], 7.0, 40.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([offset, 5.0, offset], [0.5, 0.7, 1.0], 7.0, 40.0),
+        );
 
         self.state = Some(AppState {
             window,
@@ -336,6 +271,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: fmt,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             frame_count: 0,
             cam_pos: glam::Vec3::new(0.0, 7.0, 25.0),
@@ -362,6 +298,7 @@ impl ApplicationHandler for App {
             physics_impulse_joints: ImpulseJointSet::new(),
             physics_multibody_joint_set: MultibodyJointSet::new(),
             physics_ccd_solver: CCDSolver::new(),
+            inspector_agent: scenedb_inspector_agent::InlineAgent::maybe_start(),
         });
     }
 
@@ -459,7 +396,9 @@ impl ApplicationHandler for App {
                 state.surface.configure(
                     &state.device,
                     &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        // COPY_SRC so the debug frame-dump (see dump_frame_png) can
+                // read the actual presented swapchain texture back.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                         format: state.surface_format,
                         width: s.width,
                         height: s.height,
@@ -562,8 +501,8 @@ impl AppState {
                 &mut self.physics_bodies,
             );
 
-            if let Ok(obj_id) = insert_object_with_movability(
-                &mut self.renderer,
+            if let Ok(obj_id) = spawn_object_with_movability(
+                &mut self.scene_db.world,
                 mesh,
                 material,
                 transform,
@@ -599,7 +538,7 @@ impl AppState {
 
             if self.dynamic_objects.len() > max_count {
                 if let Some(dead) = self.dynamic_objects.first() {
-                    let _ = self.renderer.scene_mut().remove_object(dead.id);
+                    let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, dead.id);
                     self.physics_colliders.remove(
                         dead.collider_handle,
                         &mut self.physics_forces,
@@ -633,10 +572,12 @@ impl AppState {
             let transform = glam::Mat4::from_translation(pos)
                 * glam::Mat4::from_rotation_y(phase * 1.37)
                 * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
-            let _ = self
-                .renderer
-                .scene_mut()
-                .update_object_transform(variant.id, transform);
+            let _ = update_object_transform(
+                &mut self.scene_db.world,
+                &mut self.renderer,
+                variant.id,
+                transform,
+            );
 
             if let Some(body) = self.physics_bodies.get_mut(variant.body_handle) {
                 body.set_position(
@@ -689,15 +630,26 @@ impl AppState {
                 let transform = glam::Mat4::from_translation(translation)
                     * glam::Mat4::from_quat(rotation)
                     * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
-                let _ = self
-                    .renderer
-                    .scene_mut()
-                    .update_object_transform(variant.id, transform);
+                let _ = update_object_transform(
+                    &mut self.scene_db.world,
+                    &mut self.renderer,
+                    variant.id,
+                    transform,
+                );
             }
         }
     }
 
     fn render(&mut self, dt: f32) {
+        // A churn demo is exactly the case worth polling faster than
+        // cloud_engine's ~10 Hz: the point is watching entities spawn/despawn
+        // live, so publish every 3rd frame (~20 Hz at 60 fps) instead.
+        if let Some(agent) = &mut self.inspector_agent {
+            if self.frame_count % 3 == 0 {
+                agent.publish(&self.scene_db.world.telemetry_snapshot());
+            }
+        }
+
         const SPEED: f32 = 8.0;
         const SENS: f32 = 0.002;
         self.cam_yaw += self.mouse_delta.0 * SENS;
@@ -751,6 +703,15 @@ impl AppState {
             self.animate_objects();
         }
 
+        // Uploads every row queued since last frame (spawns/inserts/
+        // updates/despawns) into the GPU-mirrored buffers the renderer
+        // actually reads. Without this, CPU-side SceneDB writes are
+        // authoritative but invisible to the GPU forever -- this is the
+        // root cause of a fully black render despite correct scene data
+        // (confirmed via ObjectBatchPass reporting instance_count=0/
+        // draw_count=0 even with valid StaticObjectComponent rows present).
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -763,6 +724,30 @@ impl AppState {
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
+
+        // Debug: dump the actual presented frame to disk once, after the
+        // scene has had a chance to settle. See dump_frame_png's doc for why
+        // this is the *final* swapchain texture specifically (no engine
+        // reach-in needed) rather than an intermediate G-buffer/depth
+        // capture.
+        if self.frame_count == 100 {
+            dump_frame_png(
+                &self.device,
+                &self.queue,
+                &output.texture,
+                self.surface_format,
+                size.width,
+                size.height,
+                std::path::Path::new("frame_100.png"),
+            );
+            dump_depth_png(
+                &self.device,
+                &self.queue,
+                self.renderer.debug_depth_texture(),
+                std::path::Path::new("frame_100_depth.png"),
+            );
+        }
+
         self.queue.present(output);
 
         self.frame_count += 1;
@@ -777,5 +762,241 @@ impl AppState {
                 dt * 1000.0
             );
         }
+    }
+}
+
+/// Debug capture: read the actual presented swapchain texture back to CPU
+/// and save it as a PNG. Deliberately reads the *final* output rather than
+/// an intermediate render-graph buffer (G-buffer albedo, depth, etc.):
+/// those are privately owned inside each pass crate (`Renderer` itself only
+/// holds `depth_texture` as a raw `wgpu::Texture`; everything else is a
+/// `wgpu::TextureView` handed out per-frame via `ResourceRegistry`, with no
+/// path back to the owning `Texture` `copy_texture_to_buffer` needs), so
+/// capturing them would mean adding a new debug-only trait method to
+/// `RenderPass` and implementing it pass-by-pass -- worth doing later if a
+/// specific intermediate stage needs inspecting, but the final frame
+/// already answers "does anything render at all" with zero engine changes
+/// beyond adding `COPY_SRC` to the surface's usage flags.
+///
+/// Blocks the calling thread until the GPU readback completes (a one-time
+/// debug capture, not a hot-path concern).
+fn dump_frame_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    path: &std::path::Path,
+) {
+    let Some(bytes_per_pixel) = format.block_copy_size(None) else {
+        log::error!("dump_frame_png: unsupported (non-color) format {format:?}");
+        return;
+    };
+
+    let unpadded_bytes_per_row = width * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+    let buffer_size = (padded_bytes_per_row as u64) * (height as u64);
+
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Debug Frame Dump Buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Debug Frame Dump Encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = readback_buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    if let Err(e) = device.poll(wgpu::PollType::wait_indefinitely()) {
+        log::error!("dump_frame_png: device.poll failed: {e:?}");
+        return;
+    }
+    match rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log::error!("dump_frame_png: buffer map failed: {e:?}");
+            return;
+        }
+        Err(e) => {
+            log::error!("dump_frame_png: map_async never signaled: {e:?}");
+            return;
+        }
+    }
+
+    let mapped = match slice.get_mapped_range() {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("dump_frame_png: get_mapped_range failed: {e:?}");
+            return;
+        }
+    };
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    let is_bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    for y in 0..height {
+        let row_start = (y * padded_bytes_per_row) as usize;
+        let src_row = &mapped[row_start..row_start + unpadded_bytes_per_row as usize];
+        let dst_row = &mut rgba[(y * width * 4) as usize..((y + 1) * width * 4) as usize];
+        if is_bgra {
+            for (src_px, dst_px) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+                dst_px[0] = src_px[2];
+                dst_px[1] = src_px[1];
+                dst_px[2] = src_px[0];
+                dst_px[3] = src_px[3];
+            }
+        } else {
+            dst_row.copy_from_slice(&src_row[..dst_row.len().min(src_row.len())]);
+        }
+    }
+    drop(mapped);
+    readback_buffer.unmap();
+
+    match image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8) {
+        Ok(()) => log::info!("dump_frame_png: wrote {}", path.display()),
+        Err(e) => log::error!("dump_frame_png: failed to save {}: {e:?}", path.display()),
+    }
+}
+
+/// Debug capture: read a `Depth32Float` texture back and save an
+/// autocontrast-normalized grayscale visualization (actual min/max depth
+/// found in the buffer map to black/white, since real depth values cluster
+/// tightly near the far plane and a raw 0..1 mapping would look uniformly
+/// white) -- answers "is anything being rasterized in front of the camera
+/// at all" independent of shading/lighting/post-process, which the final
+/// composited frame alone can't distinguish.
+fn dump_depth_png(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, path: &std::path::Path) {
+    let width = texture.width();
+    let height = texture.height();
+    let unpadded_bytes_per_row = width * 4; // Depth32Float = 4 bytes/texel
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+    let buffer_size = (padded_bytes_per_row as u64) * (height as u64);
+
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Debug Depth Dump Buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Debug Depth Dump Encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let slice = readback_buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    if let Err(e) = device.poll(wgpu::PollType::wait_indefinitely()) {
+        log::error!("dump_depth_png: device.poll failed: {e:?}");
+        return;
+    }
+    match rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log::error!("dump_depth_png: buffer map failed: {e:?}");
+            return;
+        }
+        Err(e) => {
+            log::error!("dump_depth_png: map_async never signaled: {e:?}");
+            return;
+        }
+    }
+
+    let mapped = match slice.get_mapped_range() {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("dump_depth_png: get_mapped_range failed: {e:?}");
+            return;
+        }
+    };
+
+    let mut values = vec![0f32; (width * height) as usize];
+    for y in 0..height {
+        let row_start = (y * padded_bytes_per_row) as usize;
+        let row_bytes = &mapped[row_start..row_start + unpadded_bytes_per_row as usize];
+        let dst_row = &mut values[(y * width) as usize..((y + 1) * width) as usize];
+        for (px, dst) in row_bytes.chunks_exact(4).zip(dst_row.iter_mut()) {
+            *dst = f32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+        }
+    }
+    drop(mapped);
+    readback_buffer.unmap();
+
+    let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let range = (max - min).max(1e-8);
+    log::info!("dump_depth_png: depth range [{min}, {max}]");
+
+    let mut gray = vec![0u8; (width * height * 4) as usize];
+    for (i, &v) in values.iter().enumerate() {
+        // Invert: near (small depth) -> bright, far/cleared (1.0) -> dark,
+        // matching the usual "closer = whiter" depth-visualization convention.
+        let normalized = 1.0 - ((v - min) / range);
+        let byte = (normalized.clamp(0.0, 1.0) * 255.0) as u8;
+        gray[i * 4] = byte;
+        gray[i * 4 + 1] = byte;
+        gray[i * 4 + 2] = byte;
+        gray[i * 4 + 3] = 255;
+    }
+
+    match image::save_buffer(path, &gray, width, height, image::ColorType::Rgba8) {
+        Ok(()) => log::info!("dump_depth_png: wrote {}", path.display()),
+        Err(e) => log::error!("dump_depth_png: failed to save {}: {e:?}", path.display()),
     }
 }

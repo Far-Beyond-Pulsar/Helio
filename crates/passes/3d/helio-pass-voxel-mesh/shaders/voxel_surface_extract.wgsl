@@ -3,7 +3,7 @@
 // Indexed by workgroup_id.x into the dirty_bricks list.
 
 // Must match MAX_SURFACE_VERTS_PER_BRICK/MAX_SURFACE_INDICES_PER_BRICK in
-// helio_voxel_core::constants (vertex_buf/index_buf are sized from those).
+// VoxelMeshPass surface budgets (vertex_buf/index_buf are sized from those).
 const MAX_VERTS: u32 = 2048u;
 const MAX_INDICES: u32 = 2048u;
 // Each brick's voxel data is padded to 9x9x9 (one extra voxel of +X/+Y/+Z

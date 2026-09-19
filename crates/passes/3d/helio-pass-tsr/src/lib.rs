@@ -140,7 +140,7 @@ struct TsrUniform {
 /// Temporal Super-Resolution pass.
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
-/// Reads `"pre_aa"` from [`FrameResources`](libhelio::FrameResources) and
+/// Reads `"pre_aa"` from [`ResourceRegistry`](helio_core::ResourceRegistry) and
 /// writes the upsampled, temporally accumulated image to `ctx.target`.
 pub struct TsrPass {
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
@@ -514,7 +514,7 @@ impl RenderPass for TsrPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -552,7 +552,7 @@ impl RenderPass for TsrPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The camera is the sample authority. Reconstructing a separate
         // sequence here breaks manual offsets and externally owned frame clocks.
-        let ndc = ctx.scene.camera.data().jitter_frame;
+        let ndc = ctx.camera_data.jitter_frame;
         let jitter = [
             ndc[0] * ctx.width as f32 * 0.5,
             ndc[1] * ctx.height as f32 * 0.5,
@@ -580,7 +580,7 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.pre_aa.read("TSR").ok_or_else(|| {
+        let pre_aa_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )
@@ -617,7 +617,7 @@ impl RenderPass for TsrPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,

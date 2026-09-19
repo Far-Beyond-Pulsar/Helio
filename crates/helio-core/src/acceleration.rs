@@ -508,3 +508,19 @@ pub struct TlasInstanceInput {
     pub mesh_id: u64,
     pub transform: [f32; 12],
 }
+
+
+/// Frontend-published acceleration input valid for exactly one render frame.
+/// Owns a cheap TLAS handle clone; the frontend retains its BLAS cache.
+#[derive(Default)]
+pub struct FrameAcceleration {
+    frame: Option<(u64, wgpu::Tlas)>,
+}
+impl FrameAcceleration {
+    pub fn publish(&mut self, frame: u64, tlas: Option<&wgpu::Tlas>) {
+        self.frame = tlas.map(|tlas| (frame, tlas.clone()));
+    }
+    pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
+        self.frame.as_ref().filter(|(generation, _)| *generation == frame).map(|(_, tlas)| tlas)
+    }
+}

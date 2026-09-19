@@ -16,13 +16,17 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
-    Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer,
-    RendererConfig, Scene,
+    Camera, HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::{build_default_graph, build_fxaa_hlfs_graph};
+use helio_default_graphs::build_fxaa_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
-use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
-use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light, spawn_material, spawn_mesh,
+    spawn_object, spawn_post_process_volume, update_light,
+};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -87,25 +91,27 @@ struct AppState {
     action_rx: Receiver<HelioAction>,
     last_frame: std::time::Instant,
 
-    _floor: MeshId,
-    _nave_ceiling: MeshId,
-    _aisle_ceil_l: MeshId,
-    _aisle_ceil_r: MeshId,
-    _wall_left_outer: MeshId,
-    _wall_right_outer: MeshId,
-    _wall_front: MeshId,
-    _wall_back: MeshId,
-    _colonnade_l: Vec<MeshId>,
-    _colonnade_r: Vec<MeshId>,
-    _columns: Vec<MeshId>,
-    _altar_plinth: MeshId,
-    _altar_step: MeshId,
-    _cross_vert: MeshId,
-    _cross_horiz: MeshId,
-    _pews_left: Vec<MeshId>,
-    _pews_right: Vec<MeshId>,
-    _chandelier_chains: Vec<MeshId>,
-    _chandelier_rings: Vec<MeshId>,
+    scene_db: SceneDb,
+
+    _floor: Entity,
+    _nave_ceiling: Entity,
+    _aisle_ceil_l: Entity,
+    _aisle_ceil_r: Entity,
+    _wall_left_outer: Entity,
+    _wall_right_outer: Entity,
+    _wall_front: Entity,
+    _wall_back: Entity,
+    _colonnade_l: Vec<Entity>,
+    _colonnade_r: Vec<Entity>,
+    _columns: Vec<Entity>,
+    _altar_plinth: Entity,
+    _altar_step: Entity,
+    _cross_vert: Entity,
+    _cross_horiz: Entity,
+    _pews_left: Vec<Entity>,
+    _pews_right: Vec<Entity>,
+    _chandelier_chains: Vec<Entity>,
+    _chandelier_rings: Vec<Entity>,
 
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -118,8 +124,8 @@ struct AppState {
     perf_overlay_mode: PerfOverlayMode,
     debug_overlay_enabled: bool,
 
-    chandelier_light_ids: Vec<LightId>,
-    candle_light_ids: Vec<LightId>,
+    chandelier_light_ids: Vec<Entity>,
+    candle_light_ids: Vec<Entity>,
     start_time: std::time::Instant,
 }
 
@@ -198,176 +204,101 @@ impl ApplicationHandler for App {
         let config = RendererConfig::new(size.width, size.height, format)
             .with_shadow_quality(helio::ShadowQuality::Ultra)
             .with_render_scale(1.0);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_editor_mode(true)
+            .with_pass_build_context(Box::new(build_fxaa_hlfs_graph_with_context))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
+
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
+                [0.75, 0.72, 0.68, 1.0],
+                0.85,
+                0.0,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ),
         );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
-        renderer.set_editor_mode(true);
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.75, 0.72, 0.68, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        spawn_indoor_cathedral_sky(&mut scene_db.world);
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
-            helio::SkyActor::indoor([0.05, 0.05, 0.1]).with_clouds(helio::VolumetricClouds {
-                coverage: 0.7,
-                density: 0.8,
-                base: 1200.0,
-                top: 1800.0,
-                wind_x: 0.8,
-                wind_z: 0.2,
-                speed: 1.3,
-                skylight_intensity: 0.25,
-            }),
-        ));
-
-        let _floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0)))
-            .as_mesh()
-            .unwrap();
-        let _wall_back = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+        let _floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 32.0));
+        let _wall_back = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [11.0, 10.5, 0.25],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _wall_front = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _wall_front = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [11.0, 10.5, 0.25],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _aisle_ceil_l = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _aisle_ceil_l = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 0.15, 28.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _nave_ceiling = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _nave_ceiling = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [6.0, 0.18, 28.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _aisle_ceil_r = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _aisle_ceil_r = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [2.5, 0.15, 28.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _wall_left_outer = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _wall_left_outer = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.25, 7.0, 28.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _wall_right_outer = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _wall_right_outer = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.25, 7.0, 28.0],
-            )))
-            .as_mesh()
-            .unwrap();
+            ));
         let _ =
-            v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+            spawn_object(
+            &mut scene_db.world, _floor, mat, glam::Mat4::IDENTITY, 11.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
             _nave_ceiling,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 21.0, 0.0)),
             28.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _aisle_ceil_l,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-8.5, 11.0, 0.0)),
             28.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _aisle_ceil_r,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(8.5, 11.0, 0.0)),
             28.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _wall_left_outer,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-11.0, 7.0, 0.0)),
             28.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _wall_right_outer,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(11.0, 7.0, 0.0)),
             28.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _wall_front,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, 28.0)),
             11.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _wall_back,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, -28.0)),
@@ -380,21 +311,17 @@ impl ApplicationHandler for App {
             v.push(28.0);
             v
         };
-        let _colonnade_l: Vec<MeshId> = col_z_all
+        let _colonnade_l: Vec<Entity> = col_z_all
             .windows(2)
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.25, 5.5, half_len.max(0.1)],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
@@ -403,21 +330,17 @@ impl ApplicationHandler for App {
                 id
             })
             .collect();
-        let _colonnade_r: Vec<MeshId> = col_z_all
+        let _colonnade_r: Vec<Entity> = col_z_all
             .windows(2)
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.25, 5.5, half_len.max(0.1)],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
@@ -427,34 +350,26 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        let _columns: Vec<MeshId> = COLUMN_Z
+        let _columns: Vec<Entity> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let l = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.65, 10.0, 0.65],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     l,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
                 );
-                let r = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let r = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.65, 10.0, 0.65],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     r,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
@@ -464,80 +379,60 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        let _altar_step = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+        let _altar_step = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [5.5, 0.20, 3.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _altar_plinth = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _altar_plinth = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [3.0, 0.45, 1.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _cross_vert = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _cross_vert = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [0.18, 2.2, 0.18],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _cross_horiz = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
+            ));
+        let _cross_horiz = spawn_mesh(&mut scene_db.world, box_mesh(
                 [0.0, 0.0, 0.0],
                 [1.0, 0.18, 0.18],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+            ));
+        let _ = spawn_object(
+            &mut scene_db.world,
             _altar_step,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.2, -24.5)),
             5.5,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _altar_plinth,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.65, -25.5)),
             3.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _cross_vert,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.2, -25.8)),
             2.2,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             _cross_horiz,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.5, -25.8)),
             1.0,
         );
 
-        let _pews_left: Vec<MeshId> = (0..PEW_COUNT)
+        let _pews_left: Vec<Entity> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [1.5, 0.45, 0.5],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
@@ -546,19 +441,15 @@ impl ApplicationHandler for App {
                 id
             })
             .collect();
-        let _pews_right: Vec<MeshId> = (0..PEW_COUNT)
+        let _pews_right: Vec<Entity> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [1.5, 0.45, 0.5],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
@@ -568,26 +459,25 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        let chandelier_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.28, 0.25, 1.0],
-            0.5,
-            0.8,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
+        let chandelier_mat = spawn_material(
+            &mut scene_db.world,
+            make_material(
+                [0.3, 0.28, 0.25, 1.0],
+                0.5,
+                0.8,
+                [0.0, 0.0, 0.0],
+                0.0,
+            ),
+        );
+        let _chandelier_chains: Vec<Entity> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [0.06, 2.0, 0.06],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
@@ -596,19 +486,15 @@ impl ApplicationHandler for App {
                 id
             })
             .collect();
-        let _chandelier_rings: Vec<MeshId> = CHANDELIER_Z
+        let _chandelier_rings: Vec<Entity> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                let id = spawn_mesh(&mut scene_db.world, box_mesh(
                         [0.0, 0.0, 0.0],
                         [1.2, 0.12, 1.2],
-                    )))
-                    .as_mesh()
-                    .unwrap();
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                    ));
+                let _ = spawn_object(
+            &mut scene_db.world,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
@@ -620,41 +506,23 @@ impl ApplicationHandler for App {
 
         let mut chandelier_light_ids = Vec::new();
         for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [0.0_f32, 15.0, z],
-                        [1.0, 0.92, 0.78],
-                        8.0,
-                        22.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            chandelier_light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
+            ));
         }
+        // Stained glass shafts. Unlike the removed `Movability::Stationary` flag,
+        // `LightComponent` carries no per-light real-time/baked distinction, so
+        // these are spawned as ordinary lights like every other one here.
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light_with_movability(
-                    point_light([x, y, z], [r, g, b], 1.8, 8.0),
-                    Some(Movability::Stationary),
-                ));
+            spawn_light(&mut scene_db.world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
-            candle_light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [x, y, z],
-                        [1.0, 0.6, 0.15],
-                        1.2,
-                        4.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            candle_light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
+            ));
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -662,94 +530,75 @@ impl ApplicationHandler for App {
         // ── Post-process volumes ──────────────────────────────────────────────────
 
         // Volume 1: Warm altar glow — golden vignette + saturation shift
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
-                PostProcessVolumeDescriptor {
-                    bounds_min: [-6.0, 0.0, -28.0],
-                    bounds_max: [6.0, 14.0, -20.0],
-                    priority: 10.0,
-                    blend_radius: 3.0,
-                    blend_weight: 1.0,
-                    unbound: false,
-                    settings: PostProcessSettings {
-                        vignette_intensity: 0.65,
-                        vignette_smoothness: 2.0,
-                        vignette_roundness: 1.2,
-                        vignette_color: [1.0, 0.7, 0.2],
-                        vignette_enabled: true,
-                        color_saturation: [1.3, 1.1, 0.8],
-                        color_contrast: [1.1, 1.1, 1.1],
-                        color_gamma: [1.0, 1.0, 1.0],
-                        color_gain: [1.0, 1.0, 1.0],
-                        color_offset: [0.05, 0.02, 0.0],
-                        ..PostProcessSettings::default()
-                    },
+        spawn_post_process_volume(
+            &mut scene_db.world,
+            PostProcessVolumeDescriptor {
+                bounds_min: [-6.0, 0.0, -28.0],
+                bounds_max: [6.0, 14.0, -20.0],
+                priority: 10.0,
+                blend_radius: 3.0,
+                blend_weight: 1.0,
+                unbound: false,
+                settings: PostProcessSettings {
+                    vignette_intensity: 0.65,
+                    vignette_smoothness: 2.0,
+                    vignette_roundness: 1.2,
+                    vignette_color: [1.0, 0.7, 0.2],
+                    vignette_enabled: true,
+                    color_saturation: [1.3, 1.1, 0.8],
+                    color_contrast: [1.1, 1.1, 1.1],
+                    color_gamma: [1.0, 1.0, 1.0],
+                    color_gain: [1.0, 1.0, 1.0],
+                    color_offset: [0.05, 0.02, 0.0],
+                    ..PostProcessSettings::default()
                 },
-            ));
+            },
+        );
 
         // Volume 2: Cool cyan entrance zone
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
-                PostProcessVolumeDescriptor {
-                    bounds_min: [-6.0, 0.0, 15.0],
-                    bounds_max: [6.0, 14.0, 28.0],
-                    priority: 10.0,
-                    blend_radius: 4.0,
-                    blend_weight: 0.8,
-                    unbound: false,
-                    settings: PostProcessSettings {
-                        color_saturation: [0.7, 0.9, 1.2],
-                        color_contrast: [0.95, 0.95, 0.95],
-                        color_gain: [0.9, 0.95, 1.1],
-                        color_offset: [-0.02, 0.0, 0.03],
-                        bloom_intensity: 0.3,
-                        bloom_enabled: true,
-                        ..PostProcessSettings::default()
-                    },
+        spawn_post_process_volume(
+            &mut scene_db.world,
+            PostProcessVolumeDescriptor {
+                bounds_min: [-6.0, 0.0, 15.0],
+                bounds_max: [6.0, 14.0, 28.0],
+                priority: 10.0,
+                blend_radius: 4.0,
+                blend_weight: 0.8,
+                unbound: false,
+                settings: PostProcessSettings {
+                    color_saturation: [0.7, 0.9, 1.2],
+                    color_contrast: [0.95, 0.95, 0.95],
+                    color_gain: [0.9, 0.95, 1.1],
+                    color_offset: [-0.02, 0.0, 0.03],
+                    bloom_intensity: 0.3,
+                    bloom_enabled: true,
+                    ..PostProcessSettings::default()
                 },
-            ));
+            },
+        );
 
         // Volume 3: Chandelier bloom zone (covers all three chandeliers)
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::post_process_volume(
-                PostProcessVolumeDescriptor {
-                    bounds_min: [-2.0, 12.0, -20.0],
-                    bounds_max: [2.0, 20.0, 20.0],
-                    priority: 5.0,
-                    blend_radius: 1.5,
-                    blend_weight: 1.0,
-                    unbound: false,
-                    settings: PostProcessSettings {
-                        bloom_intensity: 2.5,
-                        bloom_threshold: 1.5,
-                        bloom_knee: 0.5,
-                        bloom_enabled: true,
-                        bloom_tint: [1.0, 0.85, 0.6],
-                        ..PostProcessSettings::default()
-                    },
+        spawn_post_process_volume(
+            &mut scene_db.world,
+            PostProcessVolumeDescriptor {
+                bounds_min: [-2.0, 12.0, -20.0],
+                bounds_max: [2.0, 20.0, 20.0],
+                priority: 5.0,
+                blend_radius: 1.5,
+                blend_weight: 1.0,
+                unbound: false,
+                settings: PostProcessSettings {
+                    bloom_intensity: 2.5,
+                    bloom_threshold: 1.5,
+                    bloom_knee: 0.5,
+                    bloom_enabled: true,
+                    bloom_tint: [1.0, 0.85, 0.6],
+                    ..PostProcessSettings::default()
                 },
-            ));
+            },
+        );
 
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
-
-        let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra)
-            .with_render_scale(1.0);
-        let debug_overlay = helio_pass_debug_overlay::DebugOverlayState::new();
-        let fxaa_graph = build_fxaa_hlfs_graph(
-            &device,
-            &queue,
-            renderer.scene(),
-            config,
-            renderer.debug_state(),
-            renderer.debug_camera_buf(),
-            renderer.cull_stats_buf(),
-            Some(&debug_overlay),
-        );
-        renderer.set_graph(fxaa_graph);
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
@@ -780,6 +629,7 @@ impl ApplicationHandler for App {
             renderer,
             action_rx,
             last_frame: std::time::Instant::now(),
+            scene_db,
             _floor,
             _nave_ceiling,
             _aisle_ceil_l,
@@ -1039,14 +889,16 @@ impl AppState {
 
         for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
             let z = CHANDELIER_Z[i];
-            let _ = renderer.scene_mut().update_light(
+            update_light(
+                &mut self.scene_db.world,
                 id,
                 point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0),
             );
         }
         for (i, &id) in self.candle_light_ids.iter().enumerate() {
             let (x, y, z) = CANDLES[i];
-            let _ = renderer.scene_mut().update_light(
+            update_light(
+                &mut self.scene_db.world,
                 id,
                 point_light([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0),
             );

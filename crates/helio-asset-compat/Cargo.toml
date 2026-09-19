@@ -2,12 +2,19 @@
 name = "helio-asset-compat"
 version = "0.1.0"
 edition = "2021"
+workspace = "../../"
 description = "SolidRS integration layer for Helio renderer - asset loading and conversion"
 
 [dependencies]
 # Helio renderer facade
 helio = { workspace = true }
-libhelio = { workspace = true }
+helio-mats = { path = "../helio-mats" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+
+# SceneDB: material rows spawned by `upload_scene_materials` are plain
+# `helio_pass_gbuffer::MaterialComponent` rows now, same as everywhere else.
+pulsar_scenedb = { workspace = true }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 
 # SolidRS - 3D asset loading
 solid-rs = { workspace = true, features = ["configurator"] }

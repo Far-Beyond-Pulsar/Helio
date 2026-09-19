@@ -24,7 +24,26 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::ResourceRegistry;
+
+/// Marker opting a shader into [`HIZ`]. Must appear in the source.
+pub const HIZ_MARKER: &str = "//!use helio_hiz";
+
+/// Hi-Z screen-space ray marching, shared by SSR and water — as a
+/// `helio-core` shader snippet (see `helio_core::shader::ShaderSnippet`).
+///
+/// Separate from `helio_core::shader::PRELUDE` because it is only wanted by
+/// the passes that march the pyramid, and prepending it everywhere would
+/// push every other shader's diagnostics further out of alignment for
+/// nothing.
+pub const HIZ: &str = include_str!("../shaders/hiz_trace.wgsl");
+
+/// [`helio_core::shader::ShaderSnippet`] for [`HIZ`]. Passed explicitly to
+/// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
+/// via [`HIZ_MARKER`] — `helio-core` itself never names this snippet.
+pub const HIZ_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::shader::ShaderSnippet::new(HIZ_MARKER, HIZ);
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 
@@ -560,7 +579,7 @@ impl RenderPass for HiZBuildPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a FrameResources<'a>,
+        _resources: &'a ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -706,8 +725,7 @@ impl RenderPass for HiZBuildPass {
         if self.depth_copy_supported {
             let depth_texture = ctx
                 .resources
-                .depth_texture
-                .get()
+                .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
                 .expect("Renderer must publish the active depth texture for HiZ");
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
@@ -778,7 +796,7 @@ impl RenderPass for HiZBuildPass {
         self.build_min_pyramid(ctx);
 
         // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        let camera_gen = ctx.scene.camera_generation;
+        let camera_gen = ctx.camera_generation;
         let resolution_changed = false;
 
         if !self.first_frame && camera_gen == self.prev_camera_generation && !resolution_changed {
@@ -823,17 +841,29 @@ impl RenderPass for HiZBuildPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
+    fn publish<'a>(&self, frame: &mut ResourceRegistry<'a>) {
+        // SAFETY: every borrow below is extended out of `self`'s owned `Arc`
+        // fields, which are pass-lifetime (owned by the RenderGraph across
+        // many frames), never frame-scoped -- `'a` is always shorter than
+        // these fields' real lifetime. `publish(&self, ..)` (not `&'a self`)
+        // cannot express that relationship, so the borrow checker sees an
+        // unrelated, shorter lifetime here instead; matches
+        // `ResourceRegistry::write_texture_binding`'s own transmute for the
+        // same reason.
+        //
         // The graph routes "hiz" texture view via pre_pass_actions before execute().
         // We only need to publish the sampler (not owned by the graph).
-        frame.hiz_sampler.write(&*self.hiz_sampler, "HiZBuild");
+        let hiz_sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&*self.hiz_sampler) };
+        frame.write(helio_core::ResourceKey::new("hiz_sampler"), hiz_sampler, "HiZBuild");
 
         // Expose static HiZ if loaded
         if let Some(ref view) = self.static_hiz_view {
-            frame.static_hiz.write(&**view, "HiZBuild");
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&**view) };
+            frame.write(helio_core::ResourceKey::new("static_hiz"), view, "HiZBuild");
         }
         if let Some(ref sampler) = self.static_hiz_sampler {
-            frame.static_hiz_sampler.write(&**sampler, "HiZBuild");
+            let sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&**sampler) };
+            frame.write(helio_core::ResourceKey::new("static_hiz_sampler"), sampler, "HiZBuild");
         }
     }
 }

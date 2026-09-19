@@ -425,7 +425,7 @@ impl DebugPass {
         self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = ctx.resources.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
             } else {
                 ctx.depth
@@ -472,14 +472,15 @@ impl RenderPass for DebugPass {
         "DebugDraw"
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
             } else {
                 depth
@@ -496,7 +497,7 @@ impl RenderPass for DebugPass {
             None
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -529,3 +530,5 @@ impl RenderPass for DebugPass {
         Ok(())
     }
 }
+
+

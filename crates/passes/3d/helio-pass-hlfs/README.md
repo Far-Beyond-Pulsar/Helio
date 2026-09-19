@@ -45,6 +45,27 @@ for synthetic 1440p measurements and quality limits. These are direct-lighting G
 costs, including per-frame TLAS work, not whole-frame or general-scene guarantees.
 The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this preset.
 
+## SceneDB RT integration
+
+The frontend owns `SceneDbRayTracing`. After flushing the World's GPU mirror,
+call `acceleration.prepare(&world)` and publish its TLAS with
+`renderer.set_ray_tracing_frame(Some(tlas))` before each render. The renderer
+provides it through `RenderEnvironment`; publication expires after that frame.
+The helper supports opaque, indexed, world-space `StaticObjectComponent` casters,
+including off-screen objects. Material and mesh generations are validated.
+Masked/custom materials and known unsupported geometry buffers are rejected.
+Other geometry producers require an explicit acceleration projection.
+
+The current helper scans objects and hashes each referenced mesh once per frame
+to detect in-place edits. This CPU cost is excluded from GPU pass timings. Light
+sampling covers allocated SceneDB rows, including zeroed vacant slots, rather
+than truncating the population at 256. Allocation epochs do not track in-place
+light edits, so composite repair history reuse is conservatively disabled;
+the regular temporal lighting filter still runs.
+
+The workspace profiler is pinned to a published `Pulsar-Native` Git revision.
+No profiler checkout outside this repository is required.
+
 ## ScreenSpace frame stages
 
 1. A 64×64 screen tile cull builds coarse light lists. An 8×8 depth-aware cull

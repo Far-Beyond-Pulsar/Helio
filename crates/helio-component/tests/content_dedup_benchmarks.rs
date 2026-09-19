@@ -78,7 +78,7 @@ fn bm3_bulk_hydrate_10k_entities_one_shared_asset() {
         let upload = helio_component::subsystems::load_mesh_upload(&root.join("bm3_asset.mesh")).expect("load bench mesh");
         world.insert(
             e,
-            StaticMeshComponent { mesh_asset: MeshAssetPath::new("bm3_asset.mesh"), vertices: upload.vertices, indices: upload.indices },
+            StaticMeshComponent { mesh_asset: MeshAssetPath::new("bm3_asset.mesh"), vertices: upload.vertices, indices: upload.indices, bounds_local: [0.0, 0.0, 0.0, 0.5] },
         );
     }
     let elapsed = start.elapsed();

@@ -4,10 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "Foliage tile residency, GPU placement, tile/cluster culling and per-LOD compaction for Helio"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
+pulsar_reflection = { workspace = true }
+glam = { workspace = true }
 helio-core = { workspace = true }
-helio-foliage-core = { workspace = true }
-libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
+serde_json = { workspace = true }

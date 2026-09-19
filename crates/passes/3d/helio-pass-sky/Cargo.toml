@@ -5,11 +5,18 @@ edition = "2021"
 description = "Helio unified sky and volumetric clouds pass"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["gpu"]
+gpu = []
+
 [dependencies]
+pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

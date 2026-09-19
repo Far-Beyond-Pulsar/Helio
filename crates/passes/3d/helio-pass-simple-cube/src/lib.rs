@@ -209,14 +209,15 @@ impl RenderPass for SimpleCubePass {
         "SimpleCube"
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -230,7 +231,7 @@ impl RenderPass for SimpleCubePass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
-        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
+        let depth_view = resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),
             color_attachments,
@@ -254,14 +255,14 @@ impl RenderPass for SimpleCubePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Rebuild camera bind group when the camera buffer pointer changes.
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
         if self.bind_group_key != Some(camera_ptr) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("SimpleCube BG"),
                 layout: &self.bgl,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.camera.as_entire_binding(),
+                    resource: ctx.camera.as_entire_binding(),
                 }],
             }));
             self.bind_group_key = Some(camera_ptr);
@@ -276,3 +277,5 @@ impl RenderPass for SimpleCubePass {
         Ok(())
     }
 }
+
+

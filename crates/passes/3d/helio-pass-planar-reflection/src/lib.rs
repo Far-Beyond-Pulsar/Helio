@@ -144,7 +144,7 @@ impl RenderPass for PlanarReflectionPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
@@ -172,12 +172,12 @@ impl RenderPass for PlanarReflectionPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.resources.gbuffer.read("PlanarReflection") {
+        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PlanarReflection") {
             Some(g) => g,
             None => return Ok(()),
         };
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.resources.pre_aa.get() {
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -187,7 +187,7 @@ impl RenderPass for PlanarReflectionPass {
         };
 
         let key = (
-            gbuffer.normal as *const _ as usize,
+            gbuffer.views[1] as *const _ as usize,
             depth_view as *const _ as usize,
             pre_aa_view as *const _ as usize,
             planar_tex as *const _ as usize,
@@ -198,7 +198,7 @@ impl RenderPass for PlanarReflectionPass {
                 label: Some("Planar BG1"),
                 layout: &self.bgl_1,
                 entries: &[
-                    texture_view_entry(0, gbuffer.normal),
+                    texture_view_entry(0, gbuffer.views[1]),
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::TextureView(depth_view),
@@ -230,7 +230,7 @@ impl RenderPass for PlanarReflectionPass {
         Ok(())
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // Published by the graph automatically via the resource pool name.
     }
 }

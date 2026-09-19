@@ -1,5 +1,21 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
+
+pub mod components;
+pub mod gpu_types;
+pub use components::DecalComponent;
+pub use gpu_types::*;
+
+/// Fixed capacity for the `"decals"` SceneDB buffer, matching
+/// `helio_pass_forward_lit::MAX_LIGHTS`'s reasoning exactly: kept equal to
+/// the packed-layout auto-register capacity so every entity within it is
+/// covered, not just an arbitrary prefix. A row with no live entity behind
+/// it is `Zeroable`-default -- `decal_collect.wgsl`'s `opa <= 0.0` gate
+/// (driven by `color.a == 0`) makes that row a guaranteed no-op even though
+/// its degenerate all-zero `transform` would otherwise mis-classify every
+/// pixel as "inside" the decal box.
+pub const MAX_DECALS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -11,7 +27,7 @@ struct DecalGlobals {
 }
 
 pub struct DecalPass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     collect_pipeline: wgpu::ComputePipeline,
     apply_pipeline: wgpu::ComputePipeline,
     bgl_collect: wgpu::BindGroupLayout,
@@ -30,20 +46,27 @@ pub struct DecalPass {
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
     last_w: u32,
     last_h: u32,
+    /// Cached in `prepare()`, read back in `execute()` -- see `prepare()`'s
+    /// doc for why this isn't just `ctx.scene.decal_count`.
+    decal_count: u32,
+    /// Bound in place of `"decals"` when no `DecalComponent` has ever been
+    /// inserted -- SceneDB is the only decal source this pass reads.
+    /// `decal_count` is 0 whenever this is bound, so it's never dereferenced.
+    fallback_decals: wgpu::Buffer,
 }
 
 impl DecalPass {
     /// Decal textures now come from the scene's bindless table (bound per-frame
-    /// from `main_scene`), so this pass owns no texture state of its own.
+    /// from the explicit material-texture frame binding, so this pass owns no
+    /// texture table state of its own.
     pub fn new(
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        _decal_buf: &wgpu::Buffer,
         _camera_buf: &wgpu::Buffer,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let collect_src = decal_collect_source(material_binding);
         let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Collect"),
@@ -52,6 +75,12 @@ impl DecalPass {
         let apply_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Apply"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/decal_apply.wgsl").into()),
+        });
+        let fallback_decals = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Decal Fallback Decals"),
+            size: std::mem::size_of::<crate::GpuDecal>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         });
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DecalGlobals"),
@@ -176,6 +205,8 @@ impl DecalPass {
             temp_emissive: None,
             last_w: 0,
             last_h: 0,
+            decal_count: 0,
+            fallback_decals,
         }
     }
 
@@ -245,7 +276,7 @@ fn make_temp(
 /// rewritten to individual bindings (baseline WebGPU has no `binding_array`), and
 /// elsewhere the declared length is resized to match the selected material tier — the BGL and
 /// the shader must agree exactly or `create_bind_group` fails validation.
-fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> String {
+fn decal_collect_source(material_binding: helio_mats::MaterialBindingConfig) -> String {
     let src = include_str!("../shaders/decal_collect.wgsl");
     if material_binding.uses_binding_arrays() {
         src.replace(
@@ -260,14 +291,14 @@ fn decal_collect_source(material_binding: libhelio::MaterialBindingConfig) -> St
             &format!("binding_array<sampler, {}>", material_binding.max_textures),
         )
     } else {
-        libhelio::shader::apply_webgpu_decal_bindings(src, material_binding.max_textures)
+        helio_mats::apply_webgpu_decal_bindings(src, material_binding.max_textures)
     }
 }
 
 /// BGL for group 1: the scene's bindless texture table, shared with the GBuffer pass.
 fn create_decal_texture_bgl(
     device: &wgpu::Device,
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroupLayout {
     let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
     material_binding.append_layout_entries(&mut entries, 0, wgpu::ShaderStages::COMPUTE);
@@ -325,23 +356,32 @@ impl RenderPass for DecalPass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");
         builder.read("hiz");
-        builder.read("main_scene");
+        builder.read("material_textures");
     }
-    fn publish<'a>(&'a self, _: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&self, _: &mut helio_core::ResourceRegistry<'a>) {}
     fn render_pass_descriptor<'a>(
         &'a self,
         _: &'a wgpu::TextureView,
         _: &'a wgpu::TextureView,
-        _: &'a libhelio::FrameResources<'a>,
+        _: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // SceneDB is the only decal source: `"decals"` is a fixed-capacity
+        // buffer (`MAX_DECALS`), resolved fresh from the mirror by key every
+        // frame. 0 when no `DecalComponent` has ever been inserted; there is
+        // no Helio-owned decal buffer to fall back to.
+        self.decal_count = if ctx.scene_buffers.contains(BufferKey::of("decals")) {
+            MAX_DECALS
+        } else {
+            0
+        };
         ctx.write_buffer(
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&DecalGlobals {
-                decal_count: ctx.scene.decals.len() as u32,
+                decal_count: self.decal_count,
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -351,26 +391,31 @@ impl RenderPass for DecalPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.decal_count == 0 {
+        if self.decal_count == 0 {
             return Ok(());
         }
-        let gb = match ctx.resources.gbuffer.read(self.name()) {
+        let gb = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), self.name()) {
             Some(g) => g,
             None => return Ok(()),
         };
-        let depth_view = match ctx.resources.hiz.read(self.name()) {
+        let depth_view = match ctx.resources.read(helio_core::ResourceKey::new("hiz"), self.name()) {
             Some(v) => v,
             None => return Ok(()),
         };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
-        let main_scene = match ctx.resources.main_scene.read(self.name()) {
+        let material_textures = match ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), self.name()) {
             Some(m) => m,
             None => return Ok(()),
         };
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let decal_ptr = ctx.scene.decals as *const _ as usize;
         self.ensure_temp(ctx.width, ctx.height, ctx.device);
+        let decals_buf = ctx
+            .scene_buffers
+            .get(BufferKey::of("decals"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_decals);
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let decal_ptr = decals_buf as *const _ as usize;
         let (_, ta) = self.temp_albedo.as_ref().unwrap();
         let (_, tn) = self.temp_normal.as_ref().unwrap();
         let (_, to) = self.temp_orm.as_ref().unwrap();
@@ -380,9 +425,9 @@ impl RenderPass for DecalPass {
             camera_ptr,
             decal_ptr,
             depth_view as *const _ as usize,
-            gb.albedo as *const _ as usize,
-            gb.normal as *const _ as usize,
-            gb.orm as *const _ as usize,
+            gb.views[0] as *const _ as usize,
+            gb.views[1] as *const _ as usize,
+            gb.views[2] as *const _ as usize,
             u64::from(self.last_w) | (u64::from(self.last_h) << 32),
         );
         if self.bg_collect_key != Some(ck) || self.bg_collect.is_none() {
@@ -390,14 +435,14 @@ impl RenderPass for DecalPass {
                 label: Some("Decal Collect BG"),
                 layout: &self.bgl_collect,
                 entries: &[
-                    bind_buf(0, ctx.scene.camera),
+                    bind_buf(0, ctx.camera),
                     bind_buf(1, &self.globals_buf),
-                    bind_buf(2, ctx.scene.decals),
+                    bind_buf(2, decals_buf),
                     bind_tex(3, depth_view),
-                    bind_tex(4, gb.albedo),
-                    bind_tex(5, gb.normal),
-                    bind_tex(6, gb.orm),
-                    bind_tex(7, gb.emissive),
+                    bind_tex(4, gb.views[0]),
+                    bind_tex(5, gb.views[1]),
+                    bind_tex(6, gb.views[2]),
+                    bind_tex(7, gb.views[3]),
                     bind_tex(8, ta),
                     bind_tex(9, tn),
                     bind_tex(10, to),
@@ -408,12 +453,12 @@ impl RenderPass for DecalPass {
         }
 
         // Rebuild the texture table only when the scene's texture set changes.
-        let tex_version = main_scene.material_textures.version;
+        let tex_version = material_textures.version;
         if self.bg_textures_version != Some(tex_version) || self.bg_textures.is_none() {
             self.bg_textures = Some(build_texture_bind_group(
                 ctx.device,
                 &self.bgl_textures,
-                &main_scene.material_textures,
+                &material_textures,
                 self.material_binding,
             ));
             self.bg_textures_version = Some(tex_version);
@@ -445,17 +490,17 @@ impl RenderPass for DecalPass {
                 label: Some("Decal Apply BG"),
                 layout: &self.bgl_apply,
                 entries: &[
-                    bind_buf(0, ctx.scene.camera),
+                    bind_buf(0, ctx.camera),
                     bind_buf(1, &self.globals_buf),
-                    bind_buf(2, ctx.scene.decals),
+                    bind_buf(2, decals_buf),
                     bind_tex(3, ta),
                     bind_tex(4, tn),
                     bind_tex(5, to),
                     bind_tex(6, te),
-                    bind_tex(7, gb.albedo),
-                    bind_tex(8, gb.normal),
-                    bind_tex(9, gb.orm),
-                    bind_tex(10, gb.emissive),
+                    bind_tex(7, gb.views[0]),
+                    bind_tex(8, gb.views[1]),
+                    bind_tex(9, gb.views[2]),
+                    bind_tex(10, gb.views[3]),
                 ],
             }));
             self.bg_apply_key = Some(ak);
@@ -476,7 +521,7 @@ impl RenderPass for DecalPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "hiz", "main_scene"]
+        &["gbuffer", "hiz", "material_textures"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["gbuffer"]
@@ -487,8 +532,8 @@ impl RenderPass for DecalPass {
 fn build_texture_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    textures: &libhelio::MaterialTextureBindings,
-    material_binding: libhelio::MaterialBindingConfig,
+    textures: &helio_mats::MaterialTextureBindings,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroup {
     let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
     material_binding.append_bind_group_entries(
@@ -531,9 +576,9 @@ mod tests {
     #[test]
     fn webgpu_fixup_rewrites_every_binding_array_in_the_real_shader() {
         let src = include_str!("../shaders/decal_collect.wgsl");
-        let fixed = libhelio::shader::apply_webgpu_decal_bindings(
+        let fixed = helio_mats::apply_webgpu_decal_bindings(
             src,
-            libhelio::MAX_MATERIAL_TEXTURES.min(16),
+            helio_mats::MAX_MATERIAL_TEXTURES.min(16),
         );
 
         assert!(
@@ -553,7 +598,7 @@ mod tests {
     #[test]
     fn collect_shader_translates_portable_depth_to_gles() {
         let src = include_str!("../shaders/decal_collect.wgsl");
-        let src = libhelio::shader::apply_webgpu_decal_bindings(src, 1);
+        let src = helio_mats::apply_webgpu_decal_bindings(src, 1);
         let module = naga::front::wgsl::parse_str(&src)
             .expect("Decal Collect WGSL must parse after baseline binding expansion");
         let info = naga::valid::Validator::new(
@@ -600,7 +645,7 @@ mod tests {
         for adapter in &adapters {
             let info = adapter.get_info();
             let backend = format!("{:?}", info.backend);
-            let required_features = adapter.features() & libhelio::BINDLESS_MATERIAL_FEATURES;
+            let required_features = adapter.features() & helio_mats::BINDLESS_MATERIAL_FEATURES;
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("Decal Portability Test Device"),
@@ -614,19 +659,13 @@ mod tests {
                 panic!("Decal {backend} validation error: {error:?}");
             }));
 
-            let decals = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Decal Portability Decals"),
-                size: 256,
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
             let camera = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Decal Portability Camera"),
                 size: 512,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
-            let _pass = DecalPass::new(&device, &queue, &decals, &camera, 1280, 720);
+            let _pass = DecalPass::new(&device, &queue, &camera, 1280, 720);
         }
 
         adapters.len()

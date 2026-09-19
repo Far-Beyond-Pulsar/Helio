@@ -16,9 +16,12 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_simple_graph;
+
+mod v3_demo_common;
+use v3_demo_common::new_scene_db_with_gpu_mirror;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -194,37 +197,15 @@ impl ApplicationHandler for App {
 
         // ── renderer with simple graph ────────────────────────────────────────
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_simple_graph(&device, &queue, surface_format);
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        // `SimpleCubePass` reads no scene content at all, but SceneDB is the
+        // sole scene authority in every `RendererBuilder`, so an (unused)
+        // GPU mirror is still required to build one.
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let renderer = RendererBuilder::new(config, v3_demo_common::scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, _config, _debug_state, _cb, _dcb, _csb| {
+                build_simple_graph(d, q, surface_format)
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
 
         // ── initial camera: 4 units back, looking at origin ───────────────────
         self.state = Some(AppState {

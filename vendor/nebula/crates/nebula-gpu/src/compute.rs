@@ -2,36 +2,36 @@ use std::borrow::Cow;
 
 /// A compiled compute pipeline with its bind group layouts.
 pub struct ComputePipeline {
-    pub pipeline:       wgpu::ComputePipeline,
+    pub pipeline: wgpu::ComputePipeline,
     pub bind_group_layouts: Vec<wgpu::BindGroupLayout>,
 }
 
 impl ComputePipeline {
     /// Build a compute pipeline from inline WGSL source.
     pub fn from_wgsl(
-        device:     &wgpu::Device,
-        label:      &str,
-        wgsl:       &str,
-        entry:      &str,
-        layouts:    &[&wgpu::BindGroupLayout],
+        device: &wgpu::Device,
+        label: &str,
+        wgsl: &str,
+        entry: &str,
+        layouts: &[&wgpu::BindGroupLayout],
     ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some(&format!("{label}_shader")),
+            label: Some(&format!("{label}_shader")),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(wgsl)),
         });
 
         let opt_layouts: Vec<Option<&wgpu::BindGroupLayout>> =
             layouts.iter().map(|&l| Some(l)).collect();
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:          Some(&format!("{label}_layout")),
-            bind_group_layouts:   &opt_layouts,
+            label: Some(&format!("{label}_layout")),
+            bind_group_layouts: &opt_layouts,
             immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label:       Some(label),
-            layout:      Some(&pipeline_layout),
-            module:      &module,
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            module: &module,
             entry_point: Some(entry),
             compilation_options: Default::default(),
             cache: None,

@@ -10,13 +10,17 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light};
+use pulsar_scenedb::{Entity, SceneDb, World};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_external;
 
 use winit::{
     application::ApplicationHandler,
@@ -62,7 +66,8 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    light_ids: [LightId; 3],
+    scene_db: SceneDb,
+    light_ids: [Entity; 3],
     light_intensity_multiplier: f32,
 }
 
@@ -133,118 +138,60 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, fmt);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
 
         // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_white = renderer.scene_mut().insert_material(make_material(
-            [0.9, 0.9, 0.9, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_red = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.1, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_green = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.7, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let mat_cube = renderer.scene_mut().insert_material(make_material(
-            [0.8, 0.78, 0.72, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat_white = spawn_material(
+            &mut scene_db.world,
+            make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_red = spawn_material(
+            &mut scene_db.world,
+            make_material([0.8, 0.1, 0.1, 1.0], 0.9, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.1, 0.7, 0.1, 1.0], 0.9, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let mat_cube = spawn_material(
+            &mut scene_db.world,
+            make_material([0.8, 0.78, 0.72, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         // ── Geometry ───────────────────────────────────────────────────────────────
-        let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [hx, hy, hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                &mut renderer,
+        let mut add_box = |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+            let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+            let _ = spawn_object(
+                w,
                 m,
                 mat,
                 glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
                 (hx * hx + hy * hy + hz * hz).sqrt(),
             );
         };
-        add_box(0.0, -0.05, 0.0, 5.0, 0.05, 5.0, mat_white); // floor
-        add_box(0.0, 5.05, 0.0, 5.0, 0.05, 5.0, mat_white); // ceiling
-        add_box(0.0, 2.5, -5.05, 5.0, 2.5, 0.05, mat_white); // back wall
-        add_box(0.0, 2.5, 5.05, 5.0, 2.5, 0.05, mat_white); // front wall
-        add_box(5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_green); // right (green)
-        add_box(-5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_red); // left (red)
-        add_box(-2.0, 0.5, -2.0, 0.5, 0.5, 0.5, mat_cube);
-        add_box(2.0, 0.5, 2.0, 0.5, 0.5, 0.5, mat_cube);
-        add_box(0.0, 0.7, 0.0, 0.7, 0.7, 0.7, mat_cube);
-        add_box(-3.0, 1.0, 1.5, 1.0, 1.0, 1.0, mat_cube);
-        add_box(3.0, 0.6, -1.5, 0.6, 0.6, 0.6, mat_cube);
+        add_box(&mut scene_db.world, 0.0, -0.05, 0.0, 5.0, 0.05, 5.0, mat_white); // floor
+        add_box(&mut scene_db.world, 0.0, 5.05, 0.0, 5.0, 0.05, 5.0, mat_white); // ceiling
+        add_box(&mut scene_db.world, 0.0, 2.5, -5.05, 5.0, 2.5, 0.05, mat_white); // back wall
+        add_box(&mut scene_db.world, 0.0, 2.5, 5.05, 5.0, 2.5, 0.05, mat_white); // front wall
+        add_box(&mut scene_db.world, 5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_green); // right (green)
+        add_box(&mut scene_db.world, -5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_red); // left (red)
+        add_box(&mut scene_db.world, -2.0, 0.5, -2.0, 0.5, 0.5, 0.5, mat_cube);
+        add_box(&mut scene_db.world, 2.0, 0.5, 2.0, 0.5, 0.5, 0.5, mat_cube);
+        add_box(&mut scene_db.world, 0.0, 0.7, 0.0, 0.7, 0.7, 0.7, mat_cube);
+        add_box(&mut scene_db.world, -3.0, 1.0, 1.5, 1.0, 1.0, 1.0, mat_cube);
+        add_box(&mut scene_db.world, 3.0, 0.6, -1.5, 0.6, 0.6, 0.6, mat_cube);
 
         // ── Lights ───────────────────────────────────────────────────────────────
-        let light_ids: [LightId; 3] = LIGHT_BASE
+        let light_ids: [Entity; 3] = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| {
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
-                    .as_light()
-                    .unwrap()
-            })
+            .map(|&(pos, col, int, rng)| spawn_light(&mut scene_db.world, point_light(pos, col, int, rng)))
             .collect::<Vec<_>>()
             .try_into()
             .expect("3 lights");
@@ -257,6 +204,7 @@ impl ApplicationHandler for App {
             surface_format: fmt,
             renderer,
             last_frame: std::time::Instant::now(),
+            scene_db,
             cam_pos: glam::Vec3::new(0.0, 2.5, 8.0),
             cam_yaw: 0.0,
             cam_pitch: 0.0,
@@ -457,11 +405,13 @@ impl AppState {
 
         for (i, &id) in self.light_ids.iter().enumerate() {
             let (pos, col, base_int, range) = LIGHT_BASE[i];
-            let _ = self.renderer.scene_mut().update_light(
+            update_light(
+                &mut self.scene_db.world,
                 id,
                 point_light(pos, col, base_int * self.light_intensity_multiplier, range),
             );
         }
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

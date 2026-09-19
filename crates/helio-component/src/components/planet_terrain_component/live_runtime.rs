@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use engine_subsystems::{Subsystem, SubsystemContext, SubsystemError};
 use helio_pass_planetary_voxel::PlanetaryVoxelRenderConfig;
-use helio_planet_voxel_core::VisibilityOutcome;
+use helio_pass_planetary_voxel::VisibilityOutcome;
 use pulsar_reflection::LiveKeySet;
 use pulsar_terrain::{
-    CELL_COUNT, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
+    CELL_COUNT, PlanetFrame, PlanetId, PlanetPosition, PlanetView, PositionError, TerrainControllerConfig,
     TerrainControllerError, TerrainPlanningConfig, TerrainRefinementConfig,
     TerrainRenderDeltaConfig, TerrainRuntimeConfig, TerrainRuntimeError, TerrainRuntimeHandle,
     TerrainStreamingConfig, TerrainStreamingController, TerrainStreamingError, TerrainSubsystem,
@@ -18,7 +18,10 @@ use super::{
 
 const LIVE_MAX_PLANETS: usize = 4;
 const LIVE_ACTIVE_PAGES_PER_PLANET: usize = 96;
-const LIVE_TRANSITION_PAGES_PER_PLANET: usize = 96;
+// Committed + staged pages during a handoff. Must exceed the active budget or a
+// refinement step near the cap fails with a transition-budget error; 4 planets
+// x 120 exactly fills the 480-page GPU residency.
+const LIVE_TRANSITION_PAGES_PER_PLANET: usize = 120;
 const LIVE_GPU_VISIBLE_PAGES: usize = 384;
 
 /// Component identities retained between revisions of Pulsar's current legacy
@@ -152,6 +155,25 @@ impl PlanetTerrainRuntime {
         self.adapter.residency(renderer).is_ok()
     }
 
+    /// Whether streaming still has work that only advances on rendered frames.
+    ///
+    /// Planning results, refinement commits and uploads arrive over several
+    /// `advance` calls, and the pass drains one queued surface job per rendered
+    /// frame. A host that skips frames while the camera is parked (the editor's
+    /// idle early-out) must keep ticking until this is false, or a freshly
+    /// created body never finishes streaming in and nothing is drawn.
+    pub fn has_pending_work(&self, renderer: &helio::Renderer) -> bool {
+        let unconverged = self
+            .component_cache
+            .active_planets()
+            .into_iter()
+            .any(|planet| self.controller.is_converged(planet) != Some(true));
+        let queued = renderer
+            .find_pass::<helio_pass_planetary_voxel::PlanetaryVoxelRenderPass>()
+            .is_some_and(|pass| pass.counters().queued_surfaces > 0);
+        unconverged || queued
+    }
+
     pub fn remove_stale_components(
         &mut self,
         live_keys: &LiveKeySet,
@@ -211,6 +233,26 @@ impl PlanetTerrainRuntime {
             })
             .collect::<Vec<_>>();
 
+        // The controller only emits a frame once a planet has committed pages, yet
+        // the render delta can already carry uploads for it (pages are streamed in
+        // before the frontier commits). Uploads addressed to a planet with no
+        // registered camera-local frame are rejected and would fail every frame
+        // thereafter, so seed a frame for any active planet that lacks one.
+        for planet_id in self.component_cache.active_planets() {
+            let has_frame = frame
+                .planet_frames
+                .iter()
+                .any(|payload| payload.planet_id() == planet_id)
+                || self
+                    .adapter
+                    .residency(renderer)?
+                    .planet_frame(helio_pass_planetary_voxel::PlanetId(planet_id.0))
+                    .is_some();
+            if !has_frame {
+                let payload = PlanetFrame::new(planet_id, camera, input.frame_index).renderer_payload();
+                self.adapter.set_planet_frame(renderer, queue, payload)?;
+            }
+        }
         for planet_frame in frame.planet_frames {
             self.adapter
                 .set_planet_frame(renderer, queue, planet_frame)?;

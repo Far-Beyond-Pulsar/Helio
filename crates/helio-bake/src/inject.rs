@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use libhelio::FrameResources;
+use helio_core::ResourceRegistry;
 
 use crate::data::BakedData;
 
-/// A render pass that publishes pre-baked GPU resources into `FrameResources` each frame.
+/// A render pass that publishes pre-baked GPU resources into `ResourceRegistry` each frame.
 ///
 /// This pass does **zero GPU work** — it purely stores `Arc`-wrapped references and
 /// writes them into the frame resource bus in `publish()`.  
@@ -28,6 +28,20 @@ impl BakeInjectPass {
     }
 }
 
+/// Extends a borrow from `self`'s own lifetime to the registry's `'a`.
+///
+/// Sound here specifically because `BakeInjectPass` only ever borrows out of
+/// `self.data: Arc<BakedData>`, which is baking-run-lived (owned by the
+/// `Renderer`/graph across many frames), never frame-scoped — so any single
+/// frame's `'a` is always shorter than the data's real lifetime. The trait's
+/// `publish(&self, ..)` (not `&'a self`) cannot express that relationship, so
+/// the borrow checker sees an unrelated, shorter lifetime `'1` here instead;
+/// this is the same lifetime-extension idiom `ResourceRegistry::
+/// write_texture_binding` already uses for exactly this reason.
+unsafe fn extend_lifetime<'a, T: ?Sized>(value: &T) -> &'a T {
+    &*(value as *const T)
+}
+
 impl RenderPass for BakeInjectPass {
     fn name(&self) -> &'static str {
         "BakeInject"
@@ -37,56 +51,54 @@ impl RenderPass for BakeInjectPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
-    fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
+    fn publish<'a>(&self, frame: &mut ResourceRegistry<'a>) {
+        // SAFETY: every borrow below is extended per `extend_lifetime`'s doc —
+        // out of `self.data: Arc<BakedData>`, which outlives any single frame.
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO
         if let Some(ref view) = self.data.ao_view {
-            frame.baked_ao.write(view.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_ao"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
         }
         if let Some(ref sampler) = self.data.ao_sampler {
-            frame.baked_ao_sampler.write(sampler.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_ao_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
         }
 
         // Lightmap atlas
         if let Some(ref view) = self.data.lightmap_view {
-            frame.baked_lightmap.write(view.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_lightmap"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
         }
         if let Some(ref sampler) = self.data.lightmap_sampler {
-            frame
-                .baked_lightmap_sampler
-                .write(sampler.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_lightmap_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
         }
 
         // Reflection cubemap
         if let Some(ref view) = self.data.reflection_view {
-            frame.baked_reflection.write(view.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_reflection"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
         }
         if let Some(ref sampler) = self.data.reflection_sampler {
-            frame
-                .baked_reflection_sampler
-                .write(sampler.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_reflection_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
         }
 
         // Irradiance SH GPU buffer
         if let Some(ref buf) = self.data.irradiance_sh_buf {
-            frame.baked_irradiance_sh.write(buf.as_ref(), "BakeInject");
+            frame.write(helio_core::ResourceKey::new("baked_irradiance_sh"), unsafe { extend_lifetime(buf.as_ref()) }, "BakeInject");
         }
 
         // PVS — CPU-side bitfield for visibility queries
         if let Some(ref pvs) = self.data.pvs {
-            frame.baked_pvs.write(
-                libhelio::BakedPvsRef {
+            frame.write(helio_core::ResourceKey::new("baked_pvs"),
+                helio_bake_types::BakedPvsRef {
                     world_min: pvs.world_min,
                     world_max: pvs.world_max,
                     grid_dims: pvs.grid_dims,
                     cell_size: pvs.cell_size,
                     cell_count: pvs.cell_count,
                     words_per_cell: pvs.words_per_cell,
-                    bits: &pvs.bits,
+                    bits: unsafe { extend_lifetime(&pvs.bits) },
                 },
                 "BakeInject",
             );

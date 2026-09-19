@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
+use helio::PassBuildContext;
 use helio::RendererConfig;
-use helio_foliage_core::FoliageQuality;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
@@ -13,6 +13,7 @@ use helio_pass_dof::DofPass;
 use helio_pass_flare::LensFlarePass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
+use helio_pass_foliage_place::FoliageQuality;
 use helio_pass_forward_lit::ForwardLitPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
@@ -20,6 +21,7 @@ use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
+use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
@@ -47,10 +49,28 @@ use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
 
-use helio::Scene;
-
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
+
+fn scene_buffer_or_dummy(
+    scene_db: &helio::SceneDbHandle,
+    device: &wgpu::Device,
+    key: pulsar_scenedb::gpu::BufferKey,
+    label: &str,
+    fallback_size: u64,
+) -> pulsar_scenedb::gpu::BufferHandle {
+    scene_db.store().resolve_buffer_handle(key).unwrap_or_else(|| {
+        pulsar_scenedb::gpu::BufferHandle {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: fallback_size.max(4),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            epoch: 0,
+        }
+    })
+}
 
 /// Create a new graph, honouring the caller's device ownership.
 ///
@@ -76,18 +96,60 @@ fn new_graph(
     graph
 }
 
+/// Registers the resource names that every full (non-`simple`) default graph
+/// relies on the host `Renderer` to supply directly into `ResourceRegistry`
+/// every frame, rather than any pass in the graph writing them — see
+/// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
+/// §6. `"material_textures"` and `"render_environment"` are read by the
+/// geometry/lighting passes that need those backend values;
+/// `"vg"` is read only by `VirtualGeometryPass` (`add_geometry_passes`/
+/// `add_forward_geometry_passes`); `"billboards"`/`"corona_emitters"` are
+/// read only by `BillboardPass`/`CoronaPass` (`add_late_passes`). Every
+/// graph builder in this file that calls one of those three helpers needs
+/// all four names; `build_simple_graph` uses none of this and is the one
+/// entry point that legitimately calls none of these.
+fn declare_common_external_inputs(graph: &mut RenderGraph) {
+    graph.declare_external_input("material_textures");
+    graph.declare_external_input("render_environment");
+    graph.declare_external_input("vg");
+    graph.declare_external_input("billboards");
+    graph.declare_external_input("corona_emitters");
+}
+
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
     cull_stats_buf: &wgpu::Buffer,
     w: u32,
     h: u32,
+    scene_db: helio::SceneDbHandle,
 ) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
-    let gpu_scene = scene.gpu_scene();
-    let camera_buf = gpu_scene.camera.buffer();
+    let lights_buf = scene_buffer_or_dummy(
+        &scene_db,
+        device,
+        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
+        "SceneDB Lights",
+        96,
+    );
+    let shadow_matrices_buf = scene_buffer_or_dummy(
+        &scene_db,
+        device,
+        pulsar_scenedb::gpu::BufferKey::of("shadow_matrices"),
+        "SceneDB Shadow Matrices",
+        64,
+    );
+
+    // Must run before every pass below — they all read `object_batch`
+    // (instances/draw_calls/indirect/shadow partitions) published by this
+    // pass from SceneDB's `StaticObjectComponent` rows. Ordering among
+    // `add_pass` calls doesn't matter to the graph's own scheduler (it
+    // topologically sorts on declared reads/writes), but this stays first
+    // for readability, matching its role as the scene's sole GPU-driven
+    // object-batch producer.
+    graph.add_pass(Box::new(ObjectBatchPass::new(device)));
 
     let hiz_pass = HiZBuildPass::new(device, queue, w, h);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
@@ -109,8 +171,8 @@ fn add_common_early_passes(
 
     graph.add_pass(Box::new(ShadowMatrixPass::new(
         device,
-        gpu_scene.lights.buffer(),
-        gpu_scene.shadow_matrices.buffer(),
+        &lights_buf.buffer,
+        &shadow_matrices_buf.buffer,
         camera_buf,
         &shadow_dirty_buf,
         &shadow_hashes_buf,
@@ -138,13 +200,15 @@ fn add_common_early_passes(
         config.shadow_face_capacity,
     )));
 
-    if scene.sky_context().has_sky {
-        let mut sky_pass = SkyPass::new(device, camera_buf, config.surface_format);
-        if let Some(clouds) = scene.sky_context().clouds {
-            if clouds.infinite_extent {
-                sky_pass.set_infinite_extent(true);
-            }
-        }
+    {
+        let mut sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
+            device,
+            camera_buf,
+            config.surface_format,
+            w,
+            h,
+            Some(scene_db.clone()),
+        );
         graph.add_pass(Box::new(sky_pass));
     }
 
@@ -188,11 +252,11 @@ fn add_common_early_passes(
 fn add_geometry_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
+    _scene_db: helio::SceneDbHandle,
 ) {
-    let camera_buf = scene.gpu_scene().camera.buffer();
 
     // Foliage placement is a compute pass and must be added *before* GBufferPass, not
     // between it and FoliageGBufferPass. It is deliberately not `chain_transparent` (it
@@ -279,13 +343,11 @@ fn add_geometry_passes(
 fn add_forward_geometry_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
     render_all_opaque: bool,
 ) {
-    let camera_buf = scene.gpu_scene().camera.buffer();
-
     let mut fl_pass = ForwardLitPass::new(device, config.surface_format);
     fl_pass.render_all_opaque = render_all_opaque;
     graph.add_pass(Box::new(fl_pass));
@@ -300,15 +362,22 @@ fn add_late_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     w: u32,
     h: u32,
+    _scene_db: helio::SceneDbHandle,
 ) {
-    let camera_buf = scene.gpu_scene().camera.buffer();
+    let lights_buf = scene_buffer_or_dummy(
+        &_scene_db,
+        device,
+        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
+        "SceneDB Lights",
+        96,
+    );
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
@@ -430,20 +499,95 @@ fn add_final_passes(
     }
 }
 
+/// Build the default deferred graph from the shared renderer construction ABI.
+///
+/// The legacy argument-list entry points below remain for applications that
+/// construct graphs directly. New `RendererBuilder` callers should pass this
+/// function to `with_pass_build_context` so device, queue, scene, buffers, and
+/// configuration are supplied once by the renderer.
+pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_default_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        None,
+        None,
+        ctx.scene_db.clone(),
+    )
+    .expect("the default graph has no fallible optional pass")
+}
+
+/// Build the externally-owned default graph from [`PassBuildContext`].
+pub fn build_default_graph_external_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    let mut ctx = ctx;
+    ctx.owns_device = false;
+    build_default_graph_with_context(ctx)
+}
+
+/// Build the externally-owned planetary default graph from [`PassBuildContext`].
+pub fn build_default_graph_external_with_planetary_voxels_with_context(
+    ctx: PassBuildContext<'_>,
+    planetary_config: PlanetaryVoxelRenderConfig,
+) -> Result<RenderGraph, PlanetaryRenderError> {
+    build_default_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        false,
+        None,
+        None,
+        Some(planetary_config),
+        ctx.scene_db.clone(),
+    )
+}
+
+/// Build the deferred graph with user post-process effects from the shared ABI.
+pub fn build_default_graph_with_user_effects_with_context(
+    ctx: PassBuildContext<'_>,
+    user_effects: &'static str,
+) -> RenderGraph {
+    build_default_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        Some(user_effects),
+        None,
+        ctx.scene_db.clone(),
+    )
+    .expect("the default graph has no fallible optional pass")
+}
+
 pub fn build_default_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_default_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
@@ -452,6 +596,7 @@ pub fn build_default_graph(
         debug_overlay,
         None,
         None,
+        scene_db,
     )
     .expect("the default graph has no fallible optional pass")
 }
@@ -459,18 +604,19 @@ pub fn build_default_graph(
 pub fn build_default_graph_with_user_effects(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: &'static str,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_default_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
@@ -479,6 +625,7 @@ pub fn build_default_graph_with_user_effects(
         debug_overlay,
         Some(user_effects),
         None,
+        scene_db,
     )
     .expect("the default graph has no fallible optional pass")
 }
@@ -486,17 +633,18 @@ pub fn build_default_graph_with_user_effects(
 pub fn build_default_graph_external(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_default_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
@@ -505,6 +653,7 @@ pub fn build_default_graph_external(
         debug_overlay,
         None,
         None,
+        scene_db,
     )
     .expect("the default graph has no fallible optional pass")
 }
@@ -520,18 +669,19 @@ pub fn build_default_graph_external(
 pub fn build_default_graph_external_with_planetary_voxels(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     planetary_config: PlanetaryVoxelRenderConfig,
+    scene_db: helio::SceneDbHandle,
 ) -> Result<RenderGraph, PlanetaryRenderError> {
     build_default_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
@@ -540,13 +690,14 @@ pub fn build_default_graph_external_with_planetary_voxels(
         debug_overlay,
         None,
         Some(planetary_config),
+        scene_db,
     )
 }
 
 fn build_default_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
@@ -555,40 +706,47 @@ fn build_default_graph_internal(
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
     planetary_config: Option<PlanetaryVoxelRenderConfig>,
+    scene_db: helio::SceneDbHandle,
 ) -> Result<RenderGraph, PlanetaryRenderError> {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         cull_stats_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
+    let lights_buf = scene_buffer_or_dummy(
+        &scene_db,
+        device,
+        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
+        "SceneDB Lights",
+        96,
+    );
     graph.add_pass(Box::new(RadianceCascadesPass::new(
         device,
-        scene.gpu_scene().lights.buffer(),
+        &lights_buf.buffer,
     )));
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf);
-
-    let camera_buf = scene.gpu_scene().camera.buffer();
+    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
     // Decal pass — projects decals into the G-buffer after it's been written.
-    // Runs as a compute pass between GBuffer and deferred lighting.
-    let decal_buf = scene.gpu_scene().decals.buffer();
-    graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
-    )));
+    // Runs as a compute pass between GBuffer and deferred lighting. Reads
+    // SceneDB's `"decals"` buffer directly at execute time; no central
+    // buffer to pass in here.
+    graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
 
     // SSR pass — screen-space reflections for glossy/metallic surfaces.
     // Runs after GBuffer (needs normals + depth + Hi-Z), before deferred lighting.
@@ -650,13 +808,14 @@ fn build_default_graph_internal(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     // Before AA, at internal resolution: fog accumulates against internal-res
@@ -665,19 +824,17 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     // Transparent pass — alpha-blended geometry (simple fixed shader).
-    let camera_buf = scene.gpu_scene().camera.buffer();
-    let instances_buf = scene.gpu_scene().instances.buffer();
+    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
+    // resources at execute time, so no buffers are passed in here.
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
         device,
-        camera_buf,
-        instances_buf,
         config.surface_format,
     )));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,
         queue,
-        scene.gpu_scene().lights.buffer(),
+        &lights_buf.buffer,
         iw,
         ih,
         config.surface_format,
@@ -738,11 +895,11 @@ fn build_default_graph_internal(
     let overlay_owned = debug_overlay.map(Arc::clone);
     let effect_snippet = user_effects;
     let rebuilder: GraphRebuilder = Arc::new(
-        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
             build_default_graph_internal(
                 device,
                 queue,
-                scene,
+                camera_buf,
                 config,
                 debug_state,
                 debug_camera_buf,
@@ -751,6 +908,7 @@ fn build_default_graph_internal(
                 overlay_owned.as_ref(),
                 effect_snippet,
                 planetary_config,
+                scene_db.clone(),
             )
             .expect("a previously validated planetary graph configuration must rebuild")
         },
@@ -763,92 +921,114 @@ fn build_default_graph_internal(
 pub fn build_fxaa_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_fxaa_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         true,
         debug_overlay,
+        scene_db,
+    )
+}
+
+/// Build the FXAA graph from the shared renderer construction ABI.
+pub fn build_fxaa_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_fxaa_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        ctx.scene_db.clone(),
     )
 }
 
 pub fn build_fxaa_graph_external(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_fxaa_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         false,
         debug_overlay,
+        scene_db,
     )
 }
 
 fn build_fxaa_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         cull_stats_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    graph.add_pass(Box::new(RadianceCascadesPass::new(
+    let lights_buf = scene_buffer_or_dummy(
+        &scene_db,
         device,
-        scene.gpu_scene().lights.buffer(),
-    )));
+        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
+        "SceneDB Lights",
+        96,
+    );
+    graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf);
+    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
-    let camera_buf = scene.gpu_scene().camera.buffer();
-
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
-    graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
-    )));
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
+    graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
 
     // Both off by default; see the notes in the primary graph builder above.
     // DeferredLightPass binds 1×1 black fallbacks when either pass is absent.
@@ -880,13 +1060,14 @@ fn build_fxaa_graph_internal(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
@@ -932,17 +1113,18 @@ fn build_fxaa_graph_internal(
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
-        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
             build_fxaa_graph_internal(
                 device,
                 queue,
-                scene,
+                camera_buf,
                 config,
                 debug_state,
                 debug_camera_buf,
                 cull_stats_buf,
                 owns_device,
                 overlay_owned.as_ref(),
+                scene_db.clone(),
             )
         },
     );
@@ -954,39 +1136,37 @@ fn build_fxaa_graph_internal(
 fn build_hlfs_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         cull_stats_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf);
+    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
-    let camera_buf = scene.gpu_scene().camera.buffer();
-
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
-    graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, iw, ih,
-    )));
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
+    graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);
@@ -1003,13 +1183,14 @@ fn build_hlfs_graph_internal(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
@@ -1055,17 +1236,18 @@ fn build_hlfs_graph_internal(
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
-        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
             build_hlfs_graph_internal(
                 device,
                 queue,
-                scene,
+                camera_buf,
                 config,
                 debug_state,
                 debug_camera_buf,
                 cull_stats_buf,
                 owns_device,
                 overlay_owned.as_ref(),
+                scene_db.clone(),
             )
         },
     );
@@ -1078,23 +1260,41 @@ fn build_hlfs_graph_internal(
 pub fn build_hlfs_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_hlfs_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         true,
         debug_overlay,
+        scene_db,
+    )
+}
+
+/// Build the HLFS graph from the shared renderer construction ABI.
+pub fn build_hlfs_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_hlfs_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        ctx.scene_db.clone(),
     )
 }
 
@@ -1102,85 +1302,103 @@ pub fn build_hlfs_graph(
 pub fn build_fxaa_hlfs_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_fxaa_hlfs_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         true,
         debug_overlay,
+        scene_db,
+    )
+}
+
+/// Build the FXAA+HLFS graph from the shared renderer construction ABI.
+pub fn build_fxaa_hlfs_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_fxaa_hlfs_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        ctx.scene_db.clone(),
     )
 }
 
 pub fn build_fxaa_hlfs_graph_external(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_fxaa_hlfs_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         false,
         debug_overlay,
+        scene_db,
     )
 }
 
 fn build_fxaa_hlfs_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     let w = config.internal_width();
     let h = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         cull_stats_buf,
         w,
         h,
+        scene_db.clone(),
     );
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf);
+    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
-    let camera_buf = scene.gpu_scene().camera.buffer();
-
-    // Decal pass
-    let decal_buf = scene.gpu_scene().decals.buffer();
-    graph.add_pass(Box::new(DecalPass::new(
-        device, queue, decal_buf, camera_buf, w, h,
-    )));
+    // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
+    graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, w, h)));
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);
@@ -1197,13 +1415,14 @@ fn build_fxaa_hlfs_graph_internal(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
         w,
         h,
+        scene_db.clone(),
     );
 
     // Before AA, at internal resolution: fog accumulates against internal-res
@@ -1237,17 +1456,18 @@ fn build_fxaa_hlfs_graph_internal(
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
-        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
             build_fxaa_hlfs_graph_internal(
                 device,
                 queue,
-                scene,
+                camera_buf,
                 config,
                 debug_state,
                 debug_camera_buf,
                 cull_stats_buf,
                 owns_device,
                 overlay_owned.as_ref(),
+                scene_db.clone(),
             )
         },
     );
@@ -1276,136 +1496,193 @@ pub fn build_simple_graph(
     graph
 }
 
+/// Build the simple graph from the shared renderer construction ABI.
+pub fn build_simple_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    let mut graph = new_graph(ctx.device, ctx.queue, ctx.owns_device, &ctx.config);
+    graph.add_pass(Box::new(SimpleCubePass::new(
+        ctx.device,
+        ctx.config.surface_format,
+    )));
+    graph
+}
+
 // ── Forward-mode graph builders ─────────────────────────────────────────────
 
 pub fn build_forward_opaque_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_forward_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         true,
         debug_overlay,
+        scene_db,
+    )
+}
+
+/// Build the forward-opaque graph from the shared renderer construction ABI.
+pub fn build_forward_opaque_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_forward_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        ctx.scene_db.clone(),
     )
 }
 
 pub fn build_forward_opaque_graph_external(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_forward_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         false,
         debug_overlay,
+        scene_db,
     )
 }
 
 pub fn build_forward_only_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_forward_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         true,
         debug_overlay,
+        scene_db,
+    )
+}
+
+/// Build the forward-only graph from the shared renderer construction ABI.
+pub fn build_forward_only_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph {
+    build_forward_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        ctx.scene_db.clone(),
     )
 }
 
 pub fn build_forward_only_graph_external(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     build_forward_graph_internal(
         device,
         queue,
-        scene,
+        camera_buf,
         config,
         debug_state,
         debug_camera_buf,
         cull_stats_buf,
         false,
         debug_overlay,
+        scene_db,
     )
 }
 
 fn build_forward_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    scene: &Scene,
+    camera_buf: &wgpu::Buffer,
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    scene_db: helio::SceneDbHandle,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device, &config);
+    declare_common_external_inputs(&mut graph);
 
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         cull_stats_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    graph.add_pass(Box::new(RadianceCascadesPass::new(
+    let lights_buf = scene_buffer_or_dummy(
+        &scene_db,
         device,
-        scene.gpu_scene().lights.buffer(),
-    )));
+        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
+        "SceneDB Lights",
+        96,
+    );
+    graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
-    add_forward_geometry_passes(&mut graph, device, scene, &config, &perf, true);
+    add_forward_geometry_passes(&mut graph, device, camera_buf, &config, &perf, true);
 
     // Voxel mesh pass — real triangles with depth testing, composited over
     // the forward-lit output.
@@ -1419,13 +1696,14 @@ fn build_forward_graph_internal(
         &mut graph,
         device,
         queue,
-        scene,
+        camera_buf,
         &config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
         iw,
         ih,
+        scene_db.clone(),
     );
 
     // Before AA, at internal resolution: fog accumulates against internal-res
@@ -1434,19 +1712,17 @@ fn build_forward_graph_internal(
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     // Transparent pass — alpha-blended geometry (simple fixed shader).
-    let camera_buf = scene.gpu_scene().camera.buffer();
-    let instances_buf = scene.gpu_scene().instances.buffer();
+    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
+    // resources at execute time, so no buffers are passed in here.
     graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
         device,
-        camera_buf,
-        instances_buf,
         config.surface_format,
     )));
 
     graph.add_pass(Box::new(LensFlarePass::new(
         device,
         queue,
-        scene.gpu_scene().lights.buffer(),
+        &lights_buf.buffer,
         iw,
         ih,
         config.surface_format,
@@ -1478,17 +1754,18 @@ fn build_forward_graph_internal(
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
-        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
             build_forward_graph_internal(
                 device,
                 queue,
-                scene,
+                camera_buf,
                 config,
                 debug_state,
                 debug_camera_buf,
                 cull_stats_buf,
                 owns_device,
                 overlay_owned.as_ref(),
+                scene_db.clone(),
             )
         },
     );

@@ -1,10 +1,10 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio_core::GpuCameraUniforms;
+use helio_pass_planetary_voxel::{GpuPageMeta, PageKey};
 use helio_pass_planetary_voxel::{
     GpuTransvoxelEmissionCounters, GpuTransvoxelTransitionCounters, SURFACE_PUBLISH_WGSL,
 };
-use helio_planet_voxel_core::{GpuPageMeta, PageKey};
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 

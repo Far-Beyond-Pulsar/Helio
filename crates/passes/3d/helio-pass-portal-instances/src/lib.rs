@@ -29,6 +29,7 @@ use std::{borrow::Cow, sync::Arc};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_portal_cull::PORTAL_DRAW_CAPACITY;
+use pulsar_scenedb::gpu::BufferKey;
 
 mod mask;
 pub use mask::PortalMaskPass;
@@ -50,7 +51,7 @@ struct ScreenSize {
 type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize);
 
 pub struct PortalInstancePass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
@@ -77,7 +78,7 @@ impl PortalInstancePass {
         portal_compacted_indices_buf: Arc<wgpu::Buffer>,
         portal_compacted_chains_buf: Arc<wgpu::Buffer>,
     ) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
 
         let shader_source = portal_shader_source(material_binding);
 
@@ -274,12 +275,12 @@ impl PortalInstancePass {
     }
 }
 
-fn portal_shader_source(material_binding: libhelio::MaterialBindingConfig) -> Cow<'static, str> {
+fn portal_shader_source(material_binding: helio_mats::MaterialBindingConfig) -> Cow<'static, str> {
     let source = include_str!("../shaders/gbuffer_portal.wgsl");
     if material_binding.uses_binding_arrays() {
         Cow::Borrowed(source)
     } else {
-        Cow::Owned(libhelio::shader::apply_webgpu_material_bindings(
+        Cow::Owned(helio_mats::apply_webgpu_material_bindings(
             source,
             material_binding.max_textures,
         ))
@@ -333,54 +334,56 @@ impl RenderPass for PortalInstancePass {
         builder.read("gbuffer");
         // Written by helio-pass-portal-mask, which must run before this pass.
         builder.read("portal_mask");
+        builder.read("object_batch");
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "portal_mask"]
+        &["gbuffer", "portal_mask", "object_batch", "material_textures"]
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always `Some` when the G-buffer exists (chain fusion is decided by
         // attachment identity at lock time, not per-frame content — see
         // helio-pass-foliage-gbuffer's docs for why returning `None` here
         // conditionally would break fusion).
-        let gbuffer = resources.gbuffer.read("PortalInstance")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("PortalInstance")?;
-        let sss_target = resources.gbuffer_sss.read("PortalInstance")?;
-        let extra_target = resources.gbuffer_extra.read("PortalInstance")?;
-        let velocity_target = resources.gbuffer_velocity.read("PortalInstance")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PortalInstance")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "PortalInstance")?;
+        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "PortalInstance")?;
+        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "PortalInstance")?;
+        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "PortalInstance")?;
 
         const LOAD: wgpu::Operations<wgpu::Color> = wgpu::Operations {
             load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: gbuffer.views[0],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
+                    view: gbuffer.views[1],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
+                    view: gbuffer.views[2],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
+                    view: gbuffer.views[3],
                     resolve_target: None,
                     depth_slice: None,
                     ops: LOAD,
@@ -429,7 +432,9 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.scene.draw_calls.len() as u32;
+        self.draw_count = ctx.pass_resources
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
+            .map(|b| b.draw_count).unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,
@@ -459,12 +464,12 @@ impl RenderPass for PortalInstancePass {
             );
             return Ok(());
         };
-        let main_scene = ctx.resources.main_scene.read("PortalInstance");
+        let material_textures = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "PortalInstance");
         if ctx.frame_num < 3 {
             log::info!(
-                "[PortalInstance] frame={} main_scene_available={}",
+                "[PortalInstance] frame={} material_textures_available={}",
                 ctx.frame_num,
-                main_scene.is_some()
+                material_textures.is_some()
             );
         }
 
@@ -476,13 +481,26 @@ impl RenderPass for PortalInstancePass {
             return Ok(());
         };
 
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+            return Ok(());
+        };
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
+        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
+            return Ok(());
+        };
+
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.instances as *const _ as usize,
-            ctx.scene.coordinate_spaces as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
-            ctx.scene.portal_chains as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            batch.instances as *const _ as usize,
+            coord_data.coordinate_spaces as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
+            &portal_chains.buffer as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
             &*self.portal_compacted_chains_buf as *const _ as usize,
             portal_mask_view as *const _ as usize,
@@ -494,7 +512,7 @@ impl RenderPass for PortalInstancePass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -502,15 +520,15 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces_prev.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -518,11 +536,11 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.portal_chains.as_entire_binding(),
+                        resource: portal_chains.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -538,41 +556,55 @@ impl RenderPass for PortalInstancePass {
         }
 
         // ── Bind group 1 (materials) — rebuilt when texture set changes ────
-        let Some(main_scene) = main_scene else {
+        let Some(material_textures) = material_textures else {
             return Ok(());
         };
-        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let needs_rebuild = self.bind_group_1_version != Some(material_textures.version)
             || self.bind_group_1.is_none();
         if needs_rebuild {
+            let materials_buf = ctx
+                .scene_buffers
+                .get(BufferKey::of("materials"))
+                .map(|handle| &handle.buffer)
+                .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalInstance BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version);
+            self.bind_group_1_version = Some(material_textures.version);
         }
 
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
@@ -594,7 +626,7 @@ impl RenderPass for PortalInstancePass {
 #[cfg(test)]
 mod tests {
     use super::portal_shader_source;
-    use libhelio::{MaterialBindingConfig, MaterialBindingMode};
+    use helio_mats::{MaterialBindingConfig, MaterialBindingMode};
 
     #[test]
     fn expanded_tier_rewrites_the_portal_material_bindings() {
@@ -622,3 +654,5 @@ mod tests {
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }
+
+

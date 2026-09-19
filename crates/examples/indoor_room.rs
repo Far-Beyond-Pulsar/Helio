@@ -10,10 +10,14 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -54,7 +58,8 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    overhead_light_id: LightId,
+    scene_db: SceneDb,
+    overhead_light: Entity,
 }
 
 impl App {
@@ -137,48 +142,15 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
+            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
+                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+            }))
+            .build(device.clone(), queue.clone(), size.width, size.height, format);
 
-        let mat = renderer.scene_mut().insert_material(make_material(
+        let mat = spawn_material(&mut scene_db.world, make_material(
             [0.7, 0.68, 0.62, 1.0],
             0.8,
             0.0,
@@ -186,120 +158,62 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 4.0)))
-            .as_mesh()
-            .unwrap();
-        let ceiling = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 3.0, 0.0], 4.0)))
-            .as_mesh()
-            .unwrap();
-        let wall_n = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [4.0, 1.5, 0.05],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_s = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [4.0, 1.5, 0.05],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_e = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.05, 1.5, 4.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_w = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.05, 1.5, 4.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let table = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.8, 0.4, 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let bookcase = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.3, 1.0, 1.2],
-            )))
-            .as_mesh()
-            .unwrap();
-        let sofa = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [1.2, 0.35, 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
+        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 4.0));
+        let ceiling = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 3.0, 0.0], 4.0));
+        let wall_n = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
+        let wall_s = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
+        let wall_e = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
+        let wall_w = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
+        let table = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.8, 0.4, 0.5]));
+        let bookcase = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 1.0, 1.2]));
+        let sofa = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.2, 0.35, 0.5]));
 
-        let _ = v3_demo_common::insert_object(&mut renderer, floor, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ceiling, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(&mut scene_db.world, floor, mat, glam::Mat4::IDENTITY, 4.0);
+        let _ = spawn_object(&mut scene_db.world, ceiling, mat, glam::Mat4::IDENTITY, 4.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_n,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, -4.0)),
             4.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_s,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, 4.0)),
             4.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_e,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(4.0, 1.5, 0.0)),
             4.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             wall_w,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-4.0, 1.5, 0.0)),
             4.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             table,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(1.5, 0.4, 1.5)),
             0.8,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             bookcase,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-3.4, 1.0, -2.5)),
             1.0,
         );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let _ = spawn_object(
+            &mut scene_db.world,
             sofa,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-1.5, 0.35, 2.5)),
@@ -307,32 +221,18 @@ impl ApplicationHandler for App {
         );
 
         let overhead_pos = [0.0f32, 2.85, 0.0];
-        let overhead_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                overhead_pos,
-                [1.0, 0.85, 0.6],
-                4.0,
-                7.0,
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-2.5, 0.9, -2.5],
-                [1.0, 0.55, 0.2],
-                2.5,
-                5.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [2.5, 0.9, 2.5],
-                [1.0, 0.75, 0.35],
-                2.0,
-                4.5,
-            )));
+        let overhead_light = spawn_light(
+            &mut scene_db.world,
+            point_light(overhead_pos, [1.0, 0.85, 0.6], 4.0, 7.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-2.5, 0.9, -2.5], [1.0, 0.55, 0.2], 2.5, 5.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([2.5, 0.9, 2.5], [1.0, 0.75, 0.35], 2.0, 4.5),
+        );
         renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 
@@ -351,7 +251,8 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            overhead_light_id,
+            scene_db,
+            overhead_light,
         });
     }
 
@@ -503,8 +404,9 @@ impl AppState {
 
         // Overhead ceiling light pulses very slightly (candle-like flicker)
         let flicker = 1.0 + (time * 11.3).sin() * 0.04 + (time * 7.7).cos() * 0.02;
-        let _ = self.renderer.scene_mut().update_light(
-            self.overhead_light_id,
+        update_light(
+            &mut self.scene_db.world,
+            self.overhead_light,
             point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
         );
 
@@ -515,6 +417,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

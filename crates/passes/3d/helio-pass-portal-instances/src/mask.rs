@@ -12,6 +12,7 @@
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalMaskPass {
     stamp_pipeline: wgpu::RenderPipeline,
@@ -233,7 +234,7 @@ impl RenderPass for PortalMaskPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Standalone — see `execute`, which opens its own two render passes
         // directly via `ctx.begin_render_pass`.
@@ -241,7 +242,15 @@ impl RenderPass for PortalMaskPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx.scene.portal_views.len() as u32;
+        self.portal_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("portal_views"))
+            .map(|h| {
+                (h.buffer.size()
+                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                    as u32
+            })
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -256,11 +265,14 @@ impl RenderPass for PortalMaskPass {
             );
             return Ok(());
         };
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
 
         // ── Sub-pass 1: stamp ────────────────────────────────────────────
         let stamp_key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
         );
         if self.stamp_bind_group_key != Some(stamp_key) {
             self.stamp_bind_group =
@@ -270,11 +282,11 @@ impl RenderPass for PortalMaskPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: ctx.scene.camera.as_entire_binding(),
+                            resource: ctx.camera.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: ctx.scene.portal_views.as_entire_binding(),
+                            resource: portal_views.buffer.as_entire_binding(),
                         },
                     ],
                 }));

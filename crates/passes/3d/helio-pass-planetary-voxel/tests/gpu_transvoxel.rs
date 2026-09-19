@@ -3,7 +3,7 @@ use helio_pass_planetary_voxel::{
     regular_case_from_fixture, ExtractionFixture, ExtractionFixtureKind, GpuTransvoxelCell,
     GpuTransvoxelClassifyCounters, TransvoxelGpuClassifier, TransvoxelGpuError,
 };
-use helio_planet_voxel_core::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
+use helio_pass_planetary_voxel::{PageKey, PAGE_CELL_COUNT, PAGE_EDGE};
 use std::sync::mpsc;
 
 #[test]

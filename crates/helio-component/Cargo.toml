@@ -57,16 +57,20 @@ engine_class_derive = { workspace = true }
 pulsar_reflection = { workspace = true, features = ["prims-gpui"] }
 pulsar_events = { workspace = true }
 pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
 pulsar_world_registry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
-libhelio.workspace = true
 helio-asset-compat = { workspace = true }
-helio-planet-voxel-core = { workspace = true }
-helio-pass-planetary-voxel = { workspace = true }
+helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
+helio-pass-postprocess = { workspace = true }
+helio-pass-water-sim = { workspace = true }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
+helio-pass-deferred-light = { workspace = true }
 pulsar_terrain.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true

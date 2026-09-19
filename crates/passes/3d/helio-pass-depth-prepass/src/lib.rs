@@ -8,7 +8,7 @@
 //! shared mesh vertex buffer (slot 0) and index buffer **before** this pass
 //! executes, or the GPU draw will read from undefined memory.
 
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
@@ -138,21 +138,27 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["object_batch", "culled_batch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+        builder.read("culled_batch");
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([]));
+            storage.retain_boxed_slice(Box::new([]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DepthPrepass"),
             color_attachments,
@@ -171,21 +177,38 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+            return Ok(());
+        };
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
-        let draw_count = ctx.scene.draw_count;
+        let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "DepthPrepass requires main_scene mesh buffers".to_string(),
-            )
-        })?;
+        let vertices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "DepthPrepass requires builtin_mesh_vertex".to_string(),
+                )
+            })?;
+        let indices = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "DepthPrepass requires builtin_mesh_index".to_string(),
+                )
+            })?;
 
         // Extract before the mutable encoder borrow.
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
         let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
         if self.bind_group_key != Some(key) {
             log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
@@ -195,28 +218,28 @@ impl RenderPass for DepthPrepassPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: culled.compacted_indices.as_entire_binding(),
                     },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
-        let indirect = ctx.scene.indirect;
+        let indirect = culled.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         pass.set_index_buffer(
-            main_scene.mesh_buffers.indices.slice(..),
+            indices.buffer.slice(..),
             wgpu::IndexFormat::Uint32,
         );
         #[cfg(not(target_arch = "wasm32"))]
@@ -228,3 +251,5 @@ impl RenderPass for DepthPrepassPass {
         Ok(())
     }
 }
+
+

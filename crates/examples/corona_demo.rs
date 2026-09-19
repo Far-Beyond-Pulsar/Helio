@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GpuLight, LightType, Renderer, RendererConfig, Scene, SceneActor, SkyActor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
+    LightType, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph;
 use winit::{
@@ -61,8 +61,11 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    // emitter descriptors (CPU-side, rebuilt each frame with position/rotation)
-    emitters: [libhelio::GpuCoronaEmitter; 4],
+    // SceneDB: owns the corona emitters (and the floor object/sun light
+    // spawned during setup) for the lifetime of the app, since emitter
+    // transforms are updated every frame below.
+    scene_db: pulsar_scenedb::SceneDb,
+    corona_entities: [pulsar_scenedb::Entity; 4],
 }
 
 impl App {
@@ -70,11 +73,11 @@ impl App {
         Self { state: None }
     }
 
-    fn build_emitters(elapsed: f32) -> [libhelio::GpuCoronaEmitter; 4] {
+    fn build_emitters(elapsed: f32) -> [helio_pass_corona::GpuCoronaEmitter; 4] {
         let t = elapsed;
 
         // ── 1. Fountain: blue fountain bursting from origin ────────────────
-        let fountain = libhelio::CoronaEmitterDescriptor {
+        let fountain = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 262_144,
             emit_rate: 8000.0,
             lifetime: 3.0,
@@ -86,7 +89,7 @@ impl App {
             velocity: [0.0, 8.0, 0.0],
             velocity_variation: [3.0, 2.0, 3.0],
             gravity: -5.0,
-            shape: libhelio::CoronaEmitterShape::Point,
+            shape: helio_pass_corona::CoronaEmitterShape::Point,
             texture_index: -1,
             position: [0.0, 0.0, 0.0],
         };
@@ -97,7 +100,7 @@ impl App {
             2.0 + 1.5 * (t * 0.7).sin(),
             6.0 * t.sin() * 0.5,
         ];
-        let nebula = libhelio::CoronaEmitterDescriptor {
+        let nebula = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 131_072,
             emit_rate: 3000.0,
             lifetime: 6.0,
@@ -109,7 +112,7 @@ impl App {
             velocity: [0.0, 0.0, 0.0],
             velocity_variation: [0.5, 0.5, 0.5],
             gravity: 0.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 2.5 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 2.5 },
             texture_index: -1,
             position: nebula_pos,
         };
@@ -117,7 +120,7 @@ impl App {
         // ── 3. FireRing: radial burst in XZ plane ──────────────────────────
         let ring_angle = t * 0.6;
         let ring_pos = [4.0 * ring_angle.cos(), 0.5, 4.0 * ring_angle.sin()];
-        let fire = libhelio::CoronaEmitterDescriptor {
+        let fire = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 65_536,
             emit_rate: 2000.0,
             lifetime: 1.5,
@@ -129,13 +132,13 @@ impl App {
             velocity: [3.0 * ring_angle.cos(), 0.0, 3.0 * ring_angle.sin()],
             velocity_variation: [2.0, 1.0, 2.0],
             gravity: -2.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 0.8 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 0.8 },
             texture_index: -1,
             position: ring_pos,
         };
 
         // ── 4. Galaxy: spinning disk of white-blue particles ───────────────
-        let galaxy = libhelio::CoronaEmitterDescriptor {
+        let galaxy = helio_pass_corona::CoronaEmitterDescriptor {
             max_particles: 131_072,
             emit_rate: 4000.0,
             lifetime: 8.0,
@@ -147,7 +150,7 @@ impl App {
             velocity: [0.0, 0.0, 0.0],
             velocity_variation: [0.0, 0.0, 0.0],
             gravity: 0.0,
-            shape: libhelio::CoronaEmitterShape::Sphere { radius: 6.0 },
+            shape: helio_pass_corona::CoronaEmitterShape::Sphere { radius: 6.0 },
             texture_index: -1,
             position: [0.0, 8.0, 0.0],
         };
@@ -226,99 +229,83 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+
+        // SceneDB is the sole scene authority: a renderer cannot be built
+        // without a GPU mirror handle. This demo cohort places nothing
+        // through a shared, persistent `SceneDb` (see `v3_demo_common`'s
+        // module docs), so its mirror is created fresh, used to spawn this
+        // scene's content, and dropped once setup finishes -- there is
+        // nothing here another system needs to keep querying later.
+        let mut scene_db = v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
+        let scene_db_handle = v3_demo_common::scene_db_handle(&scene_db);
+
+        let graph_scene_db = scene_db_handle.clone();
+        let mut renderer = RendererBuilder::new(config, scene_db_handle)
+            .with_graph(Box::new(move |d, q, s, c, ds, cb, csb| {
+                build_default_graph(d, q, ds, s, c, cb, csb, None, graph_scene_db.clone())
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                surface_format,
+            );
 
         // ── Sky + lighting ───────────────────────────────────────────────────
-        renderer.scene_mut().insert_actor(SceneActor::sky(
-            SkyActor::new().with_sky_color([0.08, 0.10, 0.20]),
-        ));
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(GpuLight {
+        v3_demo_common::spawn_sky(&mut scene_db.world, [0.08, 0.10, 0.20]);
+        v3_demo_common::spawn_light(
+            &mut scene_db.world,
+            GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-0.3, -1.0, -0.5, 0.0],
                 color_intensity: [0.9, 0.85, 0.75, 3.0],
-                shadow_index: 0,
+                // No dynamic shadow-caster selection on this path yet (see
+                // `LightComponent`'s module doc) -- `u32::MAX` means "no
+                // shadow", not "unassigned".
+                shadow_index: u32::MAX,
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
                 ..Default::default()
-            }));
+            },
+        );
+        // SceneDB owns the light data end to end from here: the row uploaded
+        // to the "scene_lights" buffer on insert, above, and
+        // `ForwardLitPass` resolves that buffer by key every frame on its
+        // own -- no renderer call needed at all.
         renderer.set_ambient([0.08, 0.10, 0.18], 0.6);
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 
         // ── Floor plane ─────────────────────────────────────────────────────
-        let floor_mesh_id = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(v3_demo_common::plane_mesh(
-                [0.0, 0.0, 0.0],
-                30.0,
-            )))
-            .as_mesh()
-            .unwrap();
-        let floor_mat = renderer
-            .scene_mut()
-            .insert_material(v3_demo_common::make_material(
-                [0.06, 0.06, 0.08, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ));
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::object(helio::ObjectDescriptor {
-                mesh: floor_mesh_id,
-                material: floor_mat,
-                transform: Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
-                bounds: [0.0, -0.5, 0.0, 43.0],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        let floor_mesh_id = v3_demo_common::spawn_mesh(
+            &mut scene_db.world,
+            v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 30.0),
+        );
+        let floor_mat = v3_demo_common::spawn_material(
+            &mut scene_db.world,
+            v3_demo_common::make_material(
+            [0.06, 0.06, 0.08, 1.0],
+            0.8,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+            ),
+        );
+        let _floor_entity = v3_demo_common::spawn_object(
+            &mut scene_db.world,
+            floor_mesh_id,
+            floor_mat,
+            Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
+            43.0,
+        )
+        .expect("floor object placement");
 
-        // Build initial emitters
+        // Spawn the 4 emitters, one per fixed particle slot (see
+        // `spawn_corona_emitter`'s doc).
         let emitters = Self::build_emitters(0.0);
-        renderer.set_corona_emitters(&emitters);
+        let corona_entities = std::array::from_fn(|slot| {
+            v3_demo_common::spawn_corona_emitter(&mut scene_db.world, slot as u32, emitters[slot])
+        });
 
         self.state = Some(AppState {
             window,
@@ -336,7 +323,8 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            emitters,
+            scene_db,
+            corona_entities,
         });
     }
 
@@ -470,7 +458,19 @@ impl ApplicationHandler for App {
                 // ── Update emitters with time-varying positions ──────────────
                 let elapsed = state.start_time.elapsed().as_secs_f32();
                 let new_emitters = App::build_emitters(elapsed);
-                state.renderer.set_corona_emitters(&new_emitters);
+                for (slot, (&entity, &emitter)) in state
+                    .corona_entities
+                    .iter()
+                    .zip(new_emitters.iter())
+                    .enumerate()
+                {
+                    v3_demo_common::update_corona_emitter(
+                        &mut state.scene_db.world,
+                        entity,
+                        slot as u32,
+                        emitter,
+                    );
+                }
 
                 // ── Render ────────────────────────────────────────────────────
                 let output = match state.surface.get_current_texture() {

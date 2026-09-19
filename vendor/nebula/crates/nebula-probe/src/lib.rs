@@ -4,7 +4,9 @@ pub mod output;
 
 pub use baker::ProbeBaker;
 pub use config::ProbeConfig;
-pub use output::{IrradianceOutput, ReflectionOutput, ShCoeff, IRRADIANCE_CHUNK_TAG, REFLECTION_CHUNK_TAG};
+pub use output::{
+    IrradianceOutput, ReflectionOutput, ShCoeff, IRRADIANCE_CHUNK_TAG, REFLECTION_CHUNK_TAG,
+};
 
 use nebula_serialize::chunk::ChunkTag;
 

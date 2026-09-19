@@ -9,9 +9,9 @@ use crate::{
     transition_case, transition_case_from_solidity, ExtractionFixtureKind, GpuTerrainVertex,
     TransvoxelCaseTopology, TRANSVOXEL_TRANSITION_DUPLICATE_CORNERS,
 };
-use helio_planet_voxel_core::{AddressError, CellWord, PageKey, PAGE_EDGE};
+use crate::{AddressError, CellWord, PageKey, PAGE_EDGE};
 
-pub use helio_planet_voxel_core::TransitionFace;
+pub use crate::TransitionFace;
 
 pub const TRANSITION_FACE_CELL_EDGE: usize = PAGE_EDGE;
 pub const TRANSITION_FACE_SAMPLE_EDGE: usize = PAGE_EDGE * 2 + 1;

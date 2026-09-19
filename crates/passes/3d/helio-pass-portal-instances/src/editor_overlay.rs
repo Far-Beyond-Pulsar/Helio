@@ -9,6 +9,7 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
@@ -160,11 +161,12 @@ impl RenderPass for PortalEditorOverlayPass {
         self.editor_mode = enabled;
     }
 
-    fn render_pass_descriptor<'a>(
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         // Always structurally participates in the pre_aa fusion chain,
         // regardless of `editor_mode` — that flag is runtime, mutable state,
@@ -173,9 +175,19 @@ impl RenderPass for PortalEditorOverlayPass {
         // would make this pass flicker in and out of the chain and could
         // break fusion for passes chained through it. `execute()` is where
         // editor_mode actually matters: no draw call, zero cost, when off.
-        let target_view = resources.pre_aa.get().unwrap_or(target);
+        let pre_aa = resources.get(helio_core::ResourceKey::new("pre_aa"));
+        let target_view = pre_aa.unwrap_or(target);
+        // `pre_aa` is internal-resolution (render-scaled); the raw `target`
+        // fallback is full output resolution. Depth must track whichever one
+        // color actually resolved to, or wgpu rejects the pass for mismatched
+        // attachment extents whenever render_scale < 1.0.
+        let depth_view = if pre_aa.is_some() {
+            depth
+        } else {
+            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+        };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -188,7 +200,7 @@ impl RenderPass for PortalEditorOverlayPass {
             label: Some("PortalEditorOverlay"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -202,7 +214,15 @@ impl RenderPass for PortalEditorOverlayPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx.scene.portal_views.len() as u32;
+        self.portal_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("portal_views"))
+            .map(|h| {
+                (h.buffer.size()
+                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                    as u32
+            })
+            .unwrap_or(0);
         Ok(())
     }
 
@@ -213,10 +233,13 @@ impl RenderPass for PortalEditorOverlayPass {
         let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
             return Ok(());
         };
+        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+            return Ok(());
+        };
 
         let key = (
-            ctx.scene.camera as *const _ as usize,
-            ctx.scene.portal_views as *const _ as usize,
+            ctx.camera as *const _ as usize,
+            &portal_views.buffer as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -225,11 +248,11 @@ impl RenderPass for PortalEditorOverlayPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: ctx.scene.portal_views.as_entire_binding(),
+                        resource: portal_views.buffer.as_entire_binding(),
                     },
                 ],
             }));
@@ -244,3 +267,5 @@ impl RenderPass for PortalEditorOverlayPass {
         Ok(())
     }
 }
+
+

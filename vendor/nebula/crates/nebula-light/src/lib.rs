@@ -20,4 +20,4 @@ pub mod output;
 
 pub use baker::LightmapBaker;
 pub use config::LightmapConfig;
-pub use output::{LightmapOutput, AtlasRegion, CHUNK_TAG};
+pub use output::{AtlasRegion, LightmapOutput, CHUNK_TAG};

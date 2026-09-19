@@ -25,12 +25,14 @@ mod v3_demo_common;
 
 use helio::{
     portal_pose_facing, required_experimental_features, required_wgpu_features,
-    required_wgpu_limits, Camera, DebugDrawState, LightId, ObjectDescriptor, PortalDescriptor,
-    PortalId, Renderer, RendererConfig, Scene, SceneActor,
+    required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE;
-use v3_demo_common::{box_mesh, make_material, point_light};
+use helio_default_graphs::build_default_graph_external;
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
+    spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -71,6 +73,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: glam::Vec3,
@@ -82,12 +85,12 @@ struct AppState {
 
     /// Duplicates content near the far end (-Z) so it's visible through the
     /// near portal (+Z).
-    portal_near: PortalId,
+    portal_near: helio::PortalPair,
     /// Duplicates content near the near end (+Z) so it's visible through the
     /// far portal (-Z).
-    portal_far: PortalId,
+    portal_far: helio::PortalPair,
 
-    _light_ids: Vec<LightId>,
+    _light_ids: Vec<Entity>,
 }
 
 impl App {
@@ -166,90 +169,48 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let graph_scene_db = scene_db_handle(&scene_db);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    graph_config,
+                    debug_state,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
+            }))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
-        let mat = renderer.scene_mut().insert_material(make_material(
-            [0.72, 0.72, 0.75, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.72, 0.72, 0.75, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18) — same
         // shell as indoor_corridor.rs. No end walls this time: the portals
         // themselves are what closes the hallway off visually.
-        let floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [HALF_WIDTH, 0.02, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let ceiling = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [HALF_WIDTH, 0.02, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_l = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.02, HALF_HEIGHT, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let wall_r = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.02, HALF_HEIGHT, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
+        let floor = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]),
+        );
+        let ceiling = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]),
+        );
+        let wall_l = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]),
+        );
+        let wall_r = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]),
+        );
 
         // Rooms beyond each end of the corridor, reachable only through the
         // portals: through the near portal you see the far (blue) room, through
@@ -257,70 +218,47 @@ impl ApplicationHandler for App {
         // open ends (z = ±18) so the mapped duplicate never overlaps the real
         // corridor — that overlap is what the fragment z-clip exists to avoid.
         let room_half_len = 6.0;
-        let far_room_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.55, 0.95, 1.0],
-            0.7,
-            0.0,
-            [0.1, 0.5, 1.0],
-            0.4,
-        ));
-        let near_room_mat = renderer.scene_mut().insert_material(make_material(
-            [0.95, 0.6, 0.25, 1.0],
-            0.7,
-            0.0,
-            [1.0, 0.5, 0.1],
-            0.4,
-        ));
-        let room_floor = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [HALF_WIDTH, 0.02, room_half_len],
-            )))
-            .as_mesh()
-            .unwrap();
-        let room_wall = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.02, HALF_HEIGHT, room_half_len],
-            )))
-            .as_mesh()
-            .unwrap();
+        let far_room_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.3, 0.55, 0.95, 1.0], 0.7, 0.0, [0.1, 0.5, 1.0], 0.4),
+        );
+        let near_room_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.6, 0.25, 1.0], 0.7, 0.0, [1.0, 0.5, 0.1], 0.4),
+        );
+        let room_floor = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, room_half_len]),
+        );
+        let room_wall = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, room_half_len]),
+        );
 
-        let mut insert_always = |mesh, material, transform: glam::Mat4, radius: f32| {
-            let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
-                    mesh,
-                    material,
-                    transform,
-                    bounds: [
-                        transform.w_axis.x,
-                        transform.w_axis.y,
-                        transform.w_axis.z,
-                        radius,
-                    ],
-                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+        // Deliberately *not* INSTANCE_FLAG_ALWAYS_VISIBLE — see portal_cube.rs
+        // for why: bounds-based culling (a real center/radius per instance)
+        // works fine here too, since every panel's `radius` already covers
+        // its own full extent.
+        let insert_always = |world: &mut pulsar_scenedb::World, mesh, material, transform: glam::Mat4, radius: f32| {
+            let _ = spawn_object(world, mesh, material, transform, radius);
         };
-        insert_always(floor, mat, glam::Mat4::IDENTITY, HALF_LENGTH);
+        insert_always(&mut scene_db.world, floor, mat, glam::Mat4::IDENTITY, HALF_LENGTH);
         insert_always(
+                &mut scene_db.world,
             ceiling,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)),
             HALF_LENGTH,
         );
         insert_always(
+                &mut scene_db.world,
             wall_l,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)),
             HALF_LENGTH,
         );
         insert_always(
+                &mut scene_db.world,
             wall_r,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)),
@@ -331,24 +269,28 @@ impl ApplicationHandler for App {
             (near_room_mat, HALF_LENGTH + room_half_len),
         ] {
             insert_always(
+                &mut scene_db.world,
                 room_floor,
                 room_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, zc)),
                 room_half_len,
             );
             insert_always(
+                &mut scene_db.world,
                 room_floor,
                 room_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, zc)),
                 room_half_len,
             );
             insert_always(
+                &mut scene_db.world,
                 room_wall,
                 room_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, zc)),
                 room_half_len,
             );
             insert_always(
+                &mut scene_db.world,
                 room_wall,
                 room_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, zc)),
@@ -362,64 +304,25 @@ impl ApplicationHandler for App {
         // (nothing to light) and defeat the point of the demo.
         let mut light_ids = Vec::new();
         for &z in &[-15.0f32, -9.0, -3.0, 3.0, 9.0, 15.0] {
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [0.0, 2.7, z],
-                        [0.9, 0.95, 1.0],
-                        3.0,
-                        7.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 2.7, z], [0.9, 0.95, 1.0], 3.0, 7.0),
+            ));
         }
         // Colour-coded markers at each end so it's obvious at a glance which
         // end you're looking at through a portal: warm amber in the +Z room,
         // cool blue in the -Z room.
-        let near_mat = renderer.scene_mut().insert_material(make_material(
-            [1.0, 0.6, 0.2, 1.0],
-            0.6,
-            0.0,
-            [1.0, 0.5, 0.1],
-            2.0,
-        ));
-        let far_mat = renderer.scene_mut().insert_material(make_material(
-            [0.2, 0.6, 1.0, 1.0],
-            0.6,
-            0.0,
-            [0.1, 0.5, 1.0],
-            2.0,
-        ));
-        let marker_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.3, 0.3, 0.05],
-            )))
-            .as_mesh()
-            .unwrap();
-        let mut insert_always_marker = |mesh, material, transform: glam::Mat4, radius: f32| {
-            let _ = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
-                    mesh,
-                    material,
-                    transform,
-                    bounds: [
-                        transform.w_axis.x,
-                        transform.w_axis.y,
-                        transform.w_axis.z,
-                        radius,
-                    ],
-                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
-        };
-        insert_always_marker(
+        let near_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.6, 0.2, 1.0], 0.6, 0.0, [1.0, 0.5, 0.1], 2.0),
+        );
+        let far_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.6, 1.0, 1.0], 0.6, 0.0, [0.1, 0.5, 1.0], 2.0),
+        );
+        let marker_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 0.3, 0.05]));
+        insert_always(
+            &mut scene_db.world,
             marker_mesh,
             near_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -429,7 +332,8 @@ impl ApplicationHandler for App {
             )),
             0.5,
         );
-        insert_always_marker(
+        insert_always(
+            &mut scene_db.world,
             marker_mesh,
             far_mat,
             glam::Mat4::from_translation(glam::Vec3::new(
@@ -439,45 +343,31 @@ impl ApplicationHandler for App {
             )),
             0.5,
         );
-        light_ids.push(
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
-                    [0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len],
-                    [1.0, 0.6, 0.2],
-                    2.5,
-                    4.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
-        light_ids.push(
-            renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::light(point_light(
-                    [0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len)],
-                    [0.2, 0.6, 1.0],
-                    2.5,
-                    4.0,
-                )))
-                .as_light()
-                .unwrap(),
-        );
+        light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light(
+                [0.0, HALF_HEIGHT, HALF_LENGTH + room_half_len],
+                [1.0, 0.6, 0.2],
+                2.5,
+                4.0,
+            ),
+        ));
+        light_ids.push(spawn_light(
+            &mut scene_db.world,
+            point_light(
+                [0.0, HALF_HEIGHT, -(HALF_LENGTH + room_half_len)],
+                [0.2, 0.6, 1.0],
+                2.5,
+                4.0,
+            ),
+        ));
         // Room lighting so the mapped duplicate is fully lit at its mapped
         // position (the deferred pass lights it where it's drawn, z ≈ ±24).
         for &z in &[-27.0, -21.0, 21.0, 27.0] {
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [0.0, 2.7, z],
-                        [0.9, 0.95, 1.0],
-                        3.0,
-                        7.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 2.7, z], [0.9, 0.95, 1.0], 3.0, 7.0),
+            ));
         }
 
         // ── Portals ───────────────────────────────────────────────────────
@@ -499,24 +389,16 @@ impl ApplicationHandler for App {
 
         // Looking through the near portal (standing near +Z, facing further
         // +Z) shows what's actually near the far end.
-        let portal_near = renderer
-            .scene_mut()
-            .add_portal(PortalDescriptor {
-                a: pose_near,
-                b: pose_far,
-                half_extent,
-            })
-            .expect("add_portal (near)");
+        let portal_near = helio::PortalPair {
+            a: pose_near,
+            b: pose_far,
+        };
         // Looking through the far portal shows what's actually near the near
         // end — the reverse direction, completing the loop.
-        let portal_far = renderer
-            .scene_mut()
-            .add_portal(PortalDescriptor {
-                a: pose_far,
-                b: pose_near,
-                half_extent,
-            })
-            .expect("add_portal (far)");
+        let portal_far = helio::PortalPair {
+            a: pose_far,
+            b: pose_near,
+        };
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -528,6 +410,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 1.6, 0.0),
             cam_yaw: 0.0,
@@ -675,12 +558,11 @@ impl AppState {
         }
 
         // ── Teleport on crossing either portal ──────────────────────────────
-        // Same `helio_portal_core` math the renderer's own duplicate-content
+        // Same `helio_pass_portal_cull` math the renderer's own duplicate-content
         // mapping is built on (re-exported from `helio`) — crossing detection
         // and the position/direction remap are just the CPU-side half of the
         // same portal, unaffected by how it's drawn.
-        let scene = self.renderer.scene_mut();
-        if let Some(pair) = scene.portal_pair(self.portal_near) {
+        if let Some(pair) = Some(self.portal_near) {
             if helio::crossing_detected(
                 prev_pos,
                 self.cam_pos,
@@ -695,7 +577,7 @@ impl AppState {
                 self.cam_pitch = forward.y.clamp(-1.0, 1.0).asin();
             }
         }
-        if let Some(pair) = scene.portal_pair(self.portal_far) {
+        if let Some(pair) = Some(self.portal_far) {
             if helio::crossing_detected(
                 prev_pos,
                 self.cam_pos,
@@ -730,6 +612,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

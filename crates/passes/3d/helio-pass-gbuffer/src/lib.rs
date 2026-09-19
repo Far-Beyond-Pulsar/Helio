@@ -28,12 +28,27 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
-use helio::radiant::{RadiantShaderCache, RadiantShaderKey};
-use helio_core::graph::{ResourceBuilder, ResourceSize};
+use wgpu::util::DeviceExt;
+
+pub mod components;
+mod coordinate_spaces_frame_data;
+mod culled_batch_frame_data;
+mod object_batch_frame_data;
+pub use components::{
+    MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
+    SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
+    SublevelComponent, SublevelSceneBinding,
+};
+pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
+pub use culled_batch_frame_data::CulledBatchFrameData;
+pub use object_batch_frame_data::ObjectBatchFrameData;
+use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
+use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use std::collections::HashMap;
+use pulsar_scenedb::gpu::BufferKey;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -58,12 +73,12 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// Shared with the renderer and GPU scene — never deep-cloned (see
     /// `SharedTemplateRegistry`). `None` until the first `execute()`.
-    template_registry: Option<helio::radiant::SharedTemplateRegistry>,
+    template_registry: Option<helio_mats::radiant::SharedTemplateRegistry>,
     /// Key set as of the last sync, to detect content changes cheaply
     /// (registry identity is stable, so `Arc::ptr_eq` can't detect a
     /// template being re-registered under an existing id).
@@ -87,12 +102,28 @@ pub struct GBufferPass {
     pub debug_mode: u32,
     /// Lightmap atlas regions buffer (empty until bake data is loaded)
     lightmap_atlas_regions_buf: wgpu::Buffer,
+    /// Portal/sublevel-local transforms, indexed by an instance's `space_id`.
+    /// Pass-owned (not `Renderer`-owned): every consumer of `"coordinate_
+    /// spaces"` (`OcclusionCullPass`, `IndirectDispatchPass`, `ShadowPass`,
+    /// `ShadowCullPass`, both portal passes) needs `space_id 0` to always
+    /// resolve to identity even when nothing authors portal/sublevel content,
+    /// and `GBufferPass` is the one pass guaranteed present in every graph --
+    /// see `helio_pass_gbuffer::CoordinateSpacesFrameData`'s doc for the
+    /// still-pending real fix (a SceneDB-driven portal/sublevel component).
+    coordinate_spaces: wgpu::Buffer,
+    coordinate_spaces_prev: wgpu::Buffer,
+    /// Fallback `MaterialTextureData` storage buffer (352 bytes = one
+    /// zeroed slot) so `"material_textures"`' bind group stays valid before
+    /// SceneDB publishes a real table. Pass-owned because 352 is this
+    /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
+    /// generic Renderer has no business knowing it.
+    fallback_material_textures: wgpu::Buffer,
 }
 
 impl GBufferPass {
     /// Create the GBuffer pass.
     pub fn new(device: &wgpu::Device) -> Self {
-        let material_binding = libhelio::MaterialBindingConfig::for_device(device);
+        let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         // ── Globals buffer ────────────────────────────────────────────────────
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GBufferGlobals"),
@@ -209,6 +240,27 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
+        let identity_space = glam::Mat4::IDENTITY.to_cols_array();
+        let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let coordinate_spaces_prev = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Coordinate Spaces Prev (space_id 0 = identity)"),
+            contents: bytemuck::bytes_of(&identity_space),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
+        // (48 bytes each) + a 16-byte params vec4 = 352 bytes -- see this
+        // pass's own material bind-group-1 doc above.
+        let fallback_material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fallback Material Texture Slots"),
+            size: 352,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             material_binding,
             pipelines: HashMap::new(),
@@ -223,11 +275,34 @@ impl GBufferPass {
             bind_group_1: None,
             bind_group_1_version: None,
             globals_buf,
-            // Default CSM splits — single source of truth is libhelio::CSM_SPLITS.
-            csm_splits: libhelio::CSM_SPLITS,
+            // Default CSM splits — single source of truth is helio_pass_shadow_matrix::CSM_SPLITS.
+            csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
             debug_mode: 0,
             lightmap_atlas_regions_buf,
+            coordinate_spaces,
+            coordinate_spaces_prev,
+            fallback_material_textures,
         }
+    }
+
+    /// Portal/sublevel-local transform buffer (`space_id 0` = identity).
+    /// Exposed so `Renderer::render` can publish `"coordinate_spaces"` into
+    /// the frame's `ResourceRegistry` before the graph executes -- the same
+    /// `find_pass`-based reach-in `Renderer` already uses for `PostProcessPass`.
+    pub fn coordinate_spaces_buffer(&self) -> &wgpu::Buffer {
+        &self.coordinate_spaces
+    }
+
+    /// See [`Self::coordinate_spaces_buffer`].
+    pub fn coordinate_spaces_prev_buffer(&self) -> &wgpu::Buffer {
+        &self.coordinate_spaces_prev
+    }
+
+    /// Fallback `"material_textures"` buffer. See
+    /// [`Self::coordinate_spaces_buffer`] for why `Renderer` reaches in
+    /// rather than owning this itself.
+    pub fn fallback_material_textures_buffer(&self) -> &wgpu::Buffer {
+        &self.fallback_material_textures
     }
 }
 
@@ -237,30 +312,26 @@ impl RenderPass for GBufferPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw(
-            "gbuffer_albedo",
-            wgpu::TextureFormat::Rgba8Unorm,
+        builder.read("object_batch");
+        builder.read("culled_batch");
+        // The 4 bundled G-buffer targets consumed together downstream as one
+        // `Tracked<GBufferViews>` (see `publish_group` below) — declared as a
+        // single named group so the generic allocator combines them itself,
+        // rather than as 4 independent `write_color_raw` calls. See
+        // `docs/helio_3_0_spec.md` §5.
+        builder.write_group(
+            "gbuffer",
+            [
+                ("gbuffer_albedo", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_normal", ResourceFormat::Rgba16Float),
+                ("gbuffer_orm", ResourceFormat::Rgba8Unorm),
+                ("gbuffer_emissive", ResourceFormat::Rgba16Float),
+            ],
             ResourceSize::MatchSurface,
         );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_normal",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_orm",
-            wgpu::TextureFormat::Rgba8Unorm,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        builder.write_color_raw(
-            "gbuffer_emissive",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
-        );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.with_group_extra_usage("gbuffer", wgpu::TextureUsages::STORAGE_BINDING);
+        // The remaining 4 G-buffer targets are each read independently
+        // downstream (no bundling) — plain single-view declarations.
         builder.write_color_raw(
             "gbuffer_lightmap_uv",
             wgpu::TextureFormat::Rg16Float,
@@ -283,23 +354,44 @@ impl RenderPass for GBufferPass {
         );
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
-    fn render_pass_descriptor<'a>(
+    fn publish_group<'a>(
+        &self,
+        group_name: &'static str,
+        views: &[&'a wgpu::TextureView],
+        frame: &mut helio_core::ResourceRegistry<'a>,
+    ) {
+        // Turns the generically-resolved "gbuffer" write_group into the
+        // stable bundled contract downstream passes (DeferredLight, SSAO,
+        // SSR, VirtualGeometry, …) read as `frame.gbuffer`. Order matches
+        // the `write_group` call in `declare_resources` above.
+        if group_name == "gbuffer" {
+            if let [albedo, normal, orm, emissive] = *views {
+                frame.write(helio_core::ResourceKey::new("gbuffer"), 
+                    helio_core::ViewGroup::<4> { views: [albedo, normal, orm, emissive] },
+                    "GBufferPass",
+                );
+            }
+        }
+    }
+
+    fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
+        storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.gbuffer.read("GBuffer")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("GBuffer")?;
-        let sss_target = resources.gbuffer_sss.read("GBuffer")?;
-        let extra_target = resources.gbuffer_extra.read("GBuffer")?;
-        let velocity_target = resources.gbuffer_velocity.read("GBuffer")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "GBuffer")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "GBuffer")?;
+        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "GBuffer")?;
+        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "GBuffer")?;
+        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "GBuffer")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: gbuffer.views[0],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -308,7 +400,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
+                    view: gbuffer.views[1],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -317,7 +409,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
+                    view: gbuffer.views[2],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -326,7 +418,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
+                    view: gbuffer.views[3],
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -389,28 +481,31 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from frame_resources so the GBuffer globals match
+        // Read per-scene values from pass_resources so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
+        let rc_volume = ctx
+            .pass_resources
+            .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
+            if let Some(ref environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")).as_ref() {
                 (
                     [
-                        ms.ambient_color[0],
-                        ms.ambient_color[1],
-                        ms.ambient_color[2],
+                        environment.ambient_color[0],
+                        environment.ambient_color[1],
+                        environment.ambient_color[2],
                         1.0,
                     ],
-                    ms.ambient_intensity,
+                    environment.ambient_intensity,
                     [
-                        ms.rc_world_min[0],
-                        ms.rc_world_min[1],
-                        ms.rc_world_min[2],
+                        rc_volume.map(|v| v.world_min[0]).unwrap_or(-100.0),
+                        rc_volume.map(|v| v.world_min[1]).unwrap_or(-100.0),
+                        rc_volume.map(|v| v.world_min[2]).unwrap_or(-100.0),
                         0.0,
                     ],
                     [
-                        ms.rc_world_max[0],
-                        ms.rc_world_max[1],
-                        ms.rc_world_max[2],
+                        rc_volume.map(|v| v.world_max[0]).unwrap_or(100.0),
+                        rc_volume.map(|v| v.world_max[1]).unwrap_or(100.0),
+                        rc_volume.map(|v| v.world_max[2]).unwrap_or(100.0),
                         0.0,
                     ],
                 )
@@ -423,7 +518,14 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: if ctx
+                .scene_buffers
+                .contains(pulsar_scenedb::gpu::BufferKey::of("scene_lights"))
+            {
+                256
+            } else {
+                0
+            },
             ambient_intensity,
             ambient_color,
             rc_world_min,
@@ -439,19 +541,46 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
-        let main_scene = ctx.resources.main_scene;
-
-        if draw_count == 0 || main_scene.is_none() {
+        let Some(batch) = ctx.resources.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(culled) = ctx.resources.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+            return Ok(());
+        };
+        let draw_count = batch.draw_count;
+        if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = main_scene.read("GBuffer").unwrap();
+        let Some(material_textures) = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "GBuffer") else {
+            return Ok(());
+        };
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
+        else {
+            return Ok(());
+        };
+        let vertices = &vertices_handle.buffer;
+        let indices = &indices_handle.buffer;
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
-        let camera_ptr = ctx.scene.camera as *const _ as usize;
-        let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
-        let coordinate_spaces_ptr = ctx.scene.coordinate_spaces as *const _ as usize;
+        let camera_ptr = ctx.camera as *const _ as usize;
+        let instances_ptr = batch.instances as *const _ as usize;
+        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
+        let coord_spaces = ctx.resources.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces"));
+        let coordinate_spaces_buf = coord_spaces
+            .map(|c| c.coordinate_spaces)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_prev_buf = coord_spaces
+            .map(|c| c.coordinate_spaces_prev)
+            .unwrap_or(ctx.camera);
+        let coordinate_spaces_ptr = coordinate_spaces_buf as *const _ as usize;
         let key = (
             camera_ptr,
             instances_ptr,
@@ -466,7 +595,7 @@ impl RenderPass for GBufferPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -474,7 +603,7 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -482,80 +611,73 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                        resource: culled.compacted_indices.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coordinate_spaces_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: ctx.scene.coordinate_spaces_prev.as_entire_binding(),
+                        resource: coordinate_spaces_prev_buf.as_entire_binding(),
                     },
                 ],
             }));
             self.bind_group_0_key = Some(key);
         }
 
+        // Material rows are SceneDB component data.  The pass resolves the
+        // component column by key; it must not consume a renderer-owned
+        // material table hidden inside ResourceRegistry.
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
+
         // Rebuild bind group 1 when material textures version changes.
-        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+        let needs_rebuild = self.bind_group_1_version != Some(
+            material_textures.version ^ materials_epoch,
+        )
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: ctx.scene.materials.as_entire_binding(),
+                    resource: materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: main_scene
-                        .material_textures
-                        .material_textures
-                        .as_entire_binding(),
+                    resource: material_textures.material_textures.as_entire_binding(),
                 },
             ];
             self.material_binding.append_bind_group_entries(
                 &mut entries,
                 2,
-                main_scene.material_textures.texture_views,
-                main_scene.material_textures.samplers,
+                material_textures.texture_views,
+                material_textures.samplers,
             );
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 1"),
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(main_scene.material_textures.version);
+            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
         }
 
-        let indirect = ctx.scene.indirect;
+        let indirect = culled.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(
-            main_scene.mesh_buffers.indices.slice(..),
+            indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
 
-        // Sync template registry from scene (survives graph rebuilds). This
-        // is just an Arc clone (cheap refcount bump) — the registry itself
-        // is shared, never deep-copied.
-        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
-            if let Some(shared) = reg_any.downcast_ref::<helio::radiant::SharedTemplateRegistry>() {
-                let new_keys = shared.read().unwrap().keys();
-                if self.last_template_keys != new_keys {
-                    // Registry changed — pipelines must be re-created
-                    self.pipelines.clear();
-                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
-                    self.last_template_keys = new_keys;
-                }
-                self.template_registry = Some(std::sync::Arc::clone(shared));
-            }
-        }
-        let ranges = ctx.scene.material_class_ranges;
+        let ranges = batch.opaque_ranges;
         if ranges.is_empty() {
             // Fallback: no ranges (e.g. legacy mode without material_class data).
             // Use the default PBR pipeline and draw everything in one batch.
@@ -582,13 +704,7 @@ impl RenderPass for GBufferPass {
                     graph_hash,
                     feature_flags: 0,
                 };
-                let graph_wgsl = ctx
-                    .scene
-                    .graph_wgsl_snippets
-                    .get(&graph_hash)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
                 // DrawIndexedIndirectArgs = 5 × u32 = 20 bytes per entry
                 #[cfg(not(target_arch = "wasm32"))]
@@ -628,7 +744,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["main_scene"]
+        &["material_textures", "render_environment", "object_batch", "culled_batch"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -703,22 +819,41 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let registry = self
-                .template_registry
-                .clone()
-                .expect("template registry not synced — execute() must run before draws");
-            let registry = registry.read().unwrap();
-            let template = match registry.get(key.template_id) {
-                Some(t) => t,
-                None => {
+            // The renderer only ever hands us a shared registry when a
+            // caller actually registers custom (id >= 5) templates; nothing
+            // wires that up yet (see `template_registry`'s doc). Rather than
+            // hard-require it for every draw -- panicking on the overwhelming
+            // majority of scenes that only ever use the built-in classes
+            // (0 = default_pbr .. 4 = skin) -- fall back to a local registry
+            // that has those same built-ins, mirroring TransparentPass's
+            // `local_class0` fallback for the identical situation.
+            let local_fallback;
+            let registry_guard;
+            let template = if let Some(shared) = self.template_registry.as_ref() {
+                registry_guard = shared.read().unwrap();
+                match registry_guard.get(key.template_id) {
+                    Some(t) => t,
+                    None => {
+                        log::warn!(
+                            "Radiant: template class {} not found, falling back to class 0",
+                            key.template_id,
+                        );
+                        registry_guard
+                            .get(0)
+                            .expect("Default PBR template (class 0) missing")
+                    }
+                }
+            } else {
+                local_fallback = helio_mats::radiant::RadiantTemplateRegistry::new();
+                if key.template_id != 0 {
                     log::warn!(
-                        "Radiant: template class {} not found, falling back to class 0",
+                        "Radiant: no shared template registry synced yet; class {} unavailable, using class 0",
                         key.template_id,
                     );
-                    registry
-                        .get(0)
-                        .expect("Default PBR template (class 0) missing")
                 }
+                local_fallback
+                    .get(0)
+                    .expect("Default PBR template (class 0) missing")
             };
             let module = self.shader_cache.get_or_compile(
                 device,
@@ -853,11 +988,11 @@ impl GBufferPass {
 /// Build the BGL for group 1 (bindless materials + textures).
 // TODO: Generalize material BGL creation to avoid cross-pass deps.
 // Both GBufferPass and TransparentPass need the same material bind group layout.
-// This should be moved to a shared crate (helio-core or libhelio) so neither
+// This should be moved to a shared crate (helio-core or a shared pass crate) so neither
 // pass depends on the other for basic infrastructure.
 pub fn create_material_bgl(
     device: &wgpu::Device,
-    material_binding: libhelio::MaterialBindingConfig,
+    material_binding: helio_mats::MaterialBindingConfig,
 ) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
@@ -888,3 +1023,5 @@ pub fn create_material_bgl(
         entries: &entries,
     })
 }
+
+

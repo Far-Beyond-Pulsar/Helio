@@ -52,7 +52,7 @@
 //!         &'a self,
 //!         _: &'a wgpu::TextureView,
 //!         _: &'a wgpu::TextureView,
-//!         _: &'a helio_core::FrameResources<'a>,
+//!         _: &'a helio_core::ResourceRegistry<'a>,
 //!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 //!         None
 //!     }
@@ -101,9 +101,9 @@
 //! }
 //! ```
 
-use crate::component::{Component, ComponentRegistry};
-use crate::scene::GpuScene;
-use crate::{Profiler, SceneResources};
+use crate::graph::PipelineRegistry;
+use crate::{Profiler, SceneBufferProjection};
+use crate::GpuCameraUniforms;
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -148,7 +148,7 @@ use crate::{Profiler, SceneResources};
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::ResourceRegistry<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -212,8 +212,27 @@ pub struct PassContext<'a> {
     /// Depth/stencil buffer.
     pub depth: &'a wgpu::TextureView,
 
-    /// Zero-copy scene resources (lights, meshes, materials).
-    pub scene: SceneResources<'a>,
+    /// The active camera's GPU-bound uniform buffer -- see
+    /// `SceneInput::camera`'s doc for why this is a first-class field rather
+    /// than part of `scene_buffers`.
+    pub camera: &'a wgpu::Buffer,
+    /// CPU-side mirror of the same camera data.
+    pub camera_data: &'a GpuCameraUniforms,
+    /// Increments whenever the camera's view/projection changes -- passes
+    /// that cache camera-dependent GPU state (Hi-Z, SSR, ...) use this to
+    /// detect the change cheaply instead of comparing matrices.
+    pub camera_generation: u64,
+
+    /// Type-erased SceneDB GPU columns supplied by the frontend. The sole
+    /// scene-data seam: `helio-core` has zero knowledge of any specific
+    /// scene-object type past this point -- a pass resolves its own
+    /// `BufferKey`s and interprets the bytes itself. (Formerly there was
+    /// also a `scene: SceneResources<'a>` field here with named fields per
+    /// type -- lights, camera, materials, shadow matrices, coordinate
+    /// spaces, voxels, portals -- removed; every such field's replacement
+    /// data source, if one exists yet, lives behind a `BufferKey` or a
+    /// `crate::ResourceRegistry` slot published by the pass that owns it.)
+    pub scene_buffers: &'a SceneBufferProjection,
 
     /// Profiler (automatic - injected by RenderGraph).
     #[allow(dead_code)]
@@ -232,7 +251,11 @@ pub struct PassContext<'a> {
     pub device: &'a wgpu::Device,
 
     /// Per-frame transient resource views.
-    pub resources: &'a libhelio::FrameResources<'a>,
+    pub resources: &'a crate::ResourceRegistry<'a>,
+
+    /// Open typed per-frame resource registry. New passes should prefer this
+    /// over the legacy `resources` field when publishing or consuming data.
+    pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// Subpass index within a fused render-pass chain.
     pub subpass_index: u32,
@@ -255,23 +278,85 @@ pub struct PassContext<'a> {
     /// Active compute pass, or None if not in a compute pass.
     pub active_compute_pass: Option<*mut wgpu::ComputePass<'static>>,
 
-    /// Component registry for type-erased storage access.
-    pub components: &'a ComponentRegistry,
-
     /// Dynamic-rendering pipeline cache, keyed by runtime attachment
     /// formats (see [`crate::graph::PipelineFormatCache`]). Passes that
     /// bind a format-dependent pipeline should look it up here every frame
-    /// via `ctx.pipeline_cache.get_or_create(key, || build_pipeline(...))`
+    /// via `ctx.pipeline_cache.try_get_or_schedule(key, build_pipeline)`
     /// rather than rebuilding — the cache only pays the build cost once per
-    /// distinct format combination, not once per frame. One instance lives
-    /// on the executor and is threaded into every pass's context, so a
-    /// resize/reformat of a named transient is picked up automatically the
-    /// next time a pass computes its key via
+    /// distinct format combination, not once per frame. A `None` result is a
+    /// typed, frame-local fallback: skip the draw and try again next frame.
+    /// One instance lives on the executor and is threaded into every pass's
+    /// context, so a resize/reformat of a named transient is picked up
+    /// automatically the next time a pass computes its key via
     /// [`crate::graph::attachment_format`].
     pub pipeline_cache: &'a crate::graph::PipelineFormatCache,
+
+    /// Pipelines declared by this pass and resolved by the executor before
+    /// `execute()` begins.
+    pub pipelines: &'a PipelineRegistry,
+
+    /// Bind groups created by the executor from the pass's reflected shader.
+    /// Empty for legacy/manual passes. Groups are ordered by WGSL group index.
+    pub reflected_bind_groups: &'a [wgpu::BindGroup],
+
+    /// Executor-owned reflection products. The layout and directives are
+    /// available to passes that use the reflected bind groups to construct a
+    /// pipeline without duplicating layout or fixed-function declarations.
+    pub reflected_pipeline: Option<&'a crate::shader::ReflectedPipeline>,
 }
 
 impl<'a> PassContext<'a> {
+    /// Returns an executor-created reflected bind group by group index.
+    pub fn reflected_bind_group(&self, group: usize) -> Option<&wgpu::BindGroup> {
+        self.reflected_bind_groups.get(group)
+    }
+
+    pub fn reflected_pipeline_layout(&self) -> Option<&wgpu::PipelineLayout> {
+        self.reflected_pipeline
+            .map(|pipeline| &pipeline.pipeline_layout)
+    }
+
+    pub fn reflected_directives(&self) -> Option<&crate::shader::PipelineDirectives> {
+        self.reflected_pipeline.map(|pipeline| &pipeline.directives)
+    }
+
+    pub fn reflected_primitive_state(&self) -> Option<wgpu::PrimitiveState> {
+        self.reflected_pipeline
+            .map(crate::shader::ReflectedPipeline::primitive_state)
+    }
+
+    pub fn reflected_blend_state(&self) -> Option<wgpu::BlendState> {
+        self.reflected_pipeline
+            .and_then(crate::shader::ReflectedPipeline::blend_state)
+    }
+
+    pub fn reflected_depth_stencil_state(
+        &self,
+        format: wgpu::TextureFormat,
+    ) -> Option<wgpu::DepthStencilState> {
+        self.reflected_pipeline
+            .and_then(|pipeline| pipeline.depth_stencil_state(format))
+    }
+
+    /// Applies all executor-created reflected groups to the active pass.
+    /// This is a no-op for self-managed/manual passes and for passes that did
+    /// not opt into reflection.
+    pub fn apply_reflected_bind_groups(&mut self) {
+        if let Some(ptr) = self.active_render_pass {
+            // The executor establishes this pointer immediately before the
+            // callback and keeps the render pass alive until it returns.
+            let pass = unsafe { &mut *ptr };
+            for (group, bind_group) in self.reflected_bind_groups.iter().enumerate() {
+                pass.set_bind_group(group as u32, bind_group, &[]);
+            }
+        }
+        if let Some(ptr) = self.active_compute_pass {
+            let pass = unsafe { &mut *ptr };
+            for (group, bind_group) in self.reflected_bind_groups.iter().enumerate() {
+                pass.set_bind_group(group as u32, bind_group, &[]);
+            }
+        }
+    }
     /// Returns a raw pointer to the active render pass, if any.
     /// Cast to a reference in the pass: `let rp = unsafe { &mut *ctx.active_render_pass()? };`
     ///
@@ -297,11 +382,6 @@ impl<'a> PassContext<'a> {
     pub fn active_compute_pass_ptr(&self) -> Option<*mut wgpu::ComputePass<'static>> {
         self.active_compute_pass
     }
-
-    /// Access a registered component storage by type.
-    pub fn storage<T: Component + 'static>(&self) -> Option<&Vec<T>> {
-        self.components.get_storage::<T>()
-    }
 }
 
 impl<'a> PassContext<'a> {
@@ -326,7 +406,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::ResourceRegistry<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -395,7 +475,7 @@ impl<'a> PassContext<'a> {
     /// #         &'a self,
     /// #         _: &'a wgpu::TextureView,
     /// #         _: &'a wgpu::TextureView,
-    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #         _: &'a helio_core::ResourceRegistry<'a>,
     /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -463,7 +543,7 @@ impl<'a> PassContext<'a> {
 ///         &'a self,
 ///         _: &'a wgpu::TextureView,
 ///         _: &'a wgpu::TextureView,
-///         _: &'a helio_core::FrameResources<'a>,
+///         _: &'a helio_core::ResourceRegistry<'a>,
 ///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
 ///         None
 ///     }
@@ -529,11 +609,22 @@ pub struct PrepareContext<'a> {
     /// Useful for time-based effects (e.g., animations, TAA jitter).
     pub frame_num: u64,
 
-    /// Zero-copy scene resource references for prepare().
-    pub scene: &'a GpuScene,
+    /// The active camera -- see `PassContext::camera`'s doc.
+    pub camera: &'a wgpu::Buffer,
+    /// CPU-side mirror of the same camera data.
+    pub camera_data: &'a GpuCameraUniforms,
+    /// See `PassContext::camera_generation`'s doc.
+    pub camera_generation: u64,
+
+    /// Type-erased SceneDB GPU columns supplied by the frontend -- see
+    /// `PassContext::scene_buffers`'s doc; the same field, same removal.
+    pub scene_buffers: &'a SceneBufferProjection,
 
     /// Per-frame transient resource views (for passes that need them in prepare).
-    pub frame_resources: &'a libhelio::FrameResources<'a>,
+    pub pass_resources: &'a crate::ResourceRegistry<'a>,
+
+    /// Open typed per-frame resource registry for new passes.
+    pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// True if the render target was resized this frame.
     pub resize: bool,

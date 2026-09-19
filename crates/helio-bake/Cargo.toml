@@ -10,8 +10,8 @@ license = "MIT OR Apache-2.0"
 nebula = { path = "../../vendor/nebula/crates/nebula", default-features = false, features = ["ao", "light", "probe", "visibility"] }
 
 # Helio internal crates
-libhelio = { workspace = true }
 helio-core = { workspace = true }
+helio-bake-types = { workspace = true }
 
 # GPU
 wgpu.workspace = true

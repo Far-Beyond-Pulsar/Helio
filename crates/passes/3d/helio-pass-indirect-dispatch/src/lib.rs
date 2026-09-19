@@ -15,6 +15,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+pub mod gpu_types;
+pub use gpu_types::*;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
@@ -23,11 +26,27 @@ struct CullUniforms {
     _pad: [u32; 3],
 }
 
+/// Below this many entries, `indirect_buf`/`compacted_indices_buf` still
+/// allocate at this floor -- avoids reallocating on every single object
+/// insert/remove around a tiny scene, matching `ObjectBatchPass`'s own
+/// `MIN_SCRATCH_CAPACITY` idiom.
+const MIN_CAPACITY: u32 = 256;
+
 pub struct IndirectDispatchPass {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     cull_stats_buf: wgpu::Buffer,
+    /// This pass's own output -- no longer a central `GpuScene` field (see
+    /// `IndirectDispatchFrameData`'s doc, now in this crate): frustum-culled
+    /// indirect draw args, one `DrawIndexedIndirect` (20 bytes) per
+    /// draw-call group.
+    indirect_buf: wgpu::Buffer,
+    /// Frustum-culling survivors, one `u32` per live instance (worst case).
+    compacted_indices_buf: wgpu::Buffer,
+    /// Rows `indirect_buf`/`compacted_indices_buf` are currently sized for.
+    draw_capacity: u32,
+    instance_capacity: u32,
     /// Lazy bind group — rebuilt whenever the underlying buffer pointers change
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
@@ -173,16 +192,78 @@ impl IndirectDispatchPass {
             cache: None,
         });
 
+        let indirect_buf = create_indirect_buf(device, MIN_CAPACITY);
+        let compacted_indices_buf = create_compacted_indices_buf(device, MIN_CAPACITY);
+
         Self {
             pipeline,
             bind_group_layout,
             uniform_buf,
             cull_stats_buf: cull_stats_buf.clone(),
+            indirect_buf,
+            compacted_indices_buf,
+            draw_capacity: MIN_CAPACITY,
+            instance_capacity: MIN_CAPACITY,
             bind_group: None,
             bind_group_key: None,
             draw_count: 0,
         }
     }
+
+    /// Grows `indirect_buf`/`compacted_indices_buf` to at least
+    /// `draw_count`/`instance_count` rows (next-power-of-two, floor
+    /// `MIN_CAPACITY`) if either has grown since the last call. Returns
+    /// `true` if anything reallocated (the caller must then rebuild the
+    /// bind group).
+    fn ensure_capacity(
+        &mut self,
+        device: &wgpu::Device,
+        draw_count: u32,
+        instance_count: u32,
+    ) -> bool {
+        let mut grew = false;
+        if draw_count > self.draw_capacity {
+            self.draw_capacity = draw_count.next_power_of_two().max(MIN_CAPACITY);
+            self.indirect_buf = create_indirect_buf(device, self.draw_capacity);
+            grew = true;
+        }
+        if instance_count > self.instance_capacity {
+            self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
+            self.compacted_indices_buf =
+                create_compacted_indices_buf(device, self.instance_capacity);
+            grew = true;
+        }
+        grew
+    }
+}
+
+fn create_indirect_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("IndirectDispatch Indirect"),
+        size: (capacity as u64 * 20).max(4),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_compacted_indices_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("IndirectDispatch CompactedIndices"),
+        size: (capacity as u64 * 4).max(4),
+        // COPY_SRC: `OcclusionCullPass`'s "no Hi-Z pyramid yet" bypass path
+        // copies this buffer straight into its own `compacted_indices_2_buf`
+        // (see that pass's `execute()`) instead of running the real Hi-Z
+        // test. That path was previously unreachable in practice (gated on
+        // `frame_num == 0`, which always saw `draw_count == 0` due to
+        // `ObjectBatchPass`'s readback lag -- see `OcclusionCullPass::
+        // hiz_warmed_up`'s doc), so this missing flag never surfaced as a
+        // validation error until that gate was fixed to actually run the
+        // bypass on the first frame with real instances.
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
 }
 
 impl RenderPass for IndirectDispatchPass {
@@ -194,19 +275,50 @@ impl RenderPass for IndirectDispatchPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_calls.len() as u32;
-        self.draw_count = draw_count;
-        let planes = extract_frustum_planes(ctx.scene.camera.data().view_proj);
+    fn reads(&self) -> &'static [&'static str] {
+        &["object_batch"]
+    }
 
+    fn writes(&self) -> &'static [&'static str] {
+        &["indirect_dispatch"]
+    }
+
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("object_batch");
+        builder.write_buffer("indirect_dispatch");
+    }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // The pass owns these buffers for the renderer lifetime; ResourceRegistry
+        // stores borrowed views for the current frame.
+        let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.indirect_buf) };
+        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_buf) };
+        frame.write(helio_core::ResourceKey::new("indirect_dispatch"), 
+            crate::IndirectDispatchFrameData {
+                indirect,
+                compacted_indices,
+            },
+            "IndirectDispatch",
+        );
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let Some(batch) = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            self.draw_count = 0;
+            return Ok(());
+        };
+        self.draw_count = batch.draw_count;
+        self.ensure_capacity(ctx.device, batch.draw_count, batch.instance_count);
+
+        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
         let uniforms = CullUniforms {
             frustum_planes: planes,
-            draw_count,
+            draw_count: batch.draw_count,
             _pad: [0; 3],
         };
         ctx.queue
@@ -215,21 +327,27 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
+        let draw_count = self.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
+        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+            return Ok(());
+        };
+        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+            return Ok(());
+        };
 
-        // Rebuild bind group if any GrowableBuffer has reallocated (pointer changed).
+        // Rebuild bind group if any source buffer has reallocated (pointer changed).
         let key = (
-            ctx.scene.camera as *const wgpu::Buffer as usize,
-            ctx.scene.instances as *const wgpu::Buffer as usize,
-            ctx.scene.draw_calls as *const wgpu::Buffer as usize,
-            ctx.scene.aabbs as *const wgpu::Buffer as usize,
-            ctx.scene.indirect as *const wgpu::Buffer as usize,
+            ctx.camera as *const wgpu::Buffer as usize,
+            batch.instances as *const wgpu::Buffer as usize,
+            batch.draw_calls as *const wgpu::Buffer as usize,
+            batch.aabbs as *const wgpu::Buffer as usize,
+            &self.indirect_buf as *const wgpu::Buffer as usize,
             &self.cull_stats_buf as *const wgpu::Buffer as usize,
-            ctx.scene.compacted_indices as *const wgpu::Buffer as usize,
-            ctx.scene.coordinate_spaces as *const wgpu::Buffer as usize,
+            &self.compacted_indices_buf as *const wgpu::Buffer as usize,
+            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -238,7 +356,7 @@ impl RenderPass for IndirectDispatchPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: ctx.scene.camera.as_entire_binding(),
+                        resource: ctx.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -246,19 +364,19 @@ impl RenderPass for IndirectDispatchPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.instances.as_entire_binding(),
+                        resource: batch.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: ctx.scene.draw_calls.as_entire_binding(),
+                        resource: batch.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.aabbs.as_entire_binding(),
+                        resource: batch.aabbs.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: ctx.scene.indirect.as_entire_binding(),
+                        resource: self.indirect_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
@@ -266,11 +384,11 @@ impl RenderPass for IndirectDispatchPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                        resource: self.compacted_indices_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
-                        resource: ctx.scene.coordinate_spaces.as_entire_binding(),
+                        resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
                 ],
             }));

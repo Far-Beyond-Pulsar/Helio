@@ -43,11 +43,22 @@ blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+# Published Pulsar-Native profiler (including cross-thread scope contexts) -- the same
+# collector that powers the editor flamegraph. Feature-flag aliased below so
+# the fork's `profile_scope!` coexists with the compile-time `profiling`
+# feature already gating helio-core's per-pass CpuProfiler.
+profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "45cda191beb316fee0859ae40d59f0dff986a66a" }
 egui = "0.36.1"
 egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
 env_logger = "0.11"
 log = "0.4"
+# Required as a *direct* dependency (not just transitively via
+# pulsar_reflection) by any crate using #[derive(Reflectable)] -- its
+# generated code writes `::serde_json::Value`, and `::crate_name` paths
+# resolve against the compiling crate's own direct dependencies (the 2018+
+# extern prelude), not a proc-macro crate's.
+serde_json = "1"
 
 # SolidRS - 3D asset loading library
 solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
@@ -62,7 +73,18 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
-helio-portal-core = { path = "crates/helio-portal-core" }
+helio-mats = { path = "crates/helio-mats" }
+helio-bake-types = { path = "crates/helio-bake-types" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83" }
+# Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
+# a different rev is a different SourceId and thus a second,
+# type-incompatible copy of this crate in the build (see helio-wasm's
+# BufferKey mismatch, hit and fixed earlier from exactly this). Every crate
+# that needs the Reflectable derive should depend on this workspace entry,
+# never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
+# of stale per-crate pins fixed in the same session.
+pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "1c64758" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
@@ -71,14 +93,10 @@ helio-pass-portal-instances = { path = "crates/passes/3d/helio-pass-portal-insta
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "crates/passes/3d/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }
-libhelio = { path = "crates/libhelio" }
 helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
-helio-voxel-core = { path = "crates/helio-voxel-core" }
-helio-foliage-core = { path = "crates/helio-foliage-core" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
-helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
 helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
@@ -92,6 +110,19 @@ helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
 helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
 helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
 helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
+helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
+helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
+helio-pass-forward-lit = { path = "crates/passes/3d/helio-pass-forward-lit" }
+helio-pass-gbuffer = { path = "crates/passes/3d/helio-pass-gbuffer" }
+helio-pass-object-batch = { path = "crates/passes/3d/helio-pass-object-batch" }
+helio-pass-occlusion-cull = { path = "crates/passes/3d/helio-pass-occlusion-cull" }
+helio-pass-indirect-dispatch = { path = "crates/passes/3d/helio-pass-indirect-dispatch" }
+helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
+helio-pass-virtual-geometry = { path = "crates/passes/3d/helio-pass-virtual-geometry" }
+helio-pass-water-sim = { path = "crates/passes/3d/helio-pass-water-sim" }
+helio-pass-transparent = { path = "crates/passes/3d/helio-pass-transparent" }
+helio-pass-radiance-cascades = { path = "crates/passes/3d/helio-pass-radiance-cascades" }
+helio-pass-hiz = { path = "crates/passes/3d/helio-pass-hiz" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
 
@@ -99,3 +130,15 @@ microfont = "3.7.8"
 tiny_http = "0.12"
 ratatui = "0.29"
 crossterm = "0.28"
+
+# SceneDB inspector + reflection: route `pulsar_scenedb` (and its derive, which
+# the passes depend on directly) through the pushed `main` rev carrying the
+# batched `cpu_ranges` protocol and the `#[derive(SceneStore)]` -> `Reflectable`
+# registration. Mirrors Pulsar-Native/Cargo.toml's
+# `[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]`. Remove once Helio's
+# own `pulsar_scenedb`/`pulsar_scenedb_derive` pins are bumped to this rev.
+# The patch VALUE uses the `//`-spelled URL: cargo refuses a patch that points
+# at the exact source the manifest pins (same URL, even at a different rev).
+[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]
+pulsar_scenedb = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "214cb5319fcef099f2413005e472d86aaf1046b3" }
+pulsar_scenedb_derive = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "214cb5319fcef099f2413005e472d86aaf1046b3" }

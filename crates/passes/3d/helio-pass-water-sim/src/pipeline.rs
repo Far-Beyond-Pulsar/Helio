@@ -698,10 +698,11 @@ impl WaterSimPass {
         // the vertex stage and every helper, so the surface can only be shaded
         // one way. They used to be separate files with the whole coordinate and
         // SSR apparatus duplicated between them.
-        let surface_shader = helio_core::shader::module(
+        let surface_shader = helio_core::shader::module_with(
             device,
             "Water Surface Shader",
             include_str!("../shaders/surface.wgsl"),
+            &[helio_pass_hiz::HIZ_SNIPPET],
         );
 
         let vbl = vec4_vbl();

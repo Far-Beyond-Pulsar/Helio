@@ -140,11 +140,11 @@ fn visible_blade_halves_cover_the_default_ring_and_tile_occupancy() {
     // aliases. The default ring is 4096 slots; an 8 m tile at the reference 40 blades/m²
     // holds ~2560 blades.
     let ceiling = VISIBLE_LOCAL_MASK;
-    assert!(helio_foliage_core::DEFAULT_TILE_RING_CAPACITY <= ceiling);
-    let tile_area = helio_foliage_core::FOLIAGE_TILE_SIZE_METERS.powi(2);
-    let blades_per_tile = (helio_foliage_core::GpuFoliageType::default().density
+    assert!(helio_pass_foliage_place::DEFAULT_TILE_RING_CAPACITY <= ceiling);
+    let tile_area = helio_pass_foliage_place::FOLIAGE_TILE_SIZE_METERS.powi(2);
+    let blades_per_tile = (helio_pass_foliage_place::GpuFoliageType::default().density
         * tile_area
-        * helio_foliage_core::FoliageQuality::Ultra.density_multiplier())
+        * helio_pass_foliage_place::FoliageQuality::Ultra.density_multiplier())
         as u32;
     assert!(
         blades_per_tile <= ceiling,

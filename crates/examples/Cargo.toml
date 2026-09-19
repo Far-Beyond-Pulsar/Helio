@@ -20,6 +20,10 @@ name = "indoor_room"
 path = "indoor_room.rs"
 
 [[bin]]
+name = "billboard_demo"
+path = "billboard_demo.rs"
+
+[[bin]]
 name = "indoor_corridor"
 path = "indoor_corridor.rs"
 
@@ -254,7 +258,8 @@ path = "vr/main.rs"
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 helio-core = { workspace = true }
-libhelio = { workspace = true }
+helio-mats = { workspace = true }
+helio-pass-object-batch = { workspace = true }
 helio-pass-sprite-batch = { workspace = true }
 helio-pass-sprite-cull = { workspace = true }
 helio-pass-sprite-simulate = { workspace = true }
@@ -265,6 +270,7 @@ helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-corona = { workspace = true }
+helio-pass-billboard = { workspace = true }
 helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
@@ -273,13 +279,18 @@ helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
 helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-portal-cull = { workspace = true }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
-helio-voxel-core = { path = "../helio-voxel-core" }
-helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
 helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+pulsar_scenedb = { workspace = true }
+scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 rapier3d = "0.24"
 image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }

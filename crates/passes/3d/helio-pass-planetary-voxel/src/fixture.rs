@@ -1,4 +1,4 @@
-use helio_planet_voxel_core::{AddressError, CellWord, PageKey, PAGE_EDGE};
+use crate::{AddressError, CellWord, PageKey, PAGE_EDGE};
 
 pub const EXTRACTION_HALO: i32 = 1;
 pub const EXTRACTION_SAMPLE_EDGE: usize = PAGE_EDGE + 2 * EXTRACTION_HALO as usize;

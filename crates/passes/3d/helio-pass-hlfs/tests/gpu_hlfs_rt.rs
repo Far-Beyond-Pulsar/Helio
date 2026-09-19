@@ -58,7 +58,7 @@ fn empty_scene(f: &mut Fixture) {
     f.queue.submit([encoder.finish()]);
 }
 
-fn light() -> libhelio::GpuLight {
+fn light() -> helio_pass_forward_lit::GpuLight {
     let mut light = point([10.0, 0.0, 2.0], [1.0, 1.0, 1.0], 10000.0);
     light.position_range[3] = 100.0;
     light.shadow_index = u32::MAX;
@@ -255,7 +255,7 @@ fn perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers
                 glam::Mat4::look_at_rh(camera, glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y)
             };
             let vp = proj * view;
-            f.scene.camera.update(libhelio::GpuCameraUniforms::new(
+            f.scene.camera.update(helio_core::GpuCameraUniforms::new(
                 view, proj, camera, 0.1, 200.0, 0, [0.0; 2], vp,
             ));
             let mut light = point(camera.to_array(), [1.0; 3], 100000.0);
@@ -894,5 +894,141 @@ fn tile_proposals_preserve_energy_across_empty_strata_and_packed_overflow() {
         f.lights(vec![make_light(2.0)]);
         f.frame();
         assert!((mean(&f.read()) - reference).abs() < reference * 0.02);
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
+    pollster::block_on(async {
+        use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
+        use std::sync::Arc;
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.publish_ray_frame = false;
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
+        f.lights(vec![light()]);
+        let mut db = pulsar_scenedb::SceneDb::new();
+        let context = pulsar_scenedb::gpu::EngineGpuContext::new(f.device.clone(), f.queue.clone());
+        let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+            &context,
+            pulsar_scenedb::gpu::SceneGpuConfig {
+                classes: vec![],
+                tombstone_headroom: 0,
+                max_cells_metadata: 0,
+            },
+        );
+        MeshComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        MaterialComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        StaticObjectComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        db.world
+            .attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(
+                Arc::new(store),
+                f.queue.clone(),
+            ));
+        let mut acceleration =
+            helio_pass_hlfs::SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
+        let render = |f: &mut Fixture,
+                      acceleration: &mut helio_pass_hlfs::SceneDbRayTracing,
+                      db: &pulsar_scenedb::SceneDb| {
+            db.world.flush_gpu_mirror(&f.queue);
+            let tlas = acceleration.prepare(&db.world).unwrap();
+            f.ray_frame.publish(f.scene.frame_count, Some(tlas));
+            f.frame();
+            mean(&f.read())
+        };
+        let clear = render(&mut f, &mut acceleration, &db);
+        assert!(
+            f.try_frame().is_err(),
+            "last frame's acceleration input must expire"
+        );
+        let mesh = db.world.spawn();
+        db.world.insert(
+            mesh,
+            MeshComponent {
+                vertices: [
+                    [5.0, -100.0, -100.0],
+                    [5.0, 100.0, -100.0],
+                    [5.0, 0.0, 100.0],
+                ]
+                .map(|position| helio_core::PackedVertex {
+                    position,
+                    ..Default::default()
+                })
+                .to_vec(),
+                indices: vec![0, 1, 2],
+            },
+        );
+        let material = db.world.spawn();
+        db.world.insert(
+            material,
+            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+        );
+        let mirror = db.world.gpu_mirror().unwrap();
+        let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index()).unwrap();
+        let indices = MeshComponent::indices_gpu_handle(mirror.store(), mesh.index()).unwrap();
+        let object = db.world.spawn();
+        db.world.insert(
+            object,
+            StaticObjectComponent::new(
+                mesh.index(),
+                mesh.generation() + 1,
+                material.index(),
+                material.generation() + 1,
+                glam::Mat4::IDENTITY,
+                [0.0, 0.0, 0.0, 200.0],
+                indices.count,
+                indices.offset,
+                vertices.offset as i32,
+                0,
+                0,
+                helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW,
+            ),
+        );
+        let shadow = render(&mut f, &mut acceleration, &db);
+        assert!(
+            shadow < clear * 0.2,
+            "SceneDB offscreen caster missing: {shadow}/{clear}"
+        );
+        {
+            let mut mesh = db.world.get_mut::<MeshComponent>(mesh).unwrap();
+            for vertex in &mut mesh.vertices {
+                vertex.position[0] += 20.0;
+            }
+        }
+        let edited = render(&mut f, &mut acceleration, &db);
+        assert!(
+            (edited - clear).abs() < clear * 0.01,
+            "in-place mesh edit retained stale BLAS"
+        );
+        {
+            let mut row = db.world.get_mut::<StaticObjectComponent>(object).unwrap();
+            *row = row.with_transform(
+                glam::Mat4::from_translation(glam::Vec3::new(-20.0, 0.0, 0.0)),
+                [0.0, 0.0, 0.0, 200.0],
+            );
+        }
+        assert!(
+            render(&mut f, &mut acceleration, &db) < clear * 0.2,
+            "transformed caster missing"
+        );
+        db.world
+            .get_mut::<MaterialComponent>(material)
+            .unwrap()
+            .flags |= helio_mats::FLAG_ALPHA_TEST;
+        db.world.flush_gpu_mirror(&f.queue);
+        assert!(
+            acceleration.prepare(&db.world).is_err(),
+            "unsupported alpha caster must fail closed"
+        );
+        db.world.despawn(object);
+        let removed = render(&mut f, &mut acceleration, &db);
+        assert!(
+            (removed - clear).abs() < clear * 0.01,
+            "removed caster remained in TLAS"
+        );
     });
 }

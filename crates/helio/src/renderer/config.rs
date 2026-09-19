@@ -1,5 +1,5 @@
 use crate::material::MAX_TEXTURES;
-use libhelio::BINDLESS_MATERIAL_FEATURES;
+use helio_mats::BINDLESS_MATERIAL_FEATURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -35,13 +35,13 @@ pub enum PerfOverlayMode {
 /// Falls back to the first available format if no preferred format is found.
 pub fn select_hdr_surface_format(
     caps: &wgpu::SurfaceCapabilities,
-    mode: libhelio::HdrOutputMode,
+    mode: helio_pass_postprocess::HdrOutputMode,
 ) -> wgpu::TextureFormat {
     let preferred = match mode {
-        libhelio::HdrOutputMode::Ldr => caps.formats.iter().find(|f| f.is_srgb()).copied(),
-        libhelio::HdrOutputMode::Hdr10
-        | libhelio::HdrOutputMode::ScRgb
-        | libhelio::HdrOutputMode::Passthrough => caps
+        helio_pass_postprocess::HdrOutputMode::Ldr => caps.formats.iter().find(|f| f.is_srgb()).copied(),
+        helio_pass_postprocess::HdrOutputMode::Hdr10
+        | helio_pass_postprocess::HdrOutputMode::ScRgb
+        | helio_pass_postprocess::HdrOutputMode::Passthrough => caps
             .formats
             .iter()
             .find(|f| **f == wgpu::TextureFormat::Rgba16Float)
@@ -61,7 +61,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
-        wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE;
+        wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE |
+        wgpu::Features::PIPELINE_CACHE; // persistent driver-validated pipeline cache
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
         optional |= BINDLESS_MATERIAL_FEATURES;
@@ -116,7 +117,7 @@ pub fn required_experimental_features(
 #[cfg(test)]
 mod tests {
     use super::{required_wgpu_features, RendererConfig};
-    use libhelio::BINDLESS_MATERIAL_FEATURES;
+    use helio_mats::BINDLESS_MATERIAL_FEATURES;
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
@@ -217,7 +218,7 @@ pub struct RendererConfig {
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
     pub gi_config: GiConfig,
-    pub shadow_quality: libhelio::ShadowQuality,
+    pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
@@ -244,7 +245,7 @@ pub struct RendererConfig {
     /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
     ///
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
-    /// — a scene that never calls `add_foliage_type` pays nothing for this being true.
+    /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
     pub enable_foliage: bool,
     /// Foliage density budget in blades per square metre, or `None` for the quality
     /// preset default.
@@ -288,7 +289,7 @@ pub struct RendererConfig {
     pub tsr_quality: Option<helio_pass_tsr::TsrQuality>,
 
     /// HDR display output mode. Default `Ldr`.
-    pub hdr_output_mode: libhelio::HdrOutputMode,
+    pub hdr_output_mode: helio_pass_postprocess::HdrOutputMode,
     pub render_mode: RenderMode,
     /// Enable the OpenXR render path. When `true` the graph is built in
     /// multiview mode (2-layer array targets, `multiview_mask = 0b11`) and the
@@ -306,12 +307,12 @@ pub struct RendererConfig {
     ///
     /// Sublevels have no separate pass to gate — a sublevel-tagged instance is
     /// drawn through the *existing* GBuffer/shadow pipeline (see
-    /// `libhelio::coordinate_space`), so there is nothing here for a scene
+    /// `helio_pass_object_batch::coordinate_space`), so there is nothing here for a scene
     /// with no sublevels to pay for. Portals are the one part of this
     /// mechanism with real fixed GPU allocations (~10 MB, see
     /// `helio-pass-portal-cull`'s module docs) and a per-frame dispatch, so
     /// unlike sublevels they get an actual off switch: a scene that never
-    /// calls `Scene::add_portal` can skip paying for it by setting this `false`.
+    /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
 }
 
@@ -322,7 +323,7 @@ impl RendererConfig {
             height: height.max(1),
             surface_format,
             gi_config: GiConfig::default(),
-            shadow_quality: libhelio::ShadowQuality::Medium,
+            shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
@@ -334,7 +335,7 @@ impl RendererConfig {
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,
-            hdr_output_mode: libhelio::HdrOutputMode::Ldr,
+            hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
             enable_portals: true,
@@ -364,7 +365,7 @@ impl RendererConfig {
         self
     }
 
-    pub fn with_shadow_quality(mut self, quality: libhelio::ShadowQuality) -> Self {
+    pub fn with_shadow_quality(mut self, quality: helio_pass_shadow_matrix::ShadowQuality) -> Self {
         self.shadow_quality = quality;
         self
     }
@@ -396,7 +397,7 @@ impl RendererConfig {
         self
     }
 
-    pub fn with_hdr_output_mode(mut self, mode: libhelio::HdrOutputMode) -> Self {
+    pub fn with_hdr_output_mode(mut self, mode: helio_pass_postprocess::HdrOutputMode) -> Self {
         self.hdr_output_mode = mode;
         self
     }

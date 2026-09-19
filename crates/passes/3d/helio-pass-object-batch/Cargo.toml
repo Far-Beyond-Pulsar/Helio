@@ -1,0 +1,16 @@
+[package]
+name = "helio-pass-object-batch"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-driven sort/group/batch pipeline: turns SceneDB's StaticObjectComponent rows into instances/draw_calls/material_class_ranges with zero per-frame CPU involvement"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+
+[dev-dependencies]
+pollster = "0.4"

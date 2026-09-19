@@ -12,7 +12,7 @@ use helio_pass_planetary_voxel::{
     FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelRenderPass,
     PlanetaryVoxelResidency,
 };
-use helio_planet_voxel_core::{
+use helio_pass_planetary_voxel::{
     AddressError, ContractError, EvictOutcome, EvictedPage, LOD0_CELL_SIZE_METERS, PAGE_EDGE_CELLS,
     PageEvict, PageKey, PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, SourceGeneration,
     UploadOutcome, VisibilityOutcome, VisiblePage, VisiblePageSet,
@@ -481,7 +481,7 @@ fn translate_upload(upload: TerrainPageUpload) -> Result<PageUpload, PlanetaryTe
         .cells
         .into_vec()
         .into_iter()
-        .map(|cell| helio_planet_voxel_core::CellWord(cell.0))
+        .map(|cell| helio_pass_planetary_voxel::CellWord(cell.0))
         .collect();
     Ok(PageUpload::new(
         key,
@@ -540,7 +540,7 @@ fn translate_page_key(page: pulsar_terrain::PageKey) -> Result<PageKey, AddressE
 mod tests {
     use super::*;
     use helio_pass_planetary_voxel::PlanetaryVoxelGpuConfig;
-    use helio_planet_voxel_core::{
+    use helio_pass_planetary_voxel::{
         PAGE_CELL_COUNT, PAGE_EDGE as HELIO_PAGE_EDGE, TRANSITION_FACE_MASK, UploadOutcome,
     };
     use pulsar_terrain::{
