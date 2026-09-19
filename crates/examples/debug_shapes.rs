@@ -1,13 +1,15 @@
-//! Debug Shapes — helio v3
+//! Infinite Grid Debug Scene — helio v3
 //!
 //! The v2 debug drawing primitives (debug_line, debug_sphere, etc.) are
 //! not available in helio v3.  This demo instead displays a gallery of
-//! richly coloured solid-geometry props that showcase the material/light
-//! system while still serving as a visual debugging reference.
+//! richly coloured debug props that showcase the procedural infinite grid,
+//! depth occlusion, world axes, and logarithmic grid LOD.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly  (5 m/s)
 //!   Mouse drag           — look (click to grab cursor)
+//!   The grid is enabled automatically; fly away from the origin to exercise
+//!   its continuous LOD transitions.
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
@@ -69,7 +71,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio Debug Shapes (v3)")
+                        .with_title("Helio Infinite Grid Debug Scene")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -295,8 +297,17 @@ impl AppState {
 
         // Sphere
         let sphere_center = glam::Vec3::new((t * 0.6).cos() * 3.0, 1.0, (t * 0.6).sin() * 3.0);
+            self.renderer
+                .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+
+        // A small depth-occlusion gallery: the grid must disappear behind
+        // these props while remaining visible through the spaces between them.
         self.renderer
-            .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+            .debug_filled_box([-4.0, 1.0, -3.0], 1.0, [0.22, 0.35, 0.85, 0.9]);
+        self.renderer
+            .debug_filled_box([4.0, 1.5, -7.0], 1.5, [0.85, 0.28, 0.22, 0.9]);
+        self.renderer
+            .debug_filled_box([0.0, 0.5, -12.0], 0.5, [0.25, 0.75, 0.35, 0.9]);
 
         // Torus
         let torus_center = glam::Vec3::new((t * 0.4).sin() * 3.0, 1.5, (t * 0.4).cos() * 3.0);
