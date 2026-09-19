@@ -4,6 +4,7 @@ mod scene;
 use helio_pass_hlfs::{HlfsConfig, HlfsPass};
 use scene::TestScene;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
 
 pub struct Fixture {
     pub ambient: [f32; 3],
@@ -20,6 +21,7 @@ pub struct Fixture {
     target: wgpu::TextureView,
     timestamps: Option<wgpu::QuerySet>,
     shadow: Option<wgpu::TextureView>,
+    velocity: Option<wgpu::TextureView>,
 }
 
 impl Fixture {
@@ -200,6 +202,7 @@ impl Fixture {
             target,
             timestamps,
             shadow: None,
+            velocity: None,
         }
     }
     pub fn material(&mut self, albedo: [f32; 4], orm: [f32; 4]) {
@@ -301,6 +304,9 @@ impl Fixture {
                 shadow,
                 "Fixture",
             );
+        }
+        if let Some(velocity) = &self.velocity {
+            resources.write(helio_core::ResourceKey::new("gbuffer_velocity"), velocity, "Fixture");
         }
         self.graph
             .execute_with_registry(&self.scene, &self.target, &self.depth, &mut resources)?;
@@ -500,6 +506,77 @@ impl Fixture {
             6
         ]);
     }
+    /// Rasterize a real world-space plane instead of supplying ideal CPU depth.
+    /// This includes vertex arithmetic, clipping and hardware interpolation.
+    pub fn raster_plane_depth(&mut self, view: glam::Mat4, proj: glam::Mat4, z: f32) {
+        let source = r#"
+            struct Camera { view:mat4x4<f32>, proj:mat4x4<f32> }
+            @group(0) @binding(0) var<uniform> camera:Camera;
+            struct Vertex { @invariant @builtin(position) position:vec4<f32>, @location(0) view_z:f32 }
+            @vertex fn vs(@builtin(vertex_index) i:u32)->Vertex {
+                let p=array<vec2<f32>,3>(vec2<f32>(-500.0,-500.0),vec2<f32>(500.0,-500.0),vec2<f32>(0.0,500.0));
+                let view=camera.view*vec4<f32>(p[i],PLANE_Z,1.0);
+                return Vertex(camera.proj*view,view.z);
+            }
+            @fragment fn fs(v:Vertex)->@location(0) vec4<f32> {
+                let reconstructed=camera.proj[3].z/(camera.proj[2].w*v.position.z-camera.proj[2].z);
+                return vec4<f32>(0.0,0.0,v.view_z-reconstructed,2.0);
+            }
+        "#.replace("PLANE_Z", &format!("{z:.9}"));
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Rasterized receiver depth"), source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[view.to_cols_array(), proj.to_cols_array()]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Rasterized receiver depth"), layout: None,
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs"), compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default(),
+            }),
+            multisample: Default::default(), multiview_mask: None, cache: None,
+        });
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        let correction = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Raster depth residual"),
+            size: wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        }).create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &correction, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.velocity = Some(correction);
+    }
+
     pub fn depth_values(&mut self, values: &[f32]) {
         assert_eq!(values.len(), (self.width * self.height) as usize);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {

@@ -35,7 +35,7 @@
 //! pass's colour attachments in count and format (`RenderPassContext::check_compatible`
 //! compares the lists element-wise), so a 5-target pipeline needs its own render pass,
 //! which forfeits subpass fusion. Breaking the chain forces a store and reload of every
-//! touched attachment; at 1080p and 48 bytes/sample that is ~100 MiB each way on a
+//! touched attachment; at 1080p and 52 bytes/sample that is ~100 MiB each way on a
 //! tile-based GPU, far more than the lever was ever going to save.
 //!
 //! So: all eight targets, identical formats to `GBufferPass`'s, and
@@ -198,7 +198,7 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rg16Float,   // 4 lightmap_uv
     wgpu::TextureFormat::Rgba16Float, // 5 sss
     wgpu::TextureFormat::Rgba16Float, // 6 extra
-    wgpu::TextureFormat::Rg16Float,   // 7 velocity
+    wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
 /// The three targets grass does not write, which therefore carry

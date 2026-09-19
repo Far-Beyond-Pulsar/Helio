@@ -41,5 +41,6 @@ fn vs_main(
 ) -> @invariant @builtin(position) vec4<f32> {
     let inst      = instance_data[compacted_indices[slot]];
     let world_pos = inst.transform * vec4<f32>(position, 1.0);
-    return cameras[0].view_proj * world_pos;
+    // Match G-buffer projection order exactly, including rounding.
+    return cameras[0].proj * (cameras[0].view * world_pos);
 }

@@ -56,8 +56,12 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
             Err(_) => (640, 360),
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let config = RendererConfig::new(width, height, format)
+        let mut config = RendererConfig::new(width, height, format)
             .with_shadow_quality(helio::ShadowQuality::High);
+        if std::env::var_os("HLFS_TSR_NATIVE").is_some() {
+            assert!(!fxaa, "select one AA method for a controlled capture");
+            config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Native);
+        }
         let mut scene_db = crate::v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate(&mut scene_db.world);
         if ray_traced {

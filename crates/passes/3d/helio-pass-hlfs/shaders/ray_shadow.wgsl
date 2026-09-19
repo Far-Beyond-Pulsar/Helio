@@ -13,7 +13,13 @@ fn shadow_factor(id: u32, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f3
     let adjacent_depth=bitcast<f32>(bitcast<u32>(depth)+1u);
     let depth_error=abs(world_position(pixel,adjacent_depth)-position);
     let rounding=max(max(abs(position.x),abs(position.y)),abs(position.z))*0.000002;
-    let bias=max(0.0001,dot(abs(normal),depth_error)+rounding);
+    let velocity=textureLoad(gbuf_velocity,vec2<i32>(pixel),0);
+    // Corrected G-buffer receivers no longer carry depth-buffer quantization
+    // error. Bound the FP16 residual's relative rounding plus transform error;
+    // legacy producers retain the depth-ULP bound instead of assuming precision.
+    let corrected=globals.has_velocity!=0u && velocity.w==2.0;
+    let error=select(dot(abs(normal),depth_error),abs(velocity.z)*0.001,corrected);
+    let bias=max(0.0001,error+rounding);
     let origin=position+normal*bias;
     let inc=incident(light,origin);
     var distance=globals.ray_settings.x;

@@ -12,7 +12,7 @@
 //! | 1    | normal         | Rgba16Float   | world normal.xyz + F0.r           |
 //! | 2    | orm            | Rgba8Unorm    | AO, roughness, metallic, F0.g     |
 //! | 3    | emissive       | Rgba16Float   | emissive.rgb + F0.b               |
-//! | 7    | gbuffer_velocity | Rg16Float    | screen-space velocity (px/frame)  |
+//! | 7    | gbuffer_velocity | Rgba16Float  | motion.xy + depth residual.z / validity.w  |
 //!
 //! # Material Bind Group
 //!
@@ -349,7 +349,9 @@ impl RenderPass for GBufferPass {
         );
         builder.write_color_raw(
             "gbuffer_velocity",
-            wgpu::TextureFormat::Rg16Float,
+            // XY remain pixel motion. Z is the FP16 view-depth residual and W=2
+            // marks a valid correction for precise ray-query receiver origins.
+            wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
     }
@@ -955,7 +957,7 @@ impl GBufferPass {
                             write_mask: wgpu::ColorWrites::ALL,
                         }),
                         Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rg16Float,
+                            format: wgpu::TextureFormat::Rgba16Float,
                             blend: None,
                             write_mask: wgpu::ColorWrites::ALL,
                         }),

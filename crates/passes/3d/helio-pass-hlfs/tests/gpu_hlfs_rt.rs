@@ -305,6 +305,48 @@ fn receiver_plane(f: &mut Fixture, z: f32) {
 
 #[test]
 #[ignore = "requires Vulkan hardware ray queries"]
+fn rasterized_depth_preserves_receiver_and_close_contact_shadows() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.config(HlfsConfig { mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+        let proj = glam::Mat4::perspective_rh(0.8, 65.0 / 49.0, 0.1, 200.0);
+        for camera in [glam::Vec3::new(2.0, 2.0, 6.0), glam::Vec3::new(2.0, 2.0, 24.0)] {
+            let view = glam::Mat4::look_at_rh(camera, glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y);
+            f.scene.camera.update(helio_core::GpuCameraUniforms::new(
+                view, proj, camera, 0.1, 200.0, 0, [0.0; 2], proj * view,
+            ));
+            let mut l = point(camera.to_array(), [1.0; 3], 100000.0);
+            l.position_range[3] = 200.0;
+            l.set_ray_traced_shadows(true);
+            f.lights(vec![l]);
+            for distance in [10.0, 30.0, 60.0, 100.0, 150.0] {
+                let z = camera.z - distance;
+                f.raster_plane_depth(view, proj, z);
+                empty_scene(&mut f);
+                f.scene.frame_count = 0;
+                f.frame();
+                let reference = f.read();
+                receiver_plane(&mut f, z);
+                f.scene.frame_count = 0;
+                f.frame();
+                for (index, (actual, expected)) in f.read().iter().zip(&reference).enumerate() {
+                    for c in 0..3 {
+                        assert!((actual[c] - expected[c]).abs() < expected[c] * 0.01 + 0.0001,
+                            "raster self-shadow: camera {camera:?}, distance {distance}, pixel {index}: {actual:?}/{expected:?}");
+                    }
+                }
+                receiver_plane(&mut f, z + 0.02);
+                f.frame();
+                assert!(mean(&f.read()) < mean(&reference) * 0.05,
+                    "lost raster contact shadow: camera {camera:?}, distance {distance}");
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
 fn perspective_depth_error_does_not_shadow_the_receiver_or_erase_nearby_blockers() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(32, 32).await;

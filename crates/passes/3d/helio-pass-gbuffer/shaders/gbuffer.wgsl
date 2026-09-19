@@ -199,7 +199,10 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let prev_clip   = cameras[0].prev_view_proj * prev_world;
 
     var out: VertexOutput;
-    out.clip_position      = cameras[0].view_proj * world_pos;
+    // Keep projection separate: precombining P*V rounds away depth precision
+    // needed by world-position reconstruction and ray-query self-hit offsets.
+    // The depth prepass and forward/transparent variants must match this order.
+    out.clip_position      = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position     = world_pos.xyz;
     out.world_normal       = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent      = normalize(model_mat3  * decode_snorm8x4(v.tangent));
@@ -257,7 +260,7 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
-    @location(7) velocity:    vec2<f32>,  // screen-space motion in pixels/frame
+    @location(7) velocity:    vec4<f32>,  // motion.xy, view-depth residual.z, validity.w
 }
 
 // ── Surface data passed to GBuffer packing ──────────────────────────────────
@@ -414,12 +417,26 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     return s;
 }
 
-fn compute_velocity(input: VertexOutput) -> vec2<f32> {
+fn compute_velocity(input: VertexOutput) -> vec4<f32> {
     let prev_ndc = input.prev_clip_position.xy / input.prev_clip_position.w;
     let prev_pixel_x = (prev_ndc.x * 0.5 + 0.5) * globals.screen_width;
     let prev_pixel_y = (0.5 - prev_ndc.y * 0.5) * globals.screen_height;
     let prev_pixel = vec2<f32>(prev_pixel_x, prev_pixel_y);
-    return input.clip_position.xy - prev_pixel;
+    let p=cameras[0].proj;
+    var residual=0.0;
+    var valid=0.0;
+    if abs(p[2].w)==1.0 && p[3].w==0.0 && p[0].y==0.0 && p[1].x==0.0
+        && p[0].z==0.0 && p[1].z==0.0 && p[0].w==0.0 && p[1].w==0.0
+        && p[3].x==0.0 && p[3].y==0.0 {
+        let reconstructed_z=p[3].z/(p[2].w*input.clip_position.z-p[2].z);
+        let actual_z=(cameras[0].view*vec4<f32>(input.world_position,1.0)).z;
+        residual=actual_z-reconstructed_z;
+        valid=select(0.0,2.0,abs(residual)<60000.0);
+        residual=select(0.0,residual,valid==2.0);
+    }
+    // Store only the small reconstruction error in FP16, not the large view
+    // depth itself. This preserves contact-scale precision at long distances.
+    return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid);
 }
 
 @fragment

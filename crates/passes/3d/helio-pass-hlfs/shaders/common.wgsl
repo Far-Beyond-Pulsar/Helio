@@ -94,7 +94,11 @@ fn world_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
     if abs(p[2].w)==1.0 && p[3].w==0.0 && p[0].y==0.0 && p[1].x==0.0
         && p[0].z==0.0 && p[1].z==0.0 && p[0].w==0.0 && p[1].w==0.0
         && p[3].x==0.0 && p[3].y==0.0 {
-        let z=p[3].z/(p[2].w*depth-p[2].z);
+        var z=p[3].z/(p[2].w*depth-p[2].z);
+        if globals.has_velocity!=0u {
+            let motion=textureLoad(gbuf_velocity,vec2<i32>(pixel),0);
+            if motion.w==2.0 { z+=motion.z; }
+        }
         view_position=vec3<f32>((p[2].w*ndc-p[2].xy)*z/vec2<f32>(p[0].x,p[1].y),z);
     } else {
         let h=globals.inverse_projection*vec4<f32>(ndc,depth,1.0);

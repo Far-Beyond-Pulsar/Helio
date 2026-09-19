@@ -282,7 +282,7 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
-    @location(7) velocity:    vec2<f32>,
+    @location(7) velocity:    vec4<f32>,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -421,6 +421,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     out.sss = vec4<f32>(0.0);
     out.extra = vec4<f32>(0.0);
-    out.velocity = compute_velocity(input);
+    out.velocity = vec4<f32>(compute_velocity(input),0.0,0.0);
     return out;
 }
