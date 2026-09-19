@@ -45,6 +45,7 @@ impl InternalBindings {
                 t.coarse.as_entire_binding(),
                 t.grid.as_entire_binding(),
                 view(&t.depth_mips[0]),
+                t.proposals.as_entire_binding(),
             ],
         );
         let depth_reduce = t
@@ -72,6 +73,7 @@ impl InternalBindings {
                     view(&t.raw_lighting.view),
                     view(&previous.geometry.view),
                     view(&t.depth_bounds.view),
+                    t.proposals.as_entire_binding(),
                 ],
             )
         });

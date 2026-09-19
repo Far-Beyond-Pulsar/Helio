@@ -26,18 +26,24 @@ A TLAS or ray-query-capable device never changes the selected mode automatically
 Its execution time depends on tracing and reservoir settings; it does not promise
 a strict gameplay frame budget.
 
-The public enum is non-exhaustive and currently exposes only the implemented
-`ScreenSpace` backend. A future `RayTraced` mode will replace visibility evaluation
-and add spatial/temporal candidate pruning before hardware queries. The internal
-`VisibilityPipelines` selection in `pipelines.rs` is the extension point; the
-single `HlfsPass` continues owning common grids, reservoir bindings, demodulated
-histories and spatial filtering. Mode changes replace only the visibility pipelines and
-invalidate history, retaining common resources and bindings. No second lighting pass or duplicate denoiser is needed.
+`HlfsMode::RayTraced` uses Vulkan hardware ray queries over the current opaque
+triangle TLAS. Unsupported devices and missing/stale acceleration data are errors;
+it does not silently fall back to ScreenSpace. The shared pass still owns grids,
+reservoirs, history, spatial filtering and composition. Masked materials and the
+larger production acceptance suite remain outside the validated RT scope.
 
-RayTraced implementation and post-merge tracking are follow-up work. The retained
-ray-query WGSL prototype is shader-validated but is not a selectable backend or a
-runtime fallback. The proposed sub-3-4 ms gameplay budget is a future validation
-target, not a guarantee of this ScreenSpace implementation.
+`HlfsConfig::ray_traced_presampled()` explicitly opts into the experimental
+one-sample/eight-candidate tier, shading at half the output width and height.
+It builds 64 current-frame weighted proposals per coarse tile, samples a weighted
+alias table mixed with uniform discovery, and uses reactive history clipping.
+This changes the estimator and denoising; it is not an exact-output replacement
+for `compact()`. The regular presets and defaults retain the original sampler.
+Changing the proposal mode specializes the visibility pipelines and resets history.
+
+See [tile-presampling evidence](../../../../docs/validation/hlfs/rt-control/tile-presampling/report.md)
+for synthetic 1440p measurements and quality limits. These are direct-lighting GPU
+costs, including per-frame TLAS work, not whole-frame or general-scene guarantees.
+The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this preset.
 
 ## ScreenSpace frame stages
 

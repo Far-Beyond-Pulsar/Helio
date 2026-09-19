@@ -4,8 +4,11 @@
 @group(2) @binding(3) var raw_lighting: texture_storage_2d<rg32uint,write>;
 @group(2) @binding(4) var previous_geometry: texture_2d<u32>;
 @group(2) @binding(5) var screen_depth_bounds: texture_2d<f32>;
+@group(2) @binding(6) var<storage,read> tile_proposals: array<LightProposal>;
 var<workgroup> seen_ids: array<u32,256>;
 var<workgroup> seen_weights: array<f32,256>;
+var<workgroup> bucket_weights: array<atomic<u32>,64>;
+var<workgroup> bucket_ids: array<atomic<u32>,64>;
 var<workgroup> slot_ids: array<u32,64>;
 var<workgroup> slot_weights: array<f32,64>;
 var<workgroup> sorted_ids: array<u32,16>;
@@ -25,6 +28,15 @@ fn reservoir_add(r: ptr<function, Reservoir>, id: u32, importance_value: f32, we
     }
 }
 
+fn record_visible(id: u32, s: Surface, index: u32) {
+    if USE_TILE_PRESAMPLING { return; }
+    let weight=importance(id,s);
+    seen_ids[index]=id;
+    seen_weights[index]=weight;
+    // Positive IEEE float bits preserve order; normalize signed zero.
+    if weight>=0.0 { atomicMax(&bucket_weights[hash_u32(id)&63u],select(bitcast<u32>(weight),0u,weight==0.0)); }
+}
+
 fn trace_visibility(id: u32, surface: Surface, pixel: vec2<u32>) -> f32 {
     return shadow_factor(id,surface.position,surface.normal,vec2<f32>(pixel)+0.5,globals.frame);
 }
@@ -38,9 +50,45 @@ fn guided(tile: u32, count: u32, id: u32) -> bool {
     return lo<count && previous_visible[tile].indices[lo]==id;
 }
 
+// Each lane's coarse reservoir represents a disjoint stratum of lights.
+// A power-weighted alias table cancels the within-stratum normalization.
+fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bool,
+    candidate: u32, candidate_count: u32, rng: ptr<function,u32>) -> LightProposal {
+    if USE_TILE_PRESAMPLING && overflow && globals.light_count<=65535u {
+        let coarse=(pixel.y/COARSE_TILE_SIZE)*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+pixel.x/COARSE_TILE_SIZE;
+        let roll=(f32(candidate)+random(rng))/f32(candidate_count);
+        // Reserve a uniform component so floating-point proposal tables cannot
+        // remove support for dim lights or a poorly represented receiver.
+        let uniform_fraction=0.0625;
+        let uniform_pdf=uniform_fraction/f32(population);
+        if roll<uniform_fraction {
+            let id=min(u32(roll/uniform_fraction*f32(population)),population-1u);
+            let total=tile_proposals[coarse*64u].total_weight;
+            let center=min((pixel/COARSE_TILE_SIZE)*COARSE_TILE_SIZE+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
+            let center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0));
+            let pdf=(1.0-uniform_fraction)*proposal_weight(lights[id],center_position)/max(total,1e-20)+uniform_pdf;
+            return LightProposal(id,1.0/pdf,0u,0.0,0.0);
+        }
+        let scaled=(roll-uniform_fraction)/(1.0-uniform_fraction)*64.0;
+        let slot=min(u32(scaled),63u);
+        let entry=tile_proposals[coarse*64u+slot];
+        let index=select(slot,entry.alias_index,fract(scaled)>=entry.alias_probability);
+        let proposal=tile_proposals[coarse*64u+index];
+        if proposal.id==INVALID_LIGHT { return proposal; }
+        let pdf=(1.0-uniform_fraction)/proposal.inverse_probability+uniform_pdf;
+        return LightProposal(proposal.id,1.0/pdf,0u,0.0,0.0);
+    }
+    let pick=min(u32((f32(candidate)+random(rng))*(f32(population)/f32(candidate_count))),population-1u);
+    var id=pick;
+    if !overflow { id=(grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u; }
+    return LightProposal(id,f32(population),0u,0.0,0.0);
+}
+
 @compute @workgroup_size(8,8)
 fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
-    for(var i=0u;i<4u;i++) { seen_ids[lane*4u+i]=INVALID_LIGHT; seen_weights[lane*4u+i]=0.0; }
+    for(var i=0u;i<4u;i++) { seen_ids[i*64u+lane]=INVALID_LIGHT; seen_weights[i*64u+lane]=0.0; }
+    atomicStore(&bucket_weights[lane],0u);
+    atomicStore(&bucket_ids[lane],INVALID_LIGHT);
     if lane==0u { atomicStore(&confidence_bits[0],0u); atomicStore(&confidence_bits[1],0u); }
     workgroupBarrier();
     if all(gid.xy<globals.sample_size) {
@@ -63,7 +111,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     let vis=trace_visibility(id,s,pixel);
                     let light=evaluate_light(id,s,vis);
                     result.diffuse+=light.diffuse; result.specular+=light.specular;
-                    if vis>0.0 && i<4u { seen_ids[lane*4u+i]=id; seen_weights[lane*4u+i]=importance(id,s); }
+                    if vis>0.0 && i<4u { record_visible(id,s,i*64u+lane); }
                 }
             } else {
                 confidence=0.0;
@@ -82,13 +130,14 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 let guide_xy=vec2<u32>(clamp(floor(tile_f+tile_jitter),vec2<f32>(0.0),vec2<f32>(tile_dims-1u)));
                 let guide_tile=guide_xy.y*tile_dims.x+guide_xy.x;
                 var guide_count=0u;
-                if globals.history_valid!=0u { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
+                if globals.history_valid!=0u && !USE_TILE_PRESAMPLING { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
                 let hidden_fraction=select(0.5,globals.discovery_fraction,valid_history);
                 let candidate_count=select(min(globals.candidate_count*2u,16u),globals.candidate_count,valid_history);
                 var rng=hash_u32(pixel.x+pixel.y*globals.screen_size.x+globals.frame*0x9e3779b9u);
                 var guide_energy=0.0;
                 var covered_energy=0.0;
-                var traced_ids=vec4<u32>(INVALID_LIGHT);
+                var selected_ids=vec4<u32>(INVALID_LIGHT);
+                var selected_normalization=vec4<f32>(0.0);
                 var traced_visibility=vec4<f32>(-1.0);
                 // The guide and surface are shared by every sample. Preserve
                 // their accumulation order without rescoring the same lights.
@@ -130,14 +179,15 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     // Streaming both scans keeps candidates out of private arrays.
                     let candidate_seed=rng;
                     var directional_weight=guided_directional_weight; var local_weight=guided_local_weight;
-                    let inverse_proposal=f32(population)/f32(candidate_count);
                     // With no directional proposals the scale is exactly one.
                     // Keep private arrays out of the shader and advance the RNG
                     // through the reservoir scan below when this scan is skipped.
                     if grid[tile].has_directional!=0u || guided_directional_weight>0.0 {
                         for(var candidate=0u;candidate<candidate_count;candidate++) {
-                            let pick=min(u32((f32(candidate)+random(&rng))*inverse_proposal),population-1u);
-                            var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+                            let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&rng);
+                            let id=proposal.id;
+                            if id==INVALID_LIGHT { continue; }
+                            let inverse_proposal=proposal.inverse_probability/f32(candidate_count);
                             var proxy=importance(id,s);
                             if guided(guide_tile,guide_count,id) { proxy=0.0; }
                             if lights[id].light_type==0u { directional_weight+=proxy*inverse_proposal; }
@@ -160,8 +210,10 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     }
                     var replay=candidate_seed;
                     for(var candidate=0u;candidate<candidate_count;candidate++) {
-                        let pick=min(u32((f32(candidate)+random(&replay))*inverse_proposal),population-1u);
-                        var id=pick; if !overflow { id=((grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u); }
+                        let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&replay);
+                        let id=proposal.id;
+                        if id==INVALID_LIGHT { continue; }
+                        let inverse_proposal=proposal.inverse_probability/f32(candidate_count);
                         var proxy=importance(id,s);
                         if guided(guide_tile,guide_count,id) { proxy=0.0; }
                         if lights[id].light_type==0u { proxy*=directional_scale; }
@@ -182,25 +234,32 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     if group_roll<p_hidden { chosen=hidden_reservoir; group_probability=p_hidden; }
                     let selected=chosen.selected;
                     if selected==INVALID_LIGHT { continue; }
+                    let normalization=chosen.weight_sum/max(chosen.importance_value*group_probability*f32(globals.sample_count),1e-20);
+                    let mask=vec4<u32>(0u,1u,2u,3u)==vec4<u32>(sample);
+                    selected_ids=select(selected_ids,vec4<u32>(selected),mask);
+                    selected_normalization=select(selected_normalization,vec4<f32>(normalization),mask);
+                }
+                // Finish selection before traversal so reservoir state need not
+                // remain live across hardware ray-query operations.
+                for(var sample=0u;sample<globals.sample_count;sample++) {
+                    let selected=selected_ids[sample];
+                    if selected==INVALID_LIGHT { continue; }
                     var vis=-1.0;
-                    if sample>0u && traced_ids.x==selected { vis=traced_visibility.x; }
-                    else if sample>1u && traced_ids.y==selected { vis=traced_visibility.y; }
-                    else if sample>2u && traced_ids.z==selected { vis=traced_visibility.z; }
+                    if sample>0u && selected_ids.x==selected { vis=traced_visibility.x; }
+                    else if sample>1u && selected_ids.y==selected { vis=traced_visibility.y; }
+                    else if sample>2u && selected_ids.z==selected { vis=traced_visibility.z; }
                     let first_trace=vis<0.0;
                     if first_trace { vis=trace_visibility(selected,s,pixel); }
                     let mask=vec4<u32>(0u,1u,2u,3u)==vec4<u32>(sample);
-                    traced_ids=select(traced_ids,vec4<u32>(selected),mask);
                     traced_visibility=select(traced_visibility,vec4<f32>(vis),mask);
-                    // Correct BOTH reservoir weights and the clamped group PDF.
-                    // A hidden/directional budget must not remove lighting energy.
-                    let normalization=chosen.weight_sum/max(chosen.importance_value*group_probability*f32(globals.sample_count),1e-20);
+                    let normalization=selected_normalization[sample];
                     let light=evaluate_light(selected,s,vis);
                     if first_trace && guided(guide_tile,guide_count,selected) {
                         covered_energy+=luminance(light.diffuse*s.albedo+light.specular*s.specular_factor);
                     }
                     result.diffuse+=light.diffuse*normalization;
                     result.specular+=light.specular*normalization;
-                    if vis>0.0 { seen_ids[lane*4u+sample]=selected; seen_weights[lane*4u+sample]=importance(selected,s); }
+                    if vis>0.0 { record_visible(selected,s,sample*64u+lane); }
                 }
                 // Only the >= 0.8 decision is stored. Once a nonnegative
                 // partial sum makes the ratio smaller, remaining terms cannot
@@ -222,13 +281,31 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
     }
     workgroupBarrier();
     let output_tile=group.y*div_ceil(globals.sample_size,TILE_SIZE).x+group.x;
+    if USE_TILE_PRESAMPLING {
+        if lane==0u {
+            next_visible[output_tile].count=0u;
+            next_visible[output_tile].confidence_low=atomicLoad(&confidence_bits[0]);
+            next_visible[output_tile].confidence_high=atomicLoad(&confidence_bits[1]);
+        }
+        return;
+    }
     // Parallel deduplication keeps one explicit ID in each of 64 scratch slots.
     // Visibility is binary: penumbra hits rank by unoccluded importance too.
-    var best=INVALID_LIGHT; var weight=0.0;
-    for(var i=0u;i<256u;i++) {
-        let id=seen_ids[i]; let w=seen_weights[i];
-        if id!=INVALID_LIGHT && (hash_u32(id)&63u)==lane && (w>weight || (w==weight && id<best)) { best=id; weight=w; }
+    // The greatest weight is already reduced while recording visibility.
+    // A second exact reduction chooses the lowest ID among equal weights.
+    for(var sample=0u;sample<select(globals.sample_count,4u,globals.debug_mode==1u);sample++) {
+        let index=sample*64u+lane;
+        let id=seen_ids[index];
+        let weight=seen_weights[index];
+        if id!=INVALID_LIGHT && weight>=0.0 {
+            let bucket=hash_u32(id)&63u;
+            let bits=select(bitcast<u32>(weight),0u,weight==0.0);
+            if bits==atomicLoad(&bucket_weights[bucket]) { atomicMin(&bucket_ids[bucket],id); }
+        }
     }
+    workgroupBarrier();
+    var best=atomicLoad(&bucket_ids[lane]);
+    let weight=bitcast<f32>(atomicLoad(&bucket_weights[lane]));
     slot_ids[lane]=best; slot_weights[lane]=weight;
     if lane<VISIBLE_CAPACITY { sorted_ids[lane]=INVALID_LIGHT; }
     workgroupBarrier();
@@ -238,20 +315,25 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
     for(var i=0u;i<64u;i++) {
         if slot_weights[i]>weight || (slot_weights[i]==weight && slot_ids[i]<best) { rank++; }
     }
+    // Rank is unique for valid IDs, so only the retained 16 slots need
+    // numerical sorting. Keep scratch reads separate from output writes.
+    if rank<VISIBLE_CAPACITY && best!=INVALID_LIGHT { sorted_ids[rank]=best; }
     workgroupBarrier();
-    if rank>=VISIBLE_CAPACITY { best=INVALID_LIGHT; }
-    slot_ids[lane]=best;
-    workgroupBarrier();
-    // Rank the retained unique IDs numerically for sorted-list membership tests.
-    var sorted_rank=0u; var count=0u;
-    for(var i=0u;i<64u;i++) {
-        if slot_ids[i]<best { sorted_rank++; }
-        if slot_ids[i]!=INVALID_LIGHT { count++; }
+    if lane<VISIBLE_CAPACITY {
+        best=sorted_ids[lane];
+        var sorted_rank=0u; var count=0u;
+        for(var i=0u;i<VISIBLE_CAPACITY;i++) {
+            if sorted_ids[i]<best { sorted_rank++; }
+            if sorted_ids[i]!=INVALID_LIGHT { count++; }
+        }
+        if best!=INVALID_LIGHT { next_visible[output_tile].indices[sorted_rank]=best; }
+        else { next_visible[output_tile].indices[lane]=INVALID_LIGHT; }
+        if lane==0u {
+            next_visible[output_tile].count=count;
+            next_visible[output_tile].confidence_low=atomicLoad(&confidence_bits[0]);
+            next_visible[output_tile].confidence_high=atomicLoad(&confidence_bits[1]);
+        }
     }
-    if best!=INVALID_LIGHT { sorted_ids[sorted_rank]=best; }
-    workgroupBarrier();
-    if lane<VISIBLE_CAPACITY { next_visible[output_tile].indices[lane]=sorted_ids[lane]; }
-    if lane==0u { next_visible[output_tile].count=count; next_visible[output_tile].confidence_low=atomicLoad(&confidence_bits[0]); next_visible[output_tile].confidence_high=atomicLoad(&confidence_bits[1]); }
 }
 
 

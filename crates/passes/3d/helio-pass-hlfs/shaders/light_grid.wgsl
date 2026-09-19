@@ -2,6 +2,13 @@
 @group(2) @binding(0) var<storage, read_write> coarse_grid: array<CoarseTile>;
 @group(2) @binding(1) var<storage, read_write> fine_grid: array<LightTile>;
 @group(2) @binding(2) var depth_bounds: texture_storage_2d<r32float,write>;
+@group(2) @binding(3) var<storage,read_write> tile_proposals: array<LightProposal>;
+var<workgroup> proposal_weights: array<f32,64>;
+var<workgroup> alias_probabilities: array<f32,64>;
+var<workgroup> alias_indices: array<u32,64>;
+var<workgroup> small_aliases: array<u32,64>;
+var<workgroup> large_aliases: array<u32,64>;
+var<workgroup> proposal_total: f32;
 var<workgroup> accepted: atomic<u32>;
 var<workgroup> has_directional: atomic<u32>;
 var<workgroup> min_depth: atomic<u32>;
@@ -45,12 +52,54 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
         }
         return;
     }
+    let proposal_index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
+    let presample=(globals.surface_flags&4u)!=0u;
+    let center=min(lo+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
+    var center_position=vec3<f32>(0.0);
+    if presample { center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0)); }
+    var selected=INVALID_LIGHT; var selected_weight=0.0; var weight_sum=0.0;
+    var rng=hash_u32(proposal_index*64u+lane+globals.frame*0x9e3779b9u);
     for (var i=lane; i<globals.light_count; i+=64u) {
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
+            if presample {
+                let weight=proposal_weight(lights[i],center_position);
+                if weight>0.0 {
+                    weight_sum+=weight;
+                    if random(&rng)*weight_sum<weight { selected=i; selected_weight=weight; }
+                }
+            }
             if lights[i].light_type==0u { atomicStore(&has_directional,1u); }
             let slot=atomicAdd(&accepted,1u);
             if slot<COARSE_CAPACITY { packed[slot]=i; }
         }
+    }
+    if presample {
+        proposal_weights[lane]=weight_sum;
+        workgroupBarrier();
+        if lane==0u {
+            var total=0.0;
+            for(var i=0u;i<64u;i++) { total+=proposal_weights[i]; }
+            proposal_total=total;
+            var small_count=0u; var large_count=0u;
+            for(var i=0u;i<64u;i++) {
+                alias_probabilities[i]=1.0; alias_indices[i]=i;
+                if total>0.0 {
+                    proposal_weights[i]=proposal_weights[i]*64.0/total;
+                    if proposal_weights[i]<1.0 { small_aliases[small_count]=i; small_count++; }
+                    else { large_aliases[large_count]=i; large_count++; }
+                }
+            }
+            while small_count>0u && large_count>0u {
+                small_count--; large_count--;
+                let a=small_aliases[small_count]; let b=large_aliases[large_count];
+                alias_probabilities[a]=proposal_weights[a]; alias_indices[a]=b;
+                proposal_weights[b]=(proposal_weights[b]+proposal_weights[a])-1.0;
+                if proposal_weights[b]<1.0 { small_aliases[small_count]=b; small_count++; }
+                else { large_aliases[large_count]=b; large_count++; }
+            }
+        }
+        workgroupBarrier();
+        tile_proposals[proposal_index*64u+lane]=LightProposal(selected,proposal_total/max(selected_weight,1e-20),alias_indices[lane],alias_probabilities[lane],proposal_total);
     }
     workgroupBarrier();
     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;

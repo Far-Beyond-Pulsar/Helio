@@ -1,0 +1,32 @@
+{
+  "hdr-material-overflow": {
+    "bit_identical": true,
+    "changed_floats": 0,
+    "nrmse": 0.0
+  },
+  "local-grid": {
+    "bit_identical": false,
+    "changed_floats": 46349,
+    "nrmse": 0.031193603073752546
+  },
+  "local-overflow": {
+    "bit_identical": true,
+    "changed_floats": 0,
+    "nrmse": 0.0
+  },
+  "mixed-grid": {
+    "bit_identical": false,
+    "changed_floats": 54562,
+    "nrmse": 0.21791073936659733
+  },
+  "mixed-overflow": {
+    "bit_identical": true,
+    "changed_floats": 0,
+    "nrmse": 0.0
+  },
+  "packed-id-overflow": {
+    "bit_identical": true,
+    "changed_floats": 0,
+    "nrmse": 0.0
+  }
+}

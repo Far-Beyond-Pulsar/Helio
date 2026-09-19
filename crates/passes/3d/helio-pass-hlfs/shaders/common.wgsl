@@ -186,3 +186,12 @@ fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     let bits=textureLoad(signal,pixel,0).g;
     return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
 }
+
+struct LightProposal { id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32, total_weight: f32, }
+fn proposal_weight(light: GpuLight, center: vec3<f32>) -> f32 {
+    let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
+    if power<=0.0 { return 0.0; }
+    let delta=light.position_range.xyz-center;
+    let attenuation=select(1.0/max(dot(delta,delta),0.0001),1.0,light.light_type==0u);
+    return clamp(power*attenuation,1e-20,1e20);
+}

@@ -46,6 +46,12 @@ fn incident(light: GpuLight, position: vec3<f32>) -> Incident {
     return Incident(direction,max(light.color_intensity.rgb*light.color_intensity.w*attenuation,vec3<f32>(0.0)));
 }
 fn importance(id: u32, s: Surface) -> f32 {
+    if USE_TILE_PRESAMPLING {
+        // Current-frame RIS uses the actual unshadowed luminance target.
+        // Absolute color retains support for the existing HDR-albedo range.
+        let light=evaluate_light(id,s,1.0);
+        return luminance(abs(light.diffuse*s.albedo+light.specular*s.specular_factor));
+    }
     let inc=incident(lights[id],s.position);
     let ndl=max(dot(s.normal,inc.direction),0.0);
     // Cheap, positive proxy. The PDF correction below does not require an exact BRDF.

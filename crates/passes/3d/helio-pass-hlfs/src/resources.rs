@@ -56,6 +56,7 @@ pub(crate) struct Targets {
     pub history: [History; 2],
     pub output: Image,
     pub coarse: wgpu::Buffer,
+    pub proposals: wgpu::Buffer,
     pub grid: wgpu::Buffer,
     pub width: u32,
     pub height: u32,
@@ -144,6 +145,15 @@ impl Targets {
                 device,
                 "HLFS coarse light grid",
                 tile_count(width, height, COARSE_TILE_SIZE) * (2 + COARSE_CAPACITY / 2) * 4,
+            ),
+            proposals: buffer(
+                device,
+                "HLFS tile proposals",
+                if config.tile_presampling {
+                    tile_count(width, height, COARSE_TILE_SIZE) * 64 * 20
+                } else {
+                    20
+                },
             ),
             grid: buffer(
                 device,

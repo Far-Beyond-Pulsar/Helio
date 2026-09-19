@@ -336,6 +336,24 @@ fn benchmark_rt_resolution_and_acceleration() {
                 _ => panic!("HLFS_RT_PROBE_FOCUS must be 1, 1440p-reconstructed, 1440p-native or 4k-reconstructed"),
             }
         });
+        let samples = std::env::var("HLFS_RT_PROBE_SAMPLES")
+            .map(|value| value.parse::<u32>().expect("probe sample count"))
+            .unwrap_or(2);
+        assert!((1..=4).contains(&samples), "probe samples must be 1..=4");
+        let candidate_override = std::env::var("HLFS_RT_PROBE_CANDIDATES")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("probe candidate count"));
+        assert!(candidate_override.is_none_or(|count| (1..=16).contains(&count)));
+        assert!(
+            candidate_override.is_none() || focus.is_some(),
+            "candidate override requires a focused resolution"
+        );
+        let discovery = std::env::var("HLFS_RT_PROBE_DISCOVERY")
+            .map(|value| value.parse::<f32>().expect("probe discovery fraction"))
+            .unwrap_or(0.2);
+        assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
+        let tile_presampling = std::env::var_os("HLFS_RT_PROBE_PRESAMPLE").is_some();
+        let reactive_history = std::env::var_os("HLFS_RT_PROBE_REACTIVE").is_some();
         let warmup = if focus.is_some() { 120 } else { 16 };
         let measured = if focus.is_some() { 600 } else { 40 };
         for (width, height, scale, candidates) in [
@@ -349,13 +367,17 @@ fn benchmark_rt_resolution_and_acceleration() {
             if focus.is_some_and(|selected| (width, scale) != selected || candidates != 8) {
                 continue;
             }
+            let candidates = candidate_override.unwrap_or(candidates);
             let mut f = Fixture::new_rt(width, height).await;
             f.compact_output();
             f.config(HlfsConfig {
                 mode: HlfsMode::RayTraced,
                 sample_scale: scale,
                 candidates_per_sample: candidates,
-                samples_per_pixel: 2,
+                samples_per_pixel: samples,
+                discovery_fraction: discovery,
+                tile_presampling,
+                reactive_history,
                 ..Default::default()
             });
             assert!(f
@@ -503,7 +525,7 @@ fn benchmark_rt_resolution_and_acceleration() {
                 }
                 std::fs::write(
                     std::path::Path::new(&directory).join(format!(
-                        "{width}x{height}-scale{scale}-candidates{candidates}.csv"
+                        "{width}x{height}-scale{scale}-spp{samples}-candidates{candidates}-discovery{discovery}.csv"
                     )),
                     csv,
                 )
@@ -517,7 +539,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             totals.sort_by(f64::total_cmp);
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
-            eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp=2 candidates={candidates} warmup={warmup} measured={measured} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+            eprintln!("RT_PROBE resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances=256 median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
         }
     });
 }
@@ -614,5 +636,263 @@ fn benchmark_candidate_output_audit() {
             )
             .unwrap();
         }
+    });
+}
+
+// Development frontier only: a small receiver/occluder scene, not the frozen
+// million-triangle primary tier. Failed quality rows remain in the output.
+#[test]
+#[ignore = "explicit RT quality frontier; requires HLFS_RT_QUALITY_OUTPUT"]
+fn benchmark_rt_quality_frontier() {
+    let directory = std::env::var("HLFS_RT_QUALITY_OUTPUT").expect("quality output directory");
+    let discovery = std::env::var("HLFS_RT_QUALITY_DISCOVERY")
+        .map(|value| value.parse::<f32>().expect("quality discovery fraction"))
+        .unwrap_or(0.2);
+    assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
+    let tile_presampling = std::env::var_os("HLFS_RT_QUALITY_PRESAMPLE").is_some();
+    let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
+    let selected_setting = std::env::var("HLFS_RT_QUALITY_SETTING").ok();
+    if let Some(setting) = &selected_setting {
+        assert!(["1:4", "1:8", "2:4", "2:8", "4:8"].contains(&setting.as_str()));
+    }
+    std::fs::create_dir_all(&directory).unwrap();
+    pollster::block_on(async {
+        let checkpoints = [
+            0u32, 1, 3, 7, 15, 31, 63, 64, 65, 67, 71, 79, 80, 81, 83, 87, 95,
+        ];
+        let mut csv = String::from("seed,samples,candidates,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
+        let seeds = if std::env::var_os("HLFS_RT_QUALITY_HELD_OUT").is_some() {
+            [101u32, 131, 173, 211]
+        } else {
+            [11u32, 29, 47, 71]
+        };
+        for seed in seeds {
+            let lights_at = |frame: u32| {
+                (0..1024)
+                    .map(|i| {
+                        let phase = seed as f32 * 0.17;
+                        let shift = if frame >= 64 {
+                            ((frame - 64) as f32 * 0.1 + phase).sin() * 0.25
+                        } else {
+                            0.0
+                        };
+                        let color = match (i + seed) % 3 {
+                            0 => [1.0, 0.2, 0.1],
+                            1 => [0.1, 1.0, 0.2],
+                            _ => [0.2, 0.1, 1.0],
+                        };
+                        let mut light = point(
+                            [
+                                (i % 32) as f32 / 8.0 - 2.0 + shift,
+                                (i / 32) as f32 / 8.0 - 2.0,
+                                0.8 + ((i + seed) % 5) as f32 * 0.4,
+                            ],
+                            color,
+                            if i == 0 { 8.0 } else { 0.025 },
+                        );
+                        light.set_ray_traced_shadows(true);
+                        light
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut oracle = Fixture::new_rt(129, 73).await;
+            oracle.config(HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
+            let mut references = Vec::new();
+            for frame in checkpoints {
+                oracle.scene.frame_count = frame as u64;
+                oracle.lights(lights_at(frame));
+                if (64..80).contains(&frame) {
+                    blocker(&mut oracle, 0.35);
+                } else {
+                    empty_scene(&mut oracle);
+                }
+                oracle.frame();
+                references.push(oracle.read());
+            }
+            let luminance =
+                |p: &[f32; 3]| p[0] as f64 * 0.2126 + p[1] as f64 * 0.7152 + p[2] as f64 * 0.0722;
+            let initial: Vec<_> = references[0].iter().map(luminance).collect();
+            let peak = initial.iter().copied().fold(0.0, f64::max);
+            let mut f = Fixture::new_rt(129, 73).await;
+            f.compact_output();
+            for (samples, candidates) in [(1, 4), (1, 8), (2, 4), (2, 8), (4, 8)] {
+                if selected_setting
+                    .as_ref()
+                    .is_some_and(|setting| setting != &format!("{samples}:{candidates}"))
+                {
+                    continue;
+                }
+                for mode in [HlfsDebugMode::Final, HlfsDebugMode::Unfiltered] {
+                    f.config(HlfsConfig {
+                        mode: HlfsMode::RayTraced,
+                        debug_mode: mode,
+                        sample_scale: 2,
+                        samples_per_pixel: samples,
+                        candidates_per_sample: candidates,
+                        discovery_fraction: discovery,
+                        tile_presampling,
+                        reactive_history,
+                        ..Default::default()
+                    });
+                    f.scene.frame_count = 0;
+                    empty_scene(&mut f);
+                    for frame in 0..96u32 {
+                        f.lights(lights_at(frame));
+                        if frame == 64 {
+                            blocker(&mut f, 0.35);
+                        }
+                        if frame == 80 {
+                            empty_scene(&mut f);
+                        }
+                        f.frame();
+                        let Some(reference_index) =
+                            checkpoints.iter().position(|&value| value == frame)
+                        else {
+                            continue;
+                        };
+                        let reference = &references[reference_index];
+                        let pixels = f.read();
+                        assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+                        for mask in ["all", "changed"] {
+                            let mut count = 0u32;
+                            let mut sum = 0.0;
+                            let mut ref_sum = 0.0;
+                            let mut squared = 0.0;
+                            let mut ref_squared = 0.0;
+                            for (index, (a, b)) in pixels.iter().zip(reference).enumerate() {
+                                let a = luminance(a);
+                                let b = luminance(b);
+                                if mask == "changed" && (b - initial[index]).abs() <= peak * 0.1 {
+                                    continue;
+                                }
+                                count += 1;
+                                sum += a;
+                                ref_sum += b;
+                                squared += (a - b) * (a - b);
+                                ref_squared += b * b;
+                            }
+                            if count == 0 {
+                                continue;
+                            }
+                            let mean_error =
+                                (sum - ref_sum).abs() / ref_sum.abs().max(1e-6 * count as f64);
+                            let nrmse = (squared / ref_squared.max(1e-12 * count as f64)).sqrt();
+                            let pass = mean_error < 0.08 && nrmse < 0.20;
+                            csv.push_str(&format!("{seed},{samples},{candidates},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
+                        }
+                        if mode == HlfsDebugMode::Final && [63, 65, 95].contains(&frame) {
+                            for (suffix, buffer) in [("sampled", &pixels), ("reference", reference)]
+                            {
+                                let mut image = image::RgbImage::new(f.width, f.height);
+                                for (out, pixel) in image.pixels_mut().zip(buffer) {
+                                    *out = image::Rgb(pixel.map(|v| {
+                                        ((v.max(0.0) / (1.0 + v.max(0.0))).powf(1.0 / 2.2) * 255.0)
+                                            as u8
+                                    }));
+                                }
+                                image.save(std::path::Path::new(&directory).join(format!("seed{seed}-spp{samples}-c{candidates}-f{frame}-{suffix}.png"))).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("RT_QUALITY completed seed={seed}");
+        }
+        std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn tile_proposals_preserve_energy_across_empty_strata_and_packed_overflow() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.compact_output();
+        empty_scene(&mut f);
+        let make_light = |intensity| {
+            let mut light = point([0.0, 0.0, 2.0], [1.0, 0.7, 0.3], intensity);
+            light.set_ray_traced_shadows(true);
+            light
+        };
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
+        f.lights(vec![make_light(2.0)]);
+        f.frame();
+        let reference = mean(&f.read());
+        f.lights(vec![]);
+        f.frame();
+        let ambient = mean(&f.read());
+        assert!(reference > ambient + 0.01);
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Unfiltered,
+            tile_presampling: true,
+            reactive_history: true,
+            sample_scale: 2,
+            samples_per_pixel: 1,
+            candidates_per_sample: 8,
+            ..Default::default()
+        });
+        for count in [0u32, 1, 63, 64, 65, 1024, 65536] {
+            let active = if count >= 128 { count / 2 } else { count };
+            f.lights(
+                (0..count)
+                    .map(|i| {
+                        make_light(if count >= 128 && i % 64 < 32 {
+                            0.0
+                        } else {
+                            2.0 / active.max(1) as f32
+                        })
+                    })
+                    .collect(),
+            );
+            f.frame();
+            let pixels = f.read();
+            assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+            let expected = if count == 0 { ambient } else { reference };
+            let error = (mean(&pixels) - expected).abs() / expected.max(0.001);
+            eprintln!(
+                "RT_PROPOSAL_ENERGY lights={count} expected={expected} measured={} error={error}",
+                mean(&pixels)
+            );
+            assert!(
+                error < 0.08,
+                "proposal normalization lost energy at {count} lights"
+            );
+        }
+        // Same-count extinction must not keep old IDs or old illumination.
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            tile_presampling: true,
+            reactive_history: true,
+            sample_scale: 2,
+            samples_per_pixel: 1,
+            candidates_per_sample: 8,
+            ..Default::default()
+        });
+        f.lights(vec![make_light(2.0 / 1024.0); 1024]);
+        for _ in 0..8 {
+            f.frame();
+        }
+        f.lights(vec![make_light(0.0); 1024]);
+        for _ in 0..8 {
+            f.frame();
+        }
+        assert!((mean(&f.read()) - ambient).abs() < (reference - ambient) * 0.01);
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            sample_scale: 2,
+            ..Default::default()
+        });
+        f.lights(vec![make_light(2.0)]);
+        f.frame();
+        assert!((mean(&f.read()) - reference).abs() < reference * 0.02);
     });
 }

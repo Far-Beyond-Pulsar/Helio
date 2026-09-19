@@ -4,20 +4,26 @@ pub(crate) const COMMON: &str = include_str!("../shaders/common.wgsl");
 const LIGHTING: &str = include_str!("../shaders/lighting.wgsl");
 const SHADOWS: &str = include_str!("../shaders/shadows.wgsl");
 pub(crate) fn shader_source(stage: &str) -> String {
+    shader_source_for_sampler(stage, false)
+}
+
+pub(crate) fn shader_source_for_sampler(stage: &str, presampled: bool) -> String {
+    let common = format!("const USE_TILE_PRESAMPLING: bool = {presampled};\n{COMMON}");
+    let common = common.as_str();
     match stage {
         "depth" => include_str!("../shaders/depth_pyramid.wgsl").into(),
-        "grid" => [COMMON, include_str!("../shaders/light_grid.wgsl")].concat(),
+        "grid" => [common, include_str!("../shaders/light_grid.wgsl")].concat(),
         "screen_space" => [
-            COMMON,
+            common,
             LIGHTING,
             SHADOWS,
             include_str!("../shaders/sample.wgsl"),
         ]
         .concat(),
-        "spatial" => [COMMON, LIGHTING, include_str!("../shaders/spatial.wgsl")].concat(),
-        "temporal" => [COMMON, include_str!("../shaders/temporal.wgsl")].concat(),
+        "spatial" => [common, LIGHTING, include_str!("../shaders/spatial.wgsl")].concat(),
+        "temporal" => [common, include_str!("../shaders/temporal.wgsl")].concat(),
         "composite" => [
-            COMMON,
+            common,
             LIGHTING,
             SHADOWS,
             include_str!("../shaders/composite.wgsl"),
@@ -25,7 +31,7 @@ pub(crate) fn shader_source(stage: &str) -> String {
         .concat(),
         "ray_traced" | "ray_traced_composite" => [
             "enable wgpu_ray_query;\n",
-            COMMON,
+            common,
             LIGHTING,
             include_str!("../shaders/ray_shadow.wgsl"),
             if stage == "ray_traced" {
@@ -134,6 +140,7 @@ impl VisibilityPipelines {
     fn new(
         device: &wgpu::Device,
         mode: HlfsMode,
+        presampled: bool,
         common: &wgpu::BindGroupLayout,
         gbuffer: &wgpu::BindGroupLayout,
         reservoirs: &wgpu::BindGroupLayout,
@@ -143,7 +150,9 @@ impl VisibilityPipelines {
             HlfsMode::ScreenSpace => {
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("HLFS ScreenSpace visibility"),
-                    source: wgpu::ShaderSource::Wgsl(shader_source("screen_space").into()),
+                    source: wgpu::ShaderSource::Wgsl(
+                        shader_source_for_sampler("screen_space", presampled).into(),
+                    ),
                 });
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("HLFS ScreenSpace visibility"),
@@ -170,7 +179,9 @@ impl VisibilityPipelines {
             HlfsMode::RayTraced => {
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("HLFS RayTraced visibility"),
-                    source: wgpu::ShaderSource::Wgsl(shader_source("ray_traced").into()),
+                    source: wgpu::ShaderSource::Wgsl(
+                        shader_source_for_sampler("ray_traced", presampled).into(),
+                    ),
                 });
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("HLFS RayTraced visibility"),
@@ -230,10 +241,11 @@ pub(crate) struct Pipelines {
     output_format: wgpu::TextureFormat,
 }
 impl Pipelines {
-    pub fn set_mode(&mut self, device: &wgpu::Device, mode: HlfsMode) {
+    pub fn set_mode(&mut self, device: &wgpu::Device, mode: HlfsMode, presampled: bool) {
         self.visibility = VisibilityPipelines::new(
             device,
             mode,
+            presampled,
             &self.common_bgl,
             &self.gbuffer_bgl,
             &self.sample_bgl,
@@ -243,6 +255,7 @@ impl Pipelines {
             device,
             self.output_format,
             mode,
+            presampled,
             &self.common_bgl,
             &self.gbuffer_bgl,
             &self.composite_bgl,
@@ -250,7 +263,12 @@ impl Pipelines {
         );
     }
 
-    pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, mode: HlfsMode) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        output_format: wgpu::TextureFormat,
+        mode: HlfsMode,
+        presampled: bool,
+    ) -> Self {
         use wgpu::{ShaderStages as S, TextureFormat as F, TextureViewDimension as D};
         let all = S::COMPUTE | S::FRAGMENT;
         let rt_bgl = device
@@ -312,6 +330,7 @@ impl Pipelines {
                 entry(0, storage(false), S::COMPUTE),
                 entry(1, storage(false), S::COMPUTE),
                 entry(2, storage_texture(F::R32Float), S::COMPUTE),
+                entry(3, storage(false), S::COMPUTE),
             ],
         );
         let sample_bgl = bgl(
@@ -324,6 +343,7 @@ impl Pipelines {
                 entry(3, storage_texture(F::Rg32Uint), S::COMPUTE),
                 entry(4, uint_texture(), S::COMPUTE),
                 entry(5, texture(D::D2, false), S::COMPUTE),
+                entry(6, storage(true), S::COMPUTE),
             ],
         );
         let temporal_bgl = bgl(
@@ -410,6 +430,7 @@ impl Pipelines {
         let visibility = VisibilityPipelines::new(
             device,
             mode,
+            presampled,
             &common_bgl,
             &gbuffer_bgl,
             &sample_bgl,
@@ -433,6 +454,7 @@ impl Pipelines {
             device,
             output_format,
             mode,
+            presampled,
             &common_bgl,
             &gbuffer_bgl,
             &composite_bgl,
@@ -464,6 +486,7 @@ fn composite_pipeline(
     device: &wgpu::Device,
     output_format: wgpu::TextureFormat,
     mode: HlfsMode,
+    presampled: bool,
     common: &wgpu::BindGroupLayout,
     gbuffer: &wgpu::BindGroupLayout,
     composite: &wgpu::BindGroupLayout,
@@ -476,7 +499,7 @@ fn composite_pipeline(
     };
     let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(stage),
-        source: wgpu::ShaderSource::Wgsl(shader_source(stage).into()),
+        source: wgpu::ShaderSource::Wgsl(shader_source_for_sampler(stage, presampled).into()),
     });
     let mut layouts = vec![Some(common), Some(gbuffer), Some(composite)];
     if mode == HlfsMode::RayTraced {

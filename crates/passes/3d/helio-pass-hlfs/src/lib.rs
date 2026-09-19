@@ -59,6 +59,10 @@ pub struct HlfsConfig {
     pub mode: HlfsMode,
     /// Shadowed light samples per shading pixel, clamped to 1..=4.
     pub samples_per_pixel: u32,
+    /// Experimental coarse-tile importance proposals for overflow populations.
+    pub tile_presampling: bool,
+    /// Experimental confidence-of-the-mean history clipping.
+    pub reactive_history: bool,
     /// Steady-state candidates per sample, clamped to 1..=16. Disocclusion
     /// doubles discovery candidates up to the hard limit of 16.
     pub candidates_per_sample: u32,
@@ -81,6 +85,8 @@ impl Default for HlfsConfig {
         Self {
             mode: HlfsMode::ScreenSpace,
             samples_per_pixel: 2,
+            tile_presampling: false,
+            reactive_history: false,
             candidates_per_sample: 8,
             sample_scale: 1,
             max_history_frames: 16,
@@ -93,6 +99,23 @@ impl Default for HlfsConfig {
     }
 }
 impl HlfsConfig {
+    /// Experimental one-sample tier with eight candidates and half-width/height
+    /// shading. Uses current-frame coarse-tile proposals and reactive history.
+    /// Requires hardware ray queries. The 1440p timing target is validated only
+    /// on the documented synthetic workload, not general scene complexity.
+    pub fn ray_traced_presampled() -> Self {
+        Self {
+            mode: HlfsMode::RayTraced,
+            samples_per_pixel: 1,
+            candidates_per_sample: 8,
+            sample_scale: 2,
+            tile_presampling: true,
+            reactive_history: true,
+            discovery_fraction: 1.0,
+            ..Self::default()
+        }
+    }
+
     fn validate_device(&self, device: &wgpu::Device) -> Result<()> {
         if self.mode == HlfsMode::RayTraced
             && (!device
@@ -251,7 +274,7 @@ impl HlfsPass {
     ) -> Result<Self> {
         config.validate_device(device)?;
         let config = config.normalized();
-        let pipelines = Pipelines::new(device, output_format, config.mode);
+        let pipelines = Pipelines::new(device, output_format, config.mode, config.tile_presampling);
         let targets = Targets::new(device, width, height, output_format, config, None);
         let internal = InternalBindings::new(device, &pipelines, &targets);
         let uniform = |label, size| {
@@ -307,11 +330,14 @@ impl HlfsPass {
         if config == self.config {
             return Ok(());
         }
-        let mode_changed = config.mode != self.config.mode;
-        let resize = config.sample_scale != self.config.sample_scale;
+        let mode_changed = config.mode != self.config.mode
+            || config.tile_presampling != self.config.tile_presampling;
+        let resize = config.sample_scale != self.config.sample_scale
+            || config.tile_presampling != self.config.tile_presampling;
         self.config = config;
         if mode_changed {
-            self.pipelines.set_mode(device, config.mode);
+            self.pipelines
+                .set_mode(device, config.mode, config.tile_presampling);
             self.external.clear_ray_binding();
         }
         if resize {
@@ -401,6 +427,7 @@ impl HlfsPass {
             + output
             + t.coarse.size()
             + t.grid.size()
+            + t.proposals.size()
             + t.history.iter().map(|h| h.visible.size()).sum::<u64>()
             + self.globals.size()
             + self.shadows.size()
@@ -631,7 +658,8 @@ impl RenderPass for HlfsPass {
                 as u32
                 | (u32::from(
                     self.previous_light_generation == Some(ctx.scene.movable_lights_generation),
-                ) << 1),
+                ) << 1)
+                | (u32::from(self.config.tile_presampling) << 2),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,
@@ -639,7 +667,12 @@ impl RenderPass for HlfsPass {
             ambient,
             csm_splits: libhelio::CSM_SPLITS,
             previous_view: self.previous_camera.map_or(camera.view, |c| c.view),
-            ray_settings: [self.config.ray_trace_distance, 0.0, 0.0, 0.0],
+            ray_settings: [
+                self.config.ray_trace_distance,
+                0.0,
+                u32::from(self.config.reactive_history) as f32,
+                0.0,
+            ],
             inverse_view: glam::Mat4::from_cols_array(&camera.view)
                 .as_dmat4()
                 .inverse()
@@ -772,15 +805,17 @@ mod tests {
             "ray_traced",
             "ray_traced_composite",
         ] {
-            let source = super::pipelines::shader_source(stage);
-            let module = naga::front::wgsl::parse_str(&source)
-                .unwrap_or_else(|e| panic!("{stage}: {}", e.emit_to_string(&source)));
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{stage}: {e:?}"));
+            for presampled in [false, true] {
+                let source = super::pipelines::shader_source_for_sampler(stage, presampled);
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|e| panic!("{stage}: {}", e.emit_to_string(&source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{stage}: {e:?}"));
+            }
         }
     }
 }

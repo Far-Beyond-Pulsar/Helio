@@ -1,0 +1,300 @@
+{
+  "runs": [
+    {
+      "run": "rt-isolated-1-1-A",
+      "frames": 600,
+      "median_ms": 8.8873,
+      "p95_ms": 11.8262,
+      "p99_ms": 16.479232000000003,
+      "median_stages_ms": {
+        "tlas_ms": 0.075776,
+        "hlfs_ms": 8.807424000000001,
+        "cpu_submit_ms": 14.72795,
+        "coarse_ms": 0.070656,
+        "fine_ms": 0.119808,
+        "sample_ms": 5.753856,
+        "temporal_ms": 1.141248,
+        "spatial_ms": 0.7424,
+        "composite_ms": 0.864256
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-1-2-U",
+      "frames": 600,
+      "median_ms": 3.3341,
+      "p95_ms": 4.7688,
+      "p99_ms": 5.1896320000000005,
+      "median_stages_ms": {
+        "tlas_ms": 0.075776,
+        "hlfs_ms": 3.258368,
+        "cpu_submit_ms": 9.36475,
+        "coarse_ms": 0.132096,
+        "fine_ms": 0.119808,
+        "sample_ms": 1.024,
+        "temporal_ms": 0.61952,
+        "spatial_ms": 0.503808,
+        "composite_ms": 0.856064
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-1-3-U",
+      "frames": 600,
+      "median_ms": 3.3444,
+      "p95_ms": 4.9695,
+      "p99_ms": 5.227519999999999,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 3.2696319999999996,
+        "cpu_submit_ms": 9.55295,
+        "coarse_ms": 0.131072,
+        "fine_ms": 0.119808,
+        "sample_ms": 1.021952,
+        "temporal_ms": 0.628736,
+        "spatial_ms": 0.502784,
+        "composite_ms": 0.85504
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-1-4-A",
+      "frames": 600,
+      "median_ms": 9.0593,
+      "p95_ms": 11.5415,
+      "p99_ms": 16.711679999999998,
+      "median_stages_ms": {
+        "tlas_ms": 0.075776,
+        "hlfs_ms": 8.982016000000002,
+        "cpu_submit_ms": 14.7704,
+        "coarse_ms": 0.07168,
+        "fine_ms": 0.120832,
+        "sample_ms": 5.894144,
+        "temporal_ms": 1.21344,
+        "spatial_ms": 0.740352,
+        "composite_ms": 0.866304
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-1440p-native",
+      "frames": 600,
+      "median_ms": 9.7167,
+      "p95_ms": 10.6578,
+      "p99_ms": 29.272064000000004,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 9.637888,
+        "cpu_submit_ms": 15.438849999999999,
+        "coarse_ms": 0.131072,
+        "fine_ms": 0.120832,
+        "sample_ms": 3.80416,
+        "temporal_ms": 2.429952,
+        "spatial_ms": 1.95584,
+        "composite_ms": 0.873472
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-2-5-A",
+      "frames": 600,
+      "median_ms": 8.9958,
+      "p95_ms": 10.1386,
+      "p99_ms": 13.708288,
+      "median_stages_ms": {
+        "tlas_ms": 0.075776,
+        "hlfs_ms": 8.920064,
+        "cpu_submit_ms": 14.93675,
+        "coarse_ms": 0.07168,
+        "fine_ms": 0.119808,
+        "sample_ms": 5.9223040000000005,
+        "temporal_ms": 1.145856,
+        "spatial_ms": 0.74752,
+        "composite_ms": 0.866304
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-2-6-U",
+      "frames": 600,
+      "median_ms": 3.3362,
+      "p95_ms": 4.9531,
+      "p99_ms": 5.20704,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 3.26144,
+        "cpu_submit_ms": 9.56695,
+        "coarse_ms": 0.131072,
+        "fine_ms": 0.119808,
+        "sample_ms": 1.020928,
+        "temporal_ms": 0.627712,
+        "spatial_ms": 0.502784,
+        "composite_ms": 0.85504
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-2-7-U",
+      "frames": 600,
+      "median_ms": 3.5246,
+      "p95_ms": 4.2127,
+      "p99_ms": 4.391936,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 3.4472960000000006,
+        "cpu_submit_ms": 8.83525,
+        "coarse_ms": 0.131072,
+        "fine_ms": 0.119808,
+        "sample_ms": 1.021952,
+        "temporal_ms": 0.625664,
+        "spatial_ms": 0.50176,
+        "composite_ms": 0.851968
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-2-8-A",
+      "frames": 600,
+      "median_ms": 8.5197,
+      "p95_ms": 9.1853,
+      "p99_ms": 15.544319999999999,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 8.444416,
+        "cpu_submit_ms": 13.88195,
+        "coarse_ms": 0.070656,
+        "fine_ms": 0.119808,
+        "sample_ms": 5.438976,
+        "temporal_ms": 1.140736,
+        "spatial_ms": 0.744448,
+        "composite_ms": 0.863232
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-3-10-U",
+      "frames": 600,
+      "median_ms": 3.3198,
+      "p95_ms": 4.0591,
+      "p99_ms": 4.2260480000000005,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 3.245056,
+        "cpu_submit_ms": 8.76165,
+        "coarse_ms": 0.130048,
+        "fine_ms": 0.119808,
+        "sample_ms": 1.014784,
+        "temporal_ms": 0.623616,
+        "spatial_ms": 0.500736,
+        "composite_ms": 0.850944
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-3-11-U",
+      "frames": 600,
+      "median_ms": 3.3495,
+      "p95_ms": 3.8287,
+      "p99_ms": 3.9823360000000005,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 3.273728,
+        "cpu_submit_ms": 8.530349999999999,
+        "coarse_ms": 0.130048,
+        "fine_ms": 0.118784,
+        "sample_ms": 1.019904,
+        "temporal_ms": 0.62464,
+        "spatial_ms": 0.500736,
+        "composite_ms": 0.850944
+      },
+      "primary_gate_pass": true
+    },
+    {
+      "run": "rt-isolated-3-12-A",
+      "frames": 600,
+      "median_ms": 8.45,
+      "p95_ms": 10.8544,
+      "p99_ms": 15.562752,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 8.375296,
+        "cpu_submit_ms": 13.8689,
+        "coarse_ms": 0.070656,
+        "fine_ms": 0.119808,
+        "sample_ms": 5.328896,
+        "temporal_ms": 1.138688,
+        "spatial_ms": 0.740352,
+        "composite_ms": 0.863232
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-3-9-A",
+      "frames": 600,
+      "median_ms": 8.4603,
+      "p95_ms": 9.6707,
+      "p99_ms": 15.490048,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 8.384,
+        "cpu_submit_ms": 14.054300000000001,
+        "coarse_ms": 0.070656,
+        "fine_ms": 0.119808,
+        "sample_ms": 5.116928,
+        "temporal_ms": 1.137664,
+        "spatial_ms": 0.740352,
+        "composite_ms": 0.864256
+      },
+      "primary_gate_pass": false
+    },
+    {
+      "run": "rt-isolated-4k-reconstructed",
+      "frames": 600,
+      "median_ms": 7.5581,
+      "p95_ms": 8.6948,
+      "p99_ms": 19.395584,
+      "median_stages_ms": {
+        "tlas_ms": 0.074752,
+        "hlfs_ms": 7.48288,
+        "cpu_submit_ms": 12.793499999999998,
+        "coarse_ms": 0.253952,
+        "fine_ms": 0.262144,
+        "sample_ms": 2.250752,
+        "temporal_ms": 1.38752,
+        "spatial_ms": 1.114112,
+        "composite_ms": 1.898496
+      },
+      "primary_gate_pass": false
+    }
+  ],
+  "paired_blocks": [
+    {
+      "block": 1,
+      "baseline_median_average_ms": 8.9733,
+      "candidate_median_average_ms": 3.33925,
+      "saved_ms": 5.63405,
+      "reduction_percent": 62.78682313084373
+    },
+    {
+      "block": 2,
+      "baseline_median_average_ms": 8.75775,
+      "candidate_median_average_ms": 3.4303999999999997,
+      "saved_ms": 5.32735,
+      "reduction_percent": 60.83012189203848
+    },
+    {
+      "block": 3,
+      "baseline_median_average_ms": 8.45515,
+      "candidate_median_average_ms": 3.33465,
+      "saved_ms": 5.1205,
+      "reduction_percent": 60.56072334612632
+    }
+  ],
+  "saved_ms_mean": 5.360633333333333,
+  "saved_ms_95_percent_t_interval": [
+    4.718762548116503,
+    6.0025041185501635
+  ],
+  "all_six_candidate_runs_pass": true,
+  "scope": "Synthetic direct-lighting sum including TLAS; reconstructed 1440p; 1024 moving lights; 256 moving triangle instances; 1spp/8 candidates candidate versus 2spp/8 control"
+}

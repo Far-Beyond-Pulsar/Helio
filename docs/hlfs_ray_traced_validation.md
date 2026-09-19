@@ -86,6 +86,9 @@ Use Unreal GPU/graph profiling with asynchronous overlap handled explicitly, the
 
 ## Delivery and issue workflow
 
-The planning PR contains research and this protocol only. It references the implementation issue without a closing keyword so that merging documentation cannot close unimplemented work. The planning PR may move to In Review when the document, source links and required CI pass. The implementation issue remains Todo until implementation starts, with the design available for review.
+PR #248 now carries the implementation as requested, alongside the research and
+protocol. Keep it Draft / In Progress while its implementation gates remain open;
+issue #247 stays open. Partial synthetic results do not satisfy the larger primary
+fixtures or authorize a ready-to-merge status.
 
 Implementation PRs must include the exact tested revision, scenes, raw results, visual captures, supported geometry/material matrix and known limits. Mark ready and In Review only when their declared scope passes. If the 4 ms goal fails, report the failure rather than relabeling partial functionality as completion. Leave merge decisions to the maintainer.

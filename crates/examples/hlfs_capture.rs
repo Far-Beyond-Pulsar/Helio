@@ -15,6 +15,11 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         "capture needs more than 16 warmup frames"
     );
     let ray_traced = std::env::var_os("HLFS_RT").is_some();
+    let presampled = std::env::var_os("HLFS_PRESAMPLED").is_some();
+    assert!(
+        !presampled || ray_traced,
+        "HLFS_PRESAMPLED requires HLFS_RT"
+    );
     let reference = std::env::var_os("HLFS_REFERENCE").is_some();
     let performance = std::env::var_os("HLFS_PERFORMANCE").is_some();
     let sample_count = std::env::var("HLFS_SAMPLE_COUNT").ok().map(|value| {
@@ -112,7 +117,7 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
         for frame in 0..capture_frames {
-            if ray_traced || reference || performance || sample_count.is_some() {
+            if ray_traced || reference || performance || presampled || sample_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
@@ -129,8 +134,16 @@ pub fn run(directory: &str, populate: fn(&mut Renderer) -> (Vec<LightId>, Vec<Li
                         } else {
                             helio_pass_hlfs::HlfsDebugMode::Final
                         },
-                        samples_per_pixel: sample_count.unwrap_or(if performance { 4 } else { 2 }),
-                        ..if performance {
+                        samples_per_pixel: sample_count.unwrap_or(if presampled {
+                            1
+                        } else if performance {
+                            4
+                        } else {
+                            2
+                        }),
+                        ..if presampled {
+                            helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
+                        } else if performance {
                             helio_pass_hlfs::HlfsConfig::performance()
                         } else {
                             Default::default()

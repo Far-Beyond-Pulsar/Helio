@@ -1,0 +1,42 @@
+{
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\common.wgsl": {
+    "sha256": "3acccedb1fc94c6733f107b68684b47548be078964e0b8526a65d539061c912e",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\composite.wgsl": {
+    "sha256": "aaaa808dfc784f7af3c689a75991d821f28ed3e74ed5778b38b343b8f5812d21",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\depth_pyramid.wgsl": {
+    "sha256": "285555440e04f0c083cb2a30a509436d51e7a07f7957029380664da834d8b92c",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\lighting.wgsl": {
+    "sha256": "ccd077b22c550d74d5655a32e03833f1870541b1b4c8e3a1365367c43453802b",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\light_grid.wgsl": {
+    "sha256": "9aa1f41f2ccd58c9d5dbd52bae31bd8ebf5f0f11359e42751c61c0acc73076f5",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\ray_shadow.wgsl": {
+    "sha256": "05dc09edcacedbaec51831206c2644d0f6cd4e649a9f98dfd207e8f6d2a880ff",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\sample.wgsl": {
+    "sha256": "9f0f0b86d8d7411e4a1a0daaa8337540b34fb07da1ead211316efd3996874a02",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\shadows.wgsl": {
+    "sha256": "2d80e99c19c5002b33aff8ff048f95e5d8412594a1cff638b67fd3bf9733d253",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\spatial.wgsl": {
+    "sha256": "0f6dc70f23087faff84dfde04343cd6981a93ef52e1109cd877c747ab5a7922b",
+    "embedded": true
+  },
+  "crates\\passes\\3d\\helio-pass-hlfs\\shaders\\temporal.wgsl": {
+    "sha256": "89e7d01bd41eba568faa634a449d292693a0f90c237008bcb6e2e341aa9b8803",
+    "embedded": true
+  }
+}
