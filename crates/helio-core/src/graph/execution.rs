@@ -4,11 +4,313 @@ use crate::graph::{PipelineFormatCache, PipelineFormatSet, PipelineRegistry};
 use crate::{PassContext, PrepareContext, Profiler, RenderFrameStorage, RenderPass, Result, SceneInput};
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
 use super::resource_lifetime::ResourceLifetime;
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
+
+/// Maximum number of resident render workers. Bounded so a flamegraph records
+/// a small, fixed set of thread ids instead of one OS thread per spawn.
+const MAX_PARALLEL_WORKERS: usize = 32;
+
+enum ParallelWorkerMsg {
+    Job(Box<ParallelWorkItem>),
+    /// End-of-wave terminator: every resident worker receives exactly one
+    /// Sync per layer, even on layers narrower than the worker set. A worker
+    /// records its arrival when it drains a Sync (see [`PoolSync`]).
+    Sync,
+    Shutdown,
+}
+
+struct ParallelWorkItem {
+    /// Logical profiling parent captured on the dispatch thread. This is
+    /// independent of the worker OS thread and survives the handoff.
+    scope_context: profiling::ScopeContext,
+    pass_address: usize,
+    target_ptr: usize,
+    depth_ptr: usize,
+    camera_ptr: usize,
+    camera_data_ptr: usize,
+    camera_generation: u64,
+    scene_buffers_ptr: usize,
+    frame_num: u64,
+    width: u32,
+    height: u32,
+    owns_device: bool,
+    registry_ptr: usize,
+    pool_ptr: usize,
+    pipeline_cache_ptr: usize,
+    pipeline_registry_ptr: usize,
+    bind_groups_ptr: usize,
+    reflected_pipeline_ptr: usize,
+    device_ptr: usize,
+    queue_ptr: usize,
+    store: Arc<Mutex<Vec<Option<crate::Result<ParallelWorkerResult>>>>>,
+    store_index: usize,
+}
+
+struct ParallelWorkerResult {
+    encoder: wgpu::CommandBuffer,
+    compute_encoder: wgpu::CommandBuffer,
+    cpu_timing: (&'static str, std::time::Duration),
+    profiler: Profiler,
+}
+
+/// A fixed set of persistent threads that execute parallel pass layers.
+///
+/// Replaces the previous per-frame `std::thread::scope` spawn: that design
+/// created a fresh OS thread — and therefore a fresh thread-local profiler
+/// id — for every parallel pass on every frame, so any long recording
+/// accumulated tens of thousands of thread ids and drowned the flamegraph
+/// viewer. Pooled workers keep the resident thread set constant and cut the
+/// per-frame spawn/join cost entirely.
+struct ParallelRenderPool {
+    senders: Vec<mpsc::Sender<ParallelWorkerMsg>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    sync: Arc<PoolSync>,
+    count: usize,
+}
+
+/// Wave rendezvous shared by the parent (dispatch) thread and every resident
+/// worker.
+///
+/// This replaces the initial shared [`std::sync::Barrier`]. A `Barrier`
+/// releases threads in *arrival order*, so once a worker finishes a Job
+/// before its neighbours (or is assigned more than one Job per wave) its
+/// Sync-wait can slip into the generation ahead of the parent's wait; the
+/// parent then lands in a fresh generation that never fills and the pool
+/// deadlocks on the very first parallel frame. Per-worker arrival flags have
+/// no such ordering dependency: each worker just records the wave it last
+/// drained, and the parent sleeps on the condvar until every record covers
+/// its wave. The census is monotonic per worker, so the design stays sound
+/// even if two parents ever dispatch through the same pool.
+struct PoolSync {
+    /// Wave sequence number, bumped by the parent before it dispatches a
+    /// wave. Workers read it when they drain that wave's `Sync`.
+    wave: AtomicUsize,
+    /// Indexed by worker id; monotonically rising "highest wave drained".
+    arrivals: Vec<AtomicUsize>,
+    /// Guards the arrival predicate below without being held by workers,
+    /// which only touch the atomics and signal the condvar lock-free.
+    mtx: Mutex<()>,
+    cv: Condvar,
+}
+
+impl ParallelRenderPool {
+    fn new(count: usize) -> Self {
+        let mut senders = Vec::with_capacity(count);
+        let mut workers = Vec::with_capacity(count);
+        let sync = Arc::new(PoolSync {
+            wave: AtomicUsize::new(0),
+            arrivals: (0..count).map(|_| AtomicUsize::new(0)).collect(),
+            mtx: Mutex::new(()),
+            cv: Condvar::new(),
+        });
+        for i in 0..count {
+            let (tx, rx) = mpsc::channel();
+            senders.push(tx);
+            let sync = Arc::clone(&sync);
+            workers.push(
+                std::thread::Builder::new()
+                    .name(format!("helio-par-worker-{i}"))
+                    .spawn(move || parallel_worker_loop(i, rx, sync))
+                    .expect("failed to spawn helio parallel render worker"),
+            );
+        }
+        Self {
+            senders,
+            workers,
+            sync,
+            count,
+        }
+    }
+}
+
+impl Drop for ParallelRenderPool {
+    fn drop(&mut self) {
+        for tx in &self.senders {
+            let _ = tx.send(ParallelWorkerMsg::Shutdown);
+        }
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn parallel_worker_loop(
+    id: usize,
+    rx: mpsc::Receiver<ParallelWorkerMsg>,
+    sync: Arc<PoolSync>,
+) {
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            ParallelWorkerMsg::Job(job) => {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_parallel_work_item(&job)
+                }));
+                let recorded = match outcome {
+                    Ok(Ok(value)) => Some(Ok(value)),
+                    Ok(Err(err)) => Some(Err(err)),
+                    Err(_) => Some(Err(crate::Error::InvalidPassConfig(
+                        "parallel render pass worker panicked".to_string(),
+                    ))),
+                };
+                if let Ok(mut store) = job.store.lock() {
+                    store[job.store_index] = recorded;
+                }
+            }
+            ParallelWorkerMsg::Sync => {
+                // Publish the wave id this worker has fully drained, then
+                // wake the parent. Order matters: the store must be visible
+                // (Release) before the notify so the waiting parent either
+                // observes the flag on its locked predicate check or is
+                // woken to re-check it.
+                let wave = sync.wave.load(Ordering::Acquire);
+                sync.arrivals[id].store(wave, Ordering::Release);
+                sync.cv.notify_all();
+            }
+            ParallelWorkerMsg::Shutdown => break,
+        }
+    }
+}
+
+fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorkerResult> {
+    let worker_device: &Arc<wgpu::Device> = unsafe { &*(job.device_ptr as *const Arc<wgpu::Device>) };
+    let worker_queue: &Arc<wgpu::Queue> = unsafe { &*(job.queue_ptr as *const Arc<wgpu::Queue>) };
+    let target: &wgpu::TextureView = unsafe { &*(job.target_ptr as *const wgpu::TextureView) };
+    let depth: &wgpu::TextureView = unsafe { &*(job.depth_ptr as *const wgpu::TextureView) };
+    let camera: &wgpu::Buffer = unsafe { &*(job.camera_ptr as *const wgpu::Buffer) };
+    let camera_data: &crate::GpuCameraUniforms =
+        unsafe { &*(job.camera_data_ptr as *const crate::GpuCameraUniforms) };
+    let scene_buffers: &crate::SceneBufferProjection =
+        unsafe { &*(job.scene_buffers_ptr as *const crate::SceneBufferProjection) };
+    let visible_ref: &crate::ResourceRegistry<'_> =
+        unsafe { &*(job.registry_ptr as *const crate::ResourceRegistry<'_>) };
+    let resource_pool: &GraphTexturePool =
+        unsafe { &*(job.pool_ptr as *const GraphTexturePool) };
+    let pipeline_cache: &PipelineFormatCache =
+        unsafe { &*(job.pipeline_cache_ptr as *const PipelineFormatCache) };
+    let pipeline_registry: &PipelineRegistry =
+        unsafe { &*(job.pipeline_registry_ptr as *const PipelineRegistry) };
+    let reflected_bind_groups: &Vec<wgpu::BindGroup> =
+        unsafe { &*(job.bind_groups_ptr as *const Vec<wgpu::BindGroup>) };
+    let reflected_pipeline = unsafe {
+        (&*(job.reflected_pipeline_ptr as *const Option<crate::shader::ReflectedPipeline>)).as_ref()
+    };
+
+    let mut encoder = worker_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Helio Parallel Render Pass"),
+    });
+    let mut compute_encoder = worker_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Helio Parallel Compute Pass"),
+    });
+    let mut local_profiler = Profiler::new(worker_device, worker_queue);
+    let cpu_start = std::time::Instant::now();
+    let pass = unsafe { &mut *(job.pass_address as *mut Box<dyn RenderPass>) };
+    let pass_name = pass.name();
+    let mut frame_storage = RenderFrameStorage::new();
+    local_profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+    if let Some(desc) = pass.render_pass_descriptor_with_pool_and_storage(
+        target,
+        depth,
+        visible_ref,
+        resource_pool,
+        &mut frame_storage,
+    ) {
+        let attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
+            desc.color_attachments.to_vec();
+        let standalone_desc = wgpu::RenderPassDescriptor {
+            label: desc.label,
+            color_attachments: &attachments,
+            depth_stencil_attachment: desc.depth_stencil_attachment,
+            timestamp_writes: desc.timestamp_writes,
+            occlusion_query_set: desc.occlusion_query_set,
+            multiview_mask: desc.multiview_mask,
+        };
+        let encoder_ptr: *mut wgpu::CommandEncoder = &mut encoder;
+        let mut render_pass = encoder.begin_render_pass(&standalone_desc);
+        let mut ctx = PassContext {
+            encoder_ptr,
+            compute_encoder_ptr: &mut compute_encoder,
+            target,
+            depth,
+            camera,
+            camera_data,
+            camera_generation: job.camera_generation,
+            scene_buffers,
+            profiler: &mut local_profiler,
+            frame_num: job.frame_num,
+            width: job.width,
+            height: job.height,
+            device: worker_device,
+            resources: visible_ref,
+            registry: visible_ref,
+            owns_device: job.owns_device,
+            resource_pool,
+            subpass_index: 0,
+            subpass_count: 0,
+            active_render_pass: Some(&mut render_pass as *mut _ as *mut _),
+            active_compute_pass: None,
+            pipeline_cache,
+            pipelines: pipeline_registry,
+            reflected_bind_groups,
+            reflected_pipeline,
+            #[cfg(debug_assertions)]
+            chain_transparent: false,
+        };
+        ctx.apply_reflected_bind_groups();
+        #[cfg(not(target_arch = "wasm32"))]
+        profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+        pass.execute(&mut ctx)?;
+    } else {
+        let mut ctx = PassContext {
+            encoder_ptr: &mut encoder,
+            compute_encoder_ptr: &mut compute_encoder,
+            target,
+            depth,
+            camera,
+            camera_data,
+            camera_generation: job.camera_generation,
+            scene_buffers,
+            profiler: &mut local_profiler,
+            frame_num: job.frame_num,
+            width: job.width,
+            height: job.height,
+            device: worker_device,
+            resources: visible_ref,
+            registry: visible_ref,
+            owns_device: job.owns_device,
+            resource_pool,
+            subpass_index: 0,
+            subpass_count: 0,
+            active_render_pass: None,
+            active_compute_pass: None,
+            pipeline_cache,
+            pipelines: pipeline_registry,
+            reflected_bind_groups,
+            reflected_pipeline,
+            #[cfg(debug_assertions)]
+            chain_transparent: false,
+        };
+        ctx.apply_reflected_bind_groups();
+        #[cfg(not(target_arch = "wasm32"))]
+        profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+        pass.execute(&mut ctx)?;
+    }
+    local_profiler.end_gpu_pass(&mut compute_encoder, pass_name);
+    // The profiler owns this query set and resolve buffer; resolve it into
+    // the worker command stream before the encoder is finished. The parent
+    // merges the samples after submission, when wgpu permits readback.
+    local_profiler.resolve_gpu_queries(&mut compute_encoder, job.frame_num);
+    Ok(ParallelWorkerResult {
+        encoder: encoder.finish(),
+        compute_encoder: compute_encoder.finish(),
+        cpu_timing: (pass.name(), cpu_start.elapsed()),
+        profiler: local_profiler,
+    })
+}
 
 pub struct RenderGraph {
     pub(crate) passes: Vec<Box<dyn RenderPass>>,
@@ -48,6 +350,9 @@ pub struct RenderGraph {
     resources_allocated: bool,
     pub(crate) subpass_chains: Vec<std::ops::Range<usize>>,
     pub(crate) parallel_layers: Vec<Vec<usize>>,
+    /// Persistent render workers, built lazily on the first parallel frame.
+    /// See [`ParallelRenderPool`].
+    parallel_pool: OnceLock<Arc<ParallelRenderPool>>,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
     /// so only their bundles (and everything after) need rebuilding.
@@ -136,6 +441,7 @@ impl RenderGraph {
             resources_allocated: false,
             subpass_chains: Vec::new(),
             parallel_layers: Vec::new(),
+            parallel_pool: OnceLock::new(),
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
             chain_generation: 0,
@@ -657,10 +963,13 @@ impl RenderGraph {
         Vec<(&'static str, std::time::Duration)>,
         Vec<Profiler>,
     )> {
+        #[cfg(not(target_arch = "wasm32"))]
+        profiling::profile_scope!("RenderGraph::execute_parallel_layers");
         let mut command_buffers = Vec::new();
         let mut cpu_timings = Vec::new();
         let mut worker_profilers = Vec::new();
         let layers = self.parallel_layers.clone();
+        let scope_context = profiling::current_scope_context();
         let internal_w = self.internal_w;
         let internal_h = self.internal_h;
         let delta_time = self.delta_time;
@@ -712,158 +1021,129 @@ impl RenderGraph {
                 }
             }
 
-            let visible_ref: &crate::ResourceRegistry<'_> = &*visible;
-            let registry_ref: &crate::ResourceRegistry<'_> = &*visible;
-            let device = scene.device().clone();
-            let queue = scene.queue().clone();
-            let camera = scene.camera();
-            let camera_data = scene.camera_data();
+            let registry_ptr = &*visible as *const crate::ResourceRegistry<'_> as usize;
+            let device_ptr = scene.device() as *const Arc<wgpu::Device> as usize;
+            let queue_ptr = scene.queue() as *const Arc<wgpu::Queue> as usize;
+            let camera_ptr = scene.camera() as *const wgpu::Buffer as usize;
+            let camera_data_ptr = scene.camera_data() as *const crate::GpuCameraUniforms as usize;
+            let scene_buffers_ptr = scene.scene_buffers() as *const crate::SceneBufferProjection
+                as usize;
             let camera_generation = scene.camera_generation();
-            let scene_buffers = scene.scene_buffers();
-            let pipelines = pipeline_registries;
-            let width = internal_w;
-            let height = internal_h;
             let frame_num = scene.frame_count();
-            let handles = std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(layer.len());
-                for &pass_index in &layer {
-                    // Every index in a computed layer is unique. Converting
-                    // the disjoint mutable reference to an integer lets the
-                    // scoped worker carry it without requiring a global lock;
-                    // the exclusive graph borrow and unique layer indices are
-                    // the safety proof for this narrow boundary.
-                    let pass_address =
-                        (&mut passes[pass_index]) as *mut Box<dyn RenderPass> as usize;
-                    let pipeline_registry = &pipelines[pass_index];
-                    let worker_device = device.clone();
-                    let worker_queue = queue.clone();
-                    handles.push(scope.spawn(move || {
-                        let mut encoder =
-                            worker_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Helio Parallel Render Pass"),
-                            });
-                        let mut compute_encoder =
-                            worker_device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Helio Parallel Compute Pass"),
-                            });
-                        let mut local_profiler = Profiler::new(&worker_device, &worker_queue);
-                        let cpu_start = std::time::Instant::now();
-                        let pass = unsafe { &mut *(pass_address as *mut Box<dyn RenderPass>) };
-                        let pass_name = pass.name();
-                        let mut frame_storage = RenderFrameStorage::new();
-                        local_profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
-                        if let Some(desc) =
-                            pass.render_pass_descriptor_with_pool_and_storage(target, depth, visible_ref, pool, &mut frame_storage)
-                        {
-                            let attachments: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
-                                desc.color_attachments.iter().cloned().collect();
-                            let standalone_desc = wgpu::RenderPassDescriptor {
-                                label: desc.label,
-                                color_attachments: &attachments,
-                                depth_stencil_attachment: desc.depth_stencil_attachment,
-                                timestamp_writes: desc.timestamp_writes,
-                                occlusion_query_set: desc.occlusion_query_set,
-                                multiview_mask: desc.multiview_mask,
-                            };
-                            let encoder_ptr: *mut wgpu::CommandEncoder = &mut encoder;
-                            let mut render_pass = encoder.begin_render_pass(&standalone_desc);
-                            let mut ctx = PassContext {
-                                encoder_ptr,
-                                compute_encoder_ptr: &mut compute_encoder,
-                                target,
-                                depth,
-                                camera,
-                                camera_data,
-                                camera_generation,
-                                scene_buffers,
-                                profiler: &mut local_profiler,
-                                frame_num,
-                                width,
-                                height,
-                                device: &worker_device,
-                                resources: visible_ref,
-                                registry: registry_ref,
-                                owns_device,
-                                resource_pool: pool,
-                                subpass_index: 0,
-                                subpass_count: 0,
-                                active_render_pass: Some(&mut render_pass as *mut _ as *mut _),
-                                active_compute_pass: None,
-                                pipeline_cache,
-                                pipelines: pipeline_registry,
-                                reflected_bind_groups: &reflected_groups[pass_index],
-                                reflected_pipeline: reflected_pipelines[pass_index].as_ref(),
-                                #[cfg(debug_assertions)]
-                                chain_transparent: false,
-                            };
-                            ctx.apply_reflected_bind_groups();
-                            pass.execute(&mut ctx)?;
-                        } else {
-                            let mut ctx = PassContext {
-                                encoder_ptr: &mut encoder,
-                                compute_encoder_ptr: &mut compute_encoder,
-                                target,
-                                depth,
-                                camera,
-                                camera_data,
-                                camera_generation,
-                                scene_buffers,
-                                profiler: &mut local_profiler,
-                                frame_num,
-                                width,
-                                height,
-                                device: &worker_device,
-                                resources: visible_ref,
-                                registry: registry_ref,
-                                owns_device,
-                                resource_pool: pool,
-                                subpass_index: 0,
-                                subpass_count: 0,
-                                active_render_pass: None,
-                                active_compute_pass: None,
-                                pipeline_cache,
-                                pipelines: pipeline_registry,
-                                reflected_bind_groups: &reflected_groups[pass_index],
-                                reflected_pipeline: reflected_pipelines[pass_index].as_ref(),
-                                #[cfg(debug_assertions)]
-                                chain_transparent: false,
-                            };
-                            ctx.apply_reflected_bind_groups();
-                            pass.execute(&mut ctx)?;
-                        }
-                        local_profiler.end_gpu_pass(&mut compute_encoder, pass_name);
-                        // The profiler owns this query set and resolve buffer;
-                        // resolve it into the worker command stream before the
-                        // encoder is finished. The parent merges the samples
-                        // after submission, when wgpu permits readback.
-                        local_profiler.resolve_gpu_queries(&mut compute_encoder, frame_num);
-                        Ok::<_, crate::Error>((
-                            encoder.finish(),
-                            compute_encoder.finish(),
-                            (pass.name(), cpu_start.elapsed()),
-                            local_profiler,
-                        ))
-                    }));
-                }
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().map_err(|_| {
-                            crate::Error::InvalidPassConfig(
-                                "parallel render pass worker panicked".to_string(),
-                            )
-                        })?
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })?;
+            let target_ptr = target as *const wgpu::TextureView as usize;
+            let depth_ptr = depth as *const wgpu::TextureView as usize;
+            let pool_ptr = pool as *const GraphTexturePool as usize;
+            let pipeline_cache_ptr = pipeline_cache as *const PipelineFormatCache as usize;
 
-            for (pass_index, (encoder, compute_encoder, cpu_timing, worker_profiler)) in
-                layer.iter().copied().zip(handles)
+            // Lazily build (once, process-wide) the resident worker set that
+            // replaced the per-frame scoped spawn.
+            let worker_pool = self.parallel_pool.get_or_init(|| {
+                let count = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .clamp(1, MAX_PARALLEL_WORKERS);
+                Arc::new(ParallelRenderPool::new(count))
+            });
+            let worker_count = worker_pool.count;
+            let store: Arc<Mutex<Vec<Option<crate::Result<ParallelWorkerResult>>>>> =
+                Arc::new(Mutex::new((0..layer.len()).map(|_| None).collect()));
+            // Bump the wave *before* dispatch so a worker draining its Sync
+            // records the wave it actually belongs to; the wait below then
+            // has a definitive census to poll.
+            let wave = worker_pool.sync.wave.fetch_add(1, Ordering::AcqRel) + 1;
+            for (pos, &pass_index) in layer.iter().enumerate() {
+                // Every index in a computed layer is unique. Converting the
+                // disjoint mutable reference to an integer lets the pooled
+                // worker carry it without requiring a global lock; the
+                // exclusive graph borrow and unique layer indices are the
+                // safety proof for this narrow boundary.
+                let pass_address =
+                    (&mut passes[pass_index]) as *mut Box<dyn RenderPass> as usize;
+                let pipeline_registry_ptr =
+                    (&pipeline_registries[pass_index]) as *const PipelineRegistry as usize;
+                let bind_groups_ptr =
+                    (&reflected_groups[pass_index]) as *const Vec<wgpu::BindGroup> as usize;
+                let reflected_pipeline_ptr =
+                    (&reflected_pipelines[pass_index])
+                        as *const Option<crate::shader::ReflectedPipeline>
+                        as usize;
+                let item = ParallelWorkItem {
+                    scope_context: scope_context.clone(),
+                    pass_address,
+                    target_ptr,
+                    depth_ptr,
+                    camera_ptr,
+                    camera_data_ptr,
+                    camera_generation,
+                    scene_buffers_ptr,
+                    frame_num,
+                    width: internal_w,
+                    height: internal_h,
+                    owns_device,
+                    registry_ptr,
+                    pool_ptr,
+                    pipeline_cache_ptr,
+                    pipeline_registry_ptr,
+                    bind_groups_ptr,
+                    reflected_pipeline_ptr,
+                    device_ptr,
+                    queue_ptr,
+                    store: Arc::clone(&store),
+                    store_index: pos,
+                };
+                // Positions are already 0..layer.len(); round-robin them so
+                // every resident worker receives `len/count` or fewer jobs.
+                let worker = pos % worker_count;
+                let _ = worker_pool.senders[worker].send(ParallelWorkerMsg::Job(Box::new(item)));
+            }
+            // Fan out a Sync terminator so every resident worker — idle ones
+            // included — records an arrival this wave.
+            for tx in &worker_pool.senders {
+                let _ = tx.send(ParallelWorkerMsg::Sync);
+            }
+            // Wait until every worker has drained this wave's Sync. Unlike a
+            // `Barrier`, the census counts finalized per-worker arrivals, so
+            // the completion order across workers is irrelevant.
+            let mut wait_guard = worker_pool
+                .sync
+                .mtx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !worker_pool
+                .sync
+                .arrivals
+                .iter()
+                .all(|arrived| arrived.load(Ordering::Acquire) >= wave)
             {
-                command_buffers.push(compute_encoder);
-                command_buffers.push(encoder);
-                cpu_timings.push(cpu_timing);
-                worker_profilers.push(worker_profiler);
+                wait_guard = worker_pool
+                    .sync
+                    .cv
+                    .wait(wait_guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            drop(wait_guard);
+            let mut results = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            for (pos, &pass_index) in layer.iter().enumerate() {
+                match results[pos].take() {
+                    Some(Ok(ParallelWorkerResult {
+                        encoder,
+                        compute_encoder,
+                        cpu_timing,
+                        profiler,
+                    })) => {
+                        command_buffers.push(compute_encoder);
+                        command_buffers.push(encoder);
+                        cpu_timings.push(cpu_timing);
+                        worker_profilers.push(profiler);
+                    }
+                    Some(Err(err)) => return Err(err),
+                    None => {
+                        return Err(crate::Error::InvalidPassConfig(
+                            "parallel render pass worker panicked".to_string(),
+                        ))
+                    }
+                }
                 let pass_ptr = &passes[pass_index] as *const Box<dyn RenderPass>;
                 let frame_ptr: *mut crate::ResourceRegistry<'a> =
                     unsafe { std::mem::transmute(visible as *mut crate::ResourceRegistry<'_>) };
@@ -892,6 +1172,8 @@ impl RenderGraph {
         // Descriptor slices retained by passes are frame-scoped. Reuse the
         // executor-owned arena before recording begins; it remains alive until
         // this method returns and the command buffers have been submitted.
+        #[cfg(not(target_arch = "wasm32"))]
+        profiling::profile_scope!("RenderGraph::execute_with_resources");
         self.frame_storage.reset();
         assert!(
             self.locked,
@@ -1035,6 +1317,8 @@ impl RenderGraph {
                             chain_transparent: false,
                         };
                         ctx.apply_reflected_bind_groups();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        profiling::profile_scope!(pass.name());
                         pass.execute(&mut ctx)?;
                     }
 
@@ -1175,6 +1459,8 @@ impl RenderGraph {
                             chain_transparent: false,
                         };
                         ctx.apply_reflected_bind_groups();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        profiling::profile_scope!(pass.name());
                         pass.execute(&mut ctx)?;
 
                         if pass_index + 1 >= c.chain_range.end {
@@ -1255,6 +1541,8 @@ impl RenderGraph {
                                 chain_transparent: false,
                             };
                             ctx.apply_reflected_bind_groups();
+                            #[cfg(not(target_arch = "wasm32"))]
+                            profiling::profile_scope!(pass.name());
                             pass.execute(&mut ctx)?;
                         }
                     }
@@ -1303,6 +1591,8 @@ impl RenderGraph {
                         chain_transparent: bridged,
                     };
                     ctx.apply_reflected_bind_groups();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    profiling::profile_scope!(pass.name());
                     pass.execute(&mut ctx)?;
                 }
 

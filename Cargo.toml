@@ -43,6 +43,11 @@ blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+# Pulsar-Profiling fork (Unreal-Insights-style instrumentation) -- the same
+# collector that powers the editor flamegraph. Feature-flag aliased below so
+# the fork's `profile_scope!` coexists with the compile-time `profiling`
+# feature already gating helio-core's per-pass CpuProfiler.
+profiling = { path = "../../../crates/profiling" }
 egui = "0.36.1"
 egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
