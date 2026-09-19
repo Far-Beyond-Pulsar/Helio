@@ -40,7 +40,7 @@ This changes the estimator and denoising; it is not an exact-output replacement
 for `compact()`. The regular presets and defaults retain the original sampler.
 Changing the proposal mode specializes the visibility pipelines and resets history.
 
-See [tile-presampling evidence](../../../../docs/validation/hlfs/rt-control/tile-presampling/report.md)
+See [retained validation evidence](https://github.com/Far-Beyond-Pulsar/Helio/blob/4d56b104a442382449f7f2563773313621511d8f/docs/validation/hlfs/rt-control/scenedb/report.md)
 for synthetic 1440p measurements and quality limits. These are direct-lighting GPU
 costs, including per-frame TLAS work, not whole-frame or general-scene guarantees.
 The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this preset.
@@ -142,7 +142,8 @@ Set `HLFS_PERFORMANCE=1` to capture the reduced-resolution preset.
 Set `HLFS_SAMPLE_COUNT=2` together with `HLFS_PERFORMANCE=1` to reproduce the
 two-sample compact capture. This override is for capture tools only.
 Set `HLFS_FXAA=1` to exercise the FXAA graph variant.
-Measured results and retained images are in `docs/validation/hlfs/README.md`.
+Measured results and images remain available in the
+[validation archive](https://github.com/Far-Beyond-Pulsar/Helio/tree/4d56b104a442382449f7f2563773313621511d8f/docs/validation/hlfs).
 
 ## Platform choices
 
