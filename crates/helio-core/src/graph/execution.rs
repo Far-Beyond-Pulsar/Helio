@@ -1238,9 +1238,13 @@ impl RenderGraph {
             .collect::<Result<Vec<_>>>()?;
         let resized_this_frame = self.resize_pending;
 
-        let use_parallel_recording = self.subpass_chains.is_empty()
-            && self.gpu_render_bundles.iter().all(Option::is_none)
-            && !self.parallel_layers.is_empty();
+        // The persistent worker-pool path is not safe to enter from every
+        // host/example yet: its per-wave rendezvous can wait forever when a
+        // worker is inside a backend call that does not return to the pool.
+        // Keep graph correctness and profiling available through the serial
+        // executor until the worker protocol is replaced with a completion
+        // primitive that cannot block the render caller.
+        let use_parallel_recording = false;
         let (parallel_command_buffers, parallel_cpu_timings, mut worker_profilers) =
             if use_parallel_recording {
                 self.execute_parallel_layers(
