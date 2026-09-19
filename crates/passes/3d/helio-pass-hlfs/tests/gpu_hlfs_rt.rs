@@ -175,6 +175,40 @@ fn reduced_resolution_repair_uses_hardware_visibility_in_every_phase() {
 
 #[test]
 #[ignore = "requires Vulkan hardware ray queries"]
+fn compact_light_populations_do_not_add_candidate_energy_noise() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(32, 24).await;
+        empty_scene(&mut f);
+        for count in [3, 17, 32] {
+            // Co-located sources differ only in power: their summed energy is
+            // independent of which shadow sample is selected. Randomly scoring
+            // only a subset introduces avoidable estimator variance here.
+            f.lights((0..count).map(|i| {
+                let mut l = point([1.0, 1.0, 2.0], [1.0; 3], 1.0 + (i * i) as f32);
+                l.set_ray_traced_shadows(true);
+                l
+            }).collect());
+            f.config(HlfsConfig { mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+            f.frame();
+            let reference = f.read();
+            f.config(HlfsConfig { sample_scale: 1, debug_mode: HlfsDebugMode::Unfiltered,
+                ..HlfsConfig::ray_traced_presampled() });
+            for frame in 0..8 {
+                f.frame();
+                for (pixel, (actual, expected)) in f.read().iter().zip(&reference).enumerate() {
+                    for c in 0..3 {
+                        assert!((actual[c]-expected[c]).abs() < expected[c]*0.04+0.001,
+                            "candidate noise, count {count} frame {frame} pixel {pixel}: {actual:?}/{expected:?}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
 fn uncovered_thin_edges_do_not_expose_small_population_sampling_noise() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(65, 49).await;

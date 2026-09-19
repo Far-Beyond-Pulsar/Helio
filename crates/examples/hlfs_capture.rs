@@ -98,6 +98,23 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
         let view = texture.create_view(&Default::default());
         std::fs::create_dir_all(directory).unwrap();
         let mut frame_times = Vec::new();
+        let timing = std::env::var_os("HLFS_CAPTURE_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
+            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
+            let query = pass.timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Capture HLFS timestamps"), size: 56,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Capture HLFS timestamp readback"), size: 56,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut timing_csv = String::from("frame,coarse_ms,fine_ms,sampling_ms,temporal_ms,spatial_ms,composite_ms,hlfs_only_ms\n");
         for frame in 0..capture_frames {
             if ray_traced || reference || performance || presampled || sample_count.is_some() {
                 let pass = renderer
@@ -157,6 +174,26 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
             if frame >= 16 {
                 frame_times.push(start.elapsed().as_secs_f64() * 1000.0);
             }
+            // Resolve outside the serialized-frame interval. This measures only
+            // HLFS's six GPU stages: it does not include SceneDB or TLAS work.
+            if let Some((query, resolve, read)) = &timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..7, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 56);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let stages: [f64; 6] = std::array::from_fn(|i|
+                    (ticks[i + 1] - ticks[i]) as f64 * queue.get_timestamp_period() as f64 / 1e6);
+                timing_csv.push_str(&format!("{frame},{},{},{},{},{},{},{}\n",
+                    stages[0],stages[1],stages[2],stages[3],stages[4],stages[5],stages.iter().sum::<f64>()));
+                drop(bytes);
+                read.unmap();
+            }
             if frame == 0 {
                 eprintln!(
                     "Scene: {} chandelier lights, {} candle lights",
@@ -208,6 +245,9 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
         }
         frame_times.sort_by(f64::total_cmp);
         eprintln!("Serialized frame latency (CPU + GPU, excluding capture readback): median_ms={:.3} p95_ms={:.3}", frame_times[frame_times.len()/2], frame_times[frame_times.len()*95/100]);
+        if timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("hlfs-gpu-timings.csv"), timing_csv).unwrap();
+        }
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });
 }

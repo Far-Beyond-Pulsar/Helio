@@ -28,3 +28,15 @@ Research references for subsequent scene work:
 - [Epic MegaLights documentation](https://dev.epicgames.com/documentation/unreal-engine/megalights-in-unreal-engine): stochastic light sampling, complexity diagnostics, area lights, fog/translucency and limitations.
 - [Cologne Cathedral official dimensions](https://www.koelner-dom.de/erleben/der-dom-in-zahlen): exterior length 144.58 m, width 86.25 m, nave interior width 45.19 m, nave height 43.35 m, side aisle height 19.80 m. These support a real-scale scene, not a claim of an exact architectural replica without detailed plans.
 - [Arc de Triomphe educational material](https://www.paris-arc-de-triomphe.fr/var/cmn_inter/storage/original/application/96c69db2ffcd9842fbd27e3e029883b5.pdf): dimensional drawing to inspect before implementing the arch.
+
+## Compact-population sampling follow-up
+
+Compact local light lists (up to 32 entries) now score all candidates before selecting the same fixed number of shadow rays. This removes unnecessary candidate-selection variance without converting the whole image to all-lights ray tracing. The new regression uses 3/17/32 co-located sources with unequal powers and checks unfiltered output against the all-lights result over eight frames per population. All 746 existing final-image quality checks also pass.
+
+Matched display-RGB NRMSE at frames 31/63/99 improves from 9.01/8.30/6.64% to 7.56/6.84/5.15%. Remaining differences are visible; this is not artifact-free acceptance.
+
+The real cathedral now has optional six-stage timing capture (`HLFS_CAPTURE_TIMINGS=1`). This identified exact thin-edge repair as the bottleneck: it traced out-of-range/back-facing lights. Rejecting their zero unshadowed contribution before tracing preserves frames 31/63/99 pixel for pixel. In the 100-frame capture (16 warmup, 84 measured), HLFS-only GPU median fell from 4.682 to 3.197 ms; interpolated p95 fell from 5.424 to 3.779 ms. Adjacent CSVs and JSON preserve the before/after evidence. These short real-scene runs exclude TLAS and all other passes and need longer repeated validation.
+
+One fresh synthetic 1,024-moving-light/10,000-moving-instance run (120 warmup, 600 measured) measured 3.904 ms median / 4.537 ms p95 for HLFS plus TLAS. It is the same scoped primary workload as the previous report, not a whole-frame or general-scene guarantee.
+
+![Compact candidates and zero-contribution edge-ray rejection](compact-sampled.png)

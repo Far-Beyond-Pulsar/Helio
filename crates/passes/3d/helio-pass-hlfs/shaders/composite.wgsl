@@ -83,6 +83,9 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
         if USE_TILE_PRESAMPLING && globals.light_count<=64u {
             for(var id=0u;id<globals.light_count;id++) {
                 if id==key { continue; }
+                // Range/back-face rejection is exact for the unshadowed target.
+                // Do not trace rays for lights that cannot illuminate this edge.
+                if importance(id,s)<=0.0 { continue; }
                 let light=evaluate_light(id,s,shadow_factor(id,s.position,s.normal,fragment.xy,globals.frame));
                 diffuse+=light.diffuse; specular+=light.specular;
             }

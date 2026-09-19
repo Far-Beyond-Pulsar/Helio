@@ -55,6 +55,15 @@ fn guided(tile: u32, count: u32, id: u32) -> bool {
 // A power-weighted alias table cancels the within-stratum normalization.
 fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bool,
     candidate: u32, candidate_count: u32, rng: ptr<function,u32>, use_tile: bool) -> LightProposal {
+    // Score a compact local population exhaustively before spending the fixed
+    // shadow-ray budget. A tiny random candidate set otherwise adds avoidable
+    // variance even when only a few lights can contribute to this surface.
+    if USE_TILE_PRESAMPLING && population<=32u {
+        var id=candidate;
+        if !overflow { id=(grid[tile].indices[candidate/2u]>>(16u*(candidate&1u)))&65535u; }
+        if id==tile_proposals[0].key_light { return LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,INVALID_LIGHT); }
+        return LightProposal(id,f32(population),0u,0.0,0.0,INVALID_LIGHT);
+    }
     // Narrow glossy lobes bypass the shared reservoir pool: independent
     // per-pixel discovery prevents tile-wide errors when a bright light moves.
     if USE_TILE_PRESAMPLING && use_tile && globals.light_count<=65535u {
@@ -142,7 +151,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 if globals.history_valid!=0u && !USE_TILE_PRESAMPLING { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
                 let hidden_fraction=select(0.5,globals.discovery_fraction,valid_history);
                 let surface_candidates=select(globals.candidate_count,max(globals.candidate_count,16u),USE_TILE_PRESAMPLING && s.roughness<0.2);
-                let candidate_count=select(min(surface_candidates*2u,16u),surface_candidates,valid_history);
+                let candidate_count=select(select(min(surface_candidates*2u,16u),surface_candidates,valid_history),population,USE_TILE_PRESAMPLING && population<=32u);
                 var rng=hash_u32(pixel.x+pixel.y*globals.screen_size.x+globals.frame*0x9e3779b9u);
                 var guide_energy=0.0;
                 var covered_energy=0.0;
