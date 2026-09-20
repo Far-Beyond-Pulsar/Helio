@@ -65,7 +65,7 @@ const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
 const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
 const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
 
-/// Per-material texture metadata (224 bytes, matches helio::GpuMaterialTextures)
+/// Per-material texture metadata: seven 48-byte slots and 16-byte parameters.
 struct MaterialTextureSlot {
     texture_index: u32,
     uv_channel:    u32,
@@ -439,10 +439,22 @@ fn compute_velocity(input: VertexOutput) -> vec4<f32> {
     return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid);
 }
 
+// Basic SceneDB materials carry texture-store indices directly. An explicit
+// metadata table can still supply transformed UVs and extension textures.
+fn material_slot(index: u32) -> MaterialTextureSlot {
+    return MaterialTextureSlot(index,0u,0u,0u,vec4<f32>(0.0,0.0,1.0,1.0),vec4<f32>(0.0,1.0,0.0,0.0));
+}
+fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData {
+    if material_textures[0].params.w!=-1.0 && id<arrayLength(&material_textures) { return material_textures[id]; }
+    return MaterialTextureData(material_slot(material.tex_base_color),material_slot(material.tex_normal),
+        material_slot(material.tex_roughness),material_slot(material.tex_emissive),material_slot(material.tex_occlusion),
+        material_slot(NO_TEXTURE),material_slot(NO_TEXTURE),vec4<f32>(1.0,1.0,0.0,0.0));
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material_id];
-    let material_tex = material_textures[input.material_id];
+    let material_tex = material_texture_data(material,input.material_id);
 
     // DEBUG MODE 1: Show UVs as colors
     if globals.debug_mode == 1u {

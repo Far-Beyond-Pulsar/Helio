@@ -91,7 +91,7 @@ pub struct GBufferPass {
     bind_group_0_key: Option<(usize, usize, usize, usize)>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    bind_group_1_version: Option<(u64,u64)>,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     /// CSM cascade split distances. Must match the values used in shadow_matrices.wgsl
@@ -113,7 +113,7 @@ pub struct GBufferPass {
     coordinate_spaces: wgpu::Buffer,
     coordinate_spaces_prev: wgpu::Buffer,
     /// Fallback `MaterialTextureData` storage buffer (352 bytes = one
-    /// zeroed slot) so `"material_textures"`' bind group stays valid before
+    /// sentinel slot) so `"material_textures"`' bind group stays valid before
     /// SceneDB publishes a real table. Pass-owned because 352 is this
     /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
     /// generic Renderer has no business knowing it.
@@ -254,11 +254,15 @@ impl GBufferPass {
         // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
         // (48 bytes each) + a 16-byte params vec4 = 352 bytes -- see this
         // pass's own material bind-group-1 doc above.
-        let fallback_material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+        // params.w = -1 marks the descriptor-only fallback. Shaders derive
+        // basic texture slots from SceneDB material rows instead of indexing
+        // this single row by arbitrary material IDs.
+        let mut fallback_words=[0u32;88];
+        fallback_words[87]=(-1.0f32).to_bits();
+        let fallback_material_textures = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fallback Material Texture Slots"),
-            size: 352,
+            contents: bytemuck::cast_slice(&fallback_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         Self {
@@ -639,7 +643,7 @@ impl RenderPass for GBufferPass {
 
         // Rebuild bind group 1 when material textures version changes.
         let needs_rebuild = self.bind_group_1_version != Some(
-            material_textures.version ^ materials_epoch,
+            (material_textures.version, materials_epoch),
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -665,7 +669,7 @@ impl RenderPass for GBufferPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let indirect = culled.indirect;

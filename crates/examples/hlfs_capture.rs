@@ -95,8 +95,26 @@ pub fn run_scene(
         }
         let mut acceleration =
             helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone());
+        let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
+        let mut diagnostic_texture_store=None;
+        let texture_lifecycle=std::env::var_os("HLFS_TEXTURE_LIFECYCLE").is_some();
+        assert!(!texture_lifecycle || std::env::var_os("HLFS_TEXTURE_CHECKER").is_some(), "texture lifecycle requires checker mode");
+        // Diagnostic material texture, not an architectural art asset. Keep
+        // ownership in SceneDB's store and refer to its slot from material rows.
+        if std::env::var_os("HLFS_TEXTURE_CHECKER").is_some() {
+            let mut store=pulsar_scenedb::gpu::TextureStore::new(1);
+            let slot=register_checker(&device,&queue,&mut store,false);
+            let materials:Vec<_>=scene_db.world.query::<(&helio_pass_gbuffer::MaterialComponent,)>()
+                .filter(|(_, (material,))|material.base_color[3]>=1.0).map(|(entity,_)|entity).collect();
+            for entity in materials {
+                scene_db.world.get_mut::<helio_pass_gbuffer::MaterialComponent>(entity).unwrap().tex_base_color=slot;
+            }
+            let store=Arc::new(std::sync::RwLock::new(store));
+            scene_handle=scene_handle.with_texture_store(store.clone()).unwrap();
+            diagnostic_texture_store=Some(store);
+        }
         let mut renderer =
-            RendererBuilder::new(config, crate::v3_demo_common::scene_db_handle(&scene_db))
+            RendererBuilder::new(config, scene_handle)
                 .with_editor_mode(false)
                 .with_pass_build_context(Box::new(move |ctx| {
                     if fxaa {
@@ -142,6 +160,12 @@ pub fn run_scene(
         });
         let mut timing_csv = String::from("frame,coarse_ms,fine_ms,sampling_ms,temporal_ms,spatial_ms,composite_ms,hlfs_only_ms\n");
         for frame in 0..capture_frames {
+            if texture_lifecycle {
+                let mut store=diagnostic_texture_store.as_ref().unwrap().write().unwrap();
+                if frame==48 { store.unregister(0).unwrap(); }
+                if frame==80 { assert_eq!(register_checker(&device,&queue,&mut store,true),0); }
+                if frame+1==capture_frames { eprintln!("Diagnostic texture uploads: {}",store.upload_count()); }
+            }
             if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
@@ -308,4 +332,22 @@ pub fn enable_ray_shadows(world: &mut World) {
                 .flags |= helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW;
         }
     }
+}
+
+/// A deliberately obvious texture for binding/lifecycle validation only.
+fn register_checker(device: &wgpu::Device, queue: &wgpu::Queue,
+    store: &mut pulsar_scenedb::gpu::TextureStore, replacement: bool) -> u32 {
+    let mut texels=Vec::new();
+    for y in 0..4 { for x in 0..4 {
+        let value=if (x+y)%2==0 {255} else {45};
+        texels.extend_from_slice(&if replacement {[45,value,45,255]} else {[value,value,value,255]});
+    }}
+    store.register(device,queue,&wgpu::TextureDescriptor {
+        label:Some("Material texture diagnostic checker"),
+        size:wgpu::Extent3d {width:4,height:4,depth_or_array_layers:1},
+        mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+        format:wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::COPY_DST,
+        view_formats:&[],
+    },&texels).unwrap()
 }

@@ -51,14 +51,15 @@ pub struct DebugVertex {
 ///
 /// Material parameters and texture references are authored in SceneDB. The
 /// renderer keeps only the descriptor objects required by the passes to bind
-/// that data. Until a frontend publishes texture components, the arrays point
-/// at one white texture so untextured material rows remain valid.
+/// that data. SceneDB texture-store slots supply cached views; vacant slots use the white
+/// fallback. Frontends must clear material slot references before freeing them.
 pub(crate) struct MaterialBindingResources {
     pub(crate) _fallback_texture: wgpu::Texture,
     pub(crate) fallback_view: wgpu::TextureView,
     pub(crate) fallback_sampler: wgpu::Sampler,
     pub(crate) texture_count: usize,
     pub(crate) version: u64,
+    pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
 }
 
 pub use helio_pass_billboard::BillboardInstance;

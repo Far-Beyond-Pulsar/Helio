@@ -1821,6 +1821,7 @@ dependencies = [
  "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "log",
+ "naga",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",

@@ -348,10 +348,31 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs: Option<helio_bake_types::BakedPvsRef<'_>> = None;
 
-        let material_texture_views = vec![
-            &self.material_bindings.fallback_view;
-            self.material_bindings.texture_count
-        ];
+        // SceneDB owns texture residency. Retain descriptor views by GPU handle
+        // identity, including slot replacement/removal; no duplicate uploads.
+        let texture_store = self.scene_db.texture_store();
+        let texture_guard = texture_store.as_ref().map(|store| store.read().map_err(|_| {
+            helio_core::Error::InvalidPassConfig("SceneDB texture store lock poisoned".into())
+        })).transpose()?;
+        if texture_guard.as_ref().is_some_and(|store| store.slot_count() as usize > self.material_bindings.texture_count) {
+            return Err(helio_core::Error::InvalidPassConfig("SceneDB texture slots exceed the device material binding capacity".into()));
+        }
+        for (slot,cached) in self.material_bindings.scene_views.iter_mut().enumerate() {
+            let texture=texture_guard.as_ref().and_then(|store| store.texture(slot as u32));
+            if cached.as_ref().map(|(texture,_)|texture)==texture { continue; }
+            if let Some(texture)=texture {
+                if texture.dimension()!=wgpu::TextureDimension::D2 || texture.depth_or_array_layers()!=1
+                    || texture.sample_count()!=1 || !texture.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING)
+                    || texture.format().sample_type(None,Some(self.device.features()))!=Some(wgpu::TextureSampleType::Float {filterable:true}) {
+                    return Err(helio_core::Error::InvalidPassConfig(format!("SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture")));
+                }
+                *cached=Some((texture.clone(),texture.create_view(&Default::default())));
+            } else { *cached=None; }
+            self.material_bindings.version=self.material_bindings.version.wrapping_add(1);
+        }
+        drop(texture_guard);
+        let material_texture_views: Vec<_> = self.material_bindings.scene_views.iter()
+            .map(|entry|entry.as_ref().map(|(_,view)|view).unwrap_or(&self.material_bindings.fallback_view)).collect();
         let material_samplers = vec![
             &self.material_bindings.fallback_sampler;
             self.material_bindings.texture_count

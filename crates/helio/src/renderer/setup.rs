@@ -212,6 +212,7 @@ impl Renderer {
             fallback_sampler,
             texture_count: material_binding.max_textures,
             version: 0,
+            scene_views: vec![None; material_binding.max_textures],
         };
 
         // Camera jitter is only valid when a temporal pass reconstructs it.

@@ -57,7 +57,7 @@ pub struct ForwardLitPass {
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    bind_group_1_version: Option<(u64,u64)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     /// When true, renders from `material_class_ranges` (all opaque draws)
@@ -599,7 +599,7 @@ impl RenderPass for ForwardLitPass {
         }
 
         let needs_rebuild = self.bind_group_1_version != Some(
-            material_textures.version ^ materials_epoch,
+            (material_textures.version, materials_epoch),
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -625,7 +625,7 @@ impl RenderPass for ForwardLitPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let indirect = culled.indirect;
