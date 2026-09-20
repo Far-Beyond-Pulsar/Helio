@@ -1,0 +1,56 @@
+{
+  "neighborhood-moving": {
+    "display_rgb_nrmse_percent": {
+      "31": 13.93703190792521,
+      "63": 13.636695060255105,
+      "99": 13.085755881476047
+    },
+    "hlfs_only_median_ms": 3.399168,
+    "hlfs_only_p95_ms": 4.0451071999999995,
+    "frames": 84
+  },
+  "neighborhood-static": {
+    "display_rgb_nrmse_percent": {
+      "31": 13.045927464431903,
+      "63": 13.0449786261198,
+      "99": 13.18684765962387,
+      "399": 13.071582975430838
+    },
+    "hlfs_only_median_ms": 3.3064959999999997,
+    "hlfs_only_p95_ms": 4.049254399999999,
+    "frames": 384
+  },
+  "guide-moving": {
+    "display_rgb_nrmse_percent": {
+      "31": 11.034502229483383,
+      "63": 10.660859106921606,
+      "99": 10.370029148145921
+    },
+    "hlfs_only_median_ms": 4.460544,
+    "hlfs_only_p95_ms": 4.9913856,
+    "frames": 84
+  },
+  "guide-static": {
+    "display_rgb_nrmse_percent": {
+      "31": 10.436205058340567,
+      "63": 10.417174702032327,
+      "99": 10.417513715202581,
+      "399": 10.451030400667221
+    },
+    "hlfs_only_median_ms": 4.365824,
+    "hlfs_only_p95_ms": 5.156966399999998,
+    "frames": 384
+  },
+  "neighborhood-quality": {
+    "failed_final_rows": 0,
+    "final_rows": 90
+  },
+  "neighborhood-sem-quality": {
+    "failed_final_rows": 13,
+    "final_rows": 90
+  },
+  "presampled-guide-quality": {
+    "failed_final_rows": 0,
+    "final_rows": 90
+  }
+}

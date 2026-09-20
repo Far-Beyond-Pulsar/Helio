@@ -1,0 +1,49 @@
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
+@@ -55 +55 @@
+-struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, }
++struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, key_light: u32, key_changed: u32, }
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/sample.wgsl
+@@ -33 +32,0 @@
+-    if USE_TILE_PRESAMPLING { return; }
+@@ -42,0 +42,5 @@
++}
++
++fn guide_target_weight(id: u32, s: Surface) -> f32 {
++    if USE_TILE_PRESAMPLING && globals.light_count<=65535u && id==tile_proposals[0].key_light { return 0.0; }
++    return importance(id,s);
+@@ -157 +161 @@
+-                if globals.history_valid!=0u && !USE_TILE_PRESAMPLING { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
++                if globals.history_valid!=0u { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
+@@ -175 +179 @@
+-                        let proxy=importance(id,s);
++                        let proxy=guide_target_weight(id,s);
+@@ -191 +195 @@
+-                        let proxy=importance(id,s);
++                        let proxy=guide_target_weight(id,s);
+@@ -231 +235 @@
+-                            var proxy=importance(id,s);
++                            var proxy=guide_target_weight(id,s);
+@@ -312,2 +316,2 @@
+-            next_visible[output_tile].count=select(0u,1u,key!=previous_visible[output_tile].indices[0]);
+-            next_visible[output_tile].indices[0]=key;
++            next_visible[output_tile].key_changed=select(0u,1u,key!=previous_visible[output_tile].key_light);
++            next_visible[output_tile].key_light=key;
+@@ -317 +320,0 @@
+-        return;
+@@ -375,2 +378,2 @@
+-            next_visible[tile].count=select(0u,1u,key!=previous_visible[tile].indices[0]);
+-            next_visible[tile].indices[0]=key;
++            next_visible[tile].key_changed=select(0u,1u,key!=previous_visible[tile].key_light);
++            next_visible[tile].key_light=key;
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/temporal.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/temporal.wgsl
+@@ -72 +72 @@
+-    let same_residual=(globals.surface_flags&4u)==0u || visible[residual_tile].count==0u;
++    let same_residual=(globals.surface_flags&4u)==0u || visible[residual_tile].key_changed==0u;
+--- a/crates/passes/3d/helio-pass-hlfs/src/resources.rs
++++ b/crates/passes/3d/helio-pass-hlfs/src/resources.rs
+@@ -105 +105 @@
+-                tile_count(sw, sh, TILE_SIZE) * (3 + VISIBLE_CAPACITY) * 4,
++                tile_count(sw, sh, TILE_SIZE) * (5 + VISIBLE_CAPACITY) * 4,

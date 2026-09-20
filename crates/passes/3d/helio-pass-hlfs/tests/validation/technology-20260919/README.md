@@ -60,3 +60,22 @@ Next: distinguish a spatially coherent lighting change from stochastic single-pi
 
 ![Unclipped stationary diagnostic](history-unclipped.png)
 ![Rejected variance bounds during camera motion](history-variance-aware-moving.png)
+
+
+## Neighborhood rejection and visible-ID reuse experiments
+
+Three further variants were rejected and all engine changes reverted. The first compared a geometry-validated, reprojected 5x5 history mean with the current 5x5 mean, preserving each history pixel's deviation from its old mean. It retained the original 5% luminance cap. This passed 90/90 motion-quality rows but did not reduce image error. Removing that cap while retaining the original standard-error bounds failed 13/90 motion rows, so no full-size capture was pursued for that variant.
+
+The third enabled the existing sorted visible-ID tile guide in the presampled path, with separate key-light/change fields and a current-key exclusion to avoid double counting on key transitions. It still traced current-frame visibility and did not reuse stale shadow results. The initial motion test passed 90/90 rows; the final current-key exclusion was build/capture validated but did not receive a separate motion-suite run because the full scene already rejected this approach on quality/cost. Exact experimental patches are included for reproducibility; none is active renderer code.
+
+| Variant | Moving frame-99 RGB NRMSE | Moving HLFS median / p95 ms | Static frame-399 RGB NRMSE |
+| --- | ---: | ---: | ---: |
+| Original baseline | 13.03% | 3.174 / 4.024 | 12.91% |
+| Neighborhood means, 5% cap retained | 13.09% | 3.399 / 4.045 | 13.07% |
+| Presampled visible-ID guide | 10.37% | 4.461 / 4.991 | 10.45% |
+
+Same 1440p, two-ray/two-candidate, FXAA capture settings and earlier reference images. Single runs, 16 warmup frames, 84 moving or 384 stationary measured frames; the existing stationary-reference fog-history caveat still applies. `neighborhood-guide-experiments.json` and adjacent CSVs retain measurements. The guide costs more than the earlier eight-candidate experiment while retaining conspicuous mottling, so it does not satisfy either the requested visual outcome or budget. Normal renderer source and the example binary were restored after the experiments.
+
+These results motivate compact weighted reservoir reuse rather than retaining and rescoring a sorted tile list. Any future reuse must handle support changes, removed lights, key transitions and disocclusion, retain fresh visibility, and pass both motion and stationary controls. This is the next implementation direction, not a claim that reservoir reuse has already been implemented or validated.
+
+![Rejected visible-ID reuse capture](rejected-presampled-guide.png)
