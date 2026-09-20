@@ -59,8 +59,10 @@ struct TsrUniform {
     time_delta:     f32,       // seconds since last frame
     tap_radius:     u32,       // 1 = 3×3, 2 = 5×5
     previous_jitter_uv: vec2<f32>,
+    previous_view: mat4x4<f32>,
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
+@group(0) @binding(7) var history_depth_tex: texture_2d<f32>;
 
 // ── Vertex passthrough ────────────────────────────────────────────────────────
 
@@ -311,16 +313,25 @@ fn apply_cas(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 // Color and depth refer to the same jittered raster position. History is
 // resolved into an unjittered display grid, so remove the prior projection's
 // jitter after reprojection. Keep clip W for behind-camera rejection.
-fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec3<f32> {
+fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec4<f32> {
     let ndc = raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0);
     let world_h = cameras[0].inv_view_proj * vec4<f32>(ndc,depth,1.0);
     let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_h.xyz/world_h.w,1.0);
     let uv = prev_clip.xy/prev_clip.w * vec2<f32>(0.5,-0.5)+0.5;
-    return vec3<f32>(uv-tsr.previous_jitter_uv,prev_clip.w);
+    let previous_position = tsr.previous_view * vec4<f32>(world_h.xyz/world_h.w,1.0);
+    return vec4<f32>(uv-tsr.previous_jitter_uv,prev_clip.w,-previous_position.z);
+}
+
+struct TsrOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) view_depth: f32,
+}
+fn history_depth_matches(expected: f32, stored: f32, tolerance: f32) -> bool {
+    return expected > 0.0 && stored > 0.0 && abs(expected-stored) <= tolerance;
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> TsrOutput {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
     let out_dims = vec2<f32>(textureDimensions(history_frame));
     let in_texel = 1.0 / in_dims;
@@ -331,35 +342,41 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── Current frame sample (jitter-corrected) ───────────────────────────────
     let current_rgb = textureSampleLevel(current_frame, linear_sampler, cur_uv, 0.0).rgb;
+    let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
+    let clip = vec4<f32>(cur_uv*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0),depth_val,1.0);
+    let world_h = cameras[0].inv_view_proj * clip;
+    let view_position = cameras[0].view * vec4<f32>(world_h.xyz/world_h.w,1.0);
+    let current_depth = select(max(-view_position.z,0.0),0.0,depth_val>=1.0);
+
 
     // ── RESET path ────────────────────────────────────────────────────────────
     if tsr.reset != 0u {
         let sharpened = apply_cas(current_rgb, cur_uv);
-        return vec4<f32>(sharpened, 1.0);
+        return TsrOutput(vec4<f32>(sharpened, 1.0),current_depth);
     }
 
     // ── Depth-based reprojection → history UV ─────────────────────────────────
-    let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
     let history = reproject_history(cur_uv, depth_val);
     let history_uv = history.xy;
+    let depth_tolerance = max(0.002,abs(history.w)*0.001) + 1.5*(abs(dpdx(history.w))+abs(dpdy(history.w)));
 
     // If reprojected UV is out of screen, use current frame only
     if history.z <= 0.0 || any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
         let sharpened = apply_cas(current_rgb, cur_uv);
-        return vec4<f32>(sharpened, 1.0);
+        return TsrOutput(vec4<f32>(sharpened, 1.0),current_depth);
     }
 
     // ── History sample (Catmull-Rom for quality) ───────────────────────────────
+    let depth_pixel = clamp(vec2<i32>(history_uv*out_dims),vec2<i32>(0),vec2<i32>(out_dims)-1);
+    let history_depth = textureLoad(history_depth_tex,depth_pixel,0).r;
+    if !history_depth_matches(history.w,history_depth,depth_tolerance) {
+        return TsrOutput(vec4<f32>(apply_cas(current_rgb,cur_uv),1.0),current_depth);
+    }
+
     let history_rgb = sample_catmull_rom(history_frame, linear_sampler, history_uv);
 
     // ── Reprojected history depth ─────────────────────────────────────────────
-    // We use the current depth value for the disocclusion comparison. Sampling
-    // at history_uv would cause false disocclusions at depth edges because the
-    // jitter delta between frames shifts history_uv away from in.uv, even for
-    // a perfectly static scene. That spurious CLASS_DISOCCLUSION forces blend
-    // to 0.5 and prevents temporal accumulation (visible as shimmer/shake).
-    // A proper implementation would keep a separate history depth buffer.
-    let history_depth_approx = depth_val;
+
 
     // ── Neighbourhood statistics ───────────────────────────────────────────────
     let tap_radius = i32(tsr.tap_radius);
@@ -369,7 +386,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let velocity = history_uv - in.uv;
 
     // ── Pixel classification ──────────────────────────────────────────────────
-    let flags = classify_pixel(velocity, depth_val, history_depth_approx, n);
+    let flags = classify_pixel(velocity, history.w, history_depth, n);
 
     // ── Tonemap for stable accumulation ───────────────────────────────────────
     let current_tm  = rgb_to_ycocg(tonemap(current_rgb));
@@ -410,5 +427,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cas_result = apply_cas(result_linear, cur_uv);
     let output     = mix(result_linear, cas_result, cas_weight);
 
-    return vec4<f32>(output, 1.0);
+    return TsrOutput(vec4<f32>(output, 1.0),current_depth);
 }
