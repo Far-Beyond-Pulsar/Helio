@@ -25,8 +25,22 @@ impl Mesh {
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
     pub(crate) fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
-        self.triangle(a, b, c);
-        self.triangle(a, c, d);
+        // Both triangles share one UV rectangle. Calling triangle twice maps
+        // the whole texture onto each half and disagrees along the diagonal.
+        // Preserve per-triangle face normals for non-planar architectural quads.
+        for (points, uvs, tangent) in [
+            ([a, b, c], [[0., 0.], [1., 0.], [1., 1.]], (b-a).normalize()),
+            ([a, c, d], [[0., 0.], [1., 1.], [0., 1.]], (c-d).normalize()),
+        ] {
+            let normal=(points[1]-points[0]).cross(points[2]-points[0]).normalize();
+            let base=self.vertices.len() as u32;
+            for (point,uv) in points.into_iter().zip(uvs) {
+                self.vertices.push(PackedVertex::from_components(
+                    point.to_array(),normal.to_array(),uv,tangent.to_array(),1.0,
+                ));
+            }
+            self.indices.extend_from_slice(&[base,base+1,base+2]);
+        }
     }
     pub(crate) fn block(&mut self, center: [f32; 3], half: [f32; 3]) {
         let mesh = box_mesh(center, half);
@@ -123,3 +137,25 @@ impl Mesh {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quad_texture_covers_one_rectangle_without_a_diagonal_seam() {
+        let mut mesh=Mesh::default();
+        mesh.quad(Vec3::ZERO,Vec3::X*2.0,Vec3::new(2.0,3.0,0.0),Vec3::Y*3.0);
+        let uv:Vec<_>=mesh.vertices.iter().map(|v|v.tex_coords0).collect();
+        assert_eq!(uv,vec![[0.,0.],[1.,0.],[1.,1.],[0.,0.],[1.,1.],[0.,1.]]);
+        // Duplicated diagonal vertices agree in both position and UV. A
+        // checkerboard therefore has no discontinuity at the triangle split.
+        for (a,b) in [(0,3),(2,4)] {
+            assert_eq!(mesh.vertices[a].position,mesh.vertices[b].position);
+            assert_eq!(uv[a],uv[b]);
+            assert_eq!(mesh.vertices[a].normal,mesh.vertices[b].normal);
+            assert_eq!(mesh.vertices[a].tangent,mesh.vertices[b].tangent);
+        }
+        assert_eq!(mesh.indices,vec![0,1,2,3,4,5]);
+    }
+}
