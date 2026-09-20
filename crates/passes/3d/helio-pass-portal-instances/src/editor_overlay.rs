@@ -17,6 +17,9 @@ pub struct PortalEditorOverlayPass {
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(usize, usize)>,
     portal_count: u32,
+    /// Active resolver-published view rows. `None` preserves legacy manual
+    /// behavior for callers that do not provide projection counts.
+    active_portal_count: Option<u32>,
     editor_mode: bool,
 }
 
@@ -123,8 +126,14 @@ impl PortalEditorOverlayPass {
             bind_group: None,
             bind_group_key: None,
             portal_count: 0,
+            active_portal_count: None,
             editor_mode: false,
         }
+    }
+
+    /// Set the active dense portal-view row count for editor visualization.
+    pub fn set_active_portal_count(&mut self, count: u32) {
+        self.active_portal_count = Some(count);
     }
 
     /// Enable or disable the checkerboard indicator. Mirrors whatever
@@ -214,15 +223,16 @@ impl RenderPass for PortalEditorOverlayPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_views"))
-            .map(|h| {
-                (h.buffer.size()
-                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                    as u32
-            })
-            .unwrap_or(0);
+        self.portal_count = self.active_portal_count.unwrap_or_else(|| {
+            ctx.scene_buffers
+                .get(BufferKey::of("portal_views"))
+                .map(|h| {
+                    (h.buffer.size()
+                        / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                        as u32
+                })
+                .unwrap_or(0)
+        });
         Ok(())
     }
 

@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use bytemuck::Zeroable;
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7,8 +7,8 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use helio_mats::radiant::RadiantTemplateRegistry;
 use helio_core::{PipelineFormatSet, RenderGraph};
+use helio_mats::radiant::RadiantTemplateRegistry;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -153,7 +153,8 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let postprocess_buf_size = std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
+        let postprocess_buf_size =
+            std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
             size: postprocess_buf_size,
@@ -194,8 +195,7 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
@@ -253,6 +253,8 @@ impl Renderer {
             enable_foliage: config.enable_foliage,
             foliage_blades_per_m2: config.foliage_blades_per_m2,
             enable_portals: config.enable_portals,
+            coordinate_spaces: Vec::new(),
+            portal_projection_counts: None,
             enable_planar_reflections: config.enable_planar_reflections,
             enable_environment_reflections: config.enable_environment_reflections,
             debug_mode: config.debug_mode,

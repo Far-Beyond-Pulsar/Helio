@@ -59,6 +59,7 @@ const LOCAL_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
 struct StampOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) @interpolate(flat) portal_index: u32,
+    @location(1) @interpolate(flat) portal_flags: u32,
 }
 
 @vertex
@@ -70,11 +71,18 @@ fn vs_stamp(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) i
     var out: StampOutput;
     out.clip_position = cameras[0].view_proj * world_pos;
     out.portal_index = instance_index;
+    out.portal_flags = portal._pad;
     return out;
 }
 
 @fragment
 fn fs_stamp(input: StampOutput) -> @location(0) u32 {
+    // Nested projection rows are required by PortalChainComponent for
+    // clipping, but they do not represent additional physical openings in
+    // the current world. Legacy rows use zero and remain visible.
+    if (input.portal_flags & 1u) != 0u {
+        discard;
+    }
     return input.portal_index + 1u;
 }
 

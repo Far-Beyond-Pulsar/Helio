@@ -2,6 +2,7 @@
 //!
 //! The gbuffer/cull passes project these rows into transient instance and
 //! coordinate-space inputs. No renderer-side group registry is authoritative.
+#![allow(deprecated)]
 use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 use std::marker::PhantomData;
@@ -104,9 +105,65 @@ pub struct RenderGroupComponent {
     pub group_mask: u64,
 }
 
+/// Stable content-space index for an authored sublevel.
+///
+/// Sublevels are indexed content spaces rather than SceneDB entities. Index
+/// zero is the default level and always denotes identity/world space. The
+/// index is intentionally a plain scalar here: resolving an index to content
+/// and projecting it into a transient GPU coordinate-space slot belongs to a
+/// later scene-runtime phase.
+pub type SubLevelIndex = u32;
+
+/// The default level's authored sublevel index.
+pub const DEFAULT_SUBLEVEL_INDEX: SubLevelIndex = 0;
+
+/// SceneDB-authored placement of an indexed sublevel inside its owning level.
+///
+/// This is the direct-instancing primitive for reusable content (for example,
+/// an aircraft or room). It is deliberately separate from portal data:
+/// portals display a peer portal's context through an aperture and do not
+/// become sublevel actors. The row is registered and mirrored now so the
+/// authoritative SceneDB schema exists without changing the current render
+/// passes; a later resolver will project it into coordinate-space slots.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "sublevel_actors")]
+pub struct SubLevelActorComponent {
+    #[gpu]
+    pub sublevel_index: SubLevelIndex,
+    #[gpu]
+    pub flags: u32,
+    #[gpu]
+    pub transform: [[f32; 4]; 4],
+}
+
+impl SubLevelActorComponent {
+    /// Bit in [`Self::flags`] that enables this actor instance.
+    pub const FLAG_ENABLED: u32 = 1 << 0;
+
+    pub fn new(sublevel_index: SubLevelIndex, transform: glam::Mat4) -> Self {
+        Self {
+            sublevel_index,
+            flags: Self::FLAG_ENABLED,
+            transform: transform.to_cols_array_2d(),
+        }
+    }
+
+    pub fn transform(&self) -> glam::Mat4 {
+        glam::Mat4::from_cols_array_2d(&self.transform)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.flags & Self::FLAG_ENABLED != 0
+    }
+}
+
 /// A movable SceneDB sublevel. The matrix is copied into the transient
 /// coordinate-space projection by the render bridge; it is not a renderer
 /// scene record.
+#[deprecated(
+    note = "legacy movable sublevel projection; use SubLevelIndex and SubLevelActorComponent"
+)]
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "sublevels")]
@@ -324,6 +381,11 @@ binding!(
     RenderGroupComponent,
     "render_groups"
 );
+binding!(
+    SubLevelActorSceneBinding,
+    SubLevelActorComponent,
+    "sublevel_actors"
+);
 binding!(SublevelSceneBinding, SublevelComponent, "sublevels");
 binding!(
     SectionedObjectSceneBinding,
@@ -338,9 +400,20 @@ mod tests {
     fn component_layouts_are_stable() {
         assert_eq!(std::mem::size_of::<MaterialComponent>(), 96);
         assert_eq!(std::mem::size_of::<RenderGroupComponent>(), 8);
+        assert_eq!(std::mem::size_of::<SubLevelActorComponent>(), 72);
         assert_eq!(std::mem::size_of::<SublevelComponent>(), 72);
         assert_eq!(std::mem::size_of::<SectionedObjectComponent>(), 32);
+        assert_eq!(std::mem::align_of::<SubLevelActorComponent>(), 4);
         assert_eq!(std::mem::align_of::<SublevelComponent>(), 8);
+    }
+
+    #[test]
+    fn sublevel_actor_round_trips_index_and_transform() {
+        let actor =
+            SubLevelActorComponent::new(7, glam::Mat4::from_translation(glam::vec3(3.0, 4.0, 5.0)));
+        assert_eq!(actor.sublevel_index, 7);
+        assert_eq!(actor.flags, SubLevelActorComponent::FLAG_ENABLED);
+        assert_eq!(actor.transform().w_axis, glam::vec4(3.0, 4.0, 5.0, 1.0));
     }
 }
 #[cfg(test)]
@@ -368,4 +441,3 @@ mod lifecycle_tests {
         assert_eq!(world.remove::<SublevelComponent>(level), Some(s));
     }
 }
-

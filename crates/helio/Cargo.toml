@@ -15,6 +15,7 @@ glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
+helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }

@@ -333,6 +333,15 @@ fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
     return local.z > 0.0 || abs(local.x) > half_extent.x || abs(local.y) > half_extent.y;
 }
 
+// The physical outer portal's screen-space mask is the exact X/Y aperture.
+// Its mapped target geometry must not also be forced through the portal's
+// local rectangular tube: that would clip the target room itself down to the
+// doorway dimensions. Inner recursive stages have no physical screen mask,
+// so they continue to use `clip_stage` below.
+fn clip_depth_only(local: vec4<f32>) -> bool {
+    return local.z > 0.0;
+}
+
 // Basic SceneDB materials carry texture-store indices directly. An explicit
 // metadata table can still supply transformed UVs and extension textures.
 fn material_slot(index: u32) -> MaterialTextureSlot {
@@ -375,7 +384,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     // construction there) but clips away nearly everything for any portal
     // whose far side is bigger than its opening.
     let p0_local = p0.inverse_transform * vec4<f32>(input.world_position, 1.0);
-    if p0_local.z > 0.0 {
+    // The screen mask is an additional visibility gate, not a replacement
+    // for the exact portal-local aperture boundary. This keeps target room
+    // geometry from escaping when the screen-space mask is stale or mapped
+    // through a different viewport coordinate space.
+    if clip_depth_only(p0_local) {
         discard;
     }
     // Inner stages (depth >= 2) have no screen-space mask of their own —

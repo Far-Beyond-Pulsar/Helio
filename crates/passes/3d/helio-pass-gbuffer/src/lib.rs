@@ -34,10 +34,12 @@ pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
 mod object_batch_frame_data;
+#[allow(deprecated)]
 pub use components::{
     MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
     SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
-    SublevelComponent, SublevelSceneBinding,
+    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, SublevelComponent,
+    SublevelSceneBinding, DEFAULT_SUBLEVEL_INDEX,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
@@ -240,15 +242,16 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
-        let identity_space = glam::Mat4::IDENTITY.to_cols_array();
+        let mut coordinate_space_words = vec![0.0f32; 32 * 16];
+        coordinate_space_words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
         let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Coordinate Spaces (space_id 0 = identity)"),
-            contents: bytemuck::bytes_of(&identity_space),
+            contents: bytemuck::cast_slice(&coordinate_space_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let coordinate_spaces_prev = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Coordinate Spaces Prev (space_id 0 = identity)"),
-            contents: bytemuck::bytes_of(&identity_space),
+            contents: bytemuck::cast_slice(&coordinate_space_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
@@ -300,6 +303,24 @@ impl GBufferPass {
     /// See [`Self::coordinate_spaces_buffer`].
     pub fn coordinate_spaces_prev_buffer(&self) -> &wgpu::Buffer {
         &self.coordinate_spaces_prev
+    }
+
+    /// Upload the current portal/sublevel coordinate-space table. Slot zero is
+    /// always world space; additional slots map authored target geometry into
+    /// the source portal that displays it.
+    pub fn set_coordinate_spaces(&self, queue: &wgpu::Queue, spaces: &[glam::Mat4]) {
+        let mut words = [0.0f32; 32 * 16];
+        words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
+        for (slot, space) in spaces.iter().take(31).enumerate() {
+            words[(slot + 1) * 16..(slot + 2) * 16]
+                .copy_from_slice(&space.to_cols_array());
+        }
+        queue.write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
+        queue.write_buffer(
+            &self.coordinate_spaces_prev,
+            0,
+            bytemuck::cast_slice(&words),
+        );
     }
 
     /// Fallback `"material_textures"` buffer. See

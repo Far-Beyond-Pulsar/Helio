@@ -6,14 +6,11 @@
 //! engine's own portal-chain composition (`helio-pass-portal-cull` /
 //! `helio-pass-portal-instances`). This is the automatic-recursion
 //! generalization of `infinite_tunnel`'s single hand-placed corridor: a
-//! portal here pairs its real doorway with the pose *at the opposite wall,
-//! facing the same direction* — a real, physical position with real content
-//! already there (the room's own opposite side), not a hidden buried copy.
-//! Because the engine composes portals into chains automatically, each
-//! doorway shows the room repeating away from you for a few bounces, and —
-//! since every portal's "far side" is itself a room with its own 6 portals —
-//! standing near a corner you can see one doorway's reflection through
-//! another's.
+//! portal here peers with the actual physical doorway on the opposite wall.
+//! Because the engine composes those peer links into chains automatically,
+//! each doorway can show the same room repeating away from you for multiple
+//! bounces, and a view through one doorway can contain another doorway's
+//! projection without any demo-authored copies or continuation anchors.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -26,14 +23,18 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external;
+use helio_pass_portal_cull::{
+    components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver,
+    MAX_PORTAL_CHAINS,
+};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
-    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
-    spawn_light, spawn_material, spawn_mesh, spawn_object,
+    box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
 };
 
 use winit::{
@@ -44,7 +45,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -89,7 +90,6 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     scene_db: SceneDb,
-    _portal_pairs: Vec<helio::PortalPair>,
     _light_ids: Vec<Entity>,
 
     /// Debug-only: when `CUBE_SCREENSHOT` is set, counts frames so a single
@@ -177,27 +177,50 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
-                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
+                build_default_graph_external(
+                    d,
+                    q,
+                    cb,
+                    c,
+                    ds,
+                    dcb,
+                    csb,
+                    None,
+                    graph_scene_db.clone(),
+                )
             }))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
+
+        // Reserve dense derived rows before authored portal and scene rows.
+        // Authored portal entities remain separate from the GPU projection
+        // entities populated by the resolver bridge below.
+        let projection_entities: Vec<Entity> = (0..MAX_PORTAL_CHAINS)
+            .map(|_| scene_db.world.spawn())
+            .collect();
 
         // ── Materials ───────────────────────────────────────────────────────
         let wall_mat = spawn_material(
             &mut scene_db.world,
             make_material([0.75, 0.75, 0.78, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
-        let frame_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.3, 0.9, 1.0, 1.0],
-            0.4,
-            0.0,
-            [0.2, 0.85, 1.0],
-            2.5,
-        ));
+        let frame_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.3, 0.9, 1.0, 1.0], 0.4, 0.0, [0.2, 0.85, 1.0], 2.5),
+        );
 
         // Single shared unit box (half-extent 1 on every axis) — every wall
         // panel and frame piece is this same mesh, scaled/rotated/positioned
         // per instance via its own transform (see `insert_wall_face` below).
-        let unit_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+        let unit_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        );
 
         // ── The room: one wall per axis direction, each with a centered
         // doorway. `up_hint` just needs to not be parallel to `normal` — Y
@@ -214,8 +237,17 @@ impl ApplicationHandler for App {
             (Vec3::NEG_Z, Vec3::Y),
         ];
 
-        let mut portal_pairs = Vec::new();
-        for &(normal, up_hint) in &faces {
+        // There is one authored portal entity per physical opening. The
+        // opposite opening is the peer; it is not a hidden target row or a
+        // second copy of the same surface. This is the same topology that
+        // arbitrary portal scenes use, and lets the resolver produce normal
+        // recursive chains without demo-specific anchor records.
+        let authored_portal_entities: Vec<Entity> = (0..faces.len())
+            .map(|_| scene_db.world.spawn())
+            .collect();
+        let opposite_face = [1usize, 0, 3, 2, 5, 4];
+        let mut authored_portals = Vec::with_capacity(faces.len());
+        for (i, &(normal, up_hint)) in faces.iter().enumerate() {
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
 
@@ -229,17 +261,51 @@ impl ApplicationHandler for App {
                 up,
             );
 
-            // Pair this doorway with the pose at the *opposite* wall, facing
-            // the *same* direction as this one (not that wall's own outward
-            // normal) — that's what makes the map a pure "keep going
-            // straight" translation by the room's full size, using the
-            // opposite wall's real content, not a fabricated stand-in. See
-            // the module doc for why this is the whole trick.
-            let a = helio::portal_pose_facing(normal * HALF_SIZE, normal, up);
-            let b = helio::portal_pose_facing(-normal * HALF_SIZE, normal, up);
-            let portal = helio::PortalPair { a, b };
-            portal_pairs.push(portal);
+            // Pair this opening with the actual opposite physical opening.
+            // The authored surface faces into the room: the camera starts on
+            // the room side of every wall, and the portal clip convention
+            // keeps the half-space in front of this inward-facing normal.
+            // Each peer retains its own physical orientation; recursion does
+            // not rely on a hidden continuation marker.
+            let pose = helio::portal_pose_facing(normal * HALF_SIZE, -normal, up);
+            let entity = authored_portal_entities[i];
+            let component = PortalComponent::new(
+                Some(authored_portal_entities[opposite_face[i]]),
+                pose.transform,
+                [DOOR_HALF_W, DOOR_HALF_H],
+            );
+            scene_db.world.insert(entity, component);
+            authored_portals.push((entity, component));
         }
+
+        // A central ordinary scene object makes the mapped level contents
+        // legible from every doorway. It is deliberately not portal-authored:
+        // a portal is a window into the peer level occurrence, so the same
+        // ordinary room geometry — including this center reference — is what
+        // gets projected through every opening.
+        let _ = spawn_object(
+            &mut scene_db.world,
+            unit_mesh,
+            frame_mat,
+            Mat4::from_translation(Vec3::ZERO) * Mat4::from_scale(Vec3::splat(0.9)),
+            1.6,
+        );
+
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(0, SubLevelContents::new([], authored_portals));
+        let projection_frame = PortalProjectionBridge::new(3)
+            .expect("portal_cube projection depth")
+            .build(&resolver)
+            .expect("portal_cube authored portal graph");
+        projection_frame
+            .publish_to_world(
+                &mut scene_db.world,
+                &projection_entities[..projection_frame.portal_views.len()],
+                &projection_entities[..projection_frame.portal_chains.len()],
+                projection_entities[0],
+            )
+            .expect("portal_cube dense projection rows");
+        renderer.set_portal_projection_frame(&projection_frame);
 
         // ── A light near the center so every wall reads, plus one per
         // doorway direction so the receding reflections don't go flat black.
@@ -297,17 +363,17 @@ impl ApplicationHandler for App {
             // view off that centerline, same as it would with two real
             // rooms and a real window between them.
             cam_pos: if std::env::var("CUBE_CLOSEUP").is_ok() {
-                Vec3::new(1.5, 1.0, 3.5)
+                Vec3::new(0.0, 0.8, 4.3)
             } else {
                 Vec3::new(4.0, 3.0, 4.0)
             },
             cam_yaw: if std::env::var("CUBE_CLOSEUP").is_ok() {
-                -2.60
+                std::f32::consts::PI
             } else {
                 -0.785
             },
             cam_pitch: if std::env::var("CUBE_CLOSEUP").is_ok() {
-                -0.33
+                -0.03
             } else {
                 -0.488
             },
@@ -315,7 +381,6 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             scene_db,
-            _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
         });
@@ -479,6 +544,11 @@ impl AppState {
             0.1,
             FAR_PLANE,
         );
+
+        // SceneDB is the authoritative scene. Publish all component rows
+        // (including the mesh/material/object rows created at startup) before
+        // the render graph reads its GPU mirror.
+        flush_scene_db(&self.scene_db, &self.queue);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)

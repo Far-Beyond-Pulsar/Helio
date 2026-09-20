@@ -53,6 +53,7 @@ const DARKEN_ALPHA: f32 = 0.18;
 struct OverlayOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) local_xy: vec2<f32>,
+    @location(1) @interpolate(flat) portal_flags: u32,
 }
 
 @vertex
@@ -64,11 +65,15 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     var out: OverlayOutput;
     out.clip_position = cameras[0].view_proj * world_pos;
     out.local_xy = local;
+    out.portal_flags = portal._pad;
     return out;
 }
 
 @fragment
 fn fs_main(input: OverlayOutput) -> @location(0) vec4<f32> {
+    if (input.portal_flags & 1u) != 0u {
+        discard;
+    }
     let cell = vec2<i32>(floor(input.local_xy / CELL_SIZE));
     // Bitwise AND on the low bit — well-defined for negative i32 in WGSL,
     // unlike `%` which can return negative results and break the parity.

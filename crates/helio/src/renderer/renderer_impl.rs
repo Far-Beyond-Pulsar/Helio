@@ -111,6 +111,14 @@ pub struct Renderer {
     /// Mirrors `RendererConfig::enable_portals` — same "persist for resize
     /// rebuild" reasoning as `enable_foliage` above.
     pub(crate) enable_portals: bool,
+    /// Coordinate-space transforms supplied by the frontend for portal and
+    /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
+    /// the G-buffer's table back to identity.
+    pub(crate) coordinate_spaces: Vec<glam::Mat4>,
+    /// Active dense portal projection counts supplied by the resolver bridge.
+    /// Growable SceneDB buffers are capacity-sized, so passes must not infer
+    /// active rows from their allocation size.
+    pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
@@ -598,6 +606,66 @@ impl Renderer {
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// Upload portal/sublevel coordinate spaces into the G-buffer's transient
+    /// transform table. Slot zero remains identity; callers provide slots 1+.
+    pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces.extend_from_slice(spaces);
+        let spaces = self.coordinate_spaces.clone();
+        let queue = Arc::clone(&self.queue);
+        if let Some(pass) = self.find_pass_mut::<helio_pass_gbuffer::GBufferPass>() {
+            pass.set_coordinate_spaces(&queue, &spaces);
+        }
+    }
+
+    /// Upload a resolver-generated portal projection frame while preserving
+    /// the renderer's existing coordinate-space seam. The frame owns slot
+    /// zero as identity and this facade accepts the non-identity tail because
+    /// `GBufferPass::set_coordinate_spaces` reserves slot zero itself.
+    pub fn set_portal_projection_frame(
+        &mut self,
+        frame: &helio_pass_portal_cull::PortalProjectionFrame,
+    ) {
+        self.set_coordinate_spaces(frame.renderer_coordinate_spaces());
+        self.portal_projection_counts = Some((
+            frame.counts.portal_view_count,
+            frame.counts.portal_chain_count,
+        ));
+        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_cull::PortalCullPass>() {
+            pass.set_active_chain_count(frame.counts.portal_chain_count);
+        }
+        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalMaskPass>() {
+            pass.set_active_portal_count(frame.counts.portal_view_count);
+        }
+        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>() {
+            pass.set_active_portal_count(frame.counts.portal_view_count);
+        }
+    }
+
+    pub(crate) fn apply_coordinate_spaces(&mut self) {
+        if !self.coordinate_spaces.is_empty() {
+            let spaces = self.coordinate_spaces.clone();
+            let queue = Arc::clone(&self.queue);
+            if let Some(pass) = self.find_pass_mut::<helio_pass_gbuffer::GBufferPass>() {
+                pass.set_coordinate_spaces(&queue, &spaces);
+            }
+        }
+        if let Some((view_count, chain_count)) = self.portal_projection_counts {
+            if let Some(pass) = self.find_pass_mut::<helio_pass_portal_cull::PortalCullPass>() {
+                pass.set_active_chain_count(chain_count);
+            }
+            if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalMaskPass>()
+            {
+                pass.set_active_portal_count(view_count);
+            }
+            if let Some(pass) =
+                self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
+            {
+                pass.set_active_portal_count(view_count);
+            }
+        }
     }
 
     /// Select the cloud representation used by the default sky pass.

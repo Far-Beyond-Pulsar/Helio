@@ -26,6 +26,9 @@ pub struct PortalMaskPass {
     reset_bind_group_key: Option<usize>,
 
     portal_count: u32,
+    /// Active resolver-published view rows. `None` preserves legacy manual
+    /// behavior for callers that do not provide projection counts.
+    active_portal_count: Option<u32>,
 }
 
 impl PortalMaskPass {
@@ -204,7 +207,14 @@ impl PortalMaskPass {
             reset_bind_group: None,
             reset_bind_group_key: None,
             portal_count: 0,
+            active_portal_count: None,
         }
+    }
+
+    /// Set the active dense portal-view row count. Growable SceneDB storage
+    /// can contain more capacity than the current projection frame.
+    pub fn set_active_portal_count(&mut self, count: u32) {
+        self.active_portal_count = Some(count);
     }
 }
 
@@ -242,15 +252,16 @@ impl RenderPass for PortalMaskPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_views"))
-            .map(|h| {
-                (h.buffer.size()
-                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                    as u32
-            })
-            .unwrap_or(0);
+        self.portal_count = self.active_portal_count.unwrap_or_else(|| {
+            ctx.scene_buffers
+                .get(BufferKey::of("portal_views"))
+                .map(|h| {
+                    (h.buffer.size()
+                        / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
+                        as u32
+                })
+                .unwrap_or(0)
+        });
         Ok(())
     }
 

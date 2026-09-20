@@ -35,6 +35,31 @@ pub fn new_scene_db_with_gpu_mirror(
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::SubLevelActorComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalViewComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalChainComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalProjectionCountsComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1,
+        device,
+    );
     helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,

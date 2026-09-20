@@ -57,6 +57,16 @@ mod portal_math;
 pub use portal_math::{
     crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
 };
+mod resolver;
+pub use resolver::{
+    PortalOccurrence, PortalProjection, PortalRecord, ResolutionError, ResolvedPortalChain,
+    SubLevelActorRecord, SubLevelContents, SubLevelResolver, SubLevelRuntimeContext,
+};
+mod projection;
+pub use projection::{
+    PortalProjectionBridge, PortalProjectionFrame, PortalProjectionKey, ProjectionError,
+    RuntimePortalKey, IDENTITY_COORDINATE_SPACE_SLOT,
+};
 mod contract;
 pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
 pub use helio_pass_gbuffer::CoordinateSpacesFrameData;
@@ -118,6 +128,9 @@ pub struct PortalCullPass {
 
     draw_count: u32,
     chain_count: u32,
+    /// Active resolver-published rows. `None` preserves the legacy manual
+    /// path, which historically used the whole growable buffer.
+    active_chain_count: Option<u32>,
 }
 
 impl PortalCullPass {
@@ -235,7 +248,14 @@ impl PortalCullPass {
             bind_group_key: None,
             draw_count: 0,
             chain_count: 0,
+            active_chain_count: None,
         }
+    }
+
+    /// Set the active chain row count published by the resolver/projection
+    /// bridge. The SceneDB buffer may be larger than the current dense frame.
+    pub fn set_active_chain_count(&mut self, count: u32) {
+        self.active_chain_count = Some(count.min(MAX_PORTAL_CHAINS as u32));
     }
 }
 
@@ -279,12 +299,15 @@ impl RenderPass for PortalCullPass {
             .pass_resources
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.draw_count)
             .unwrap_or(0);
-        self.chain_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_chains"))
-            .map(|h| (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32)
-            .unwrap_or(0)
-            .min(MAX_PORTAL_CHAINS as u32);
+        self.chain_count = self.active_chain_count.unwrap_or_else(|| {
+            ctx.scene_buffers
+                .get(BufferKey::of("portal_chains"))
+                .map(|h| {
+                    (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32
+                })
+                .unwrap_or(0)
+                .min(MAX_PORTAL_CHAINS as u32)
+        });
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {

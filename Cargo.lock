@@ -1488,6 +1488,7 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-object-batch",
  "helio-pass-portal-cull",
+ "helio-pass-portal-instances",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
