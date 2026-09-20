@@ -206,7 +206,9 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_shadow_quality(helio::ShadowQuality::Ultra)
+            .with_ssr(true)
+            .with_environment_reflections(true);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate_cathedral(&mut scene_db.world);
 

@@ -418,7 +418,13 @@ impl RenderPass for VolumetricFogPass {
             .get(helio_core::BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
-        let shadow_matrices = ctx.resources.read::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices"), "VolumetricFogPass").map(|s| s.shadow_matrices).unwrap_or(ctx.camera);
+        let shadow_matrices = ctx
+            .resources
+            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+                helio_core::ResourceKey::new("shadow_matrices"),
+            )
+            .map(|s| s.shadow_matrices)
+            .unwrap_or(ctx.camera);
 
         // Swap the ping-pong: last frame's write target is this frame's history.
         self.write_idx ^= 1;

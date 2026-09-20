@@ -697,15 +697,17 @@ impl RenderPass for HlfsPass {
             candidate_count: self.config.candidates_per_sample,
             has_velocity: ctx
                 .pass_resources
-                .read_texture_view(helio_core::ResourceKey::new("gbuffer_velocity"), "HLFS")
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"))
                 .is_some() as u32,
+            // Baked lightmaps are optional.  Screen-space HLFS is the dynamic,
+            // no-bake path, so use non-panicking lookups for these resources.
             surface_flags: (ctx
                 .pass_resources
-                .read_texture_view(helio_core::ResourceKey::new("baked_lightmap"), "HLFS")
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("baked_lightmap"))
                 .is_some()
                 && ctx
                     .pass_resources
-                    .read_texture_view(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "HLFS")
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
                     .is_some()) as u32
                 | (u32::from(self.previous_light_generation == Some(ctx.frame_num)) << 1)
                 | (u32::from(self.config.tile_presampling) << 2)
@@ -764,9 +766,8 @@ impl RenderPass for HlfsPass {
             .unwrap_or(&f.empty_lights);
         let shadow_matrices_buf = ctx
             .resources
-            .read::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
                 helio_core::ResourceKey::new("shadow_matrices"),
-                "HLFS",
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(&f.empty_shadow_matrices);
@@ -776,11 +777,11 @@ impl RenderPass for HlfsPass {
             shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx
                 .resources
-                .read_texture_view(helio_core::ResourceKey::new("shadow_atlas"), "HLFS")
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("shadow_atlas"))
                 .unwrap_or(&f.shadow_view),
             shadow_sampler: ctx
                 .resources
-                .read_sampler(helio_core::ResourceKey::new("shadow_sampler"), "HLFS")
+                .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("shadow_sampler"))
                 .unwrap_or(&f.shadow_sampler),
             textures: [
                 gbuffer.views[0],
@@ -789,22 +790,19 @@ impl RenderPass for HlfsPass {
                 gbuffer.views[3],
                 ctx.depth,
                 ctx.resources
-                    .read_texture_view(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "HLFS")
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
                     .unwrap_or(&f.lightmap_uv.view),
                 ctx.resources
-                    .read_texture_view(helio_core::ResourceKey::new("baked_lightmap"), "HLFS")
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("baked_lightmap"))
                     .unwrap_or(&f.black.view),
                 pre_aa,
                 ctx.resources
-                    .read_texture_view(helio_core::ResourceKey::new("gbuffer_velocity"), "HLFS")
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"))
                     .unwrap_or(&f.black.view),
             ],
             lightmap_sampler: ctx
                 .resources
-                .read_sampler(
-                    helio_core::ResourceKey::new("baked_lightmap_sampler"),
-                    "HLFS",
-                )
+                .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("baked_lightmap_sampler"))
                 .unwrap_or(&f.linear_sampler),
         };
         self.external.update(
