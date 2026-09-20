@@ -9,7 +9,7 @@ This new workload contains 1,024 independently shadowed local lights in a 48 x 6
 | Presampled | 3.174 | 4.024 | 13.87 / 13.54 / 13.03% |
 | All-light reference | 116.021 | 119.334 | reference |
 
-**Visual gate fails:** severe colored sampling variance on walls and metal. Reference renders smooth direct-light gradients. The performance figure does not make the noisy result acceptable. Metrics use post-tonemap RGB, not linear energy. The current HLFS graph still lacks reflection tracing/composition; black polished cylinders are not a verified reflection result. No realistic texture assets are present. The next work is variance control and reflection integration, followed by motion/disocclusion and 4K validation.
+**Visual gate fails:** severe colored sampling variance on walls and metal. Reference renders smooth direct-light gradients. The performance figure does not make the noisy result acceptable. Metrics use post-tonemap RGB, not linear energy. At this baseline the HLFS graph lacked reflection tracing/composition; black polished cylinders are not a verified reflection result. No realistic texture assets are present. The next work is variance control and reflection integration, followed by motion/disocclusion and 4K validation.
 
 Build: `cargo build --release -p examples --bin technology_gallery_hlfs`.
 Capture: set `HLFS_RT=1`, `HLFS_PRESAMPLED=1`, `HLFS_RESOLUTION=1440p`, `HLFS_FXAA=1`, `HLFS_CAPTURE_TIMINGS=1`, then run `target/release/technology_gallery_hlfs.exe --capture target/technology`. Add `HLFS_REFERENCE=1` for the all-light reference. Both 100-frame captures complete; release build passes. No interactive-viewer acceptance yet.
@@ -105,3 +105,8 @@ Reproduce the example using the earlier capture command plus `HLFS_TEMPORAL_RIS=
 
 ![Opt-in temporal reuse, still not visually accepted](temporal-ris-moving.png)
 ![Stationary temporal reuse, frame 399](temporal-ris-static.png)
+
+
+## Reflection integration follow-up
+
+The optional reflection path is now connected to both HLFS graphs. See the [reflection validation report](../../../../helio-pass-ssr/tests/validation/hlfs-20260920/README.md) for reference/sampled captures, GPU composition tests, 1440p/4K measurements and remaining screen-space limitations. The original screenshots above predate this integration and remain useful lighting-only controls. The visual acceptance gate remains failed.

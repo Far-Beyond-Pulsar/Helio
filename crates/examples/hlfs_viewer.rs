@@ -53,7 +53,7 @@ impl ApplicationHandler for App {
         assert!(!presampled||rt,"HLFS_PRESAMPLED requires HLFS_RT");
         let hlfs=if presampled {helio_pass_hlfs::HlfsConfig::ray_traced_presampled()}
             else {helio_pass_hlfs::HlfsConfig{mode:if rt {helio_pass_hlfs::HlfsMode::RayTraced}else{helio_pass_hlfs::HlfsMode::ScreenSpace},..Default::default()}};
-        let mut renderer=RendererBuilder::new(RendererConfig::new(config.width,config.height,format),scene_db_handle(&scene_db))
+        let mut renderer=RendererBuilder::new(RendererConfig::new(config.width,config.height,format).with_ssr(std::env::var_os("HLFS_SSR").is_some()),scene_db_handle(&scene_db))
             .with_editor_mode(false)
             .with_pass_build_context(Box::new(move |ctx| {
                 let device=ctx.device.clone();

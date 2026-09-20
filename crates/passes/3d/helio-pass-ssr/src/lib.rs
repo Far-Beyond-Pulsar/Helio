@@ -15,6 +15,9 @@
 //!
 //! Writes Rgba16Float at full resolution: RGB = colour, A = hit confidence.
 
+mod compose;
+pub use compose::SsrCompositePass;
+
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
@@ -30,9 +33,9 @@ pub struct SsrPass {
 
     bg_0: wgpu::BindGroup,
     bg_1: Option<wgpu::BindGroup>,
-    bg_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bg_1_key: Option<[wgpu::TextureView; 6]>,
     bg_2: Option<wgpu::BindGroup>,
-    bg_2_key: Option<(usize, usize)>,
+    bg_2_key: Option<(wgpu::Tlas, Option<wgpu::TextureView>)>,
 
     linear_sampler: wgpu::Sampler,
     rc_fallback: wgpu::TextureView,
@@ -244,7 +247,7 @@ impl RenderPass for SsrPass {
         };
 
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+        let pre_aa_view: &wgpu::TextureView = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -258,16 +261,10 @@ impl RenderPass for SsrPass {
         };
 
         // ── BG1: always bound ───────────────────────────────────────────
-        let key = (
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            depth_view as *const _ as usize,
-            pre_aa_view as *const _ as usize,
-            hiz_min_view as *const _ as usize,
-            ssr_trace as *const _ as usize,
-        );
+        let key = [gbuffer.views[1].clone(), gbuffer.views[2].clone(),
+            depth_view.clone(), pre_aa_view.clone(), hiz_min_view.clone(), ssr_trace.clone()];
 
-        if self.bg_1_key != Some(key) {
+        if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("SSR BG1"),
                 layout: &self.bgl_1,
@@ -299,14 +296,11 @@ impl RenderPass for SsrPass {
             let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
-                let rc_view = ctx.resources.get(helio_core::ResourceKey::new("rc_view"));
+                let rc_view: Option<&wgpu::TextureView> = ctx.resources.get(helio_core::ResourceKey::new("rc_view"));
 
-                let rt_key = (
-                    tlas_binding as *const _ as usize,
-                    rc_view.map_or(0, |v| v as *const _ as usize),
-                );
+                let rt_key = (tlas_binding.clone(), rc_view.cloned());
 
-                if self.bg_2_key != Some(rt_key) {
+                if self.bg_2_key.as_ref() != Some(&rt_key) {
                     let rc_tex = rc_view.unwrap_or(&self.rc_fallback);
 
                     self.bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -327,7 +321,7 @@ impl RenderPass for SsrPass {
                 }
 
                 // RT path
-                let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+                let cpass = unsafe { &mut *ctx.encoder_ptr };
                 let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SSR Hybrid Trace"),
                     timestamp_writes: None,
@@ -343,7 +337,7 @@ impl RenderPass for SsrPass {
         }
 
         // ── Default: Hi-Z only ──────────────────────────────────────────
-        let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+        let cpass = unsafe { &mut *ctx.encoder_ptr };
         let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("SSR Trace"),
             timestamp_writes: None,

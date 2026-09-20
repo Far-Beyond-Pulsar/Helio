@@ -1173,6 +1173,10 @@ fn build_hlfs_graph_internal(
     let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+    }
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,
@@ -1410,6 +1414,10 @@ fn build_fxaa_hlfs_graph_internal(
     let mut hlfs_pass = HlfsPass::new(device, queue, w, h, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, w, h)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+    }
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,

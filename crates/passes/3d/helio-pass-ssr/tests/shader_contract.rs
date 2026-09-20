@@ -3,6 +3,7 @@ fn raster_and_ray_query_sources_validate_with_shared_gbuffer_contract() {
     for source in [
         include_str!("../shaders/ssr_trace.wgsl"),
         include_str!("../shaders/ssr_trace_rt.wgsl"),
+        include_str!("../shaders/ssr_compose.wgsl"),
     ] {
         let resolved = helio_core::shader::resolve_with(source, &[helio_pass_hiz::HIZ_SNIPPET]);
         let module = naga::front::wgsl::parse_str(&resolved)
@@ -39,6 +40,7 @@ fn hybrid_pipeline_accepts_shared_camera_and_normal_contract() {
             mapped_at_creation: false,
         });
         let _pass = helio_pass_ssr::SsrPass::new(&device, &queue, &camera, 64, 64);
+        let _composite = helio_pass_ssr::SsrCompositePass::new(&device, &camera, wgpu::TextureFormat::Rgba16Float);
         assert!(errors.pop().await.is_none(), "SSR pipeline validation failed");
     });
 }

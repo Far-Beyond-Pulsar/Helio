@@ -82,7 +82,8 @@ pub fn run_scene(
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut config = RendererConfig::new(width, height, format)
-            .with_shadow_quality(helio::ShadowQuality::High);
+            .with_shadow_quality(helio::ShadowQuality::High)
+            .with_ssr(std::env::var_os("HLFS_SSR").is_some());
         if std::env::var_os("HLFS_TSR_NATIVE").is_some() {
             assert!(!fxaa, "select one AA method for a controlled capture");
             config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Native);

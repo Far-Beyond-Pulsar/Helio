@@ -1,0 +1,6 @@
+test compose::tests::additive_composition_respects_fresnel_confidence_ao_and_background ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+test raster_and_ray_query_sources_validate_with_shared_gbuffer_contract ... ok
+test hybrid_pipeline_accepts_shared_camera_and_normal_contract ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

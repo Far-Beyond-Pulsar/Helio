@@ -56,26 +56,34 @@ fn exit_cell(
     return o + d * min(delta.x, delta.y);
 }
 
-fn ray_query_hit(world_pos: vec3<f32>, R: vec3<f32>) -> bool {
-    let origin = world_pos + R * 0.001;
+fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>) -> vec4<f32> {
+    let origin = world_pos + normal * 0.002;
     var rq: ray_query;
     rayQueryInitialize(&rq, acc_struct,
         RayDesc(0x01u, 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
     rayQueryProceed(&rq);
-    return rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE;
+    let hit=rayQueryGetCommittedIntersection(&rq);
+    if hit.kind==RAY_QUERY_INTERSECTION_NONE { return vec4<f32>(0.0); }
+    return vec4<f32>(origin+R*hit.t,1.0);
 }
 
-fn ray_query_hit_world_pos(world_pos: vec3<f32>, R: vec3<f32>) -> vec3<f32> {
-    let origin = world_pos + R * 0.001;
-    var rq: ray_query;
-    rayQueryInitialize(&rq, acc_struct,
-        RayDesc(0x01u, 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
-    rayQueryProceed(&rq);
-    if rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE {
-        let t = rayQueryGetCommittedIntersection(&rq).t;
-        return origin + R * t;
-    }
-    return world_pos;
+// Screen color is valid only if it represents this RT hit, rather than an
+// unrelated foreground surface at the same projected coordinate.
+fn projected_hit_color(hit: vec4<f32>, direction: vec3<f32>) -> vec4<f32> {
+    if hit.w==0.0 { return vec4<f32>(0.0); }
+    let clip=cameras[0].view_proj*vec4<f32>(hit.xyz,1.0);
+    if clip.w<=0.0 { return vec4<f32>(0.0); }
+    let uv=helio_ndc_to_uv(clip.xy/clip.w);
+    if any(uv<vec2<f32>(0.0)) || any(uv>=vec2<f32>(1.0)) { return vec4<f32>(0.0); }
+    let px=vec2<i32>(uv*vec2<f32>(textureDimensions(gbuf_depth)));
+    let depth=textureLoad(gbuf_depth,px,0);
+    if depth>=1.0 { return vec4<f32>(0.0); }
+    let hit_z=-(cameras[0].view*vec4<f32>(hit.xyz,1.0)).z;
+    let visible_z=linearize_depth(depth);
+    if abs(hit_z-visible_z)>max(0.02,0.005*hit_z) { return vec4<f32>(0.0); }
+    let normal=helio_gbuffer_normal(textureLoad(gbuf_normal,px,0).xyz);
+    if dot(normal,-direction)<=0.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(textureLoad(scene_color,px,0).rgb,1.0);
 }
 
 fn sample_rc_reflection(world_pos: vec3<f32>, R: vec3<f32>, roughness: f32) -> vec3<f32> {
@@ -207,88 +215,35 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
         tr = next;
     }
 
-    // ── Hybrid blend ────────────────────────────────────────────────────────
-    var final_color = vec3<f32>(0.0);
-    var final_confidence = 0.0;
-    let rt_hit = ray_query_hit(world_pos, R2);
-
+    // Prefer reliable screen hits. Low-confidence rays get one hardware query,
+    // and reuse screen radiance only after checking the projected hit depth.
+    var final_color=vec3<f32>(0.0);
+    var final_confidence=0.0;
     if hiz_hit {
-        let hit_uv = tr.xy;
-        let r_depth = linearize_depth(tr.z);
-        let scene_depth = linearize_depth(
-            textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(dims)), 0)
-        );
-
-        if r_depth <= scene_depth * (1.0 + THICKNESS) {
-            let n_hit = helio_gbuffer_normal(
-                textureLoad(gbuf_normal, vec2<i32>(hit_uv * vec2<f32>(dims)), 0).xyz
-            );
-            let arriving = -dot(R2, n_hit);
-            let backface_fade = smoothstep(-0.15, 0.15, arriving);
-            let border = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
-            let edge_fade = smoothstep(0.0, 0.1, border);
-            let facing_fade = 1.0 - smoothstep(0.26, 0.5, dot(R2, V));
-            let travelled = length(hit_uv - p0.xy) / max(length(d.xy), 1e-6);
-            let dist_fade = 1.0 - smoothstep(FADE_START, 1.0, travelled);
-            let confidence = clamp(
-                backface_fade * edge_fade * facing_fade * dist_fade * roughness_fade,
-                0.0, 1.0,
-            );
-
-            let ssr_col = textureSampleLevel(scene_color, linear_sampler, hit_uv, 0.0).rgb;
-
-            if confidence >= 0.5 || !rt_hit {
-                final_color = ssr_col;
-                final_confidence = confidence;
-            } else {
-                let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-                let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-                let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-                if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-                    let rt_col = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-                    final_color = mix(ssr_col, rt_col, 1.0 - confidence);
-                    final_confidence = max(confidence, 0.5);
-                } else {
-                    let rc_col = sample_rc_reflection(world_pos, R2, roughness);
-                    final_color = mix(ssr_col, rc_col, 1.0 - confidence);
-                    final_confidence = confidence;
-                }
-            }
-        } else if rt_hit {
-            let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-            let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-            let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-            if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-                final_color = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-                final_confidence = 0.6;
-            } else {
-                final_color = sample_rc_reflection(world_pos, R2, roughness);
-                final_confidence = roughness_fade * 0.3;
-            }
-        } else {
-            textureStore(ssr_output, px, vec4<f32>(0.0));
-            return;
-        }
-    } else if rt_hit {
-        let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-        let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-        let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-        if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-            final_color = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-            final_confidence = 0.5;
-        } else {
-            final_color = sample_rc_reflection(world_pos, R2, roughness);
-            final_confidence = roughness_fade * 0.3;
-        }
-    } else {
-        if roughness > 0.6 {
-            final_color = sample_rc_reflection(world_pos, R2, roughness);
-            final_confidence = roughness_fade * 0.2;
-        } else {
-            textureStore(ssr_output, px, vec4<f32>(0.0));
-            return;
+        let hit_uv=tr.xy;
+        let hit_px=vec2<i32>(hit_uv*vec2<f32>(dims));
+        let ray_z=linearize_depth(tr.z);
+        let scene_z=linearize_depth(textureLoad(gbuf_depth,hit_px,0));
+        if abs(ray_z-scene_z)<=max(0.02,scene_z*THICKNESS) {
+            let n_hit=helio_gbuffer_normal(textureLoad(gbuf_normal,hit_px,0).xyz);
+            let border=min(min(hit_uv.x,1.0-hit_uv.x),min(hit_uv.y,1.0-hit_uv.y));
+            let travelled=length(hit_uv-p0.xy)/max(length(d.xy),1e-6);
+            final_confidence=clamp(smoothstep(-0.15,0.15,-dot(R2,n_hit))
+                *smoothstep(0.0,0.1,border)*(1.0-smoothstep(0.26,0.5,dot(R2,V)))
+                *(1.0-smoothstep(FADE_START,1.0,travelled))*roughness_fade,0.0,1.0);
+            final_color=textureSampleLevel(scene_color,linear_sampler,hit_uv,0.0).rgb;
         }
     }
-
-    textureStore(ssr_output, px, vec4<f32>(final_color, final_confidence));
+    if final_confidence<0.5 {
+        let hit=ray_query_hit_position(world_pos,N,R2);
+        let radiance=projected_hit_color(hit,R2);
+        if radiance.a>0.0 {
+            final_color=radiance.rgb;
+            final_confidence=roughness_fade;
+        } else if final_confidence==0.0 && roughness>0.6 {
+            final_color=sample_rc_reflection(world_pos,R2,roughness);
+            final_confidence=roughness_fade*0.2;
+        }
+    }
+    textureStore(ssr_output,px,vec4<f32>(final_color,final_confidence));
 }
