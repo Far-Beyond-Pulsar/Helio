@@ -1,0 +1,32 @@
+{
+  "baseline": {
+    "nrmse_display_rgb_percent": {
+      "31": 4.655020243468002,
+      "63": 4.915388005078061,
+      "99": 4.80875132229569
+    },
+    "hlfs_only_median_ms": 4.450304,
+    "hlfs_only_p95_ms": 5.0878464,
+    "composite_median_ms": 1.5605760000000002
+  },
+  "phase": {
+    "nrmse_display_rgb_percent": {
+      "31": 4.40600908326175,
+      "63": 4.759533876829831,
+      "99": 4.6831056958323884
+    },
+    "hlfs_only_median_ms": 5.284864000000001,
+    "hlfs_only_p95_ms": 6.226073599999999,
+    "composite_median_ms": 2.3475200000000003
+  },
+  "phase-support": {
+    "nrmse_display_rgb_percent": {
+      "31": 4.660007424255631,
+      "63": 5.076373595416292,
+      "99": 4.920630498888108
+    },
+    "hlfs_only_median_ms": 4.569088000000001,
+    "hlfs_only_p95_ms": 5.7637376,
+    "composite_median_ms": 1.622016
+  }
+}
