@@ -22,7 +22,8 @@
 //! `execute()` records exactly:
 //! 1. One fullscreen draw (TSR resolve) into `output_texture`.
 //! 2. One `copy_texture_to_texture` (history ping-pong).
-//! 3. One fullscreen draw (passthrough blit) into `ctx.target`.
+//! 3. Optional fullscreen blit into `ctx.target`; intermediate mode publishes
+//!    the HDR resolve as `tsr_color` for a following post-process pass.
 //!
 //! All three are constant-time GPU operations regardless of scene complexity.
 
@@ -141,8 +142,10 @@ struct TsrUniform {
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
 /// Reads `"pre_aa"` from [`ResourceRegistry`](helio_core::ResourceRegistry) and
-/// writes the upsampled, temporally accumulated image to `ctx.target`.
+/// publishes the upsampled, temporally accumulated image as `tsr_color`.
+/// By default it also blits to `ctx.target`.
 pub struct TsrPass {
+    intermediate_output: bool,
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
@@ -183,6 +186,12 @@ pub struct TsrPass {
 }
 
 impl TsrPass {
+    /// Publish the HDR resolve for post-processing without a redundant surface blit.
+    pub fn with_intermediate_output(mut self) -> Self {
+        self.intermediate_output = true;
+        self
+    }
+
     /// Create a new TSR pass.
     ///
     /// - `internal_*` — pre-AA (geometry) render resolution.
@@ -334,6 +343,7 @@ impl TsrPass {
         });
 
         Self {
+            intermediate_output: false,
             pipeline,
             bgl,
             bind_group: None,
@@ -506,6 +516,15 @@ impl RenderPass for TsrPass {
         "TSR"
     }
 
+    fn writes(&self) -> &'static [&'static str] { &["tsr_color"] }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // The pass owns this view for the graph lifetime; frame registries
+        // cannot outlive it. Resize replaces it before the next publication.
+        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.output_view) };
+        frame.write(helio_core::ResourceKey::new("tsr_color"), view, "TSR");
+    }
+
     fn requires_camera_jitter(&self) -> bool {
         true
     }
@@ -665,7 +684,7 @@ impl RenderPass for TsrPass {
         );
 
         // ── 4. Blit output_view → ctx.target ──────────────────────────────────
-        {
+        if !self.intermediate_output {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: ctx.target,
                 resolve_target: None,

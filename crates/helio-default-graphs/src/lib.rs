@@ -1218,17 +1218,20 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
+        ).with_intermediate_output()));
     }
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+    let postprocess = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
         config.height,
         config.surface_format,
         None,
-    )));
+    );
+    graph.add_pass(Box::new(if config.tsr_quality.is_some() {
+        postprocess.with_tsr_input()
+    } else { postprocess }));
 
     add_final_passes(
         &mut graph,

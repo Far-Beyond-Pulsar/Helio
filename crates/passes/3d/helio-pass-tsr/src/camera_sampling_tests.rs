@@ -8,8 +8,12 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let device = Arc::new(device);
     let queue = Arc::new(queue);
-    let mut scene = helio_core::GpuScene::new(device.clone(), queue.clone());
-    let scene_resources = scene.resources();
+    let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None, size: std::mem::size_of::<helio_core::GpuCameraUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let scene_buffers = helio_core::SceneBufferProjection::empty();
     let mut pass = TsrPass::new(
         &device,
         32,
@@ -81,11 +85,15 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             123.0,
             0.0,
         ];
-        scene.camera.update(camera);
+        queue.write_buffer(&camera_buffer, 0, bytemuck::bytes_of(&camera));
         pass.prepare(&PrepareContext {
             device: &device,
             queue: &queue,
-            scene: scene_resources,
+            camera: &camera_buffer,
+            camera_data: &camera,
+            camera_generation: 0,
+            scene_buffers: &scene_buffers,
+            registry: &helio_core::ResourceRegistry::empty(),
             pass_resources: &helio_core::ResourceRegistry::empty(),
             width: size[0],
             height: size[1],
@@ -119,5 +127,23 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
         assert_eq!(words[4], time.to_bits());
         drop(data);
         staging.unmap();
+    }
+}
+
+#[test]
+fn resolved_view_publication_follows_resize() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, _) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let mut pass = TsrPass::new(&device, 32, 16, 64, 32,
+        wgpu::TextureFormat::Rgba8Unorm, TsrQuality::Quality).with_intermediate_output();
+    let old = pass.output_view.clone();
+    for size in [None, Some((96, 48))] {
+        if let Some((width, height)) = size { pass.on_resize(&device, width, height); }
+        let mut frame = helio_core::ResourceRegistry::empty();
+        pass.publish(&mut frame);
+        let published: &wgpu::TextureView = frame.get(helio_core::ResourceKey::new("tsr_color")).unwrap();
+        assert_eq!(published, &pass.output_view);
+        if size.is_some() { assert_ne!(published, &old); }
     }
 }

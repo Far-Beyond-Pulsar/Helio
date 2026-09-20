@@ -125,6 +125,9 @@ pub fn run_scene(
                 }))
                 .build(device.clone(), queue.clone(), width, height, format);
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        // Camera motion advances by frame index. Temporal filters and animated
+        // passes must use the same fixed clock, independent of capture readback.
+        renderer.set_frame_delta_override(Some(1.0 / 60.0));
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cathedral capture"),
             size: wgpu::Extent3d {

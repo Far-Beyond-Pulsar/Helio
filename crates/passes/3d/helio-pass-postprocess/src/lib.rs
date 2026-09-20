@@ -71,7 +71,7 @@ pub struct UserEffectEntry {
 }
 
 pub struct PostProcessPass {
-    fxaa_input: bool,
+    color_input: &'static str,
     avg_luminance_buf: wgpu::Buffer,
 
     exposure_pipeline: wgpu::ComputePipeline,
@@ -143,7 +143,13 @@ pub struct PostProcessPass {
 impl PostProcessPass {
     /// Consume the linear HDR intermediate published by FXAA.
     pub fn with_fxaa_input(mut self) -> Self {
-        self.fxaa_input = true;
+        self.color_input = "fxaa_color";
+        self
+    }
+
+    /// Consume the HDR history resolve published by TSR.
+    pub fn with_tsr_input(mut self) -> Self {
+        self.color_input = "tsr_color";
         self
     }
 
@@ -640,7 +646,7 @@ impl PostProcessPass {
         let stored_snippet = user_effects_fn.map(|s| s.to_string());
 
         Self {
-            fxaa_input: false,
+            color_input: "pre_aa",
             avg_luminance_buf,
             exposure_pipeline,
             bloom_extract_pipeline,
@@ -1070,8 +1076,11 @@ impl RenderPass for PostProcessPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        if self.fxaa_input { &["fxaa_color", "fog_accum", "color_grading_lut"] }
-        else { &["pre_aa", "fog_accum", "color_grading_lut"] }
+        match self.color_input {
+            "fxaa_color" => &["fxaa_color", "fog_accum", "color_grading_lut"],
+            "tsr_color" => &["tsr_color", "fog_accum", "color_grading_lut"],
+            _ => &["pre_aa", "fog_accum", "color_grading_lut"],
+        }
     }
 
     fn render_pass_descriptor<'a>(
@@ -1084,7 +1093,7 @@ impl RenderPass for PostProcessPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read(if self.fxaa_input { "fxaa_color" } else { "pre_aa" });
+        builder.read(self.color_input);
         // Optional: graphs without a VolumetricFogPass never publish this, and the
         // uber shader falls back to a 1x1 no-op texture.
         builder.read("fog_accum");
@@ -1180,7 +1189,7 @@ impl RenderPass for PostProcessPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_key = if self.fxaa_input { "fxaa_color" } else { "pre_aa" };
+        let input_key = self.color_input;
         let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new(input_key)) {
             Some(v) => v,
             None => return Ok(()),

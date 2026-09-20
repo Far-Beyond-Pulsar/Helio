@@ -1,0 +1,26 @@
+{
+  "tsr-discarded": {
+    "hlfs_only_median_ms": 9.43872,
+    "hlfs_only_p95_ms": 10.2170112,
+    "serialized_cpu_gpu_median_ms": 33.369,
+    "serialized_cpu_gpu_p95_ms": 37.564
+  },
+  "tsr-fixed-clock-a": {
+    "hlfs_only_median_ms": 9.450496000000001,
+    "hlfs_only_p95_ms": 10.1612032,
+    "serialized_cpu_gpu_median_ms": 33.962,
+    "serialized_cpu_gpu_p95_ms": 39.647
+  },
+  "tsr-fixed-clock-b": {
+    "hlfs_only_median_ms": 9.500160000000001,
+    "hlfs_only_p95_ms": 10.2438912,
+    "serialized_cpu_gpu_median_ms": 33.685,
+    "serialized_cpu_gpu_p95_ms": 39.708
+  },
+  "tsr-fixed-clock-4k": {
+    "hlfs_only_median_ms": 20.47744,
+    "hlfs_only_p95_ms": 21.1175936,
+    "serialized_cpu_gpu_median_ms": 73.778,
+    "serialized_cpu_gpu_p95_ms": 84.912
+  }
+}
