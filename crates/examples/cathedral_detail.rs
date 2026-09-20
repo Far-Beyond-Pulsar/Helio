@@ -334,11 +334,15 @@ pub fn populate(world: &mut World) {
         .chain(&panes)
         .map(|m| m.indices.len() / 3)
         .sum();
-    for (mesh, (colour, rough, metal, emission, strength)) in meshes.into_iter().zip(properties) {
+    for (index, (mut mesh, (colour, rough, metal, emission, strength))) in meshes.into_iter().zip(properties).enumerate() {
         let material = spawn_material(
             world,
             make_material(colour, rough, metal, emission, strength),
         );
+        if index == 0 {
+            world.insert(material, crate::hlfs_capture::architectural_materials::StoneMaterial);
+            mesh.world_space_uv(2.0);
+        }
         let mesh = spawn_mesh(
             world,
             MeshUpload {

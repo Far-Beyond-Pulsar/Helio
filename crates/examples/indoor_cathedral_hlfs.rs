@@ -208,10 +208,15 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate_cathedral(&mut scene_db.world);
 
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let mut scene_handle = scene_db_handle(&scene_db);
+        let stone_store = hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let has_stone = stone_store.is_some();
+        if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
+        let mut renderer = RendererBuilder::new(config, scene_handle)
             .with_editor_mode(true)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
+        if has_stone { hlfs_capture::architectural_materials::configure_sampler(&mut renderer); }
         let acceleration = if std::env::var_os("HLFS_RT").is_some() {
             hlfs_capture::enable_ray_shadows(&mut scene_db.world);
             let config = if std::env::var_os("HLFS_PRESAMPLED").is_some() {

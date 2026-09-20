@@ -9,6 +9,27 @@ pub(crate) struct Mesh {
     pub(crate) indices: Vec<u32>,
 }
 impl Mesh {
+    /// Dominant-plane mapping in metres for flat architectural stone faces.
+    /// Rebuild the tangent basis to agree with the projected UV axes.
+    pub(crate) fn world_space_uv(&mut self, tile_metres: f32) {
+        assert!(tile_metres > 0.0 && tile_metres.is_finite());
+        for vertex in &mut self.vertices {
+            let decode = |shift| ((vertex.normal >> shift) as u8 as i8) as f32 / 127.0;
+            let n = Vec3::new(decode(0), decode(8), decode(16)).normalize();
+            let a = n.abs();
+            let (u, v) = if a.y >= a.x && a.y >= a.z { (Vec3::X, -Vec3::Z) }
+                else if a.x >= a.z { (Vec3::Z, Vec3::Y) } else { (Vec3::X, Vec3::Y) };
+            let p = Vec3::from_array(vertex.position);
+            let axis = v.cross(n).normalize();
+            let tangent = axis * axis.dot(u).signum();
+            let sign = n.cross(tangent).dot(v).signum();
+            let packed = PackedVertex::from_components(vertex.position, n.to_array(),
+                [p.dot(u) / tile_metres, p.dot(v) / tile_metres], tangent.to_array(), sign);
+            vertex.tex_coords0 = packed.tex_coords0;
+            vertex.tangent = packed.tangent;
+            vertex.bitangent_sign = packed.bitangent_sign;
+        }
+    }
     pub(crate) fn triangle(&mut self, a: Vec3, b: Vec3, c: Vec3) {
         let normal = (b - a).cross(c - a).normalize();
         let tangent = (b - a).normalize();

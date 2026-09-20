@@ -3,6 +3,9 @@ use helio::{Camera, RendererBuilder, RendererConfig};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
+#[path = "architectural_materials.rs"]
+pub mod architectural_materials;
+
 pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>)) {
     run_scene(directory, "cathedral", populate, |t, aspect| {
         Camera::perspective_look_at(
@@ -108,6 +111,11 @@ pub fn run_scene(
         let mut acceleration =
             helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone());
         let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
+        let architectural_store = architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let has_architectural_textures = architectural_store.is_some();
+        if let Some(store) = architectural_store {
+            scene_handle = scene_handle.with_texture_store(store).unwrap();
+        }
         let mut diagnostic_texture_store=None;
         let texture_lifecycle=std::env::var_os("HLFS_TEXTURE_LIFECYCLE").is_some();
         assert!(!texture_lifecycle || std::env::var_os("HLFS_TEXTURE_CHECKER").is_some(), "texture lifecycle requires checker mode");
@@ -136,6 +144,9 @@ pub fn run_scene(
                     }
                 }))
                 .build(device.clone(), queue.clone(), width, height, format);
+        if has_architectural_textures {
+            architectural_materials::configure_sampler(&mut renderer);
+        }
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         // Camera motion advances by frame index. Temporal filters and animated
         // passes must use the same fixed clock, independent of capture readback.
@@ -238,7 +249,7 @@ pub fn run_scene(
                 let sample_height = size.height.div_ceil(sample_scale);
                 let aa = if fxaa { "fxaa" } else if std::env::var_os("HLFS_TSR_NATIVE").is_some() { "tsr_native" } else { "none" };
                 let metadata = format!(
-                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"reference\": {reference},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
+                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"reference\": {reference},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
                     size.width, size.height);
                 eprintln!("Capture dimensions: {metadata}");
                 std::fs::write(std::path::Path::new(directory).join("capture-config.json"), metadata).unwrap();

@@ -653,6 +653,13 @@ impl Renderer {
         self.clear_color = color;
     }
 
+    /// Replace the shared sampler used by SceneDB material texture slots.
+    /// Incrementing the binding version refreshes pass descriptor caches.
+    pub fn set_material_sampler(&mut self, descriptor: &wgpu::SamplerDescriptor<'_>) {
+        self.material_bindings.fallback_sampler = self.device.create_sampler(descriptor);
+        self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
+    }
+
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
         self.ambient_color = color;
         self.ambient_intensity = intensity;
