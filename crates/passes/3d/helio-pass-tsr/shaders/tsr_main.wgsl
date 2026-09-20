@@ -55,7 +55,7 @@ struct CameraUniforms {
 struct TsrUniform {
     jitter_offset:  vec2<f32>, // sub-pixel jitter in [-0.5, 0.5)
     reactivity:     f32,       // 0 = full history, 1 = no history
-    reset:          u32,       // 1 on first frame / after reset_history()
+    flags:          u32,       // bit 0: reset, bit 1: transparency coverage
     time_delta:     f32,       // seconds since last frame
     tap_radius:     u32,       // 1 = 3×3, 2 = 5×5
     previous_jitter_uv: vec2<f32>,
@@ -63,6 +63,7 @@ struct TsrUniform {
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
 @group(0) @binding(7) var history_depth_tex: texture_2d<f32>;
+@group(0) @binding(8) var transparency_reactivity: texture_2d<f32>;
 
 // ── Vertex passthrough ────────────────────────────────────────────────────────
 
@@ -339,6 +340,13 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // ── Jitter correction ─────────────────────────────────────────────────────
     let jitter_uv = tsr.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
     let cur_uv    = in.uv + jitter_uv;
+    let use_coverage = (tsr.flags & 2u) != 0u;
+    var coverage = 0.0;
+    if use_coverage {
+        coverage = clamp(textureSampleLevel(transparency_reactivity, linear_sampler, cur_uv, 0.0).r, 0.0, 1.0);
+    }
+    // History alpha holds coverage only in the opt-in transparency path.
+    let output_alpha = select(1.0, coverage, use_coverage);
 
     // ── Current frame sample (jitter-corrected) ───────────────────────────────
     let current_rgb = textureSampleLevel(current_frame, linear_sampler, cur_uv, 0.0).rgb;
@@ -351,9 +359,9 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     // Full reactivity promises current-frame-only output. Bypass reprojection
     // and history blending just as a reset does, even after a long frame.
-    if tsr.reset != 0u || tsr.reactivity >= 1.0 {
+    if (tsr.flags & 1u) != 0u || max(tsr.reactivity, coverage) >= 1.0 {
         let sharpened = apply_cas(current_rgb, cur_uv);
-        return TsrOutput(vec4<f32>(sharpened, 1.0),current_depth);
+        return TsrOutput(vec4<f32>(sharpened, output_alpha),current_depth);
     }
 
     // ── Depth-based reprojection → history UV ─────────────────────────────────
@@ -364,16 +372,24 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // If reprojected UV is out of screen, use current frame only
     if history.z <= 0.0 || any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
         let sharpened = apply_cas(current_rgb, cur_uv);
-        return TsrOutput(vec4<f32>(sharpened, 1.0),current_depth);
+        return TsrOutput(vec4<f32>(sharpened, output_alpha),current_depth);
     }
 
     // ── History sample (Catmull-Rom for quality) ───────────────────────────────
     let depth_pixel = clamp(vec2<i32>(history_uv*out_dims),vec2<i32>(0),vec2<i32>(out_dims)-1);
     let history_depth = textureLoad(history_depth_tex,depth_pixel,0).r;
     if !history_depth_matches(history.w,history_depth,depth_tolerance) {
-        return TsrOutput(vec4<f32>(apply_cas(current_rgb,cur_uv),1.0),current_depth);
+        return TsrOutput(vec4<f32>(apply_cas(current_rgb,cur_uv),output_alpha),current_depth);
     }
 
+    var local_reactivity = max(tsr.reactivity, coverage);
+    if use_coverage {
+        let previous_coverage = clamp(textureSampleLevel(history_frame, linear_sampler, history_uv, 0.0).a, 0.0, 1.0);
+        local_reactivity = max(local_reactivity, previous_coverage);
+    }
+    if local_reactivity >= 1.0 {
+        return TsrOutput(vec4<f32>(apply_cas(current_rgb,cur_uv),output_alpha),current_depth);
+    }
     let history_rgb = sample_catmull_rom(history_frame, linear_sampler, history_uv);
 
     // ── Reprojected history depth ─────────────────────────────────────────────
@@ -415,7 +431,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let clamped_history = clamp(history_tm, aabb_min, aabb_max);
 
     // ── Adaptive blend ─────────────────────────────────────────────────────────
-    let blend = compute_blend_factor(flags, tsr.reactivity, tsr.time_delta, history_tm, n);
+    let blend = compute_blend_factor(flags, local_reactivity, tsr.time_delta, history_tm, n);
 
     // ── Blend ─────────────────────────────────────────────────────────────────
     let blended_ycocg = mix(clamped_history, current_tm, blend);
@@ -428,5 +444,5 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let cas_result = apply_cas(result_linear, cur_uv);
     let output     = mix(result_linear, cas_result, cas_weight);
 
-    return TsrOutput(vec4<f32>(output, 1.0),current_depth);
+    return TsrOutput(vec4<f32>(output, output_alpha),current_depth);
 }

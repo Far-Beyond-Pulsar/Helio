@@ -219,8 +219,13 @@ fn radiant_eval_transparent(material_id: u32,
     return vec4<f32>(material.base_color.rgb * ambient + emission, clamp(material.base_color.a, 0.0, 1.0));
 }
 
+// HELIO_TRANSPARENT_REACTIVITY: location 1 carries composited alpha coverage.
+struct TransparentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) reactivity: vec4<f32>,
+}
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> TransparentOutput {
     // RADIANT_OVERRIDE_TRANSPARENT
     // RADIANT_OVERRIDE_END
 
@@ -261,5 +266,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     surface = vec4<f32>(surface.rgb + Lo, surface.a);
-    return surface;
+    return TransparentOutput(surface, vec4<f32>(clamp(surface.a, 0.0, 1.0)));
 }

@@ -69,6 +69,7 @@ pub struct TransparentPass {
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     pre_aa_target: bool,
+    reactive_mask: bool,
 }
 
 impl TransparentPass {
@@ -231,6 +232,7 @@ impl TransparentPass {
             globals_buf,
             surface_format,
             pre_aa_target: false,
+            reactive_mask: false,
         }
     }
 
@@ -238,6 +240,13 @@ impl TransparentPass {
     /// `surface_format` supplied to `new` must match that lighting target.
     pub fn with_pre_aa_target(mut self) -> Self {
         self.pre_aa_target = true;
+        self
+    }
+
+    /// Publish R8 transparency coverage for temporal AA. Custom templates can
+    /// opt in with HELIO_TRANSPARENT_REACTIVITY and a vec4 alpha at location 1.
+    pub fn with_reactive_mask(mut self) -> Self {
+        self.reactive_mask = true;
         self
     }
 }
@@ -260,10 +269,18 @@ impl RenderPass for TransparentPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
+        if self.reactive_mask {
+            return if self.pre_aa_target { &["pre_aa", "transparency_reactivity"] }
+                else { &["transparency_reactivity"] };
+        }
         if self.pre_aa_target { &["pre_aa"] } else { &[] }
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        if self.reactive_mask {
+            builder.write_color_raw("transparency_reactivity", wgpu::TextureFormat::R8Unorm,
+                helio_core::graph::ResourceSize::MatchSurface);
+        }
         if self.pre_aa_target { builder.read("pre_aa"); }
         builder.read("depth");
         builder.read("cluster_light_grid");
@@ -317,8 +334,7 @@ impl RenderPass for TransparentPass {
             resources.get(helio_core::ResourceKey::new("pre_aa"))
         } else { None };
         let target = pre_aa.unwrap_or(target);
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -326,7 +342,15 @@ impl RenderPass for TransparentPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })]));
+            })];
+        if self.reactive_mask {
+            attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: resources.texture_view(helio_core::ResourceKey::new("transparency_reactivity"))?,
+                resolve_target: None, depth_slice: None,
+                ops: wgpu::Operations {load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),store:wgpu::StoreOp::Store},
+            }));
+        }
+        let color_attachments = storage.retain_boxed_slice(attachments.into_boxed_slice());
         let depth_view = if pre_aa.is_some() { depth } else {
             resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
         };
@@ -542,6 +566,7 @@ impl TransparentPass {
                     }
                     &self.local_class0
                 });
+            let supports_reactivity = template.wgsl_source.contains("HELIO_TRANSPARENT_REACTIVITY");
             let module = self.shader_cache.get_or_compile(
                 device,
                 key,
@@ -558,6 +583,16 @@ impl TransparentPass {
                 },
                 alpha: wgpu::BlendComponent::OVER,
             };
+            let mut targets = vec![Some(wgpu::ColorTargetState {
+                format: self.surface_format, blend: Some(alpha_blend), write_mask: wgpu::ColorWrites::ALL,
+            })];
+            if self.reactive_mask {
+                targets.push(Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R8Unorm,
+                    blend: Some(wgpu::BlendState {color:wgpu::BlendComponent::OVER,alpha:wgpu::BlendComponent::OVER}),
+                    write_mask: if supports_reactivity {wgpu::ColorWrites::RED} else {wgpu::ColorWrites::empty()},
+                }));
+            }
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Transparent Pipeline"),
                 layout: Some(&self.pipeline_layout),
@@ -606,11 +641,7 @@ impl TransparentPass {
                     module,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_format,
-                        blend: Some(alpha_blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &targets,
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -635,3 +666,6 @@ impl TransparentPass {
 }
 
 
+
+#[cfg(test)]
+mod reactivity_tests;

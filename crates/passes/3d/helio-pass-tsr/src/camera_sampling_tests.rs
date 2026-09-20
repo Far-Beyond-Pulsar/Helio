@@ -189,7 +189,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(format!("{source}\n\
-                @group(0) @binding(8) var<storage,read_write> answer: vec4<f32>;\n\
+                @group(0) @binding(9) var<storage,read_write> answer: vec4<f32>;\n\
                 @compute @workgroup_size(1) fn probe() {{\n\
                   let raster_uv=vec2<f32>(0.4,0.6)+cameras[0].jitter_frame.xy*vec2<f32>(0.5,-0.5);\n\
                   answer=reproject_history(raster_uv,0.5);\n\
@@ -264,7 +264,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
                             resource: params.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
-                            binding: 8,
+                            binding: 9,
                             resource: output.as_entire_binding(),
                         },
                     ],
@@ -313,7 +313,7 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
             source: wgpu::ShaderSource::Wgsl(
                 format!(
                     "{source}\n\
-            @group(0) @binding(8) var<storage,read_write> verdicts: array<u32,6>;\n\
+            @group(0) @binding(9) var<storage,read_write> verdicts: array<u32,6>;\n\
             @compute @workgroup_size(1) fn test_depth() {{\n\
                 verdicts[0]=u32(history_depth_matches(10.0,10.0,0.02));\n\
                 verdicts[1]=u32(history_depth_matches(10.0,10.009,0.02));\n\
@@ -350,7 +350,7 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[wgpu::BindGroupEntry {
-                binding: 8,
+                binding: 9,
                 resource: output.as_entire_binding(),
             }],
         });

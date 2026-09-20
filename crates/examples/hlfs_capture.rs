@@ -156,6 +156,11 @@ pub fn run_scene(
         if has_architectural_textures {
             architectural_materials::configure_sampler(&mut renderer);
         }
+        if std::env::var_os("HLFS_NO_TRANSPARENCY_REACTIVITY").is_some() {
+            renderer.find_pass_mut::<helio_pass_tsr::TsrPass>()
+                .expect("HLFS_NO_TRANSPARENCY_REACTIVITY requires TSR")
+                .set_transparency_reactivity(false);
+        }
         if let Some(value) = tsr_reactivity {
             renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().expect("TSR pass").set_reactivity(value);
         }
@@ -260,8 +265,9 @@ pub fn run_scene(
                 let sample_width = size.width.div_ceil(sample_scale);
                 let sample_height = size.height.div_ceil(sample_scale);
                 let aa = if fxaa { "fxaa" } else if std::env::var_os("HLFS_TSR_NATIVE").is_some() { "tsr_native" } else { "none" };
+                let transparency_reactivity = aa == "tsr_native" && std::env::var_os("HLFS_NO_TRANSPARENCY_REACTIVITY").is_none();
                 let metadata = format!(
-                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"reference\": {reference},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
+                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"transparency_reactivity\": {transparency_reactivity},\n  \"reference\": {reference},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
                     size.width, size.height);
                 eprintln!("Capture dimensions: {metadata}");
                 std::fs::write(std::path::Path::new(directory).join("capture-config.json"), metadata).unwrap();

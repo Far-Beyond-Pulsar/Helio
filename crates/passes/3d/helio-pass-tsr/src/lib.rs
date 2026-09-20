@@ -132,7 +132,7 @@ impl TsrQuality {
 struct TsrUniform {
     jitter_offset: [f32; 2], // sub-pixel jitter in [-0.5, 0.5)
     reactivity: f32,         // extra blend toward current (0 = full history)
-    reset: u32,              // 1 on first frame / after reset_history()
+    flags: u32,              // bit 0: reset, bit 1: transparency coverage
     time_delta: f32,         // seconds since last frame
     tap_radius: u32,         // 1 = 3×3, 2 = 5×5
     previous_jitter_uv: [f32; 2],
@@ -153,7 +153,10 @@ pub struct TsrPass {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView)>,
+    _reactivity_fallback: wgpu::Texture,
+    reactivity_fallback_view: wgpu::TextureView,
+    transparency_reactivity: bool,
     uniform_buf: wgpu::Buffer,
 
     // ── Blit pipeline (output_texture → ctx.target) ───────────────────────────
@@ -198,6 +201,13 @@ impl TsrPass {
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
     pub fn with_intermediate_output(mut self) -> Self {
         self.intermediate_output = true;
+        self
+    }
+
+    /// Opt in to R8 transparency coverage and retain it in history alpha.
+    /// The resolved RGB is unchanged for zero current/previous coverage.
+    pub fn with_transparency_reactivity(mut self) -> Self {
+        self.transparency_reactivity = true;
         self
     }
 
@@ -257,6 +267,16 @@ impl TsrPass {
         let (history_depth, history_depth_view, output_depth, output_depth_view) =
             Self::create_textures(device, output_width, output_height, wgpu::TextureFormat::R32Float);
 
+        // Zero-initialized fallback keeps graphs without transparency unchanged.
+        let reactivity_fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TSR zero reactivity"),
+            size: wgpu::Extent3d {width:1,height:1,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::R8Unorm,usage:wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats:&[],
+        });
+        let reactivity_fallback_view = reactivity_fallback.create_view(&Default::default());
+
         // ── TSR BGL ───────────────────────────────────────────────────────────
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TSR BGL"),
@@ -268,6 +288,7 @@ impl TsrPass {
                 sampler_entry(4, wgpu::SamplerBindingType::NonFiltering),          // point_sampler
                 camera_storage_entry(5),                                           // camera
                 tex_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                tex_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
                 uniform_entry(6),                                                  // tsr
             ],
         });
@@ -362,6 +383,9 @@ impl TsrPass {
             bgl,
             bind_group: None,
             bind_group_key: None,
+            _reactivity_fallback: reactivity_fallback,
+            reactivity_fallback_view,
+            transparency_reactivity: false,
             uniform_buf,
             blit_pipeline,
             blit_bgl,
@@ -393,6 +417,16 @@ impl TsrPass {
     /// change where stale history would cause visible ghosting.
     pub fn reset_history(&mut self) {
         self.first_frame = true;
+    }
+
+    /// Enable coverage history for a graph providing `transparency_reactivity`.
+    /// Changing modes resets history because its alpha channel changes meaning.
+    pub fn set_transparency_reactivity(&mut self, enabled: bool) {
+        if self.transparency_reactivity != enabled {
+            self.transparency_reactivity = enabled;
+            self.reset_history();
+            self.bind_group_key = None;
+        }
     }
 
     /// Set a per-frame reactivity bias.
@@ -558,6 +592,7 @@ impl RenderPass for TsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
+        if self.transparency_reactivity { builder.read("transparency_reactivity"); }
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -607,7 +642,7 @@ impl RenderPass for TsrPass {
         let u = TsrUniform {
             jitter_offset: jitter,
             reactivity: self.reactivity,
-            reset,
+            flags: reset | (u32::from(self.transparency_reactivity) << 1),
             time_delta: ctx.delta_time.max(0.0),
             tap_radius: self.quality.tap_radius(),
             previous_jitter_uv: self.previous_jitter_uv,
@@ -623,21 +658,24 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
+        let pre_aa_view: &wgpu::TextureView = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )
         })?;
 
-        let key = (
-            pre_aa_view as *const _ as usize,
-            ctx.depth as *const _ as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        let reactive_view = if self.transparency_reactivity {
+            ctx.resources.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
+                .ok_or_else(|| helio_core::Error::InvalidPassConfig(
+                    "TSR coverage mode requires transparency_reactivity".into()))?
+        } else { &self.reactivity_fallback_view };
+        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone());
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TSR BG"),
                 layout: &self.bgl,
                 entries: &[
+                    wgpu::BindGroupEntry {binding:8,resource:wgpu::BindingResource::TextureView(reactive_view)},
                     wgpu::BindGroupEntry {binding:7,resource:wgpu::BindingResource::TextureView(&self.history_depth_view)},
                     wgpu::BindGroupEntry {
                         binding: 0,

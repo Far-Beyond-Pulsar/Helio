@@ -15,3 +15,6 @@ wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 log       = { workspace = true }
 pulsar_scenedb = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
