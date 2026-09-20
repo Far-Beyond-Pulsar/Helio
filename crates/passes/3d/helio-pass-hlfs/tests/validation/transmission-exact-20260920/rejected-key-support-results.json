@@ -1,0 +1,35 @@
+{
+  "medians_ms": {
+    "key-support-before-1": {
+      "sampling_ms": 2.240512,
+      "composite_ms": 1.567232,
+      "hlfs_only_ms": 4.8281600000000005
+    },
+    "key-support-before-2": {
+      "sampling_ms": 2.241536,
+      "composite_ms": 1.5713279999999998,
+      "hlfs_only_ms": 4.836864
+    },
+    "key-support-before-3": {
+      "sampling_ms": 2.2563839999999997,
+      "composite_ms": 1.582592,
+      "hlfs_only_ms": 4.84352
+    },
+    "key-support-after-1": {
+      "sampling_ms": 2.242048,
+      "composite_ms": 1.571328,
+      "hlfs_only_ms": 4.8645119999999995
+    },
+    "key-support-after-2": {
+      "sampling_ms": 2.244608,
+      "composite_ms": 1.566208,
+      "hlfs_only_ms": 4.833792
+    },
+    "key-support-after-3": {
+      "sampling_ms": 2.255872,
+      "composite_ms": 1.576448,
+      "hlfs_only_ms": 4.899328000000001
+    }
+  },
+  "capture_comparison": "All RGBA channels identical at frames 0,31,63,99 in each of three paired runs."
+}

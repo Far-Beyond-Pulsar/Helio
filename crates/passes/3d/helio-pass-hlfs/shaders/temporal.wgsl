@@ -60,7 +60,12 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
     let z=-(cameras[0].view*vec4<f32>(position,1.0)).z;
     let tile=(full.y/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+full.x/TILE_SIZE;
     let count=grid[tile].count;
-    let exact=select(count,globals.light_count,count>GRID_CAPACITY)<=select(globals.sample_count,4u,glossy) || globals.debug_mode==1u;
+    let population=select(count,globals.light_count,count>GRID_CAPACITY);
+    // Match sample.wgsl's exhaustive thin-sheet path. Exact visibility has no
+    // sampling noise; filtering it would blur chromatic shadow boundaries.
+    let exact=population<=select(globals.sample_count,4u,glossy)
+        || ((globals.surface_flags&16u)!=0u && population<=32u)
+        || globals.debug_mode==1u;
     let diff=vec4<f32>(load_radiance(raw_lighting,p,0u),select(0.0,1.0,exact));
     let spec=vec4<f32>(load_radiance(raw_lighting,p,1u),0.0);
     var result_diff=vec4<f32>(diff.rgb,moment(diff.rgb));

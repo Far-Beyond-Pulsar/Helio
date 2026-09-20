@@ -1432,3 +1432,34 @@ fn temporal_ris_rejects_same_capacity_light_reassignment() {
         }
     });
 }
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn exact_transmission_sets_bypass_noisy_history_filters() {
+    pollster::block_on(async {
+        let mut f=Fixture::new_rt(65,49).await;
+        f.ambient=[0.0;3];
+        blocker(&mut f,5.0);
+        f.transmission=Some(transmission_buffer(&f.device,&[[0.7,0.3,0.1,0.0]]));
+        let sources:Vec<_>=(0..8).map(|i| {
+            let mut source=point([8.0,i as f32*0.3-1.0,1.0],[1.0,0.7,0.4],20.0);
+            source.position_range[3]=10.0;
+            source.set_ray_traced_shadows(true);source
+        }).collect();
+        f.lights(sources);
+        for frame in [0,1,8,16] {
+            let mut images=Vec::new();
+            for debug_mode in [HlfsDebugMode::Final,HlfsDebugMode::Reference] {
+                f.config(HlfsConfig {debug_mode,sample_scale:1,..HlfsConfig::ray_traced_presampled()});
+                f.scene.frame_count=frame;
+                f.frame();images.push(f.read());
+            }
+            for (i,(actual,expected)) in images[0].iter().zip(&images[1]).enumerate() {
+                for channel in 0..3 {
+                    assert!((actual[channel]-expected[channel]).abs()<0.00001,
+                        "exact colored lighting filtered at pixel {i}, frame {frame}: {actual:?}/{expected:?}");
+                }
+            }
+        }
+    });
+}

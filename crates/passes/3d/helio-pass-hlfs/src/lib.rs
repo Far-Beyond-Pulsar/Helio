@@ -614,7 +614,7 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa", "render_environment"]
+        &["gbuffer", "pre_aa", "render_environment", "ray_transmission"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
@@ -709,7 +709,9 @@ impl RenderPass for HlfsPass {
                     .is_some()) as u32
                 | (u32::from(self.previous_light_generation == Some(ctx.frame_num)) << 1)
                 | (u32::from(self.config.tile_presampling) << 2)
-                | (u32::from(self.config.temporal_resampling) << 3),
+                | (u32::from(self.config.temporal_resampling) << 3)
+                | (u32::from(self.config.mode == HlfsMode::RayTraced
+                    && ctx.pass_resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some()) << 4),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,
