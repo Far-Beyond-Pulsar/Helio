@@ -188,10 +188,15 @@ fn small_directional_key_preserves_energy_with_empty_and_local_residuals() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(32, 24).await;
         empty_scene(&mut f);
-        for count in [1, 2, 17] {
+        // Front-facing, back-facing and tangent keys must all agree with the
+        // unextracted reference, including an otherwise empty local population.
+        for (count, direction) in [1, 2, 17].into_iter().flat_map(|count| {
+            [[0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+                .into_iter().map(move |direction| (count, direction))
+        }) {
             let mut lights = vec![point([1.0, 1.0, 2.0], [1.0; 3], 4.0); count];
             lights[0].light_type = 0;
-            lights[0].direction_outer = [0.0, 0.0, -1.0, 0.0];
+            lights[0].direction_outer = direction;
             for light in &mut lights { light.set_ray_traced_shadows(true); }
             f.lights(lights);
             f.config(HlfsConfig { mode: HlfsMode::RayTraced,

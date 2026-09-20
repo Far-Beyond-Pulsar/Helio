@@ -119,7 +119,9 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     if (globals.surface_flags&1u)!=0u && lm_uv.x>=0.0 {
         indirect=textureSampleLevel(baked_lightmap,lightmap_sampler,lm_uv,0.0).rgb*s.albedo;
     }
-    if key!=INVALID_LIGHT {
+    // The extracted key still has to illuminate this receiver. In particular,
+    // back-facing surfaces need no full-resolution shadow ray.
+    if key!=INVALID_LIGHT && can_illuminate(key,s) {
         let exact=evaluate_light(key,s,shadow_factor(key,s.position,s.normal,fragment.xy,globals.frame));
         diffuse+=exact.diffuse; specular+=exact.specular;
     }
