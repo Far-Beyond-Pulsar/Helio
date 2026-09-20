@@ -47,7 +47,9 @@ impl GpuCameraUniforms {
     ) -> Self {
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
-        let forward = (-view.z_axis.truncate()).normalize();
+        // Transform camera-local forward back to world space. A column of the
+        // world-to-view matrix is not a world-space camera axis after rotation.
+        let forward = view.inverse().transform_vector3(Vec3::NEG_Z).normalize();
         Self {
             view: view.to_cols_array(),
             proj: proj.to_cols_array(),
@@ -66,5 +68,25 @@ impl GpuCameraUniforms {
     pub fn upload_stereo(queue: &wgpu::Queue, buffer: &wgpu::Buffer, left: &Self, right: &Self) {
         let data = [*left, *right];
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(&data));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forward_matches_look_direction_under_yaw_pitch_and_translation() {
+        let eye = Vec3::new(43.0, 11.0, 78.0);
+        for target in [Vec3::new(0.0, 24.0, 0.0), Vec3::new(90.0, -8.0, 110.0)] {
+            let view = glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
+            let proj = glam::camera::rh::proj::directx::perspective(0.85, 16.0 / 9.0, 0.1, 350.0);
+            let camera = GpuCameraUniforms::new(view, proj, eye, 0.1, 350.0, 0, [0.0; 2], proj * view);
+            let forward = Vec3::from_slice(&camera.forward_far);
+            assert!(forward.distance((target - eye).normalize()) < 1e-5);
+            // A centre-ray view depth must also equal its world-space distance.
+            let centre = eye + forward * 50.0;
+            assert!((-view.transform_point3(centre).z - 50.0).abs() < 1e-4);
+        }
     }
 }
