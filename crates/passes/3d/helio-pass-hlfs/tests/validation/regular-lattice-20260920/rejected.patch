@@ -1,0 +1,47 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
+index 7c56d2fa..ce5a266b 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/common.wgsl
+@@ -72,15 +72,23 @@ fn stbn(pixel: vec2<u32>, dimension: u32) -> f32 {
+     // Quantized ranks are bin centers: never return 0 or 1 to the reservoir.
+     return (textureLoad(blue_noise, vec2<i32>(p), i32(z), 0).r * 255.0 + 0.5) / 256.0;
+ }
++fn sample_offset(frame: u32) -> vec2<u32> {
++    let phase = frame & 3u;
++    return vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;
++}
+ fn sample_pixel(p: vec2<u32>, frame: u32) -> vec2<u32> {
+-    // Four-rooks over the 2x2 block. Half resolution visits every full-res pixel.
+-    let phase = (frame + (p.x & 1u) + 2u * (p.y & 1u)) & 3u;
+-    let offset = vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;
+-    return min(p * globals.sample_scale + offset, globals.screen_size - 1u);
++    // A regular lattice visits all four pixel phases without changing spacing
++    // between adjacent samples. Reconstruction uses its actual origin.
++    let phase=select(frame+(p.x&1u)+2u*(p.y&1u),frame,(globals.surface_flags&4u)!=0u);
++    return min(p * globals.sample_scale + sample_offset(phase), globals.screen_size - 1u);
+ }
+ fn sample_position_from_uv(uv: vec2<f32>) -> vec2<f32> {
+     // Sample blocks have a fixed full-resolution size. Ceil-rounded texture
+     // extents must not stretch reprojection when an output dimension is odd.
++    if (globals.surface_flags&4u)!=0u {
++        let origin=vec2<f32>(sample_offset(globals.frame+3u))+0.5;
++        return (uv*vec2<f32>(globals.screen_size)-origin)/f32(globals.sample_scale)+0.5;
++    }
+     return uv*vec2<f32>(globals.screen_size)/f32(globals.sample_scale);
+ }
+ fn world_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
+index 5708f6c4..56d83ced 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
+@@ -19,7 +19,9 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+     var key=INVALID_LIGHT;
+     if USE_TILE_PRESAMPLING && globals.light_count<=65535u { key=tile_proposals[0].key_light; }
+     let z=-(cameras[0].view*vec4<f32>(s.position,1.0)).z;
+-    let sample_pos=fragment.xy/f32(globals.sample_scale)-0.5;
++    let sample_origin=select(vec2<f32>(0.5*f32(globals.sample_scale)),
++        vec2<f32>(sample_offset(globals.frame))+0.5,(globals.surface_flags&4u)!=0u);
++    let sample_pos=(fragment.xy-sample_origin)/f32(globals.sample_scale);
+     let base=vec2<i32>(floor(sample_pos));
+     let fraction=fract(sample_pos);
+     var diffuse=vec3<f32>(0.0); var specular=vec3<f32>(0.0); var weight_sum=0.0;

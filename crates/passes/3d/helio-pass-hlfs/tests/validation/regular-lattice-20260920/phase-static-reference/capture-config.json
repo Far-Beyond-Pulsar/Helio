@@ -1,0 +1,11 @@
+{
+  "output": [2560, 1440],
+  "internal": [2560, 1440],
+  "hlfs_sampling": [2560, 1440],
+  "render_scale": 1,
+  "sample_scale": 1,
+  "aa": "fxaa",
+  "stone_textures": true,
+  "reference": true,
+  "fixed_delta_seconds": 0.016666666666666666
+}

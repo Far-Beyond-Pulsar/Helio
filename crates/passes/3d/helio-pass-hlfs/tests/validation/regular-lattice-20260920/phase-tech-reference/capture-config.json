@@ -1,0 +1,11 @@
+{
+  "output": [640, 360],
+  "internal": [640, 360],
+  "hlfs_sampling": [640, 360],
+  "render_scale": 1,
+  "sample_scale": 1,
+  "aa": "fxaa",
+  "stone_textures": false,
+  "reference": true,
+  "fixed_delta_seconds": 0.016666666666666666
+}

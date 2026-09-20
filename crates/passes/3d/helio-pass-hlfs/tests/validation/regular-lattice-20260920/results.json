@@ -1,0 +1,21 @@
+{
+  "reference_temporal_std": 0.11257619331051204,
+  "phase-static-baseline": {
+    "nrmse_percent": 5.602432620284693,
+    "mean_temporal_std": 0.8062666111011367,
+    "fraction_range_over_20": 0.030995008680555554
+  },
+  "phase-static-candidate": {
+    "nrmse_percent": 4.902618069414342,
+    "mean_temporal_std": 0.7471003083941521,
+    "fraction_range_over_20": 0.028954535590277778
+  },
+  "phase-tech-control": {
+    "nrmse_percent": 22.614928068763458,
+    "mean_ratio": 0.9374098469370125
+  },
+  "phase-tech-candidate": {
+    "nrmse_percent": 23.8072983481265,
+    "mean_ratio": 0.9248110404739446
+  }
+}

@@ -34,6 +34,9 @@ pub fn run_scene(
         "capture needs more than 16 warmup frames"
     );
     let ray_traced = std::env::var_os("HLFS_RT").is_some();
+    let capture_tail = std::env::var("HLFS_CAPTURE_TAIL").map(|value|
+        value.parse::<u32>().expect("HLFS_CAPTURE_TAIL must be an integer")).unwrap_or(1);
+    assert!(capture_tail > 0 && capture_tail <= capture_frames, "invalid capture tail count");
     let presampled = std::env::var_os("HLFS_PRESAMPLED").is_some();
     let temporal_resampling = std::env::var_os("HLFS_TEMPORAL_RIS").is_some();
     assert!(!temporal_resampling || presampled, "HLFS_TEMPORAL_RIS requires HLFS_PRESAMPLED");
@@ -285,7 +288,7 @@ pub fn run_scene(
                     candle_light_ids.len()
                 );
             }
-            if [0, 31, 63, 99].contains(&frame) || frame + 1 == capture_frames {
+            if [0, 31, 63, 99].contains(&frame) || frame >= capture_frames - capture_tail {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Capture readback"),
                     size: u64::from(width * height * 4),
