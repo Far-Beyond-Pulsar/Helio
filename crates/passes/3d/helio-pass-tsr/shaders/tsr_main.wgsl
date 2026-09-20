@@ -349,8 +349,9 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let current_depth = select(max(-view_position.z,0.0),0.0,depth_val>=1.0);
 
 
-    // ── RESET path ────────────────────────────────────────────────────────────
-    if tsr.reset != 0u {
+    // Full reactivity promises current-frame-only output. Bypass reprojection
+    // and history blending just as a reset does, even after a long frame.
+    if tsr.reset != 0u || tsr.reactivity >= 1.0 {
         let sharpened = apply_cas(current_rgb, cur_uv);
         return TsrOutput(vec4<f32>(sharpened, 1.0),current_depth);
     }

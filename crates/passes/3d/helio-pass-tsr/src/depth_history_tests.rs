@@ -176,7 +176,15 @@ fn resolve_rejects_wrong_surface_and_writes_current_linear_depth() {
             ],
         });
         let mut results = Vec::new();
-        for (stored_depth, reset) in [(10.0f32, 0u32), (2.0, 0), (10.0, 1)] {
+        for (stored_depth, reset, reactivity, time_delta) in [
+            (10.0f32, 0u32, 0.0, 1.0 / 60.0),
+            (2.0, 0, 0.0, 1.0 / 60.0),
+            (10.0, 1, 0.0, 1.0 / 60.0),
+            (10.0, 0, 1.0, 1.0 / 120.0),
+            (10.0, 0, 1.0, 1.0 / 60.0),
+            (10.0, 0, 1.0, 1.0 / 15.0),
+            (10.0, 0, 1.0, 0.5),
+        ] {
             queue.write_texture(
                 pass.history_depth.as_image_copy(),
                 bytemuck::cast_slice(&vec![stored_depth; 512]),
@@ -189,9 +197,9 @@ fn resolve_rejects_wrong_surface_and_writes_current_linear_depth() {
             );
             let uniform = TsrUniform {
                 jitter_offset: [0.0; 2],
-                reactivity: 0.0,
+                reactivity,
                 reset,
-                time_delta: 1.0 / 60.0,
+                time_delta,
                 tap_radius: 2,
                 previous_jitter_uv: [0.0; 2],
                 previous_view: identity,
@@ -274,6 +282,12 @@ fn resolve_rejects_wrong_surface_and_writes_current_linear_depth() {
             (results[0][0] - results[2][0]).abs() > 0.0001,
             "matching history must accumulate: {results:?}"
         );
+        for result in &results[3..] {
+            assert_eq!(
+                result, &results[2],
+                "full reactivity must discard history at every frame rate"
+            );
+        }
         for result in results {
             assert!(
                 (result[3] - 10.0).abs() < 0.00001,

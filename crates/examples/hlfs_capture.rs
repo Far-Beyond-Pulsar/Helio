@@ -53,6 +53,12 @@ pub fn run_scene(
             .expect("HLFS_SAMPLE_COUNT must be an integer")
     });
     let fxaa = std::env::var_os("HLFS_FXAA").is_some();
+    let tsr_reactivity = std::env::var("HLFS_TSR_REACTIVITY").ok().map(|value| {
+        let value = value.parse::<f32>().expect("HLFS_TSR_REACTIVITY must be a number");
+        assert!(value.is_finite() && (0.0..=1.0).contains(&value), "invalid TSR reactivity");
+        assert!(std::env::var_os("HLFS_TSR_NATIVE").is_some(), "reactivity requires TSR");
+        value
+    });
     let candidate_count = std::env::var("HLFS_CANDIDATE_COUNT").ok().map(|value| {
         value.parse::<u32>().expect("HLFS_CANDIDATE_COUNT must be an integer")
     });
@@ -149,6 +155,9 @@ pub fn run_scene(
                 .build(device.clone(), queue.clone(), width, height, format);
         if has_architectural_textures {
             architectural_materials::configure_sampler(&mut renderer);
+        }
+        if let Some(value) = tsr_reactivity {
+            renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().expect("TSR pass").set_reactivity(value);
         }
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         // Camera motion advances by frame index. Temporal filters and animated

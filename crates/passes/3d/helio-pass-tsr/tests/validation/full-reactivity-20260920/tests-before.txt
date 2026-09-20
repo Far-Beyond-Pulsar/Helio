@@ -1,0 +1,20 @@
+running 1 test
+test depth_history_tests::resolve_rejects_wrong_surface_and_writes_current_linear_depth ... FAILED
+
+failures:
+
+---- depth_history_tests::resolve_rejects_wrong_surface_and_writes_current_linear_depth stdout ----
+
+thread 'depth_history_tests::resolve_rejects_wrong_surface_and_writes_current_linear_depth' (12368) panicked at crates\passes\3d\helio-pass-tsr\src\depth_history_tests.rs:286:13:
+assertion `left == right` failed: full reactivity must discard history at every frame rate
+  left: [0.48632813, 0.48632813, 0.48632813, 10.0]
+ right: [0.48608398, 0.48608398, 0.48608398, 10.0]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    depth_history_tests::resolve_rejects_wrong_surface_and_writes_current_linear_depth
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.18s
+
+error: test failed, to rerun pass `-p helio-pass-tsr --lib`

@@ -1,0 +1,8 @@
+running 5 tests
+test camera_sampling_tests::resolved_view_publication_follows_resize ... ok
+test camera_sampling_tests::reprojection_removes_both_jitters_without_removing_camera_motion ... ok
+test camera_sampling_tests::depth_history_rejects_disocclusion_and_invalid_samples ... ok
+test depth_history_tests::resolve_rejects_wrong_surface_and_writes_current_linear_depth ... ok
+test camera_sampling_tests::prepare_uploads_the_actual_camera_sample_and_supplied_frame_time ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s
