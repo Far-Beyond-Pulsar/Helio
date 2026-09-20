@@ -1,3 +1,5 @@
+> Resolution correction (2026-09-20): architectural scene captures made by the shared harness without native TSR used renderer scale 0.75. A 1440p output was internally 1920x1080; 4K output was internally 2880x1620. References used that same internal size with full HLFS shading. Native-resolution wording for those captures is superseded; standalone GPU fixtures are unaffected. See the HLFS validation report `resolution-audit-20260920/README.md` for corrected, matched measurements.
+
 # RT review validation - 2026-09-19
 
 The reconstructed 1440p primary workload passes the frozen <=4 ms median / <=5 ms p95 GPU gates in three 600-frame runs. All 746 final-image comparisons pass the unchanged <8% mean-energy error / <20% luminance NRMSE gates. This is an experimental direct-lighting tier, not a general 4 ms whole-frame guarantee.

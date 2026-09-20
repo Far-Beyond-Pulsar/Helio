@@ -82,12 +82,24 @@ pub fn run_scene(
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut config = RendererConfig::new(width, height, format)
+            // Capture resolution denotes native internal rendering by default.
+            // Do not silently inherit the renderer's interactive 75% preset.
+            .with_render_scale(1.0)
             .with_shadow_quality(helio::ShadowQuality::High)
             .with_ssr(std::env::var_os("HLFS_SSR").is_some());
         if std::env::var_os("HLFS_TSR_NATIVE").is_some() {
             assert!(!fxaa, "select one AA method for a controlled capture");
             config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Native);
         }
+        if let Ok(value) = std::env::var("HLFS_RENDER_SCALE") {
+            let scale = value.parse::<f32>().expect("HLFS_RENDER_SCALE must be a number");
+            assert!(scale.is_finite() && (0.25..=1.0).contains(&scale), "invalid render scale");
+            assert!(std::env::var_os("HLFS_TSR_NATIVE").is_none() || scale == 1.0,
+                "native TSR requires render scale 1.0");
+            config = config.with_render_scale(scale);
+        }
+        let render_scale = config.render_scale;
+        let internal_size = (config.internal_width(), config.internal_height());
         let mut scene_db = crate::v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate(&mut scene_db.world);
         if ray_traced {
@@ -216,6 +228,21 @@ pub fn run_scene(
                 renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
             }
             renderer.render(&camera, &view).expect("cathedral frame");
+            if frame == 0 {
+                let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
+                let size = pass.output_texture().size();
+                assert_eq!((size.width, size.height), internal_size,
+                    "HLFS target must match the configured internal resolution");
+                let sample_scale = pass.config().sample_scale;
+                let sample_width = size.width.div_ceil(sample_scale);
+                let sample_height = size.height.div_ceil(sample_scale);
+                let aa = if fxaa { "fxaa" } else if std::env::var_os("HLFS_TSR_NATIVE").is_some() { "tsr_native" } else { "none" };
+                let metadata = format!(
+                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"reference\": {reference},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
+                    size.width, size.height);
+                eprintln!("Capture dimensions: {metadata}");
+                std::fs::write(std::path::Path::new(directory).join("capture-config.json"), metadata).unwrap();
+            }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             if frame >= 16 {
                 frame_times.push(start.elapsed().as_secs_f64() * 1000.0);

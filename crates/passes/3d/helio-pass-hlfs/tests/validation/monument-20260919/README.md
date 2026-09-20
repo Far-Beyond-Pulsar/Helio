@@ -1,3 +1,5 @@
+> Resolution correction (2026-09-20): architectural scene captures made by the shared harness without native TSR used renderer scale 0.75. A 1440p output was internally 1920x1080; 4K output was internally 2880x1620. References used that same internal size with full HLFS shading. Native-resolution wording for those captures is superseded; standalone GPU fixtures are unaffected. See the HLFS validation report `resolution-audit-20260920/README.md` for corrected, matched measurements.
+
 # Monument scene and full-resolution sun checkpoint
 
 Development checkpoint, not final review acceptance. This original procedural stone arch uses approximate exterior proportions published by the City of Paris (about 50 x 44.8 x 22.2 m): https://www.paris.fr/pages/a-la-place-de-l-arc-de-triomphe-devait-troner-un-elephant-18396 . Ornament is invented, not a surveyed reconstruction.
