@@ -156,12 +156,90 @@ impl Mesh {
             }
         }
     }
+
+    /// One connected tube along a planar pointed arch. Adjacent rings share
+    /// vertices; there are no overlapping cylinder end caps at every segment.
+    pub(crate) fn smooth_arch(&mut self, a: Vec3, b: Vec3, rise: f32, radius: f32) {
+        assert!(radius.is_finite() && radius > 0.0 && rise.is_finite() && rise > 0.0);
+        assert!((b-a).cross(Vec3::Y).length_squared() > 0.0);
+        let mid = (a + b) * 0.5 + Vec3::Y * rise;
+        let curve = |start: Vec3, t: f32| {
+            let mut p = start.lerp(mid, t);
+            p.y += rise * 0.24 * (t * std::f32::consts::PI).sin();
+            p
+        };
+        let mut points: Vec<Vec3> = (0..=24).map(|i| curve(a, i as f32 / 24.)).collect();
+        points[24] = mid;
+        points.extend((0..24).rev().map(|i| curve(b, i as f32 / 24.)));
+        let plane_normal = (b-a).cross(Vec3::Y).normalize();
+        let sides = 16usize;
+        let base = self.vertices.len() as u32;
+        let mut distance = 0.0;
+        for (i, &point) in points.iter().enumerate() {
+            if i > 0 { distance += point.distance(points[i-1]); }
+            let direction = (points[(i+1).min(points.len()-1)] - points[i.saturating_sub(1)]).normalize();
+            let u = plane_normal;
+            let v = direction.cross(u).normalize();
+            for side in 0..=sides {
+                let angle = (side % sides) as f32 * std::f32::consts::TAU / sides as f32;
+                let normal = u * angle.cos() + v * angle.sin();
+                let tangent = -u * angle.sin() + v * angle.cos();
+                self.vertices.push(PackedVertex::from_components(
+                    (point + normal * radius).to_array(), normal.to_array(),
+                    [side as f32 / sides as f32, distance], tangent.to_array(), 1.0,
+                ));
+            }
+        }
+        for ring in 0..points.len()-1 {
+            for side in 0..sides {
+                let p = base + (ring*(sides+1)+side) as u32;
+                let q = p + (sides+1) as u32;
+                self.indices.extend_from_slice(&[p,p+1,q+1,p,q+1,q]);
+            }
+        }
+        // Flat caps only at the two springing points; vertices are separate so
+        // their normals do not smooth across the end of the tube.
+        for (ring, reverse) in [(0usize,true),(points.len()-1,false)] {
+            for side in 0..sides {
+                let p=Vec3::from_array(self.vertices[base as usize+ring*(sides+1)+side].position);
+                let q=Vec3::from_array(self.vertices[base as usize+ring*(sides+1)+side+1].position);
+                if reverse { self.triangle(points[ring],q,p); }
+                else { self.triangle(points[ring],p,q); }
+            }
+        }
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_arch_is_closed_without_segment_caps_or_cracks() {
+        let mut mesh=Mesh::default();
+        mesh.smooth_arch(Vec3::new(-5.5,12.4,2.0),Vec3::new(5.5,12.4,2.0),8.1,0.19);
+        // Weld by position for topology only: UV and hard cap-normal seams
+        // deliberately duplicate vertices but must not create geometric holes.
+        let mut edges=std::collections::HashMap::new();
+        for triangle in mesh.indices.chunks_exact(3) {
+            let vertices: Vec<_>=triangle.iter().map(|&i| &mesh.vertices[i as usize]).collect();
+            let p: Vec<_>=vertices.iter().map(|v| Vec3::from_array(v.position)).collect();
+            let face=(p[1]-p[0]).cross(p[2]-p[0]);
+            assert!(face.is_finite() && face.length_squared()>1e-12);
+            for v in &vertices {
+                let decode=|shift| ((v.normal>>shift) as u8 as i8) as f32/127.0;
+                let normal=Vec3::new(decode(0),decode(8),decode(16));
+                assert!(normal.dot(face)>0.0,"normal and triangle winding disagree");
+            }
+            for (a,b) in [(0,1),(1,2),(2,0)] {
+                let mut pair=[vertices[a].position.map(f32::to_bits),vertices[b].position.map(f32::to_bits)];
+                pair.sort();
+                *edges.entry(pair).or_insert(0usize)+=1;
+            }
+        }
+        assert!(edges.values().all(|&count| count==2),"tube must be a closed manifold");
+    }
 
     #[test]
     fn quad_texture_covers_one_rectangle_without_a_diagonal_seam() {

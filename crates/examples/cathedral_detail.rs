@@ -82,11 +82,11 @@ pub fn populate(world: &mut World) {
         meshes[0].block([side * 8.25, 12.8, 0.], [2.55, 0.15, 28.]);
         for &z in super::COLUMN_Z {
             let center = Vec3::new(side * 5.5, 0., z);
-            meshes[0].rod(center, center + Vec3::Y * 13., 0.51, 16);
+            meshes[1].smooth_rod(center, center + Vec3::Y * 13., 0.51, 48);
             for i in 0..8 {
                 let t = i as f32 * std::f32::consts::TAU / 8.;
                 let p = center + Vec3::new(t.cos() * 0.48, 0., t.sin() * 0.48);
-                meshes[1].rod(p + Vec3::Y * 0.65, p + Vec3::Y * 12.1, 0.14, 8);
+                meshes[1].smooth_rod(p + Vec3::Y * 0.65, p + Vec3::Y * 12.1, 0.14, 24);
             }
             for (y, r, h) in [
                 (0.15, 0.85, 0.15),
@@ -94,18 +94,18 @@ pub fn populate(world: &mut World) {
                 (11.85, 0.68, 0.12),
                 (12.15, 0.85, 0.17),
             ] {
-                meshes[1].rod(
+                meshes[1].smooth_rod(
                     center + Vec3::Y * (y - h),
                     center + Vec3::Y * (y + h),
                     r,
-                    12,
+                    32,
                 );
             }
             // Transverse vault ribs and wall pilasters.
             if side < 0. {
-                meshes[1].arch(Vec3::new(-5.5, 12.4, z), Vec3::new(5.5, 12.4, z), 8.1, 0.19);
+                meshes[1].smooth_arch(Vec3::new(-5.5, 12.4, z), Vec3::new(5.5, 12.4, z), 8.1, 0.19);
             }
-            meshes[1].arch(
+            meshes[1].smooth_arch(
                 Vec3::new(side * 5.5, 8.5, z),
                 Vec3::new(side * 10.7, 8.5, z),
                 3.8,
@@ -114,14 +114,14 @@ pub fn populate(world: &mut World) {
             meshes[1].block([side * 10.55, 6., z], [0.2, 6., 0.28]);
         }
         for pair in super::COLUMN_Z.windows(2) {
-            meshes[1].arch(
+            meshes[1].smooth_arch(
                 Vec3::new(side * 5.5, 8., pair[0]),
                 Vec3::new(side * 5.5, 8., pair[1]),
                 4.7,
                 0.22,
             );
             // Crossed diagonal ribs make the bays read as ribbed vaults.
-            meshes[1].arch(
+            meshes[1].smooth_arch(
                 Vec3::new(side * 5.5, 12.4, pair[0]),
                 Vec3::new(-side * 5.5, 12.4, pair[1]),
                 8.1,
@@ -162,7 +162,7 @@ pub fn populate(world: &mut World) {
     meshes[5].block([0., 4.7, -26.5], [1., 0.105, 0.09]);
     for x in [-4., -3., -2., 2., 3., 4.] {
         meshes[1].rod(Vec3::new(x, 0.6, -27.3), Vec3::new(x, 6., -27.3), 0.12, 12);
-        meshes[1].arch(
+        meshes[1].smooth_arch(
             Vec3::new(x - 0.42, 4.8, -27.3),
             Vec3::new(x + 0.42, 4.8, -27.3),
             1.5,
@@ -265,7 +265,7 @@ pub fn populate(world: &mut World) {
                     meshes[5].rod(a, c, 0.012, 5);
                 }
             }
-            meshes[1].arch(
+            meshes[1].smooth_arch(
                 Vec3::new(x, 9.7, z - 1.4),
                 Vec3::new(x, 9.7, z + 1.4),
                 1.5,

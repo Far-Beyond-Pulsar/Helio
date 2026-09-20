@@ -1,0 +1,854 @@
+warning: unused variable: `writer`
+   --> crates\helio-core\src\registry.rs:304:9
+    |
+304 |         writer: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_writer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reader`
+   --> crates\helio-core\src\registry.rs:332:9
+    |
+332 |         reader: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `target`
+   --> crates\helio-core\src\traits.rs:476:9
+    |
+476 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `depth`
+   --> crates\helio-core\src\traits.rs:477:9
+    |
+477 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\helio-core\src\traits.rs:478:9
+    |
+478 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
+warning: multiple fields are never read
+   --> crates\passes\3d\helio-pass-sky\src\lib.rs:272:5
+    |
+268 | pub struct SkyPass {
+    |            ------- fields in this struct
+...
+272 |     sim_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^
+273 |     render_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^
+...
+276 |     sampler: wgpu::Sampler,
+    |     ^^^^^^^
+277 |     volumes: [wgpu::Texture; 2],
+    |     ^^^^^^^
+...
+282 |     dummy_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+...
+289 |     raymarch_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+290 |     reproject_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^^
+291 |     upsample_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+292 |     raymarch_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+293 |     reproject_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+294 |     upsample_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+295 |     linear_sampler: wgpu::Sampler,
+296 |     nearest_sampler: wgpu::Sampler,
+    |     ^^^^^^^^^^^^^^^
+...
+328 |     sky_lut_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+...
+337 |     sky_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-sky` (lib) generated 1 warning
+warning: unused imports: `BakeOutput` and `BakeSerializer`
+ --> vendor\nebula\crates\nebula-serialize\src\binary.rs:3:14
+  |
+3 |     traits::{BakeOutput, BakeSerializer},
+  |              ^^^^^^^^^^  ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `write_bincode_chunk` is never used
+  --> vendor\nebula\crates\nebula-serialize\src\binary.rs:37:15
+   |
+37 | pub(crate) fn write_bincode_chunk<W, T>(
+   |               ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `read_bincode_chunk` is never used
+  --> vendor\nebula\crates\nebula-serialize\src\binary.rs:54:15
+   |
+54 | pub(crate) fn read_bincode_chunk<T>(data: &[u8]) -> Result<T, BinarySerError>
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> vendor\nebula\crates\nebula-gpu\src\buffer.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `wgpu::util::DeviceExt`
+ --> vendor\nebula\crates\nebula-gpu\src\texture.rs:1:5
+  |
+1 | use wgpu::util::DeviceExt;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `nebula-serialize` (lib) generated 3 warnings (run `cargo fix --lib -p nebula-serialize` to apply 1 suggestion)
+warning: `nebula-gpu` (lib) generated 2 warnings (run `cargo fix --lib -p nebula-gpu` to apply 2 suggestions)
+warning: field `last_template_keys` is never read
+  --> crates\passes\3d\helio-pass-gbuffer\src\lib.rs:85:5
+   |
+75 | pub struct GBufferPass {
+   |            ----------- field in this struct
+...
+85 |     last_template_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-gbuffer` (lib) generated 1 warning
+warning: unused variable: `mesh_idx`
+   --> vendor\nebula\crates\nebula-light\src\baker.rs:138:10
+    |
+138 |     for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
+    |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mesh_idx`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `up`
+   --> vendor\nebula\crates\nebula-light\src\baker.rs:245:17
+    |
+245 |                 up,
+    |                 ^^ help: try ignoring the field: `up: _`
+
+warning: unused variable: `resolution`
+   --> vendor\nebula\crates\nebula-light\src\baker.rs:445:47
+    |
+445 | fn build_atlas_regions(scene: &SceneGeometry, resolution: u32) -> Vec<AtlasRegion> {
+    |                                               ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resolution`
+
+warning: `nebula-light` (lib) generated 3 warnings (run `cargo fix --lib -p nebula-light` to apply 3 suggestions)
+warning: unused variable: `mip_levels`
+   --> vendor\nebula\crates\nebula-probe\src\baker.rs:207:5
+    |
+207 |     mip_levels: u32,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mip_levels`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bytes_per_pixel`
+   --> vendor\nebula\crates\nebula-probe\src\baker.rs:225:9
+    |
+225 |     let bytes_per_pixel = if config.use_rgbe { 4usize } else { 16usize }; // RGBE u8×4 vs RGBA f32×4
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bytes_per_pixel`
+
+warning: `nebula-probe` (lib) generated 2 warnings (run `cargo fix --lib -p nebula-probe` to apply 2 suggestions)
+warning: unused `std::result::Result` that must be used
+   --> crates\passes\3d\helio-pass-portal-cull\src\lib.rs:433:13
+    |
+433 |             ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+433 |             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    |             +++++++
+
+warning: unused imports: `gpu_types::*`, `packing::*`, `placement::*`, and `quality::*`
+  --> crates\passes\3d\helio-pass-foliage-place\src\lib.rs:67:20
+   |
+67 | pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
+   |                    ^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `table_stats` is never used
+   --> crates\passes\3d\helio-pass-foliage-place\src\pass.rs:664:8
+    |
+136 | impl FoliagePlacePass {
+    | --------------------- method in this implementation
+...
+664 |     fn table_stats(&self, types: &[GpuFoliageType]) -> (f32, f32) {
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `helio_core::Result as HelioResult`
+ --> crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:1:5
+  |
+1 | use helio_core::Result as HelioResult;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `noise_texture` is never read
+   --> crates\passes\3d\helio-pass-postprocess\src\lib.rs:112:5
+    |
+ 73 | pub struct PostProcessPass {
+    |            --------------- field in this struct
+...
+112 |     noise_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `pipeline_layout` is never read
+ --> crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:5:5
+  |
+3 | pub struct LutBuilder {
+  |            ---------- field in this struct
+4 |     pipeline: wgpu::ComputePipeline,
+5 |     pipeline_layout: wgpu::PipelineLayout,
+  |     ^^^^^^^^^^^^^^^
+
+warning: `helio-pass-portal-cull` (lib) generated 1 warning
+warning: `helio-pass-foliage-place` (lib) generated 2 warnings (run `cargo fix --lib -p helio-pass-foliage-place` to apply 1 suggestion)
+warning: `helio-pass-postprocess` (lib) generated 3 warnings (run `cargo fix --lib -p helio-pass-postprocess` to apply 1 suggestion)
+warning: unused import: `LightSource`
+  --> crates\helio-bake\src\cpu_lightmap.rs:28:37
+   |
+28 | use nebula::core::scene::{BakeMesh, LightSource, LightSourceKind};
+   |                                     ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-bake` (lib) generated 1 warning (run `cargo fix --lib -p helio-bake` to apply 1 suggestion)
+warning: field `last_shared_keys` is never read
+  --> crates\passes\3d\helio-pass-forward-lit\src\lib.rs:53:5
+   |
+43 | pub struct ForwardLitPass {
+   |            -------------- field in this struct
+...
+53 |     last_shared_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `max_sort_steps` is never read
+   --> crates\passes\3d\helio-pass-corona\src\lib.rs:137:5
+    |
+ 80 | pub struct CoronaPass {
+    |            ---------- field in this struct
+...
+137 |     max_sort_steps: u32, // capacity of sort_steps_buf in step count
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `internal_width` and `internal_height` are never read
+   --> crates\passes\3d\helio-pass-tsr\src\lib.rs:184:5
+    |
+150 | pub struct TsrPass {
+    |            ------- fields in this struct
+...
+184 |     internal_width: u32,
+    |     ^^^^^^^^^^^^^^
+185 |     internal_height: u32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-forward-lit` (lib) generated 1 warning
+warning: `helio-pass-corona` (lib) generated 1 warning
+warning: `helio-pass-tsr` (lib) generated 1 warning
+warning: unused imports: `Pod` and `Zeroable`
+ --> crates\helio\src\material.rs:1:16
+  |
+1 | use bytemuck::{Pod, Zeroable};
+  |                ^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `arrayvec::ArrayVec`
+ --> crates\helio\src\renderer\render.rs:6:5
+  |
+6 | use arrayvec::ArrayVec;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `wgpu::util::DeviceExt as _`
+   --> crates\helio\src\renderer\render.rs:892:13
+    |
+892 |         use wgpu::util::DeviceExt as _;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `DebugCameraUniform`
+  --> crates\helio\src\renderer\setup.rs:15:52
+   |
+15 | use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer};
+   |                                                    ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `DebugBatch` and `DebugVertex`
+  --> crates\helio\src\renderer\mod.rs:20:24
+   |
+20 |     BillboardInstance, DebugBatch, DebugCameraUniform, DebugVertex, GraphRebuilder, Renderer,
+   |                        ^^^^^^^^^^                      ^^^^^^^^^^^
+
+warning: unused variable: `rc_min`
+   --> crates\helio\src\renderer\render.rs:292:13
+    |
+292 |         let rc_min = [
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rc_min`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rc_max`
+   --> crates\helio\src\renderer\render.rs:297:13
+    |
+297 |         let rc_max = [
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rc_max`
+
+warning: value assigned to `representative` is never read
+   --> crates\helio\src\renderer\render.rs:772:34
+    |
+772 |         let mut representative = self.default_xr_camera(near_far.0, near_far.1);
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\helio\src\renderer\setup.rs:226:13
+    |
+226 |         let mut renderer = Self {
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `select_hdr_surface_format` is never used
+  --> crates\helio\src\renderer\config.rs:36:8
+   |
+36 | pub fn select_hdr_surface_format(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `clear` is never used
+   --> crates\helio\src\renderer\debug.rs:364:12
+    |
+ 68 | impl DebugPass {
+    | -------------- method in this implementation
+...
+364 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: method `execute_on_target` is never used
+   --> crates\helio\src\renderer\debug.rs:414:12
+    |
+374 | impl DebugPass {
+    | -------------- method in this implementation
+...
+414 |     pub fn execute_on_target(
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: field `graph_has_sky` is never read
+   --> crates\helio\src\renderer\renderer_impl.rs:163:16
+    |
+ 73 | pub struct Renderer {
+    |            -------- field in this struct
+...
+163 |     pub(crate) graph_has_sky: bool,
+    |                ^^^^^^^^^^^^^
+
+warning: `helio` (lib) generated 13 warnings (run `cargo fix --lib -p helio` to apply 8 suggestions)
+warning: field `last_shared_keys` is never read
+  --> crates\passes\3d\helio-pass-transparent\src\lib.rs:57:5
+   |
+47 | pub struct TransparentPass {
+   |            --------------- field in this struct
+...
+57 |     last_shared_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-transparent` (lib) generated 1 warning
+warning: variable does not need to be mutable
+   --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:111:9
+    |
+111 |     let mut add_face =
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `CLIPMAP_GRID_SNAP` is never used
+  --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:46:7
+   |
+46 | const CLIPMAP_GRID_SNAP: f32 = 0.25;
+   |       ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_CLIPMAP_VERTS` is never used
+  --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:47:7
+   |
+47 | const MAX_CLIPMAP_VERTS: u64 = 2048;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_CLIPMAP_INDICES` is never used
+  --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:48:7
+   |
+48 | const MAX_CLIPMAP_INDICES: u64 = 12288;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ClipmapRingDef` is never constructed
+  --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:50:8
+   |
+50 | struct ClipmapRingDef {
+   |        ^^^^^^^^^^^^^^
+
+warning: constant `CLIPMAP_RINGS` is never used
+  --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:58:7
+   |
+58 | const CLIPMAP_RINGS: [ClipmapRingDef; 5] = [
+   |       ^^^^^^^^^^^^^
+
+warning: function `generate_ring` is never used
+   --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:248:4
+    |
+248 | fn generate_ring(
+    |    ^^^^^^^^^^^^^
+
+warning: field `sim_array_view_b` is never read
+   --> crates\passes\3d\helio-pass-water-sim\src\lib.rs:366:16
+    |
+354 | pub struct WaterSimPass {
+    |            ------------ field in this struct
+...
+366 |     pub(crate) sim_array_view_b: wgpu::TextureView,
+    |                ^^^^^^^^^^^^^^^^
+
+warning: field `blades_per_tile` is never read
+   --> crates\passes\3d\helio-pass-foliage-gbuffer\src\lib.rs:508:5
+    |
+471 | pub struct FoliageGBufferPass {
+    |            ------------------ field in this struct
+...
+508 |     blades_per_tile: u32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-water-sim` (lib) generated 8 warnings (run `cargo fix --lib -p helio-pass-water-sim` to apply 1 suggestion)
+warning: `helio-pass-foliage-gbuffer` (lib) generated 1 warning
+warning: field `format` is never read
+  --> crates\passes\3d\helio-pass-flare\src\lib.rs:55:5
+   |
+32 | pub struct LensFlarePass {
+   |            ------------- field in this struct
+...
+55 |     format: wgpu::TextureFormat,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cols`
+   --> crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:102:13
+    |
+102 |         let cols = DEFAULT_COLS;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_cols`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rows`
+   --> crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:103:13
+    |
+103 |         let rows = DEFAULT_ROWS;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_rows`
+
+warning: field `font_texture` is never read
+   --> crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:306:5
+    |
+296 | pub struct DebugOverlayPass {
+    |            ---------------- field in this struct
+...
+306 |     font_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `MaterialTimingEntry` is more private than the item `PerfOverlayShared::get_material_timings`
+   --> crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:366:5
+    |
+366 |     pub fn get_material_timings(&self) -> &[MaterialTimingEntry] {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `PerfOverlayShared::get_material_timings` is reachable at visibility `pub`
+    |
+note: but type `MaterialTimingEntry` is only usable at visibility `pub(crate)`
+   --> crates\passes\3d\helio-pass-perf-overlay\src\lib.rs:92:1
+    |
+ 92 | pub(crate) struct MaterialTimingEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MaterialTimingEntry` is more private than the item `MaterialProfiler::get_timing_table`
+    --> crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:1147:5
+     |
+1147 |     pub fn get_timing_table(&self) -> &[MaterialTimingEntry] {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `MaterialProfiler::get_timing_table` is reachable at visibility `pub`
+     |
+note: but type `MaterialTimingEntry` is only usable at visibility `pub(crate)`
+    --> crates\passes\3d\helio-pass-perf-overlay\src\lib.rs:92:1
+     |
+  92 | pub(crate) struct MaterialTimingEntry {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `color_snapshot_prev` is never read
+  --> crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:19:16
+   |
+11 | pub struct PerfOverlayShared {
+   |            ----------------- field in this struct
+...
+19 |     pub(crate) color_snapshot_prev: wgpu::Texture,
+   |                ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `test_texture` is never read
+   --> crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:837:16
+    |
+833 | pub struct MaterialProfiler {
+    |            ---------------- field in this struct
+...
+837 |     pub(crate) test_texture: wgpu::Texture,
+    |                ^^^^^^^^^^^^
+
+warning: `helio-pass-flare` (lib) generated 1 warning
+warning: `helio-pass-debug-overlay` (lib) generated 3 warnings (run `cargo fix --lib -p helio-pass-debug-overlay` to apply 2 suggestions)
+warning: `helio-pass-perf-overlay` (lib) generated 4 warnings
+warning: unused doc comment
+   --> crates\passes\3d\helio-pass-dof\src\lib.rs:196:9
+    |
+196 | /         /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
+197 | |         /// The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
+    | |_____________________________________________________________________________________^
+198 | /         let uniform_entry =
+199 | |             |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
+200 | |                 binding,
+201 | |                 visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+...   |
+207 | |                 count: None,
+208 | |             };
+    | |______________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `bokeh_tex`, `gather_pl`, `composite_pl`, and `format` are never read
+  --> crates\passes\3d\helio-pass-dof\src\lib.rs:49:5
+   |
+34 | pub struct DofPass {
+   |            ------- fields in this struct
+...
+49 |     bokeh_tex: wgpu::Texture,
+   |     ^^^^^^^^^
+...
+61 |     gather_pl: wgpu::PipelineLayout,
+   |     ^^^^^^^^^
+62 |     composite_pl: wgpu::PipelineLayout,
+   |     ^^^^^^^^^^^^
+...
+80 |     format: wgpu::TextureFormat,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `frame`
+   --> crates\passes\3d\helio-pass-planar-reflection\src\lib.rs:233:27
+    |
+233 |     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-dof` (lib) generated 2 warnings
+warning: `helio-pass-planar-reflection` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-planar-reflection` to apply 1 suggestion)
+warning: variable does not need to be mutable
+   --> crates\helio-default-graphs\src\lib.rs:204:13
+    |
+204 |         let mut sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lights_buf`
+   --> crates\helio-default-graphs\src\lib.rs:374:9
+    |
+374 |     let lights_buf = scene_buffer_or_dummy(
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lights_buf`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `AnimationState` is never constructed
+  --> crates\helio-asset-compat\src\animation_system.rs:11:12
+   |
+11 | pub struct AnimationState {
+   |            ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `play`, `stop`, `update`, and `get_matrices` are never used
+  --> crates\helio-asset-compat\src\animation_system.rs:31:12
+   |
+29 | impl AnimationState {
+   | ------------------- associated items in this implementation
+30 |     /// Create a new animation state from a skin and animations
+31 |     pub fn new(skin: Skin, animations: Vec<Animation>) -> Self {
+   |            ^^^
+...
+45 |     pub fn play(&mut self, animation_index: usize, looping: bool) {
+   |            ^^^^
+...
+55 |     pub fn stop(&mut self) {
+   |            ^^^^
+...
+60 |     pub fn update(&mut self, delta_time: f32) {
+   |            ^^^^^^
+...
+71 |     pub fn get_matrices(&self) -> &[Mat4] {
+   |            ^^^^^^^^^^^^
+
+warning: `helio-default-graphs` (lib) generated 2 warnings (run `cargo fix --lib -p helio-default-graphs` to apply 2 suggestions)
+warning: `helio-asset-compat` (lib) generated 2 warnings
+warning: fields `slot_capacity`, `max_blocks`, and `frame_uniform_buf` are never read
+   --> crates\passes\2d\helio-pass-sprite-cull\src\lib.rs:93:5
+    |
+ 92 | pub struct SpriteCullPass {
+    |            -------------- fields in this struct
+ 93 |     slot_capacity: u32,
+    |     ^^^^^^^^^^^^^
+...
+ 99 |     max_blocks: u32,
+    |     ^^^^^^^^^^
+...
+126 |     frame_uniform_buf: wgpu::Buffer,
+    |     ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated associated function `glam::Mat4::orthographic_rh`: use the `glam::camera::rh::proj::directx::orthographic` function instead
+   --> crates\passes\2d\helio-pass-sprite-batch\src\lib.rs:910:29
+    |
+910 |                 glam::Mat4::orthographic_rh(cx - hx, cx + hx, cy - hy, cy + hy, -1.0, 1.0);
+    |                             ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `storage`
+   --> crates\passes\2d\helio-pass-radiance-cascades-2d\src\lib.rs:762:9
+    |
+762 |         storage: &'a mut helio_core::RenderFrameStorage,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_storage`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `jfa_passes` is never read
+   --> crates\passes\2d\helio-pass-radiance-cascades-2d\src\lib.rs:255:5
+    |
+251 | pub struct RadianceCascades2DPass {
+    |            ---------------------- field in this struct
+...
+255 |     jfa_passes: u32,
+    |     ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-sprite-cull` (lib) generated 1 warning
+warning: `helio-pass-sprite-batch` (lib) generated 1 warning
+warning: `helio-pass-radiance-cascades-2d` (lib) generated 2 warnings (run `cargo fix --lib -p helio-pass-radiance-cascades-2d` to apply 1 suggestion)
+   Compiling examples v0.1.0 (C:\Users\thiag\Documents\GitHub\Helio\crates\examples)
+warning: method `arch` is never used
+   --> crates\examples\architectural_mesh.rs:145:19
+    |
+ 11 | impl Mesh {
+    | --------- method in this implementation
+...
+145 |     pub(crate) fn arch(&mut self, a: Vec3, b: Vec3, rise: f32, radius: f32) {
+    |                   ^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `build_default_renderer` is never used
+  --> crates\examples\v3_demo_common.rs:81:8
+   |
+81 | pub fn build_default_renderer(
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spot_light` is never used
+   --> crates\examples\v3_demo_common.rs:183:8
+    |
+183 | pub fn spot_light(
+    |        ^^^^^^^^^^
+
+warning: function `spawn_sky` is never used
+   --> crates\examples\v3_demo_common.rs:233:8
+    |
+233 | pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
+    |        ^^^^^^^^^
+
+warning: struct `WaterVolumeDescriptor` is never constructed
+   --> crates\examples\v3_demo_common.rs:256:12
+    |
+256 | pub struct WaterVolumeDescriptor {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `to_component` is never used
+   --> crates\examples\v3_demo_common.rs:344:12
+    |
+343 | impl WaterVolumeDescriptor {
+    | -------------------------- method in this implementation
+344 |     pub fn to_component(&self) -> helio_pass_water_sim::WaterVolumeComponent {
+    |            ^^^^^^^^^^^^
+
+warning: function `spawn_water_volume` is never used
+   --> crates\examples\v3_demo_common.rs:412:8
+    |
+412 | pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) -> Entity {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `WaterHitboxDescriptor` is never constructed
+   --> crates\examples\v3_demo_common.rs:423:12
+    |
+423 | pub struct WaterHitboxDescriptor {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `to_component` is never used
+   --> crates\examples\v3_demo_common.rs:433:12
+    |
+432 | impl WaterHitboxDescriptor {
+    | -------------------------- method in this implementation
+433 |     pub fn to_component(&self) -> helio_pass_water_sim::WaterHitboxComponent {
+    |            ^^^^^^^^^^^^
+
+warning: function `spawn_water_hitbox` is never used
+   --> crates\examples\v3_demo_common.rs:445:8
+    |
+445 | pub fn spawn_water_hitbox(world: &mut World, descriptor: WaterHitboxDescriptor) -> Entity {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `update_water_hitbox` is never used
+   --> crates\examples\v3_demo_common.rs:453:8
+    |
+453 | pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterHitboxDescriptor) {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_post_process_volume` is never used
+   --> crates\examples\v3_demo_common.rs:462:8
+    |
+462 | pub fn spawn_post_process_volume(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_decal` is never used
+   --> crates\examples\v3_demo_common.rs:480:8
+    |
+480 | pub fn spawn_decal(world: &mut World, decal: helio_pass_decal::GpuDecal) -> Entity {
+    |        ^^^^^^^^^^^
+
+warning: function `spawn_reflection_capture_box` is never used
+   --> crates\examples\v3_demo_common.rs:494:8
+    |
+494 | pub fn spawn_reflection_capture_box(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_object_with_movability` is never used
+   --> crates\examples\v3_demo_common.rs:605:8
+    |
+605 | pub fn spawn_object_with_movability(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `update_object_transform` is never used
+   --> crates\examples\v3_demo_common.rs:619:8
+    |
+619 | pub fn update_object_transform(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `despawn_object` is never used
+   --> crates\examples\v3_demo_common.rs:639:8
+    |
+639 | pub fn despawn_object(
+    |        ^^^^^^^^^^^^^^
+
+warning: function `spawn_corona_emitter` is never used
+   --> crates\examples\v3_demo_common.rs:677:8
+    |
+677 | pub fn spawn_corona_emitter(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `update_corona_emitter` is never used
+   --> crates\examples\v3_demo_common.rs:690:8
+    |
+690 | pub fn update_corona_emitter(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `corona_component_for_slot` is never used
+   --> crates\examples\v3_demo_common.rs:701:4
+    |
+701 | fn corona_component_for_slot(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `cube_mesh` is never used
+   --> crates\examples\v3_demo_common.rs:716:8
+    |
+716 | pub fn cube_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
+    |        ^^^^^^^^^
+
+warning: function `plane_mesh` is never used
+   --> crates\examples\v3_demo_common.rs:764:8
+    |
+764 | pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
+    |        ^^^^^^^^^^
+
+warning: function `sphere_mesh` is never used
+   --> crates\examples\v3_demo_common.rs:788:8
+    |
+788 | pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {
+    |        ^^^^^^^^^^^
+
+warning: function `update_point_light` is never used
+   --> crates\examples\v3_demo_common.rs:837:8
+    |
+837 | pub fn update_point_light(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: `examples` (bin "indoor_cathedral_hlfs" test) generated 24 warnings (10 duplicates)
+warning: `examples` (bin "drone_flight" test) generated 24 warnings (14 duplicates)
+    Finished `release` profile [optimized] target(s) in 5.96s
+     Running unittests drone_flight.rs (target\release\deps\drone_flight-8de745d51a644599.exe)
+
+running 2 tests
+test architectural_mesh::tests::quad_texture_covers_one_rectangle_without_a_diagonal_seam ... ok
+test architectural_mesh::tests::smooth_arch_is_closed_without_segment_caps_or_cracks ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests indoor_cathedral_hlfs.rs (target\release\deps\indoor_cathedral_hlfs-62378e5a32d693b0.exe)
+
+running 2 tests
+test architectural_mesh::tests::quad_texture_covers_one_rectangle_without_a_diagonal_seam ... ok
+test architectural_mesh::tests::smooth_arch_is_closed_without_segment_caps_or_cracks ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

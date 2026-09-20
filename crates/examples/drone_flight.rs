@@ -4,6 +4,8 @@
 //! paving, carved oak pews, bronze chandeliers and leaded stained glass.
 //! Panes use alpha blending, with explicit thin-sheet RGB shadow transmission
 //! in RT mode. Refraction and caustics are not simulated.
+//! RT defaults to one daylight sun plus interior lights. Set
+//! `HLFS_LEGACY_CATHEDRAL_LIGHTS=1` for the multi-window transmission stress setup.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
 //! temporal/spatial filtering with a bounded shadow budget per shading pixel.
@@ -637,16 +639,26 @@ fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
             point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 160.0, 22.0),
         ));
     }
-    // Stained glass shafts — static, no need to store ids
-    // RT uses white exterior sources: pane materials supply the transmitted tint.
-    for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-        let light = if std::env::var_os("HLFS_RT").is_some() {
-            let position = if x == 0.0 { [0.0, 17.0, 34.0] } else { [x.signum() * 16.0, 12.0, z] };
-            point_light(position, [1.0; 3], 2500.0, 65.0)
-        } else {
-            point_light([x, y, z], [r, g, b], 35.0, 10.0)
-        };
-        spawn_light(world, light);
+    // A single exterior sun supplies a coherent daylight direction. Keep the
+    // older multi-window emitter setup as an explicit transmission stress case.
+    if std::env::var_os("HLFS_RT").is_some()
+        && std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none()
+    {
+        spawn_light(world, v3_demo_common::directional_light(
+            [0.80, -0.48, -0.30], [1.0, 0.94, 0.84], 4.0,
+        ));
+    } else {
+        // Stained glass shafts — static, no need to store ids
+        // RT uses white exterior sources: pane materials supply the transmitted tint.
+        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+            let light = if std::env::var_os("HLFS_RT").is_some() {
+                let position = if x == 0.0 { [0.0, 17.0, 34.0] } else { [x.signum() * 16.0, 12.0, z] };
+                point_light(position, [1.0; 3], 2500.0, 65.0)
+            } else {
+                point_light([x, y, z], [r, g, b], 35.0, 10.0)
+            };
+            spawn_light(world, light);
+        }
     }
     let mut candle_light_ids = Vec::new();
     for &(x, y, z) in CANDLES {
