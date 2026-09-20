@@ -17,6 +17,9 @@
 pub const BRICK_DIM: u32 = 8;
 pub const BRICKS_PER_AXIS: u32 = 8;
 pub const VOXEL_TERRAIN_GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
+/// Surface extraction modes exposed to host applications.
+pub const VOXEL_MODE_SURFACE: u32 = 0;
+pub const VOXEL_MODE_CUBES: u32 = 1;
                                                                      // VoxelMeshPass's extract shader reads a padded 9x9x9 block per brick (one
                                                                      // extra voxel of +X/+Y/+Z halo from the neighbor brick) so marching cubes can
                                                                      // cover the boundary cell between adjacent bricks — without it every brick
@@ -37,6 +40,29 @@ pub const MAT_GRASS: u8 = 1;
 pub const MAT_DIRT: u8 = 2;
 pub const MAT_STONE: u8 = 3;
 pub const MAT_ORE: u8 = 4;
+pub const MAT_SAND: u8 = 5;
+pub const MAT_WATER: u8 = 6;
+pub const MAT_BEDROCK: u8 = 7;
+pub const MAT_COAL_ORE: u8 = 8;
+pub const MAT_IRON_ORE: u8 = 9;
+pub const MAT_GOLD_ORE: u8 = 10;
+pub const MAT_LOG: u8 = 11;
+pub const MAT_LEAVES: u8 = 12;
+
+/// One caller-authored voxel mutation. Coordinates are local to a component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoxelBlockUpdate {
+    pub position: [u32; 3],
+    pub material: u8,
+}
+
+/// Inclusive rectangular area mutation. Coordinates are local to a component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoxelAreaUpdate {
+    pub min: [u32; 3],
+    pub max: [u32; 3],
+    pub material: u8,
+}
 
 // ── cheap deterministic value noise (no external crate needed) ─────────────
 
@@ -89,55 +115,322 @@ fn fbm2(x: f32, z: f32, seed: u32, octaves: u32) -> f32 {
 // ── world ────────────────────────────────────────────────────────────────────
 
 /// Dense 64^3 voxel material grid, baked into GPU bricks on demand.
+#[derive(Clone)]
 pub struct VoxelTerrain {
     materials: Vec<u8>,
+    dimensions: [u32; 3],
+}
+
+/// SceneDB-owned voxel volume instance.
+///
+/// The dense voxel payload is a SceneDB variable-length GPU field, while the
+/// transform and identity are ordinary SceneDB GPU columns. Every entity may
+/// carry one of these; there is deliberately no singleton world assumption.
+#[derive(pulsar_scenedb_derive::SceneStore, Clone, Debug)]
+pub struct VoxelComponent {
+    #[gpu(buffer = "voxel_materials", mirror = DirtyTracked)]
+    pub materials: Vec<u8>,
+    #[gpu(buffer = "voxel_transforms")]
+    pub local_to_world: [f32; 16],
+    #[gpu(buffer = "voxel_volume_params")]
+    pub volume_params: [f32; 4],
+    #[gpu(buffer = "voxel_volume_ids")]
+    pub volume_id_seed: [u32; 3],
+    #[gpu(buffer = "voxel_dimensions")]
+    pub dimensions: [u32; 3],
+    #[gpu(buffer = "voxel_generation")]
+    pub generation: [f32; 16],
+    #[gpu(buffer = "voxel_generation_flags")]
+    pub generation_flags: [u32; 3],
+    #[gpu(buffer = "voxel_streaming")]
+    pub streaming: [u32; 3],
+    #[gpu(buffer = "voxel_editing")]
+    pub editing: [f32; 12],
+    #[gpu(buffer = "voxel_palette", mirror = DirtyTracked)]
+    pub palette: Vec<[f32; 4]>,
+    /// `[mode, flags, reserved]`; mode selects surface or blocky
+    /// cube extraction for this volume.
+    #[gpu(buffer = "voxel_render_settings")]
+    pub render_settings: [u32; 3],
+}
+
+impl VoxelComponent {
+    pub fn new(terrain: VoxelTerrain, voxel_size: f32, volume_id: u32) -> Self {
+        let dimensions = terrain.dimensions;
+        Self {
+            materials: terrain.materials,
+            local_to_world: glam::Mat4::IDENTITY.to_cols_array(),
+            volume_params: [voxel_size, dimensions[0] as f32, 0.0, 0.0],
+            volume_id_seed: [volume_id, 0, 0],
+            dimensions,
+            generation: [0.0; 16],
+            generation_flags: [0; 3],
+            streaming: [0; 3],
+            editing: [0.0; 12],
+            palette: Vec::new(),
+            render_settings: [VOXEL_MODE_SURFACE, 0, 0],
+        }
+    }
+
+    pub fn with_palette(
+        terrain: VoxelTerrain,
+        voxel_size: f32,
+        volume_id: u32,
+        palette: Vec<[f32; 4]>,
+    ) -> Self {
+        let mut component = Self::new(terrain, voxel_size, volume_id);
+        component.palette = palette;
+        component
+    }
+
+    pub fn dimensions(&self) -> [u32; 3] {
+        self.dimensions
+    }
+
+    pub fn set_render_mode(&mut self, mode: u32) {
+        self.render_settings[0] = mode;
+    }
+
+    pub fn render_mode(&self) -> u32 {
+        self.render_settings[0]
+    }
+
+    pub fn voxel_size(&self) -> f32 {
+        self.volume_params[0]
+    }
+
+    pub fn volume_id(&self) -> u32 {
+        self.volume_id_seed[0]
+    }
+
+    pub fn seed(&self) -> u32 {
+        self.volume_id_seed[1]
+    }
+
+    pub fn set_seed(&mut self, seed: u32) {
+        self.volume_id_seed[1] = seed;
+    }
+
+    fn terrain_snapshot(&self) -> VoxelTerrain {
+        VoxelTerrain {
+            materials: self.materials.clone(),
+            dimensions: self.dimensions,
+        }
+    }
+
+    pub fn generate(&mut self, seed: u32) {
+        let mut terrain = self.terrain_snapshot();
+        let (chunk_x, chunk_z) = self.chunk_coord();
+        terrain.generate_at(seed, [chunk_x, chunk_z]);
+        self.materials = terrain.materials;
+        self.set_seed(seed);
+    }
+
+    /// Generate this component as a deterministic infinite-world chunk.
+    /// Chunk coordinates are signed and encoded in the SceneDB streaming row.
+    pub fn generate_chunk(&mut self, seed: u32, chunk_x: i32, chunk_z: i32) {
+        self.set_chunk_coord(chunk_x, chunk_z);
+        self.generate(seed);
+    }
+
+    pub fn set_chunk_coord(&mut self, chunk_x: i32, chunk_z: i32) {
+        self.streaming[0] = chunk_x as u32;
+        self.streaming[2] = chunk_z as u32;
+        let world_x = chunk_x as f32 * self.dimensions[0] as f32 * self.voxel_size();
+        let world_z = chunk_z as f32 * self.dimensions[2] as f32 * self.voxel_size();
+        self.local_to_world = glam::Mat4::from_translation(glam::vec3(world_x, 0.0, world_z)).to_cols_array();
+    }
+
+    pub fn chunk_coord(&self) -> (i32, i32) {
+        (self.streaming[0] as i32, self.streaming[2] as i32)
+    }
+
+    pub fn paint_sphere(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        material: u8,
+        add: bool,
+    ) -> Option<BrickRange> {
+        let mut terrain = self.terrain_snapshot();
+        let range = terrain.paint_sphere(center, radius, material, add);
+        self.materials = terrain.materials;
+        range
+    }
+
+    /// Apply N arbitrary block edits and return the combined dirty-brick range.
+    pub fn apply_block_updates(&mut self, updates: &[VoxelBlockUpdate]) -> Option<BrickRange> {
+        let mut terrain = self.terrain_snapshot();
+        let range = terrain.apply_block_updates(updates);
+        self.materials = terrain.materials;
+        range
+    }
+
+    /// Apply N inclusive rectangular area edits and return the combined dirty
+    /// range. Overlapping updates are applied in input order.
+    pub fn apply_area_updates(&mut self, updates: &[VoxelAreaUpdate]) -> Option<BrickRange> {
+        let mut terrain = self.terrain_snapshot();
+        let range = terrain.apply_area_updates(updates);
+        self.materials = terrain.materials;
+        range
+    }
+
+    pub fn set_block(&mut self, position: [u32; 3], material: u8) -> Option<BrickRange> {
+        self.apply_block_updates(&[VoxelBlockUpdate { position, material }])
+    }
+
+    pub fn upload_all_mesh(
+        &self,
+        queue: &wgpu::Queue,
+        brick_meta_buf: &wgpu::Buffer,
+        voxel_data_buf: &wgpu::Buffer,
+    ) -> Vec<(u32, [f32; 3], bool)> {
+        self.terrain_snapshot().upload_all_mesh(
+            queue,
+            brick_meta_buf,
+            voxel_data_buf,
+            self.voxel_size(),
+        )
+    }
+
+    pub fn upload_range_mesh(
+        &self,
+        queue: &wgpu::Queue,
+        brick_meta_buf: &wgpu::Buffer,
+        voxel_data_buf: &wgpu::Buffer,
+        range: BrickRange,
+    ) -> Vec<(u32, [f32; 3], bool)> {
+        self.terrain_snapshot().upload_range_mesh(
+            queue,
+            brick_meta_buf,
+            voxel_data_buf,
+            self.voxel_size(),
+            range,
+        )
+    }
 }
 
 impl VoxelTerrain {
     pub fn empty() -> Self {
+        Self::with_dimensions([VOXEL_TERRAIN_GRID_DIM; 3])
+    }
+
+    pub fn with_dimensions(dimensions: [u32; 3]) -> Self {
         Self {
-            materials: vec![
-                MAT_AIR;
-                (VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM)
-                    as usize
-            ],
+            materials: vec![MAT_AIR; (dimensions[0] * dimensions[1] * dimensions[2]) as usize],
+            dimensions,
         }
     }
 
-    fn idx(x: u32, y: u32, z: u32) -> usize {
-        (x + y * VOXEL_TERRAIN_GRID_DIM + z * VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM)
-            as usize
+    fn idx(&self, x: u32, y: u32, z: u32) -> usize {
+        (x + y * self.dimensions[0] + z * self.dimensions[0] * self.dimensions[1]) as usize
     }
 
-    fn in_bounds(x: i32, y: i32, z: i32) -> bool {
+    fn set_material(&mut self, x: u32, y: u32, z: u32, material: u8) {
+        let index = self.idx(x, y, z);
+        self.materials[index] = material;
+    }
+
+    fn in_bounds(&self, x: i32, y: i32, z: i32) -> bool {
         x >= 0
             && y >= 0
             && z >= 0
-            && (x as u32) < VOXEL_TERRAIN_GRID_DIM
-            && (y as u32) < VOXEL_TERRAIN_GRID_DIM
-            && (z as u32) < VOXEL_TERRAIN_GRID_DIM
+            && (x as u32) < self.dimensions[0]
+            && (y as u32) < self.dimensions[1]
+            && (z as u32) < self.dimensions[2]
     }
 
-    /// Fills the grid with procedurally generated hills, dirt/stone layers, caves and ore.
+    /// Fills the grid with a Minecraft-style block world: bedrock, stone,
+    /// dirt/grass strata, beaches, sea water, caves, ores, and trees.
     pub fn generate(&mut self, seed: u32) {
-        let base_height = VOXEL_TERRAIN_GRID_DIM as f32 * 0.45;
-        let amplitude = VOXEL_TERRAIN_GRID_DIM as f32 * 0.22;
-        let freq = 1.0 / 18.0;
+        self.generate_at(seed, [0, 0]);
+    }
 
-        for x in 0..VOXEL_TERRAIN_GRID_DIM {
-            for z in 0..VOXEL_TERRAIN_GRID_DIM {
-                let h = fbm2(x as f32 * freq, z as f32 * freq, seed, 4);
+    fn merge_dirty_range(dirty: &mut Option<BrickRange>, position: [u32; 3]) {
+        let brick = [position[0] / BRICK_DIM, position[1] / BRICK_DIM, position[2] / BRICK_DIM];
+        if let Some(range) = dirty {
+            for axis in 0..3 {
+                range.min[axis] = range.min[axis].min(brick[axis]);
+                range.max[axis] = range.max[axis].max(brick[axis]);
+            }
+        } else {
+            *dirty = Some(BrickRange { min: brick, max: brick });
+        }
+    }
+
+    pub fn apply_block_updates(&mut self, updates: &[VoxelBlockUpdate]) -> Option<BrickRange> {
+        let mut dirty = None;
+        for update in updates {
+            let [x, y, z] = update.position;
+            if x >= self.dimensions[0] || y >= self.dimensions[1] || z >= self.dimensions[2] {
+                continue;
+            }
+            self.set_material(x, y, z, update.material);
+            Self::merge_dirty_range(&mut dirty, update.position);
+        }
+        dirty
+    }
+
+    pub fn apply_area_updates(&mut self, updates: &[VoxelAreaUpdate]) -> Option<BrickRange> {
+        let mut dirty = None;
+        for update in updates {
+            let min = [
+                update.min[0].min(self.dimensions[0] - 1),
+                update.min[1].min(self.dimensions[1] - 1),
+                update.min[2].min(self.dimensions[2] - 1),
+            ];
+            let max = [
+                update.max[0].min(self.dimensions[0] - 1),
+                update.max[1].min(self.dimensions[1] - 1),
+                update.max[2].min(self.dimensions[2] - 1),
+            ];
+            if min.iter().zip(max.iter()).any(|(lo, hi)| lo > hi) {
+                continue;
+            }
+            for z in min[2]..=max[2] {
+                for y in min[1]..=max[1] {
+                    for x in min[0]..=max[0] {
+                        self.set_material(x, y, z, update.material);
+                    }
+                }
+            }
+            let area_max = [max[0], max[1], max[2]];
+            Self::merge_dirty_range(&mut dirty, min);
+            Self::merge_dirty_range(&mut dirty, area_max);
+        }
+        dirty
+    }
+
+    /// Generate a chunk using global voxel coordinates. This makes adjacent
+    /// component instances agree at chunk boundaries without a world-sized
+    /// allocation or a singleton terrain assumption.
+    pub fn generate_at(&mut self, seed: u32, chunk: [i32; 2]) {
+        let sea_level = 25.0;
+        let base_height = 29.0;
+        let amplitude = 13.0;
+        let freq = 0.055;
+
+        for x in 0..self.dimensions[0] {
+            for z in 0..self.dimensions[2] {
+                let wx = x as i32 + chunk[0] * self.dimensions[0] as i32;
+                let wz = z as i32 + chunk[1] * self.dimensions[2] as i32;
+                let h = fbm2(wx as f32 * freq, wz as f32 * freq, seed, 4);
                 let terrain_height = base_height + h * amplitude;
 
-                for y in 0..VOXEL_TERRAIN_GRID_DIM {
+                for y in 0..self.dimensions[1] {
                     let yf = y as f32;
-                    if yf > terrain_height {
-                        self.materials[Self::idx(x, y, z)] = MAT_AIR;
+                    if y == 0 {
+                        self.set_material(x, y, z, MAT_BEDROCK);
+                    } else if yf > terrain_height {
+                        self.set_material(x, y, z, if yf <= sea_level { MAT_WATER } else { MAT_AIR });
                         continue;
                     }
 
                     let depth = terrain_height - yf;
-                    let mut mat = if depth < 1.0 {
+                    let near_beach = terrain_height <= sea_level + 1.5;
+                    let mut mat = if near_beach && depth < 3.0 {
+                        MAT_SAND
+                    } else if depth < 1.0 {
                         MAT_GRASS
                     } else if depth < 4.0 {
                         MAT_DIRT
@@ -145,19 +438,59 @@ impl VoxelTerrain {
                         MAT_STONE
                     };
 
-                    // No cave carving here: VoxelMeshPass caps each brick at
-                    // MAX_SURFACE_VERTS_PER_BRICK/MAX_SURFACE_INDICES_PER_BRICK
-                    // (256/768) — a cave-riddled brick's internal surface area
-                    // blows well past that budget and geometry gets silently
-                    // truncated mid-brick. A plain heightfield keeps each
-                    // brick's surface to roughly one layer of cells.
-                    if mat == MAT_STONE
-                        && hash(x as i32, y as i32, z as i32, seed ^ 0x1234_5678) > 0.985
-                    {
-                        mat = MAT_ORE;
+                    if mat == MAT_STONE {
+                        let cave = fbm2(
+                            wx as f32 * 0.11,
+                            wz as f32 * 0.11 + y as f32 * 0.07,
+                            seed ^ 0x51_7A_9E,
+                            3,
+                        );
+                        if y > 5 && y < terrain_height as u32 - 2 && cave > 0.78 {
+                            mat = MAT_AIR;
+                        } else {
+                            let ore = hash(wx, y as i32, wz, seed ^ 0x1234_5678);
+                            mat = if y < 12 && ore > 0.965 {
+                                MAT_GOLD_ORE
+                            } else if y < 28 && ore > 0.94 {
+                                MAT_IRON_ORE
+                            } else if ore > 0.90 {
+                                MAT_COAL_ORE
+                            } else {
+                                mat
+                            };
+                        }
                     }
 
-                    self.materials[Self::idx(x, y, z)] = mat;
+                    self.set_material(x, y, z, mat);
+                }
+            }
+        }
+
+        // Sparse, deterministic trees make the result read as a block world
+        // without overwhelming the surface extraction budget.
+        for x in 3..self.dimensions[0].saturating_sub(3) {
+            for z in 3..self.dimensions[2].saturating_sub(3) {
+                let wx = x as i32 + chunk[0] * self.dimensions[0] as i32;
+                let wz = z as i32 + chunk[1] * self.dimensions[2] as i32;
+                if hash(wx, 91, wz, seed ^ 0x7E_2A) < 0.93 {
+                    continue;
+                }
+                let h = (base_height + fbm2(wx as f32 * freq, wz as f32 * freq, seed, 4) * amplitude)
+                    as i32;
+                if !(1..(self.dimensions[1] as i32 - 7)).contains(&h) {
+                    continue;
+                }
+                for trunk_y in h..h + 4 {
+                    self.set_material(x, trunk_y as u32, z, MAT_LOG);
+                }
+                for dz in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        if dx.abs() + dz.abs() <= 3 {
+                            let lx = (x as i32 + dx) as u32;
+                            let lz = (z as i32 + dz) as u32;
+                            self.set_material(lx, (h + 4) as u32, lz, MAT_LEAVES);
+                        }
+                    }
                 }
             }
         }
@@ -179,7 +512,7 @@ impl VoxelTerrain {
         let r2 = radius * radius;
 
         let mut touched = false;
-        let mut min = [VOXEL_TERRAIN_GRID_DIM as i32; 3];
+        let mut min = [self.dimensions[0] as i32, self.dimensions[1] as i32, self.dimensions[2] as i32];
         let mut max = [-1i32; 3];
 
         for dz in -r..=r {
@@ -190,11 +523,10 @@ impl VoxelTerrain {
                         continue;
                     }
                     let (x, y, z) = (cx + dx, cy + dy, cz + dz);
-                    if !Self::in_bounds(x, y, z) {
+                    if !self.in_bounds(x, y, z) {
                         continue;
                     }
-                    self.materials[Self::idx(x as u32, y as u32, z as u32)] =
-                        if add { material } else { MAT_AIR };
+                    self.set_material(x as u32, y as u32, z as u32, if add { material } else { MAT_AIR });
                     touched = true;
                     min[0] = min[0].min(x);
                     min[1] = min[1].min(y);
@@ -235,11 +567,11 @@ impl VoxelTerrain {
                     let gx = bx * BRICK_DIM + lx;
                     let gy = by * BRICK_DIM + ly;
                     let gz = bz * BRICK_DIM + lz;
-                    let mat = if gx < VOXEL_TERRAIN_GRID_DIM
-                        && gy < VOXEL_TERRAIN_GRID_DIM
-                        && gz < VOXEL_TERRAIN_GRID_DIM
+                    let mat = if gx < self.dimensions[0]
+                        && gy < self.dimensions[1]
+                        && gz < self.dimensions[2]
                     {
-                        self.materials[Self::idx(gx, gy, gz)]
+                        self.materials[self.idx(gx, gy, gz)]
                     } else {
                         MAT_AIR
                     };
@@ -259,12 +591,20 @@ impl VoxelTerrain {
     /// World-space origin of a brick's local (0,0,0) voxel corner — the value
     /// `VoxelMeshPass::mark_dirty` needs so its extract shader can place
     /// generated vertices in world space (see `voxel_surface_extract.wgsl`).
-    fn brick_origin(bx: u32, by: u32, bz: u32, voxel_size: f32) -> [f32; 3] {
-        let half = VOXEL_TERRAIN_GRID_DIM as f32 / 2.0;
-        let gx = (bx * BRICK_DIM) as f32 - half;
-        let gy = (by * BRICK_DIM) as f32 - half;
-        let gz = (bz * BRICK_DIM) as f32 - half;
+    fn brick_origin(&self, bx: u32, by: u32, bz: u32, voxel_size: f32) -> [f32; 3] {
+        let half = [self.dimensions[0] as f32, self.dimensions[1] as f32, self.dimensions[2] as f32];
+        let gx = (bx * BRICK_DIM) as f32 - half[0] * 0.5;
+        let gy = (by * BRICK_DIM) as f32 - half[1] * 0.5;
+        let gz = (bz * BRICK_DIM) as f32 - half[2] * 0.5;
         [gx * voxel_size, gy * voxel_size, gz * voxel_size]
+    }
+
+    fn brick_dims(&self) -> [u32; 3] {
+        [
+            self.dimensions[0].div_ceil(BRICK_DIM),
+            self.dimensions[1].div_ceil(BRICK_DIM),
+            self.dimensions[2].div_ceil(BRICK_DIM),
+        ]
     }
 
     /// Re-bakes and uploads the bricks touched by a `BrickRange` into
@@ -284,8 +624,9 @@ impl VoxelTerrain {
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
+                    let brick_dims = self.brick_dims();
                     let brick_idx =
-                        bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
+                        bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
                     let mut brick_words = [0u32; WORDS_PER_BRICK];
                     let occupied = self.bake_brick(bx, by, bz, &mut brick_words);
 
@@ -308,7 +649,7 @@ impl VoxelTerrain {
 
                     touched.push((
                         brick_idx,
-                        Self::brick_origin(bx, by, bz, voxel_size),
+                        self.brick_origin(bx, by, bz, voxel_size),
                         occupied,
                     ));
                 }
@@ -333,9 +674,9 @@ impl VoxelTerrain {
             BrickRange {
                 min: [0, 0, 0],
                 max: [
-                    BRICKS_PER_AXIS - 1,
-                    BRICKS_PER_AXIS - 1,
-                    BRICKS_PER_AXIS - 1,
+                    self.brick_dims()[0] - 1,
+                    self.brick_dims()[1] - 1,
+                    self.brick_dims()[2] - 1,
                 ],
             },
         )
@@ -357,7 +698,7 @@ impl VoxelTerrain {
                     let gx = bx * BRICK_DIM + lx;
                     let gy = by * BRICK_DIM + ly;
                     let gz = bz * BRICK_DIM + lz;
-                    let mat = self.materials[Self::idx(gx, gy, gz)];
+                    let mat = self.materials[self.idx(gx, gy, gz)];
                     if mat != MAT_AIR {
                         occupied = true;
                     }
@@ -385,8 +726,9 @@ impl VoxelTerrain {
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
+                    let brick_dims = self.brick_dims();
                     let brick_idx =
-                        bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
+                        bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
                     let mut brick_words = [0u32; RAYMARCH_WORDS_PER_BRICK];
                     let occupied = self.bake_brick_raymarch(bx, by, bz, &mut brick_words);
 
@@ -427,9 +769,9 @@ impl VoxelTerrain {
             BrickRange {
                 min: [0, 0, 0],
                 max: [
-                    BRICKS_PER_AXIS - 1,
-                    BRICKS_PER_AXIS - 1,
-                    BRICKS_PER_AXIS - 1,
+                    self.brick_dims()[0] - 1,
+                    self.brick_dims()[1] - 1,
+                    self.brick_dims()[2] - 1,
                 ],
             },
         )

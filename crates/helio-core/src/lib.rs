@@ -392,9 +392,9 @@ pub mod actor;
 pub mod asset_types;
 pub mod camera;
 pub mod context;
-pub mod frame_storage;
 pub mod entity;
 pub mod error;
+pub mod frame_storage;
 pub mod graph;
 pub mod movability;
 pub mod profiling;
@@ -418,13 +418,15 @@ pub use registry::{ResourceKey, ResourceRegistry, Tracked, ViewGroup};
 pub use render_environment::RenderEnvironment;
 
 // Re-export managers
-pub use crate::acceleration::{AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, TlasInstanceInput, TlasManager};
+pub use crate::acceleration::{
+    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, TlasInstanceInput, TlasManager,
+};
 // Re-export core types
 pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
-pub use frame_storage::RenderFrameStorage;
 pub use entity::Entity;
 pub use error::{Error, Result};
+pub use frame_storage::RenderFrameStorage;
 pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData,
     GraphTimelinePass, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,

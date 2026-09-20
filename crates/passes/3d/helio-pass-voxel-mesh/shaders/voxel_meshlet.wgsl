@@ -64,6 +64,7 @@ struct MeshletParams {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(2) var<uniform> params: MeshletParams;
+@group(0) @binding(3) var<storage, read> material_palette: array<vec4<f32>>;
 
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
@@ -77,28 +78,26 @@ fn vs_main(v: VertexInput) -> VertexOutput {
 
 // ── Fragment shader: G-buffer output ──────────────────────────────────────
 
-fn golden_ratio_hue(index: u32) -> f32 {
-    return f32(index) * 0.6180339887;
-}
-
 fn material_color(index: u32) -> vec3<f32> {
-    let h = golden_ratio_hue(index);
-    let r = cos(h * 6.28318 + 0.0) * 0.5 + 0.5;
-    let g = cos(h * 6.28318 + 2.09439) * 0.5 + 0.5;
-    let b = cos(h * 6.28318 + 4.18879) * 0.5 + 0.5;
-    return vec3<f32>(r, g, b);
+    if index < arrayLength(&material_palette) {
+        return material_palette[index].rgb;
+    }
+    return vec3<f32>(0.72, 0.72, 0.72);
 }
 
 fn material_roughness(index: u32) -> f32 {
-    return 0.4 + (f32(index % 16u) * 0.04);
+    if index < arrayLength(&material_palette) {
+        return clamp(material_palette[index].a, 0.02, 1.0);
+    }
+    return 0.8;
 }
 
-fn material_metalness(index: u32) -> f32 {
-    return select(0.0, 0.9, (index / 8u) % 2u == 1u);
+fn material_metalness(_index: u32) -> f32 {
+    return 0.0;
 }
 
-fn material_emissive(index: u32) -> vec3<f32> {
-    return select(vec3<f32>(0.0), material_color(index) * 2.0, index == 0u);
+fn material_emissive(_index: u32) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 
 // Simple Lambertian contribution from a scene light (no PBR/specular/shadows —

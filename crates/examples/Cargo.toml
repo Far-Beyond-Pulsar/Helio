@@ -208,6 +208,10 @@ name = "voxel_demo"
 path = "voxel/mesh_demo.rs"
 
 [[bin]]
+name = "minecraft_demo"
+path = "minecraft_demo/main.rs"
+
+[[bin]]
 name = "voxel_demo_raymarch"
 path = "voxel/raymarch_demo.rs"
 

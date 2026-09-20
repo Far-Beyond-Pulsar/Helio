@@ -225,7 +225,11 @@ impl BlasManager {
             vertex_count: geometry.vertex_count,
             index_format: geometry.indices.map(|_| wgpu::IndexFormat::Uint32),
             index_count: geometry.indices.map(|_| geometry.index_count),
-            flags: if opaque { wgpu::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::AccelerationStructureGeometryFlags::empty() },
+            flags: if opaque {
+                wgpu::AccelerationStructureGeometryFlags::OPAQUE
+            } else {
+                wgpu::AccelerationStructureGeometryFlags::empty()
+            },
         };
         let blas = self.device.create_blas(
             &wgpu::CreateBlasDescriptor {
@@ -572,7 +576,6 @@ pub struct TlasInstanceInput {
     pub transform: [f32; 12],
 }
 
-
 /// Frontend-published acceleration input valid for exactly one render frame.
 /// Owns a cheap TLAS handle clone; the frontend retains its BLAS cache.
 #[derive(Default)]
@@ -608,6 +611,9 @@ impl FrameAcceleration {
         self.tlas(frame).and(self.transmission.as_ref())
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
-        self.frame.as_ref().filter(|(generation, _)| *generation == frame).map(|(_, tlas)| tlas)
+        self.frame
+            .as_ref()
+            .filter(|(generation, _)| *generation == frame)
+            .map(|(_, tlas)| tlas)
     }
 }

@@ -4,8 +4,8 @@
 
 // Must match MAX_SURFACE_VERTS_PER_BRICK/MAX_SURFACE_INDICES_PER_BRICK in
 // VoxelMeshPass surface budgets (vertex_buf/index_buf are sized from those).
-const MAX_VERTS: u32 = 2048u;
-const MAX_INDICES: u32 = 2048u;
+const MAX_VERTS: u32 = 12288u;
+const MAX_INDICES: u32 = 18432u;
 // Each brick's voxel data is padded to 9x9x9 (one extra voxel of +X/+Y/+Z
 // halo copied from the neighboring brick), so cells run 0..7 (8 per axis,
 // corners 0..8) instead of 0..6 — the extra cell at each brick's +face reads
@@ -43,6 +43,8 @@ struct DrawIndexedIndirect {
 struct DirtyBrick {
     brick_slot: u32,
     volume_id: u32,
+    mode: u32,
+    _pad: u32,
     origin_size: vec4<f32>, // xyz = world origin, w = voxel_size
 }
 
@@ -121,6 +123,38 @@ fn compute_normal(data_offset: u32, cx: u32, cy: u32, cz: u32) -> vec3<f32> {
     return select(vec3<f32>(0.0, 1.0, 0.0), n * inverse_length, magnitude_squared >= 0.000001);
 }
 
+fn cube_face_corner(face: u32, corner: u32) -> vec3<f32> {
+    let faces = array<array<vec3<f32>, 4>, 6>(
+        array<vec3<f32>, 4>(vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 1.0), vec3(0.0, 0.0, 1.0)),
+        array<vec3<f32>, 4>(vec3(1.0, 0.0, 1.0), vec3(1.0, 1.0, 1.0), vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0)),
+        array<vec3<f32>, 4>(vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0)),
+        array<vec3<f32>, 4>(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), vec3(0.0, 1.0, 1.0), vec3(0.0, 1.0, 0.0)),
+        array<vec3<f32>, 4>(vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 1.0), vec3(1.0, 1.0, 1.0), vec3(1.0, 0.0, 1.0)),
+        array<vec3<f32>, 4>(vec3(1.0, 0.0, 0.0), vec3(1.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 0.0)),
+    );
+    return faces[face][corner];
+}
+
+fn cube_face_normal(face: u32) -> vec3<f32> {
+    return array<vec3<f32>, 6>(
+        vec3(-1.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0),
+        vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0),
+        vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0)
+    )[face];
+}
+
+fn neighbor_is_empty(data_offset: u32, cx: u32, cy: u32, cz: u32, face: u32) -> bool {
+    var p = vec3<i32>(i32(cx), i32(cy), i32(cz));
+    if face == 0u { p.x -= 1; }
+    if face == 1u { p.x += 1; }
+    if face == 2u { p.y -= 1; }
+    if face == 3u { p.y += 1; }
+    if face == 4u { p.z += 1; }
+    if face == 5u { p.z -= 1; }
+    if p.x < 0 || p.y < 0 || p.z < 0 { return true; }
+    return read_voxel(data_offset, clamped_voxel(p.x), clamped_voxel(p.y), clamped_voxel(p.z)) == 0u;
+}
+
 @compute @workgroup_size(WG_SIZE, 1, 1)
 fn main(
     @builtin(workgroup_id) wg_id: vec3<u32>,
@@ -129,6 +163,7 @@ fn main(
     let brick = dirty_bricks[wg_id.x];
     let brick_slot = brick.brick_slot;
     let volume_id = brick.volume_id;
+    let mode = brick.mode;
     let origin = brick.origin_size.xyz;
     let vs = brick.origin_size.w;
 
@@ -148,6 +183,33 @@ fn main(
         let cz = cell_linear / (CELLS_PER_DIM * CELLS_PER_DIM);
         let cy = (cell_linear / CELLS_PER_DIM) % CELLS_PER_DIM;
         let cx = cell_linear % CELLS_PER_DIM;
+
+        if mode == 1u {
+            let material = read_voxel(data_offset, cx, cy, cz);
+            if material == 0u { continue; }
+            let cell_world = vec3<f32>(f32(cx), f32(cy), f32(cz)) * vs + origin;
+            for (var face = 0u; face < 6u; face++) {
+                if !neighbor_is_empty(data_offset, cx, cy, cz, face) { continue; }
+                let vert_base = atomicAdd(&wg_vertex_count, 4u);
+                let index_base = atomicAdd(&wg_index_count, 6u);
+                if vert_base + 4u > MAX_VERTS || index_base + 6u > MAX_INDICES { continue; }
+                let brick_vert_offset = brick_slot * MAX_VERTS;
+                let brick_idx_offset = brick_slot * MAX_INDICES;
+                let n = cube_face_normal(face);
+                for (var v = 0u; v < 4u; v++) {
+                    let p = cell_world + cube_face_corner(face, v) * vs;
+                    vertex_buf[brick_vert_offset + vert_base + v] = vec4<f32>(p, f32(material));
+                    normal_buf[brick_vert_offset + vert_base + v] = vec4<f32>(n, 0.0);
+                }
+                index_buf[brick_idx_offset + index_base + 0u] = vert_base + 0u;
+                index_buf[brick_idx_offset + index_base + 1u] = vert_base + 1u;
+                index_buf[brick_idx_offset + index_base + 2u] = vert_base + 2u;
+                index_buf[brick_idx_offset + index_base + 3u] = vert_base + 0u;
+                index_buf[brick_idx_offset + index_base + 4u] = vert_base + 2u;
+                index_buf[brick_idx_offset + index_base + 5u] = vert_base + 3u;
+            }
+            continue;
+        }
 
         var corner: array<u32, 8>;
         corner[0] = read_voxel(data_offset, cx,     cy,     cz);

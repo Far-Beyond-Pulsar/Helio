@@ -11,7 +11,7 @@
 //!   Escape              – release cursor / quit
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
@@ -20,7 +20,8 @@ use helio::{
     LightType, RenderGraph, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+use helio_pass_voxel_mesh::{VoxelComponent, VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+use pulsar_scenedb::{Entity, SceneDb, World};
 
 #[path = "../v3_demo_common.rs"]
 mod v3_demo_common;
@@ -46,6 +47,61 @@ const VOXEL_SIZE: f32 = 0.75;
 
 struct App {
     state: Option<AppState>,
+    world_setup: fn(&mut World) -> Entity,
+    telemetry: Arc<FrameTelemetry>,
+}
+
+struct FrameTelemetry {
+    frames: AtomicU64,
+    frame_ns: AtomicU64,
+    update_ns: AtomicU64,
+    render_ns: AtomicU64,
+    max_frame_ns: AtomicU64,
+}
+
+impl FrameTelemetry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            frames: AtomicU64::new(0),
+            frame_ns: AtomicU64::new(0),
+            update_ns: AtomicU64::new(0),
+            render_ns: AtomicU64::new(0),
+            max_frame_ns: AtomicU64::new(0),
+        })
+    }
+
+    fn publish(&self, frame_ns: u64, update_ns: u64, render_ns: u64) {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.frame_ns.fetch_add(frame_ns, Ordering::Relaxed);
+        self.update_ns.fetch_add(update_ns, Ordering::Relaxed);
+        self.render_ns.fetch_add(render_ns, Ordering::Relaxed);
+        self.max_frame_ns.fetch_max(frame_ns, Ordering::Relaxed);
+    }
+}
+
+fn spawn_telemetry_reporter(telemetry: Arc<FrameTelemetry>) {
+    std::thread::Builder::new()
+        .name("voxel-telemetry".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let frames = telemetry.frames.swap(0, Ordering::Relaxed);
+            let frame_ns = telemetry.frame_ns.swap(0, Ordering::Relaxed);
+            let update_ns = telemetry.update_ns.swap(0, Ordering::Relaxed);
+            let render_ns = telemetry.render_ns.swap(0, Ordering::Relaxed);
+            let max_ns = telemetry.max_frame_ns.swap(0, Ordering::Relaxed);
+            if frames != 0 {
+                let inv = 1.0 / frames as f64 / 1_000_000.0;
+                eprintln!(
+                    "[voxel timing] fps={:.1} frame={:.2}ms update={:.2}ms render={:.2}ms worst={:.2}ms",
+                    frames,
+                    frame_ns as f64 * inv,
+                    update_ns as f64 * inv,
+                    render_ns as f64 * inv,
+                    max_ns as f64 / 1_000_000.0,
+                );
+            }
+        })
+        .expect("failed to spawn voxel telemetry thread");
 }
 
 struct AppState {
@@ -65,8 +121,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
     current_material: u8,
-    world: VoxelTerrain,
-    world_seed: u32,
+    scene_db: SceneDb,
+    voxel_entity: Entity,
+    telemetry: Arc<FrameTelemetry>,
 }
 
 impl AppState {
@@ -172,7 +229,8 @@ impl AppState {
         cam_pos: Vec3,
         yaw: f32,
         pitch: f32,
-        world: &mut VoxelTerrain,
+        world: &mut World,
+        voxel_entity: Entity,
         queue: &Arc<wgpu::Queue>,
         mesh_pass: &mut VoxelMeshPass,
     ) {
@@ -182,14 +240,24 @@ impl AppState {
         let center_grid = Self::world_to_grid(center_world);
         let radius_grid = 2.0 / VOXEL_SIZE;
 
-        if let Some(range) = world.paint_sphere(center_grid, radius_grid, material, add) {
+        let Some(mut component) = world.get_mut::<VoxelComponent>(voxel_entity) else {
+            return;
+        };
+        if let Some(range) = component.paint_sphere(center_grid, radius_grid, material, add) {
             let (meta_buf, data_buf) = (
                 mesh_pass.brick_meta_buf().clone(),
                 mesh_pass.voxel_data_buf().clone(),
             );
-            let touched = world.upload_range_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
+            let touched = component.upload_range_mesh(queue, &meta_buf, &data_buf, range);
             for (brick_idx, origin, occupied) in touched {
-                mesh_pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
+                mesh_pass.mark_dirty_with_mode(
+                    brick_idx,
+                    component.volume_id(),
+                    origin,
+                    component.voxel_size(),
+                    occupied,
+                    component.render_settings[0],
+                );
             }
         }
     }
@@ -270,32 +338,37 @@ impl ApplicationHandler for App {
         // infrastructure the default render graphs feed their deferred
         // lighting pass with.
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        spawn_light(&mut scene_db.world, GpuLight {
-            position_range: [0.0, 0.0, 0.0, f32::MAX],
-            direction_outer: [0.35, -0.8, 0.25, 0.0],
-            color_intensity: [1.0, 0.95, 0.85, 3.0],
-            shadow_index: u32::MAX,
-            light_type: LightType::Directional as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        });
-        spawn_light(&mut scene_db.world, GpuLight {
-            position_range: [0.0, 0.0, 0.0, f32::MAX],
-            direction_outer: [-0.4, -0.2, -0.6, 0.0],
-            color_intensity: [0.5, 0.6, 0.8, 0.6],
-            shadow_index: u32::MAX,
-            light_type: LightType::Directional as u32,
-            inner_angle: 0.0,
-            _pad: 0,
-            ..Default::default()
-        });
+        spawn_light(
+            &mut scene_db.world,
+            GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [0.35, -0.8, 0.25, 0.0],
+                color_intensity: [1.0, 0.95, 0.85, 3.0],
+                shadow_index: u32::MAX,
+                light_type: LightType::Directional as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            },
+        );
+        spawn_light(
+            &mut scene_db.world,
+            GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [-0.4, -0.2, -0.6, 0.0],
+                color_intensity: [0.5, 0.6, 0.8, 0.6],
+                shadow_index: u32::MAX,
+                light_type: LightType::Directional as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+                ..Default::default()
+            },
+        );
 
         // Procedurally generate the world on the CPU; baked into VoxelMeshPass's
         // buffers and mark_dirty()'d below, once the pass exists.
-        let world_seed = 1;
-        let mut world = VoxelTerrain::empty();
-        world.generate(world_seed);
+        let mut scene_db = scene_db;
+        let voxel_entity = (self.world_setup)(&mut scene_db.world);
 
         // Build a custom graph: VoxelMeshPass (real triangles, writes "pre_aa")
         // then FxaaPass (reads "pre_aa", writes directly to the swapchain
@@ -304,14 +377,22 @@ impl ApplicationHandler for App {
         // "pre_aa" and discard FXAA's result if chained after it, see how
         // build_fxaa_graph_internal in helio-default-graphs composes them).
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
-                let mut graph = RenderGraph::new(d, q);
-                graph.add_pass(Box::new(VoxelMeshPass::new(d, q, surface_format)));
-                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
-                graph.lock(graph_config.width, graph_config.height);
-                graph
-            }))
-            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
+            .with_graph(Box::new(
+                move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
+                    let mut graph = RenderGraph::new(d, q);
+                    graph.add_pass(Box::new(VoxelMeshPass::new(d, q, surface_format)));
+                    graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
+                    graph.lock(graph_config.width, graph_config.height);
+                    graph
+                },
+            ))
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
         // Renderer applies TAA-style subpixel camera jitter every frame
         // unconditionally; without a TaaPass to resolve it (we only have
         // FXAA, which is spatial-only), that jitter just makes the image
@@ -324,9 +405,20 @@ impl ApplicationHandler for App {
                 .expect("VoxelMeshPass missing from graph");
             let (meta_buf, data_buf) =
                 (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-            let touched = world.upload_all_mesh(&queue, &meta_buf, &data_buf, VOXEL_SIZE);
+            let component = scene_db
+                .world
+                .get::<VoxelComponent>(voxel_entity)
+                .expect("voxel component missing from SceneDB");
+            let touched = component.upload_all_mesh(&queue, &meta_buf, &data_buf);
             for (brick_idx, origin, occupied) in touched {
-                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
+                pass.mark_dirty_with_mode(
+                    brick_idx,
+                    component.volume_id(),
+                    origin,
+                    component.voxel_size(),
+                    occupied,
+                    component.render_settings[0],
+                );
             }
         }
 
@@ -350,8 +442,9 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             current_material: 1,
-            world,
-            world_seed,
+            scene_db,
+            voxel_entity,
+            telemetry: self.telemetry.clone(),
         });
     }
 
@@ -402,26 +495,37 @@ impl ApplicationHandler for App {
                     KeyCode::Digit3 => state.current_material = 3,
                     KeyCode::Digit4 => state.current_material = 4,
                     KeyCode::KeyR => {
-                        state.world_seed = state
-                            .world_seed
+                        let seed = state
+                            .scene_db
+                            .world
+                            .get::<VoxelComponent>(state.voxel_entity)
+                            .map(|component| component.seed())
+                            .unwrap_or(0)
                             .wrapping_add(1)
                             .wrapping_mul(2654435761)
                             .wrapping_add(1);
-                        state.world.generate(state.world_seed);
+                        let mut component = state
+                            .scene_db
+                            .world
+                            .get_mut::<VoxelComponent>(state.voxel_entity)
+                            .expect("voxel component missing from SceneDB");
+                        component.generate(seed);
                         let pass = state
                             .renderer
                             .find_pass_mut::<VoxelMeshPass>()
                             .expect("VoxelMeshPass missing from graph");
                         let (meta_buf, data_buf) =
                             (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-                        let touched = state.world.upload_all_mesh(
-                            &state.queue,
-                            &meta_buf,
-                            &data_buf,
-                            VOXEL_SIZE,
-                        );
+                        let touched = component.upload_all_mesh(&state.queue, &meta_buf, &data_buf);
                         for (brick_idx, origin, occupied) in touched {
-                            pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
+                            pass.mark_dirty_with_mode(
+                                brick_idx,
+                                component.volume_id(),
+                                origin,
+                                component.voxel_size(),
+                                occupied,
+                                component.render_settings[0],
+                            );
                         }
                     }
                     _ => {}
@@ -470,7 +574,17 @@ impl ApplicationHandler for App {
                     .renderer
                     .find_pass_mut::<VoxelMeshPass>()
                     .expect("VoxelMeshPass missing from graph");
-                AppState::place_edit(true, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
+                AppState::place_edit(
+                    true,
+                    mat,
+                    pos,
+                    yaw,
+                    pitch,
+                    &mut state.scene_db.world,
+                    state.voxel_entity,
+                    &queue,
+                    pass,
+                );
             }
 
             WindowEvent::MouseInput {
@@ -487,14 +601,27 @@ impl ApplicationHandler for App {
                     .renderer
                     .find_pass_mut::<VoxelMeshPass>()
                     .expect("VoxelMeshPass missing from graph");
-                AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
+                AppState::place_edit(
+                    false,
+                    mat,
+                    pos,
+                    yaw,
+                    pitch,
+                    &mut state.scene_db.world,
+                    state.voxel_entity,
+                    &queue,
+                    pass,
+                );
             }
 
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
+                let frame_start = Instant::now();
+                let now = frame_start;
                 let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
+                let update_start = Instant::now();
                 state.update(dt);
+                let update_ns = update_start.elapsed().as_nanos() as u64;
 
                 let size = state.window.inner_size();
                 let camera = state.camera(size.width, size.height);
@@ -510,10 +637,17 @@ impl ApplicationHandler for App {
                 let view = output
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
+                let render_start = Instant::now();
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
+                let render_ns = render_start.elapsed().as_nanos() as u64;
                 state.renderer.queue().present(output);
+                state.telemetry.publish(
+                    frame_start.elapsed().as_nanos() as u64,
+                    update_ns,
+                    render_ns,
+                );
                 state.window.request_redraw();
             }
 
@@ -538,10 +672,34 @@ impl ApplicationHandler for App {
     }
 }
 
-fn main() {
+fn default_world_setup(world: &mut World) -> Entity {
+    let world_seed = 1;
+    let mut terrain = VoxelTerrain::empty();
+    terrain.generate(world_seed);
+    let voxel_entity = world.spawn();
+    let mut voxel_component = VoxelComponent::new(terrain, VOXEL_SIZE, 0);
+    voxel_component.set_seed(world_seed);
+    world.insert(voxel_entity, voxel_component);
+    voxel_entity
+}
+
+pub fn run_with_world_setup(world_setup: fn(&mut World) -> Entity) {
     env_logger::init();
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let mut app = App { state: None };
+    let mut app = App {
+        state: None,
+        world_setup,
+        telemetry: FrameTelemetry::new(),
+    };
+    spawn_telemetry_reporter(app.telemetry.clone());
     event_loop.run_app(&mut app).unwrap();
+}
+
+pub fn run() {
+    run_with_world_setup(default_world_setup);
+}
+
+fn main() {
+    run();
 }

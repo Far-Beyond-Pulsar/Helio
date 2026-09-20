@@ -7,7 +7,10 @@
 mod marching_cubes;
 mod terrain;
 
-pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+pub use terrain::{
+    BrickRange, VoxelAreaUpdate, VoxelBlockUpdate, VoxelComponent, VoxelTerrain,
+    VOXEL_MODE_CUBES, VOXEL_MODE_SURFACE, VOXEL_TERRAIN_GRID_DIM,
+};
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
@@ -15,6 +18,7 @@ use helio_core::{
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_pass_object_batch::DrawIndexedIndirectArgs;
+use wgpu::util::DeviceExt;
 
 use marching_cubes::PACKED_TRI_TABLE;
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -32,8 +36,8 @@ pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
 // the boundary between two bricks and the surface has a visible seam/gap at
 // every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
 pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
-pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 2048;
-pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 2048;
+pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 12288;
+pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 18432;
 
 /// Mesh-pass-owned metadata consumed by the extraction and meshlet shaders.
 #[repr(C)]
@@ -87,7 +91,8 @@ impl AttachmentMode {
 struct DirtyBrick {
     brick_slot: u32,
     volume_id: u32,
-    _pad: [u32; 2],
+    mode: u32,
+    _pad: u32,
     origin_size: [f32; 4], // xyz = world origin, w = voxel size
 }
 
@@ -151,8 +156,9 @@ pub struct VoxelMeshPass {
     render_pipeline: wgpu::RenderPipeline,
     render_bgl: wgpu::BindGroupLayout,
     render_bind_group: Option<wgpu::BindGroup>,
-    render_bind_group_key: Option<(usize, usize)>,
+    render_bind_group_key: Option<(usize, usize, usize)>,
     meshlet_params_buf: wgpu::Buffer,
+    palette_buf: wgpu::Buffer,
 
     // GPU buffers
     brick_meta_buf: wgpu::Buffer,
@@ -481,6 +487,16 @@ impl VoxelMeshPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -489,6 +505,11 @@ impl VoxelMeshPass {
             size: std::mem::size_of::<MeshletParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let palette_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("VoxelMesh Neutral Palette"),
+            contents: bytemuck::cast_slice(&[[0.72f32, 0.72, 0.72, 0.8]]),
+            usage: wgpu::BufferUsages::STORAGE,
         });
 
         // ── Render pipeline ──────────────────────────────────────────────────
@@ -568,6 +589,7 @@ impl VoxelMeshPass {
             render_pipeline,
             render_bgl,
             meshlet_params_buf,
+            palette_buf,
             render_bind_group: None,
             render_bind_group_key: None,
             brick_meta_buf,
@@ -604,6 +626,20 @@ impl VoxelMeshPass {
         voxel_size: f32,
         occupied: bool,
     ) {
+        self.mark_dirty_with_mode(brick_slot, volume_id, origin, voxel_size, occupied, VOXEL_MODE_SURFACE);
+    }
+
+    /// Mark a brick with an explicit extraction mode. Cube mode emits exposed
+    /// voxel faces; surface mode uses the existing marching-cubes extractor.
+    pub fn mark_dirty_with_mode(
+        &mut self,
+        brick_slot: u32,
+        volume_id: u32,
+        origin: [f32; 3],
+        voxel_size: f32,
+        occupied: bool,
+        mode: u32,
+    ) {
         if brick_slot >= VOXEL_MESH_MAX_BRICKS {
             log::warn!(
                 "VoxelMeshPass: brick slot {brick_slot} exceeds capacity {}",
@@ -616,7 +652,8 @@ impl VoxelMeshPass {
             self.dirty_bricks.push(DirtyBrick {
                 brick_slot,
                 volume_id,
-                _pad: [0u32; 2],
+                mode,
+                _pad: 0,
                 origin_size: [origin[0], origin[1], origin[2], voxel_size],
             });
             let _ = self.active_bricks.set(brick_slot, occupied);
@@ -724,9 +761,15 @@ impl RenderPass for VoxelMeshPass {
             .get(helio_core::BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
+        let palette_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("voxel_palette"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.palette_buf);
         let camera_ptr = ctx.camera as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
-        if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
+        let palette_ptr = palette_buf as *const _ as usize;
+        if self.render_bind_group_key != Some((camera_ptr, lights_ptr, palette_ptr)) {
             self.render_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("VoxelMesh Render BG"),
@@ -744,9 +787,13 @@ impl RenderPass for VoxelMeshPass {
                             binding: 2,
                             resource: self.meshlet_params_buf.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: palette_buf.as_entire_binding(),
+                        },
                     ],
                 }));
-            self.render_bind_group_key = Some((camera_ptr, lights_ptr));
+            self.render_bind_group_key = Some((camera_ptr, lights_ptr, palette_ptr));
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
@@ -784,8 +831,8 @@ impl RenderPass for VoxelMeshPass {
         }
 
         let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "VoxelMesh")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -883,5 +930,3 @@ mod tests {
         assert!(needs_render_pass(AttachmentMode::Standalone, 0));
     }
 }
-
-

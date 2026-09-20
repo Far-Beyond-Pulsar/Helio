@@ -61,10 +61,14 @@ impl SceneDbRayTracing {
 
     /// Valid only after successful preparation; rows follow TLAS instance order.
     pub fn transmission(&self) -> Option<&wgpu::Buffer> {
-        self.has_transmission.then_some(self.transmission.as_ref()).flatten()
+        self.has_transmission
+            .then_some(self.transmission.as_ref())
+            .flatten()
     }
 
-    pub fn tlas(&self) -> Option<&wgpu::Tlas> { self.tlas.tlas() }
+    pub fn tlas(&self) -> Option<&wgpu::Tlas> {
+        self.tlas.tlas()
+    }
 
     fn build(&mut self, world: &World) -> helio_core::Result<()> {
         self.has_transmission = false;
@@ -130,7 +134,8 @@ impl SceneDbRayTracing {
                 return Err(error("stale caster material identity"));
             }
             let transmission = world.get::<RayTransmission>(*material_entity);
-            if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER) != 0
+            if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER)
+                != 0
                 || object.graph_hash() != 0
                 || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
             {
@@ -156,7 +161,9 @@ impl SceneDbRayTracing {
                 *id
             } else {
                 let id = self.next_geometry_id;
-                self.next_geometry_id = id.checked_add(1).ok_or_else(|| error("BLAS identity exhausted"))?;
+                self.next_geometry_id = id
+                    .checked_add(1)
+                    .ok_or_else(|| error("BLAS identity exhausted"))?;
                 self.geometry_ids.insert((mesh_identity, opaque), id);
                 id
             };
@@ -223,7 +230,11 @@ impl SceneDbRayTracing {
         if has_transmission {
             let size = ((transmission_rows.len() + 1) * 16).max(32) as u64;
             let mut buffer_needs_upload = false;
-            if self.transmission.as_ref().is_none_or(|buffer| buffer.size() < size) {
+            if self
+                .transmission
+                .as_ref()
+                .is_none_or(|buffer| buffer.size() < size)
+            {
                 self.transmission = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("SceneDB RT thin-sheet transmission"),
                     size: size.next_power_of_two(),
@@ -235,8 +246,10 @@ impl SceneDbRayTracing {
             let buffer = self.transmission.as_ref().unwrap();
             if buffer_needs_upload || self.transmission_rows != transmission_rows {
                 let header = [1u32, transmission_rows.len() as u32, 0, 0];
-                self.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&header));
-                self.queue.write_buffer(buffer, 16, bytemuck::cast_slice(&transmission_rows));
+                self.queue
+                    .write_buffer(buffer, 0, bytemuck::cast_slice(&header));
+                self.queue
+                    .write_buffer(buffer, 16, bytemuck::cast_slice(&transmission_rows));
                 self.transmission_rows = transmission_rows;
             }
         } else {

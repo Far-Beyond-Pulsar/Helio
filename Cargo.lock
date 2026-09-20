@@ -2223,6 +2223,8 @@ dependencies = [
  "helio-pass-object-batch",
  "log",
  "pollster 0.4.0",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 

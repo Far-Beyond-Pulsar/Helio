@@ -11,6 +11,8 @@ helio-pass-object-batch = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }
 log = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
