@@ -378,6 +378,8 @@ impl Pipelines {
                 entry(4, uint_texture(), S::COMPUTE),
                 entry(5, texture(D::D2, false), S::COMPUTE),
                 entry(6, storage(true), S::COMPUTE),
+                entry(7, uint_texture(), S::COMPUTE),
+                entry(8, storage_texture(F::Rgba32Uint), S::COMPUTE),
             ],
         );
         let temporal_bgl = bgl(

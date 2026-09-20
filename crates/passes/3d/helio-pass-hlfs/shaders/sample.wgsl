@@ -5,6 +5,12 @@
 @group(2) @binding(4) var previous_geometry: texture_2d<u32>;
 @group(2) @binding(5) var screen_depth_bounds: texture_2d<f32>;
 @group(2) @binding(6) var<storage,read> tile_proposals: array<LightProposal>;
+@group(2) @binding(7) var previous_reservoirs: texture_2d<u32>;
+@group(2) @binding(8) var next_reservoirs: texture_storage_2d<rgba32uint,write>;
+
+fn reservoir_pixel(pixel: vec2<i32>, sample: u32) -> vec2<i32> {
+    return pixel+vec2<i32>(0,i32(sample*globals.sample_size.y));
+}
 
 var<workgroup> seen_ids: array<u32,256>;
 var<workgroup> seen_weights: array<f32,256>;
@@ -109,6 +115,12 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
     workgroupBarrier();
     if all(gid.xy<globals.sample_size) {
         let pixel=sample_pixel(gid.xy,globals.frame);
+        let reuse=(globals.surface_flags&8u)!=0u && globals.light_count<=65535u;
+        if reuse {
+            for(var sample=0u;sample<globals.sample_count;sample++) {
+                textureStore(next_reservoirs,reservoir_pixel(vec2<i32>(gid.xy),sample),vec4<u32>(65535u,0u,0u,0u));
+            }
+        }
         var result=Lighting(vec3<f32>(0.0),vec3<f32>(0.0));
         var confidence=1.0;
         if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 && globals.light_count>0u {
@@ -222,7 +234,8 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     var directional_scale=1.0;
                     if local_weight>1e-5 && directional_weight>0.0 { directional_scale=min(1.0,0.5*local_weight/directional_weight); }
                     var visible_reservoir=Reservoir(INVALID_LIGHT,0.0,0.0,(f32(sample)+stbn(gid.xy,2u))/f32(pixel_sample_count));
-                    var hidden_reservoir=Reservoir(INVALID_LIGHT,0.0,0.0,(f32(sample)+stbn(gid.xy,3u))/f32(pixel_sample_count));
+                    var hidden_reservoir=Reservoir(INVALID_LIGHT,0.0,0.0,
+                        select((f32(sample)+stbn(gid.xy,3u))/f32(pixel_sample_count),stbn(gid.xy,3u+sample*7u),reuse));
                     if local_guide {
                         visible_reservoir=Reservoir(guide_ids[sample],guide_importance[sample],guide_sum,guide_random[sample]);
                     } else {
@@ -257,9 +270,38 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     // group draw, independent of the selected reservoir stratum.
                     let group_roll=stbn(gid.xy,28u+sample);
                     if group_roll<p_hidden { chosen=hidden_reservoir; group_probability=p_hidden; }
-                    let selected=chosen.selected;
+                    var selected=chosen.selected;
+                    var normalization=chosen.weight_sum/max(chosen.importance_value*group_probability,1e-20);
+                    if reuse && sample<globals.sample_count {
+                        var target_weight=0.0;
+                        if selected!=INVALID_LIGHT { target_weight=importance(selected,s); }
+                        var merged=Reservoir(selected,target_weight,normalization*target_weight,stbn(gid.xy,40u+sample));
+                        // Each fresh RIS estimate is one effective sample. Cap
+                        // history at seven; do not reuse previous visibility.
+                        // Packed record: ID16 | M16, inverse-PDF weight, stamp64.
+                        var count=1.0;
+                        let key=tile_proposals[0].key_light;
+                        let stamp=tile_proposals[arrayLength(&tile_proposals)-1u];
+                        if valid_history {
+                            let prior=textureLoad(previous_reservoirs,reservoir_pixel(prev_pixel,sample),0);
+                            let old_count=f32(min(prior.x>>16u,7u));
+                            let prior_id=prior.x&65535u;
+                            if old_count>0.0 && prior.z==stamp.id && prior.w==stamp.alias_index {
+                                count+=old_count;
+                                if prior_id<globals.light_count && prior_id!=key {
+                                    let target_weight=importance(prior_id,s);
+                                    reservoir_add(&merged,prior_id,target_weight,target_weight*bitcast<f32>(prior.y)*old_count);
+                                }
+                            }
+                        }
+                        selected=merged.selected;
+                        normalization=merged.weight_sum/max(merged.importance_value*count,1e-20);
+                        textureStore(next_reservoirs,reservoir_pixel(vec2<i32>(gid.xy),sample),
+                            vec4<u32>((selected&65535u)|(u32(count)<<16u),bitcast<u32>(normalization),stamp.id,stamp.alias_index));
+                    }
                     if selected==INVALID_LIGHT { continue; }
-                    let normalization=chosen.weight_sum/max(chosen.importance_value*group_probability*f32(pixel_sample_count),1e-20);
+                    if reuse { normalization/=f32(pixel_sample_count); }
+                    else { normalization=chosen.weight_sum/max(chosen.importance_value*group_probability*f32(pixel_sample_count),1e-20); }
                     let mask=vec4<u32>(0u,1u,2u,3u)==vec4<u32>(sample);
                     selected_ids=select(selected_ids,vec4<u32>(selected),mask);
                     selected_normalization=select(selected_normalization,vec4<f32>(normalization),mask);
@@ -380,6 +422,11 @@ fn sample_small(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgrou
     }
     if any(gid.xy>=globals.sample_size) { return; }
     let pixel=sample_pixel(gid.xy,globals.frame);
+    if (globals.surface_flags&8u)!=0u {
+        for(var sample=0u;sample<globals.sample_count;sample++) {
+            textureStore(next_reservoirs,reservoir_pixel(vec2<i32>(gid.xy),sample),vec4<u32>(65535u,0u,0u,0u));
+        }
+    }
     var result=Lighting(vec3<f32>(0.0),vec3<f32>(0.0));
     if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 {
         let s=surface_at(pixel);

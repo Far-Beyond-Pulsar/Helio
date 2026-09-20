@@ -84,7 +84,33 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
         }
     }
     workgroupBarrier();
-    if lane==0u { tile_proposals[arrayLength(&tile_proposals)-1u]=LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,key_light); }
+    // A global two-word fingerprint rejects temporal proposals when light
+    // positions, colors, ranges or shadow policy change at fixed slot capacity.
+    // Reservoir reuse remains conservative for animated light sets; visibility
+    // itself is always freshly traced, so moving casters do not require a reset.
+    var stamp0=0u; var stamp1=0u;
+    if (globals.surface_flags&8u)!=0u {
+        for(var i=lane;i<globals.light_count;i+=256u) {
+            let light=lights[i];
+            var a=hash_u32(i); var b=hash_u32(i^0x85ebca6bu);
+            for(var component=0u;component<4u;component++) {
+                a=hash_u32(a^bitcast<u32>(light.position_range[component]));
+                a=hash_u32(a^bitcast<u32>(light.color_intensity[component]));
+                b=hash_u32(b^bitcast<u32>(light.direction_outer[component]));
+                b=hash_u32(b^bitcast<u32>(light.color_intensity[component]));
+            }
+            a=hash_u32(a^light.light_type^light.shadow_index);
+            b=hash_u32(b^bitcast<u32>(light.inner_angle));
+            stamp0^=a; stamp1+=b;
+        }
+        packed[lane]=stamp0; small_aliases[lane]=stamp1;
+        workgroupBarrier();
+        if lane==0u {
+            stamp0=hash_u32(key_light); stamp1=hash_u32(globals.light_count);
+            for(var i=0u;i<256u;i++) { stamp0^=packed[i]; stamp1+=small_aliases[i]; }
+        }
+    }
+    if lane==0u { tile_proposals[arrayLength(&tile_proposals)-1u]=LightProposal(stamp0,0.0,stamp1,0.0,0.0,key_light); }
 }
 @compute @workgroup_size(256)
 fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {

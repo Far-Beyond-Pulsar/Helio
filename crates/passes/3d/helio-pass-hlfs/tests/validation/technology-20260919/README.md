@@ -79,3 +79,29 @@ Same 1440p, two-ray/two-candidate, FXAA capture settings and earlier reference i
 These results motivate compact weighted reservoir reuse rather than retaining and rescoring a sorted tile list. Any future reuse must handle support changes, removed lights, key transitions and disocclusion, retain fresh visibility, and pass both motion and stationary controls. This is the next implementation direction, not a claim that reservoir reuse has already been implemented or validated.
 
 ![Rejected visible-ID reuse capture](rejected-presampled-guide.png)
+
+
+## Opt-in weighted temporal RIS implementation
+
+Unlike the rejected visible-ID list, `HlfsConfig::temporal_resampling` retains compact weighted reservoirs: a selected light ID, effective count, inverse-PDF weight, and a two-word light-data/key fingerprint. Reprojection checks geometry. History contributes at most seven effective estimates to one new estimate. Visibility is always traced in the current frame, including colored thin sheets. The option is disabled in every preset and requires presampled RT at half resolution.
+
+A new test found an 87.58% first-frame energy loss when 128 active lights were replaced by 128 different IDs in an unchanged 1,024-slot buffer. The small prior motion test had not covered this. A global fingerprint of the supported light data now rejects these stale proposals; the same reassignment test passes. This is conservative: moving or editing lights resets reservoir reuse globally, so current measurements do not demonstrate a reuse advantage with continuously animated lights. Moving occluders do not require this reset because visibility is freshly queried.
+
+Final code, RTX 3060/Vulkan, 1440p, FXAA, two base rays/two discovery candidates. Three repeated 100-frame camera paths, 16 warmup frames. The 400-frame static run retains the earlier moving-reference/fog-history comparison limitation. NRMSE is display RGB against the all-light reference, not linear radiometric error. Values below are HLFS-only and exclude TLAS and every other pass.
+
+| Configuration | Median ms | P95 ms | Final RGB NRMSE |
+| --- | ---: | ---: | ---: |
+| Same-build control, reuse off | 3.221 | 3.604 | 13.19% |
+| Reuse on, moving run 1 | 3.428 | 3.828 | 11.69% |
+| Reuse on, moving run 2 | 3.458 | 3.928 | 11.68% |
+| Reuse on, moving run 3 | 3.423 | 4.037 | 11.90% |
+| Reuse on, stationary frame 399 | 3.357 | 4.154 | 9.80% |
+
+The nearby-reservoir experiment was not retained: moving frame-99 error was 11.49% at 3.606 ms median versus 11.57% at 3.391 ms for the earlier temporal-only variant, and stationary error worsened to 10.40% from 9.83%. The final implementation remains temporal-only. The final scene was inspected: colored mottling, edge aliasing, and the previously documented missing reflection integration remain. **The visual gate still fails**, and neither all-run sub-4-ms p95 nor the full target workload has been established. The option is retained as a measured development path, not a promoted quality preset.
+
+Validation: 15 hardware-RT tests pass, including same-capacity light reassignment and a colored-transmission test extended to temporal reuse; 14 screen-space GPU tests pass. The final four-seed glossy camera-motion/key-switch test passes 171/171 final-output quality rows (review seeds 307/401/503/601). The existing quality thresholds were unchanged. Earlier temporal-only and nearby-reuse variants each passed the initial 90-row fixture. Captures and CSVs here retain the failures and limitations rather than defining success around the small fixture.
+
+Reproduce the example using the earlier capture command plus `HLFS_TEMPORAL_RIS=1`. For the final quality fixture, add `HLFS_RT_QUALITY_TEMPORAL_RIS=1`, `HLFS_RT_QUALITY_GLOSSY_MOTION=1`, `HLFS_RT_QUALITY_REVIEW_SEEDS=1`, and `HLFS_RT_QUALITY_SWITCH_KEY=1` to the documented 2:2 presampled/reactive command. Defaults remain unchanged. The new history textures cost 56.25 MiB at 1440p/two base samples and 126.56 MiB at 4K/two base samples; final 4K rendering/performance has not yet been validated.
+
+![Opt-in temporal reuse, still not visually accepted](temporal-ris-moving.png)
+![Stationary temporal reuse, frame 399](temporal-ris-static.png)

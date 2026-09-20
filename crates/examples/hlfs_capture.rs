@@ -32,6 +32,8 @@ pub fn run_scene(
     );
     let ray_traced = std::env::var_os("HLFS_RT").is_some();
     let presampled = std::env::var_os("HLFS_PRESAMPLED").is_some();
+    let temporal_resampling = std::env::var_os("HLFS_TEMPORAL_RIS").is_some();
+    assert!(!temporal_resampling || presampled, "HLFS_TEMPORAL_RIS requires HLFS_PRESAMPLED");
     assert!(
         !presampled || ray_traced,
         "HLFS_PRESAMPLED requires HLFS_RT"
@@ -156,6 +158,7 @@ pub fn run_scene(
                         } else {
                             helio_pass_hlfs::HlfsDebugMode::Final
                         },
+                        temporal_resampling,
                         candidates_per_sample: candidate_count.unwrap_or(if presampled { 2 } else { 8 }),
                         samples_per_pixel: sample_count.unwrap_or(if presampled {
                             helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel

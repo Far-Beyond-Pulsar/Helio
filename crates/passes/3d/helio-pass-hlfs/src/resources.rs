@@ -45,6 +45,7 @@ impl Image {
     }
 }
 pub(crate) struct History {
+    pub reservoirs: Image,
     pub lighting: Image,
     pub geometry: Image,
     pub visible: wgpu::Buffer,
@@ -90,6 +91,14 @@ impl Targets {
         );
         let color = |label| Image::new(device, label, sw, sh, wgpu::TextureFormat::Rg32Uint, true);
         let history = std::array::from_fn(|_| History {
+            reservoirs: Image::new(
+                device,
+                "HLFS weighted reservoir history",
+                if config.temporal_resampling { sw } else { 1 },
+                if config.temporal_resampling { sh * config.samples_per_pixel } else { 1 },
+                wgpu::TextureFormat::Rgba32Uint,
+                true,
+            ),
             lighting: color("HLFS lighting history"),
             geometry: Image::new(
                 device,

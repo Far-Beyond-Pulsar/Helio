@@ -74,6 +74,8 @@ impl InternalBindings {
                     view(&previous.geometry.view),
                     view(&t.depth_bounds.view),
                     t.proposals.as_entire_binding(),
+                    view(&previous.reservoirs.view),
+                    view(&t.history[write].reservoirs.view),
                 ],
             )
         });

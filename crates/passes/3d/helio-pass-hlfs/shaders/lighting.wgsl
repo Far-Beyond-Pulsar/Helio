@@ -57,7 +57,10 @@ fn importance(id: u32, s: Surface) -> f32 {
         // Current-frame RIS uses the actual unshadowed luminance target.
         // Absolute color retains support for the existing HDR-albedo range.
         let light=evaluate_light(id,s,Visibility(1.0));
-        return luminance(abs(light.diffuse*s.albedo+light.specular*s.specular_factor));
+        let target_weight=luminance(abs(light.diffuse*s.albedo+light.specular*s.specular_factor));
+        // Positive support is needed when a reused sample moves from an unlit
+        // surface to one this light can illuminate. Uniform discovery covers IDs.
+        return max(target_weight,select(0.0,1e-8,(globals.surface_flags&8u)!=0u));
     }
     let inc=incident(lights[id],s.position);
     let ndl=max(dot(s.normal,inc.direction),0.0);

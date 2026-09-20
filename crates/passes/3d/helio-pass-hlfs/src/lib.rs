@@ -65,6 +65,10 @@ pub struct HlfsConfig {
     pub samples_per_pixel: u32,
     /// Experimental coarse-tile importance proposals, including sparse light sets.
     pub tile_presampling: bool,
+    /// Experimental weighted temporal RIS; requires presampled RT at half resolution.
+    /// Reuses proposals only while light data is unchanged, with fresh visibility.
+    /// Disabled by default; current examples still fail the visual quality gate.
+    pub temporal_resampling: bool,
     /// Experimental confidence-of-the-mean history clipping.
     pub reactive_history: bool,
     /// Steady-state candidates per sample, clamped to 1..=16. Disocclusion
@@ -90,6 +94,7 @@ impl Default for HlfsConfig {
             mode: HlfsMode::ScreenSpace,
             samples_per_pixel: 2,
             tile_presampling: false,
+            temporal_resampling: false,
             reactive_history: false,
             candidates_per_sample: 8,
             sample_scale: 1,
@@ -123,6 +128,13 @@ impl HlfsConfig {
     }
 
     fn validate_device(&self, device: &wgpu::Device) -> Result<()> {
+        if self.temporal_resampling
+            && (self.mode != HlfsMode::RayTraced || !self.tile_presampling || self.sample_scale != 2)
+        {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "Temporal RIS requires presampled RT with sample_scale=2".into(),
+            ));
+        }
         if self.mode == HlfsMode::RayTraced
             && (!device
                 .features()
@@ -341,7 +353,9 @@ impl HlfsPass {
         let mode_changed = config.mode != self.config.mode
             || config.tile_presampling != self.config.tile_presampling;
         let resize = config.sample_scale != self.config.sample_scale
-            || config.tile_presampling != self.config.tile_presampling;
+            || config.tile_presampling != self.config.tile_presampling
+            || config.temporal_resampling != self.config.temporal_resampling
+            || (config.temporal_resampling && config.samples_per_pixel != self.config.samples_per_pixel);
         self.config = config;
         if mode_changed {
             self.pipelines
@@ -694,7 +708,8 @@ impl RenderPass for HlfsPass {
                     .read_texture_view(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "HLFS")
                     .is_some()) as u32
                 | (u32::from(self.previous_light_generation == Some(ctx.frame_num)) << 1)
-                | (u32::from(self.config.tile_presampling) << 2),
+                | (u32::from(self.config.tile_presampling) << 2)
+                | (u32::from(self.config.temporal_resampling) << 3),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,

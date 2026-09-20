@@ -988,6 +988,7 @@ fn benchmark_rt_quality_frontier() {
                         candidates_per_sample: candidates,
                         discovery_fraction: discovery,
                         tile_presampling,
+                        temporal_resampling: std::env::var_os("HLFS_RT_QUALITY_TEMPORAL_RIS").is_some(),
                         reactive_history,
                         ..Default::default()
                     });
@@ -1385,15 +1386,49 @@ fn colored_visibility_cache_preserves_channels_with_many_lights() {
         f.config(HlfsConfig { debug_mode: HlfsDebugMode::Reference, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
         f.frame();
         let reference = f.read();
-        f.config(HlfsConfig { debug_mode: HlfsDebugMode::Unfiltered, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
-        for _ in 0..8 {
-            f.frame();
-            let result = f.read();
-            for channel in 0..3 {
-                let expected: f32 = reference.iter().map(|p| p[channel]).sum();
-                let actual: f32 = result.iter().map(|p| p[channel]).sum();
-                assert!((actual / expected - 1.0).abs() < 0.04, "colored RIS channel {channel}: {actual}/{expected}");
+        for (sample_scale, temporal_resampling) in [(1, false), (2, true)] {
+            f.config(HlfsConfig { debug_mode: HlfsDebugMode::Unfiltered, sample_scale, temporal_resampling, ..HlfsConfig::ray_traced_presampled() });
+            for _ in 0..8 {
+                f.frame();
+                let result = f.read();
+                for channel in 0..3 {
+                    let expected: f32 = reference.iter().map(|p| p[channel]).sum();
+                    let actual: f32 = result.iter().map(|p| p[channel]).sum();
+                    assert!((actual / expected - 1.0).abs() < 0.04, "colored RIS channel {channel}: {actual}/{expected}");
+                }
             }
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn temporal_ris_rejects_same_capacity_light_reassignment() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.compact_output();
+        f.ambient = [0.0; 3];
+        empty_scene(&mut f);
+        let make_lights = |start: usize| {
+            (0..1024).map(|i| {
+                let mut light = point([0.0, 0.0, 2.0], [1.0, 0.7, 0.3],
+                    if (start..start+128).contains(&i) { 2.0 / 128.0 } else { 0.0 });
+                light.set_ray_traced_shadows(true);
+                light
+            }).collect::<Vec<_>>()
+        };
+        f.config(HlfsConfig { mode: HlfsMode::RayTraced, debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+        f.lights(make_lights(0));
+        f.frame();
+        let reference = mean(&f.read());
+        assert!(reference > 0.001);
+        f.config(HlfsConfig { temporal_resampling: true, debug_mode: HlfsDebugMode::Unfiltered, ..HlfsConfig::ray_traced_presampled() });
+        for _ in 0..16 { f.frame(); }
+        for start in [512, 128, 768, 0] {
+            f.lights(make_lights(start));
+            f.frame();
+            let error = (mean(&f.read()) - reference).abs() / reference;
+            assert!(error < 0.08, "first frame after light-slot reassignment {start}: relative energy error {error}");
         }
     });
 }

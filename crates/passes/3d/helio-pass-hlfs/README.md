@@ -201,3 +201,12 @@ The embedded scalar spatiotemporal blue-noise ranks are independently generated
 by `scripts/generate_hlfs_noise.py`. NumPy is only needed to regenerate the asset;
 the renderer has no runtime Python dependency and includes no third-party
 noise texture.
+
+
+## Experimental weighted temporal reuse
+
+`HlfsConfig::temporal_resampling` is opt-in and requires presampled RayTraced mode with `sample_scale=2`. It retains one 16-byte weighted light reservoir per configured base sample and shading pixel in each of two history textures. At 1440p and two base samples these textures total 56.25 MiB. Glossy samples above the base count remain fresh. All selected lights still receive current-frame visibility queries, including RGB transmission; old shadow results are not reused.
+
+The effective history count is capped at seven prior estimates plus one fresh estimate. Geometry reprojection and a two-word light-data/key fingerprint reject incompatible history. Any detected change to light position, direction, intensity, color, range, type, cone or shadow policy resets these proposals globally. This conservative version therefore does not claim a reuse benefit for continuously animated light sets. A small positive target floor retains proposal support across receiver changes; difficult disocclusion and extreme light distributions still need broader validation.
+
+For the capture harness, add `HLFS_TEMPORAL_RIS=1` alongside `HLFS_RT=1` and `HLFS_PRESAMPLED=1`. Defaults and presets remain unchanged. [Measured results and limitations](tests/validation/technology-20260919/README.md) show modest noise reduction, with the overall visual and performance acceptance gates still incomplete.
