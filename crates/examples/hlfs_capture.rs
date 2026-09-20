@@ -45,6 +45,9 @@ pub fn run_scene(
             .expect("HLFS_SAMPLE_COUNT must be an integer")
     });
     let fxaa = std::env::var_os("HLFS_FXAA").is_some();
+    let candidate_count = std::env::var("HLFS_CANDIDATE_COUNT").ok().map(|value| {
+        value.parse::<u32>().expect("HLFS_CANDIDATE_COUNT must be an integer")
+    });
     pollster::block_on(async {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -131,7 +134,7 @@ pub fn run_scene(
         });
         let mut timing_csv = String::from("frame,coarse_ms,fine_ms,sampling_ms,temporal_ms,spatial_ms,composite_ms,hlfs_only_ms\n");
         for frame in 0..capture_frames {
-            if ray_traced || reference || performance || presampled || sample_count.is_some() {
+            if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() {
                 let pass = renderer
                     .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                     .expect("HLFS pass");
@@ -148,6 +151,7 @@ pub fn run_scene(
                         } else {
                             helio_pass_hlfs::HlfsDebugMode::Final
                         },
+                        candidates_per_sample: candidate_count.unwrap_or(if presampled { 2 } else { 8 }),
                         samples_per_pixel: sample_count.unwrap_or(if presampled {
                             helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel
                         } else if performance {
