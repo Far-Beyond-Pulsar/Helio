@@ -58,7 +58,7 @@ struct TsrUniform {
     reset:          u32,       // 1 on first frame / after reset_history()
     time_delta:     f32,       // seconds since last frame
     tap_radius:     u32,       // 1 = 3×3, 2 = 5×5
-    _pad:           vec2<f32>,
+    previous_jitter_uv: vec2<f32>,
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
 
@@ -308,6 +308,17 @@ fn apply_cas(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 
 // ── Main fragment shader ──────────────────────────────────────────────────────
 
+// Color and depth refer to the same jittered raster position. History is
+// resolved into an unjittered display grid, so remove the prior projection's
+// jitter after reprojection. Keep clip W for behind-camera rejection.
+fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0);
+    let world_h = cameras[0].inv_view_proj * vec4<f32>(ndc,depth,1.0);
+    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_h.xyz/world_h.w,1.0);
+    let uv = prev_clip.xy/prev_clip.w * vec2<f32>(0.5,-0.5)+0.5;
+    return vec3<f32>(uv-tsr.previous_jitter_uv,prev_clip.w);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
@@ -328,17 +339,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── Depth-based reprojection → history UV ─────────────────────────────────
-    let depth_val = textureSample(depth_tex, point_sampler, in.uv);
-    let ndc_xy    = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    let clip      = vec4<f32>(ndc_xy, depth_val, 1.0);
-    let world_h   = cameras[0].inv_view_proj * clip;
-    let world_pos = world_h.xyz / world_h.w;
-    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_pos, 1.0);
-    let prev_ndc  = prev_clip.xy / prev_clip.w;
-    let history_uv = vec2<f32>((prev_ndc.x + 1.0) * 0.5, (1.0 - prev_ndc.y) * 0.5);
+    let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
+    let history = reproject_history(cur_uv, depth_val);
+    let history_uv = history.xy;
 
     // If reprojected UV is out of screen, use current frame only
-    if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
+    if history.z <= 0.0 || any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
         let sharpened = apply_cas(current_rgb, cur_uv);
         return vec4<f32>(sharpened, 1.0);
     }

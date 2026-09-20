@@ -1,0 +1,14 @@
+{
+  "tsr-reprojection": {
+    "hlfs_only_median_ms": 9.486335999999998,
+    "hlfs_only_p95_ms": 10.2337536,
+    "serialized_cpu_gpu_median_ms": 33.626,
+    "serialized_cpu_gpu_p95_ms": 39.328
+  },
+  "tsr-reprojection-4k": {
+    "hlfs_only_median_ms": 20.399104,
+    "hlfs_only_p95_ms": 21.1565568,
+    "serialized_cpu_gpu_median_ms": 73.878,
+    "serialized_cpu_gpu_p95_ms": 79.942
+  }
+}

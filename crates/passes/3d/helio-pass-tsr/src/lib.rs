@@ -133,7 +133,7 @@ struct TsrUniform {
     reset: u32,              // 1 on first frame / after reset_history()
     time_delta: f32,         // seconds since last frame
     tap_radius: u32,         // 1 = 3×3, 2 = 5×5
-    _pad: [f32; 2],
+    previous_jitter_uv: [f32; 2],
 }
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
@@ -179,6 +179,7 @@ pub struct TsrPass {
     // ── Reactivity state ──────────────────────────────────────────────────────
     /// `true` until the first frame (or after `reset_history()`).
     first_frame: bool,
+    previous_jitter_uv: [f32; 2],
     /// Blend bias toward current frame (`0` = full history, `1` = no history).
     reactivity: f32,
 
@@ -363,6 +364,7 @@ impl TsrPass {
             output_width,
             output_height,
             first_frame: true,
+            previous_jitter_uv: [0.0; 2],
             reactivity: 0.0,
             quality,
         }
@@ -589,11 +591,12 @@ impl RenderPass for TsrPass {
             reset,
             time_delta: ctx.delta_time.max(0.0),
             tap_radius: self.quality.tap_radius(),
-            _pad: [0.0; 2],
+            previous_jitter_uv: self.previous_jitter_uv,
         };
 
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        self.previous_jitter_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
         Ok(())
     }
 

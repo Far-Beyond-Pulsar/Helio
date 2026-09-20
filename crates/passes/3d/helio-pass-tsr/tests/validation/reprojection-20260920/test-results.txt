@@ -33,24 +33,25 @@ warning: unused variable: `resources`
 warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
    Compiling helio-pass-tsr v0.1.0 (C:\Users\thiag\Documents\GitHub\Helio\crates\passes\3d\helio-pass-tsr)
 warning: fields `internal_width` and `internal_height` are never read
-   --> crates\passes\3d\helio-pass-tsr\src\lib.rs:172:5
+   --> crates\passes\3d\helio-pass-tsr\src\lib.rs:174:5
     |
-145 | pub struct TsrPass {
+147 | pub struct TsrPass {
     |            ------- fields in this struct
 ...
-172 |     internal_width: u32,
+174 |     internal_width: u32,
     |     ^^^^^^^^^^^^^^
-173 |     internal_height: u32,
+175 |     internal_height: u32,
     |     ^^^^^^^^^^^^^^^
     |
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: `helio-pass-tsr` (lib test) generated 1 warning
-    Finished `release` profile [optimized] target(s) in 4.34s
+    Finished `release` profile [optimized] target(s) in 4.86s
      Running unittests src\lib.rs (target\release\deps\helio_pass_tsr-acc29660df8b9abd.exe)
 
-running 2 tests
+running 3 tests
 test camera_sampling_tests::resolved_view_publication_follows_resize ... ok
 test camera_sampling_tests::prepare_uploads_the_actual_camera_sample_and_supplied_frame_time ... ok
+test camera_sampling_tests::reprojection_removes_both_jitters_without_removing_camera_motion ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.74s
