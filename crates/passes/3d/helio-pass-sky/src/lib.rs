@@ -1944,9 +1944,14 @@ impl RenderPass for SkyPass {
             .get(BufferKey::of("sky_components"))
             .map(|handle| &handle.buffer);
         let scene_sky_key = scene_sky_buf.map_or(0, |b| b as *const _ as usize);
+        // SceneDB atmosphere rows do not publish the retired SkyActor context.
+        // Empty/deleted rows are rejected in the shaders before integration.
+        let has_sky = scene_sky_buf.is_some()
+            || ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+                .is_some_and(|sky| sky.has_sky);
 
         // ── 1) Sky LUT generation (192x108) ─────────────────────────────────
-        if ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+        if has_sky {
             // Ensure LUT bind group is up to date (for generation)
             // LUT generation render pass — writes to graph-owned sky_lut texture if available.
             // We use encoder_ptr directly because this pass also owns the subsequent pre_aa pass.
@@ -2031,7 +2036,7 @@ impl RenderPass for SkyPass {
                         multiview_mask: None,
                     })
                 };
-                if ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+                if has_sky {
                     // Also composite sky when in legacy mode
                     if let Some(sky_lut_view) = ctx.resources.get(helio_core::ResourceKey::new("sky_lut")) {
                         let key = (sky_lut_view as *const _ as usize, scene_sky_key);
@@ -2256,7 +2261,7 @@ impl RenderPass for SkyPass {
         // full graph wiring is complete (prevents blank sky during incremental rollout)
         if let Some(ptr) = ctx.active_render_pass_ptr() {
             let rp = unsafe { &mut *ptr };
-            if ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+            if has_sky {
                 rp.set_pipeline(&self.sky_pipeline);
                 rp.set_bind_group(0, &self.sky_bg0, &[]);
                 if let Some(ref bg) = self.sky_bg1 {
@@ -2299,7 +2304,7 @@ impl RenderPass for SkyPass {
                     multiview_mask: None,
                 })
             };
-            if ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+            if has_sky {
                 pass.set_pipeline(&self.sky_pipeline);
                 pass.set_bind_group(0, &self.sky_bg0, &[]);
                 if let Some(ref bg) = self.sky_bg1 {

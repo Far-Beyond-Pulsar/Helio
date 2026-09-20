@@ -154,6 +154,11 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     sky = sky_rows[0];
+    // Registered buffers may contain an empty or deleted environment row.
+    if sky.earth_radius <= 0.0 || sky.atm_radius <= sky.earth_radius
+        || sky.rayleigh_h_scale <= 0.0 || sky.mie_h_scale <= 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     let uv = in.uv; // [0,1]²
 
     // Decode direction from panoramic UV

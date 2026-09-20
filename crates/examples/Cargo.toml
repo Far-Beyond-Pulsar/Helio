@@ -336,3 +336,7 @@ path = "cloud_engine_curve.rs"
 [[bin]]
 name = "procedural_clouds_demo"
 path = "procedural_clouds_demo.rs"
+
+[[bin]]
+name = "monumental_arch_hlfs"
+path = "monumental_arch_hlfs.rs"

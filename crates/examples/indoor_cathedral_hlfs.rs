@@ -16,6 +16,7 @@
 //!   Escape      — release cursor / exit
 
 mod hlfs_capture;
+mod architectural_mesh;
 mod cathedral_detail;
 mod v3_demo_common;
 

@@ -4,6 +4,21 @@ use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
 pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>)) {
+    run_scene(directory, "cathedral", populate, |t, aspect| {
+        Camera::perspective_look_at(
+            glam::Vec3::new(2.0 * t, 2.0, 24.0 - 18.0 * t),
+            glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
+        )
+    });
+}
+
+pub fn run_scene(
+    directory: &str,
+    name: &str,
+    populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>),
+    camera_path: fn(f32, f32) -> Camera,
+) {
     let capture_frames = std::env::var("HLFS_CAPTURE_FRAMES")
         .map(|value| {
             value
@@ -151,16 +166,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
                 );
             }
             let t = (frame as f32 / 99.0).clamp(0.0, 1.0);
-            let position = glam::Vec3::new(2.0 * t, 2.0, 24.0 - 18.0 * t);
-            let camera = Camera::perspective_look_at(
-                position,
-                glam::Vec3::new(0.0, 5.0, -20.0),
-                glam::Vec3::Y,
-                std::f32::consts::FRAC_PI_4,
-                width as f32 / height as f32,
-                0.1,
-                200.0,
-            );
+            let camera = camera_path(t, width as f32 / height as f32);
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             if ray_traced {
@@ -231,7 +237,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
                 let bytes = buffer.slice(..).get_mapped_range().unwrap();
                 image::save_buffer(
                     std::path::Path::new(directory).join(format!(
-                        "cathedral-{}{frame:03}.png",
+                        "{name}-{}{frame:03}.png",
                         if reference { "reference-" } else { "" }
                     )),
                     &bytes,
@@ -240,7 +246,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
                     image::ColorType::Rgba8,
                 )
                 .unwrap();
-                eprintln!("Captured cathedral frame {frame}");
+                eprintln!("Captured {name} frame {frame}");
             }
         }
         frame_times.sort_by(f64::total_cmp);

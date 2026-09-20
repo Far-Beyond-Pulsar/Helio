@@ -49,6 +49,18 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
     // same identity is used by every tile so filtering never crosses different
     // decompositions. Composition evaluates this emitter exactly at full size.
     if lane==0u { key_light=INVALID_LIGHT; }
+    // A small outdoor population still benefits from a full-resolution sun:
+    // denoising its hard visibility edge blurs architectural reliefs. Keep
+    // point/spot residuals on the normal sampling path, and use one stable
+    // directional identity for the whole frame.
+    if lane==0u && presample && globals.debug_mode!=1u && globals.light_count<=GRID_CAPACITY {
+        var peak=0.0;
+        for(var i=0u;i<globals.light_count;i++) {
+            if lights[i].light_type!=0u { continue; }
+            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
+            if power>peak { peak=power; key_light=i; }
+        }
+    }
     if presample && globals.debug_mode!=1u && globals.light_count>GRID_CAPACITY && globals.light_count<=65535u {
         var power_sum=0.0; var maximum=0.0; var best=INVALID_LIGHT;
         for(var i=lane;i<globals.light_count;i+=256u) {

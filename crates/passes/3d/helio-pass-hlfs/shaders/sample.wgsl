@@ -370,6 +370,11 @@ fn sample_small(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgrou
     if lane==0u {
         let tile=group.y*div_ceil(globals.sample_size,TILE_SIZE).x+group.x;
         next_visible[tile].count=0u;
+        if USE_TILE_PRESAMPLING {
+            let key=tile_proposals[0].key_light;
+            next_visible[tile].count=select(0u,1u,key!=previous_visible[tile].indices[0]);
+            next_visible[tile].indices[0]=key;
+        }
         next_visible[tile].confidence_low=0xffffffffu;
         next_visible[tile].confidence_high=0xffffffffu;
     }
@@ -379,6 +384,7 @@ fn sample_small(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgrou
     if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 {
         let s=surface_at(pixel);
         for(var id=0u;id<globals.light_count;id++) {
+            if USE_TILE_PRESAMPLING && id==tile_proposals[0].key_light { continue; }
             if importance(id,s)<=0.0 { continue; }
             let light=evaluate_light(id,s,trace_visibility(id,s,pixel));
             result.diffuse+=light.diffuse; result.specular+=light.specular;

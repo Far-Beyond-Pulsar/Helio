@@ -184,6 +184,37 @@ fn reduced_resolution_repair_uses_hardware_visibility_in_every_phase() {
 
 #[test]
 #[ignore = "requires Vulkan hardware ray queries"]
+fn small_directional_key_preserves_energy_with_empty_and_local_residuals() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(32, 24).await;
+        empty_scene(&mut f);
+        for count in [1, 2, 17] {
+            let mut lights = vec![point([1.0, 1.0, 2.0], [1.0; 3], 4.0); count];
+            lights[0].light_type = 0;
+            lights[0].direction_outer = [0.0, 0.0, -1.0, 0.0];
+            for light in &mut lights { light.set_ray_traced_shadows(true); }
+            f.lights(lights);
+            f.config(HlfsConfig { mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+            f.frame();
+            let reference = f.read();
+            f.config(HlfsConfig { sample_scale: 1, debug_mode: HlfsDebugMode::Unfiltered,
+                ..HlfsConfig::ray_traced_presampled() });
+            for frame in 0..4 {
+                f.frame();
+                for (actual, expected) in f.read().iter().zip(&reference) {
+                    for c in 0..3 {
+                        assert!((actual[c]-expected[c]).abs() < expected[c]*0.04+0.001,
+                            "directional split count {count} frame {frame}: {actual:?}/{expected:?}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
 fn compact_light_populations_do_not_add_candidate_energy_noise() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(32, 24).await;
