@@ -13,7 +13,10 @@
 //! is available (`rc_cascades`), the shader can fall back to RC-based irradiance
 //! for rough surfaces where SSR + RT lack enough samples.
 //!
-//! Writes Rgba16Float at full resolution: RGB = colour, A = hit confidence.
+//! Writes Rgba16Float at half internal resolution: RGB = colour, A = hit
+//! confidence. The composite pass reconstructs it onto the full-resolution
+//! lighting target. This keeps the expensive RT query budget proportional to
+//! reflection detail rather than display pixels.
 
 mod compose;
 pub use compose::SsrCompositePass;
@@ -206,8 +209,8 @@ impl SsrPass {
             rc_fallback,
             transmission_fallback,
             use_rt,
-            width,
-            height,
+            width: width.div_ceil(2),
+            height: height.div_ceil(2),
         }
     }
 }
@@ -229,7 +232,7 @@ impl RenderPass for SsrPass {
         builder.write_color_raw(
             "ssr_trace",
             wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
+            ResourceSize::ScaledInternal { divisor: 2 },
         );
         builder.with_extra_usage(
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -246,8 +249,8 @@ impl RenderPass for SsrPass {
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
+        self.width = width.div_ceil(2);
+        self.height = height.div_ceil(2);
         self.bg_1 = None;
         self.bg_1_key = None;
         self.bg_2 = None;

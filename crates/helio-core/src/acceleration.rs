@@ -114,6 +114,10 @@ pub struct BlasManager {
     geometry_keys: HashMap<u64, GeometryKey>,
     device: Arc<wgpu::Device>,
     rt_available: bool,
+    /// Changes whenever a cached BLAS handle is replaced or evicted. TLAS
+    /// reuse must include this generation because a mesh id can retain its
+    /// numeric identity while pointing at a newly-built BLAS.
+    revision: u64,
 }
 
 impl BlasManager {
@@ -128,11 +132,17 @@ impl BlasManager {
             geometry_keys: HashMap::new(),
             device,
             rt_available,
+            revision: 0,
         }
     }
 
     pub fn is_rt_available(&self) -> bool {
         self.rt_available
+    }
+
+    /// Monotonic-ish cache generation for consumers that retain TLAS instances.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Record a versioned opaque BLAS build without CPU copies, submission or
@@ -256,6 +266,7 @@ impl BlasManager {
         );
         self.blas_map.insert(mesh_id, blas);
         self.geometry_keys.insert(mesh_id, key);
+        self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
 
@@ -383,19 +394,31 @@ impl BlasManager {
     }
 
     pub fn remove_blas(&mut self, mesh_id: u64) {
-        self.blas_map.remove(&mesh_id);
+        let removed = self.blas_map.remove(&mesh_id).is_some();
         self.geometry_keys.remove(&mesh_id);
+        if removed {
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 
     pub fn clear(&mut self) {
-        self.blas_map.clear();
-        self.geometry_keys.clear();
+        if !self.blas_map.is_empty() {
+            self.blas_map.clear();
+            self.geometry_keys.clear();
+            self.revision = self.revision.wrapping_add(1);
+        } else {
+            self.geometry_keys.clear();
+        }
     }
     /// Evict geometry no longer referenced by the authoritative caster set.
     pub fn retain(&mut self, mut live: impl FnMut(u64) -> bool) {
+        let before = self.blas_map.len();
         self.blas_map.retain(|id, _| live(*id));
         self.geometry_keys
             .retain(|id, _| self.blas_map.contains_key(id));
+        if self.blas_map.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 }
 
@@ -406,6 +429,8 @@ pub struct TlasManager {
     max_instances: u32,
     populated_slots: usize,
     rt_available: bool,
+    last_instances: Vec<TlasInstanceInput>,
+    last_blas_revision: Option<u64>,
 }
 
 impl TlasManager {
@@ -423,6 +448,8 @@ impl TlasManager {
             max_instances: max_instances.max(1),
             populated_slots: 0,
             rt_available,
+            last_instances: Vec::new(),
+            last_blas_revision: None,
         }
     }
 
@@ -440,6 +467,8 @@ impl TlasManager {
     pub fn invalidate(&mut self) {
         self.tlas = None;
         self.populated_slots = 0;
+        self.last_instances.clear();
+        self.last_blas_revision = None;
     }
 
     /// Build the TLAS from a complete list of BLAS + transform pairs. Capacity
@@ -477,6 +506,8 @@ impl TlasManager {
             Err(error) => {
                 self.tlas = None;
                 self.populated_slots = 0;
+                self.last_instances.clear();
+                self.last_blas_revision = None;
                 return Err(error);
             }
         };
@@ -487,6 +518,19 @@ impl TlasManager {
                 .min(self.device.limits().max_tlas_instance_count);
             self.tlas = None;
             self.populated_slots = 0;
+            self.last_instances.clear();
+            self.last_blas_revision = None;
+        }
+
+        // Static scenes commonly call this once per render frame. Reusing the
+        // existing TLAS avoids re-recording and rebuilding every instance when
+        // neither transforms nor the referenced BLAS handles changed. The
+        // BLAS generation check is essential for in-place mesh replacement.
+        if self.tlas.is_some()
+            && self.last_blas_revision == Some(blas_manager.revision())
+            && self.last_instances == instances
+        {
+            return Ok(());
         }
 
         let tlas = self.tlas.get_or_insert_with(|| {
@@ -514,11 +558,15 @@ impl TlasManager {
             std::iter::empty::<&wgpu::BlasBuildEntry<'_>>(),
             std::iter::once(tlas_ref),
         );
+        self.last_instances.clear();
+        self.last_instances.extend_from_slice(instances);
+        self.last_blas_revision = Some(blas_manager.revision());
         Ok(())
     }
 }
 
 /// Input for one TLAS instance.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TlasInstanceInput {
     pub mesh_id: u64,
     pub transform: [f32; 12],

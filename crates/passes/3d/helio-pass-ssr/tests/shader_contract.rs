@@ -19,6 +19,19 @@ fn raster_and_ray_query_sources_validate_with_shared_gbuffer_contract() {
 }
 
 #[test]
+fn half_resolution_contract_reconstructs_full_resolution_inputs() {
+    let raster = include_str!("../shaders/ssr_trace.wgsl");
+    let rt = include_str!("../shaders/ssr_trace_rt.wgsl");
+    let compose = include_str!("../shaders/ssr_compose.wgsl");
+
+    for source in [raster, rt] {
+        assert!(source.contains("let source_dims = textureDimensions(gbuf_depth)"));
+        assert!(source.contains("let source_px = clamp"));
+    }
+    assert!(compose.contains("let reflection_dims=textureDimensions(reflection)"));
+}
+
+#[test]
 #[ignore = "requires hardware ray queries"]
 fn hybrid_pipeline_accepts_shared_camera_and_normal_contract() {
     pollster::block_on(async {

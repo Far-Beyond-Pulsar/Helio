@@ -154,15 +154,21 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let px = vec2<i32>(gid.xy);
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
-    let depth_01 = textureLoad(gbuf_depth, px, 0);
+    let source_dims = textureDimensions(gbuf_depth);
+    let source_px = clamp(
+        vec2<i32>(uv * vec2<f32>(source_dims)),
+        vec2<i32>(0),
+        vec2<i32>(source_dims) - vec2<i32>(1),
+    );
+    let depth_01 = textureLoad(gbuf_depth, source_px, 0);
 
     if depth_01 >= 1.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
 
-    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, px, 0).xyz);
-    let roughness = textureLoad(gbuf_orm, px, 0).g;
+    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, source_px, 0).xyz);
+    let roughness = textureLoad(gbuf_orm, source_px, 0).g;
     let roughness_fade = 1.0 - smoothstep(0.4, 0.7, roughness);
     if roughness_fade <= 0.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));

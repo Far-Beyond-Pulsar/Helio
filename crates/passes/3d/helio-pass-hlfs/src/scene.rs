@@ -25,6 +25,7 @@ pub struct SceneDbRayTracing {
     tlas: TlasManager,
     transmission: Option<wgpu::Buffer>,
     has_transmission: bool,
+    transmission_rows: Vec<[f32; 4]>,
     geometry_ids: HashMap<(u64, bool), u64>,
     next_geometry_id: u64,
 }
@@ -37,6 +38,7 @@ impl SceneDbRayTracing {
             queue,
             transmission: None,
             has_transmission: false,
+            transmission_rows: Vec::new(),
             geometry_ids: HashMap::new(),
             next_geometry_id: 0,
         }
@@ -220,6 +222,7 @@ impl SceneDbRayTracing {
             .map_err(|e| error(&e.to_string()))?;
         if has_transmission {
             let size = ((transmission_rows.len() + 1) * 16).max(32) as u64;
+            let mut buffer_needs_upload = false;
             if self.transmission.as_ref().is_none_or(|buffer| buffer.size() < size) {
                 self.transmission = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("SceneDB RT thin-sheet transmission"),
@@ -227,11 +230,17 @@ impl SceneDbRayTracing {
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));
+                buffer_needs_upload = true;
             }
             let buffer = self.transmission.as_ref().unwrap();
-            let header = [1u32, transmission_rows.len() as u32, 0, 0];
-            self.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&header));
-            self.queue.write_buffer(buffer, 16, bytemuck::cast_slice(&transmission_rows));
+            if buffer_needs_upload || self.transmission_rows != transmission_rows {
+                let header = [1u32, transmission_rows.len() as u32, 0, 0];
+                self.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&header));
+                self.queue.write_buffer(buffer, 16, bytemuck::cast_slice(&transmission_rows));
+                self.transmission_rows = transmission_rows;
+            }
+        } else {
+            self.transmission_rows.clear();
         }
         self.has_transmission = has_transmission;
         self.queue.submit([encoder.finish()]);

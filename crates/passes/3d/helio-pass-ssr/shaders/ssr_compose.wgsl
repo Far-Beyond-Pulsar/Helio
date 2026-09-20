@@ -13,11 +13,24 @@
     let p=vec2<i32>(position.xy);
     let d=textureLoad(depth,p,0);
     if d>=1.0 { discard; }
-    let hit=textureLoad(reflection,p,0);
+    let uv=position.xy/vec2<f32>(textureDimensions(depth));
+    let reflection_dims=textureDimensions(reflection);
+    let reflection_pos=uv*vec2<f32>(reflection_dims)-vec2<f32>(0.5);
+    let reflection_base=vec2<i32>(floor(reflection_pos));
+    let reflection_frac=fract(reflection_pos);
+    let reflection_max=vec2<i32>(reflection_dims)-vec2<i32>(1);
+    let p00=clamp(reflection_base,vec2<i32>(0),reflection_max);
+    let p10=clamp(reflection_base+vec2<i32>(1,0),vec2<i32>(0),reflection_max);
+    let p01=clamp(reflection_base+vec2<i32>(0,1),vec2<i32>(0),reflection_max);
+    let p11=clamp(reflection_base+vec2<i32>(1),vec2<i32>(0),reflection_max);
+    let hit=mix(
+        mix(textureLoad(reflection,p00,0),textureLoad(reflection,p10,0),reflection_frac.x),
+        mix(textureLoad(reflection,p01,0),textureLoad(reflection,p11,0),reflection_frac.x),
+        reflection_frac.y,
+    );
     let n=textureLoad(normals,p,0);
     let material=textureLoad(orm,p,0);
     let f0=clamp(vec3<f32>(n.w,material.a,textureLoad(emissive,p,0).a),vec3<f32>(0.0),vec3<f32>(0.999));
-    let uv=position.xy/vec2<f32>(textureDimensions(depth));
     let world=helio_world_from_depth(cameras[0].view_proj_inv,uv,d);
     let v=normalize(cameras[0].position_near.xyz-world);
     let ndv=max(dot(helio_gbuffer_normal(n.xyz),v),0.0);
