@@ -2142,6 +2142,8 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-pass-hiz",
+ "naga",
+ "pollster 0.4.0",
  "wgpu",
 ]
 

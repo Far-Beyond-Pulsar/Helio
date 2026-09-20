@@ -1,42 +1,6 @@
-// ssr_trace_rt.wgsl — Hybrid SSR with hardware ray queries.
-//
-// Fully self-contained — no prelude dependency, because `enable wgpu_ray_query;`
-// must appear before any other declaration and the prelude-based concatenation
-// would place it after the prelude's struct definitions.
-
+// Hybrid SSR uses the same camera, depth and signed normal contract as raster SSR.
+//!use helio_prelude
 enable wgpu_ray_query;
-
-// ── Camera (mirrors helio_core GpuCameraUniforms) ──────────────────────────
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
-
-// ── Screen-space helpers ───────────────────────────────────────────────────
-fn helio_uv_to_ndc(uv: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0));
-}
-fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-}
-fn helio_view_depth(device_depth01: f32, near: f32, far: f32) -> f32 {
-    return near * far / (far + device_depth01 * (near - far));
-}
-fn helio_world_from_depth(view_proj_inv: mat4x4<f32>, uv: vec2<f32>, depth01: f32) -> vec3<f32> {
-    let ndc = helio_uv_to_ndc(uv);
-    let clip = vec4<f32>(ndc, depth01, 1.0);
-    let world = view_proj_inv * clip;
-    return world.xyz / world.w;
-}
-fn helio_gbuffer_normal(encoded: vec3<f32>) -> vec3<f32> {
-    return normalize(encoded * 2.0 - 1.0);
-}
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 

@@ -35,6 +35,7 @@ pub struct SsrPass {
     bg_2_key: Option<(usize, usize)>,
 
     linear_sampler: wgpu::Sampler,
+    rc_fallback: wgpu::TextureView,
     use_rt: bool,
 
     width: u32,
@@ -63,6 +64,19 @@ impl SsrPass {
         let use_rt = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+
+        // A missing irradiance cascade must not reinterpret the scene image as
+        // directional probe data. The shader rejects this 1x1 sentinel.
+        let rc_fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SSR absent irradiance cascade"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }).create_view(&Default::default());
 
         let shader = helio_core::shader::module_with(
             device,
@@ -130,14 +144,13 @@ impl SsrPass {
 
         // ── RT pipeline (Hi-Z + ray query) ──────────────────────────────
         let rt_pipeline = use_rt.then(|| {
-            // The RT shader is self-contained (declares Camera + helpers inline)
-            // so `enable wgpu_ray_query;` can appear at line 1 as WGSL requires.
-            let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("SSR RT Trace Shader"),
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
-                    include_str!("../shaders/ssr_trace_rt.wgsl").to_string(),
-                )),
-            });
+            // The shared resolver hoists ray-query directives ahead of the
+            // prelude, keeping RT and raster G-buffer conventions identical.
+            let rt_shader = helio_core::shader::module(
+                device,
+                "SSR RT Trace Shader",
+                include_str!("../shaders/ssr_trace_rt.wgsl"),
+            );
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("SSR RT PL"),
@@ -174,6 +187,7 @@ impl SsrPass {
             bg_2: None,
             bg_2_key: None,
             linear_sampler,
+            rc_fallback,
             use_rt,
             width,
             height,
@@ -293,9 +307,7 @@ impl RenderPass for SsrPass {
                 );
 
                 if self.bg_2_key != Some(rt_key) {
-                    // RC cascade texture (or scene_color as a dummy fallback — the
-                    // shader checks texture dimensions before sampling RC data).
-                    let rc_tex = rc_view.unwrap_or(pre_aa_view);
+                    let rc_tex = rc_view.unwrap_or(&self.rc_fallback);
 
                     self.bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("SSR BG2 (RT)"),
