@@ -3,24 +3,6 @@ struct RayTransmissionData { header: vec4<u32>, rows: array<vec4<f32>> };
 @group(3) @binding(1) var<storage, read> ray_transmission: RayTransmissionData;
 // Same visibility interface as shadows.wgsl. Both sampling and reconstruction
 // use this implementation in RayTraced mode; screen depth never decides a hit.
-fn shadow_receiver(position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
-    // Perspective depth quantization grows into millimetres of world-space
-    // error at distance. A position-magnitude-only offset self-shadows even a
-    // flat receiver. Estimate the local error along its normal from one depth
-    // ULP, in addition to the floor for transform/traversal rounding.
-    let rounding=max(max(abs(position.x),abs(position.y)),abs(position.z))*0.000002;
-    let velocity=textureLoad(gbuf_velocity,vec2<i32>(pixel),0);
-    // Corrected G-buffer receivers no longer carry depth-buffer quantization
-    // error. Bound the FP16 residual's relative rounding plus transform error;
-    // legacy producers retain the depth-ULP bound instead of assuming precision.
-    let corrected=globals.has_velocity!=0u && velocity.w==2.0;
-    let depth=textureLoad(gbuf_depth,vec2<i32>(pixel),0);
-    let adjacent_depth=bitcast<f32>(bitcast<u32>(depth)+1u);
-    let depth_error=abs(world_position(pixel,adjacent_depth)-position);
-    let error=select(dot(abs(normal),depth_error),abs(velocity.z)*0.001,corrected);
-    let bias=max(0.0001,error+rounding);
-    return position+normal*bias;
-}
 fn shadow_factor_from_receiver(id: u32, origin: vec3<f32>, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
     let light=lights[id];
     let cast_shadow=select(light.shadow_index!=INVALID_LIGHT,(light._pad&2u)!=0u,(light._pad&1u)!=0u);

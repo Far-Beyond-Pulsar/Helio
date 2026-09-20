@@ -55,6 +55,7 @@ fn shader_source_for_transmission(stage: &str, presampled: bool, transmission: b
             "enable wgpu_ray_query;\n",
             common,
             LIGHTING,
+            include_str!("../shaders/ray_receiver.wgsl"),
             if transmission {
                 include_str!("../shaders/ray_shadow.wgsl")
             } else {
