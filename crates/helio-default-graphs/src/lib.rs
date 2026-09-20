@@ -1443,6 +1443,12 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
+    // Match the native HLFS graph: transparent glass belongs in linear HDR
+    // before anti-aliasing and tonemapping, alongside the opaque lighting.
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
+        device, lighting_format,
+    ).with_pre_aa_target()));
+
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
