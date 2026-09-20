@@ -4,6 +4,7 @@
 @group(2) @binding(3) var previous_lighting: texture_2d<u32>;
 @group(2) @binding(4) var previous_geometry: texture_2d<u32>;
 @group(2) @binding(5) var<storage,read> tile_proposals: array<LightProposal>;
+@group(2) @binding(6) var<storage,read> grid: array<LightTile>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -80,9 +81,14 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
         // These pixels are shaded after denoising. Small light populations can
         // be evaluated exactly here instead of exposing raw reservoir variance
         // as bright, one-pixel seams along thin geometry.
-        if USE_TILE_PRESAMPLING && globals.light_count<=64u {
+        let tile=(u32(pixel.y)/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+u32(pixel.x)/TILE_SIZE;
+        let local_count=grid[tile].count;
+        // SceneDB's light buffer contains sparse entity slots. Its allocation
+        // size is not the number of active lights affecting this receiver.
+        if USE_TILE_PRESAMPLING && local_count<=GRID_CAPACITY {
             let origin=shadow_receiver(s.position,s.normal,fragment.xy);
-            for(var id=0u;id<globals.light_count;id++) {
+            for(var i=0u;i<local_count;i++) {
+                let id=(grid[tile].indices[i/2u]>>(16u*(i&1u)))&65535u;
                 if id==key { continue; }
                 // Range/back-face rejection is exact for the unshadowed target.
                 // Do not trace rays for lights that cannot illuminate this edge.

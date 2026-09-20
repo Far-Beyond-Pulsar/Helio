@@ -1,0 +1,33 @@
+{
+  "baseline": {
+    "rgb_nrmse": 0.052557331660962096,
+    "bottom_440_rows_nrmse": 0.037935868977927625,
+    "four_frame_mean_rgb_std_8bit": 0.9874431102262586,
+    "timing": {
+      "hlfs_only_ms": {
+        "median_ms": 7.713279999999999,
+        "p95_ms": 8.5840384
+      },
+      "composite_ms": {
+        "median_ms": 2.542592,
+        "p95_ms": 3.1843328
+      }
+    }
+  },
+  "candidate": {
+    "rgb_nrmse": 0.052557331660962096,
+    "bottom_440_rows_nrmse": 0.037935868977927625,
+    "four_frame_mean_rgb_std_8bit": 0.9874431102262586,
+    "timing": {
+      "hlfs_only_ms": {
+        "median_ms": 7.523327999999999,
+        "p95_ms": 7.7411328
+      },
+      "composite_ms": {
+        "median_ms": 2.059264,
+        "p95_ms": 2.444032
+      }
+    }
+  },
+  "exact_rgb_equal": true
+}

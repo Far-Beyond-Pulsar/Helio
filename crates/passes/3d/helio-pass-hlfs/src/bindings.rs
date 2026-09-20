@@ -122,6 +122,7 @@ impl InternalBindings {
                     view(&t.history[1 - write].lighting.view),
                     view(&t.history[1 - write].geometry.view),
                     t.proposals.as_entire_binding(),
+                    t.grid.as_entire_binding(),
                 ],
             )
         });

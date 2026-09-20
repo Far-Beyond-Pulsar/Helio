@@ -408,11 +408,11 @@ impl Pipelines {
         let composite_bgl = bgl(
             device,
             "HLFS composite layout",
-            &(0..6)
+            &(0..7)
                 .map(|i| {
                     entry(
                         i,
-                        if i == 5 {
+                        if i >= 5 {
                             storage(true)
                         } else if i == 2 {
                             texture(D::D2, false)

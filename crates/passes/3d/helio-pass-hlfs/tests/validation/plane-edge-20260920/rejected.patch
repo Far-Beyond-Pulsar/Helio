@@ -1,0 +1,22 @@
+diff --git a/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl b/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
+index 5708f6c4..94e7a870 100644
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
+@@ -30,7 +30,16 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
+         let offset=vec2<i32>(vec2<u32>(i&1u,i>>1u)); let p=base+offset;
+         if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
+         let geo=load_geometry(filtered_geometry,p);
+-        if !geometry_matches(geo,s.normal,z) { continue; }
++        var matches=geometry_matches(geo,s.normal,z);
++        // View depth changes quickly along a grazing plane. Test actual
++        // receiver-plane distance before discarding an otherwise aligned sample.
++        if !matches && USE_TILE_PRESAMPLING && geo.w>0.0 && dot(oct_decode(geo.xy),s.normal)>0.9 {
++            let full=sample_pixel(vec2<u32>(p),globals.frame);
++            let neighbor_depth=textureLoad(gbuf_depth,vec2<i32>(full),0);
++            let neighbor_position=world_position(vec2<f32>(full)+0.5,neighbor_depth);
++            matches=neighbor_depth<1.0 && abs(dot(neighbor_position-s.position,s.normal))<max(0.02,abs(z)*0.01);
++        }
++        if !matches { continue; }
+         let weights=select(1.0-fraction,fraction,offset==vec2<i32>(1));
+         let weight=weights.x*weights.y*normal_weight(dot(oct_decode(geo.xy),s.normal));
+         weight_sum+=weight;
