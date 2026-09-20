@@ -38,3 +38,25 @@ A temporary composite visualization displayed stored history age divided by the 
 
 ![Stationary frame 399, still rejected](static-399.png)
 ![History age diagnostic, white indicates mature history](history-age.png)
+
+
+## History clipping isolation and rejected variance bounds
+
+A diagnostic replaced only `history_color` in `filtered_history` with `max(history.rgb, vec3<f32>(0.0))`, retaining the existing age/blend and geometry rejection. With the stationary camera it reduced frame-399 RGB NRMSE from 12.91% to 6.01%. This implicates clipping/reset behavior as a substantial contributor to mottling; it does not prove the sampler unbiased or justify disabling rejection in production.
+
+A second experiment replaced the fixed 5% luminance cap with a conservative scalar floor for all YCoCg bounds: `3 * sqrt(max(history_second_moment - history_luminance^2, 0) / max(age, 1))`. The exact rejected patch is preserved alongside these results. Both changes were reverted.
+
+| Diagnostic | Final display RGB NRMSE | HLFS median / p95 ms | Outcome |
+| --- | ---: | ---: | --- |
+| Unclipped, stationary 400 frames | 6.01% | 3.095 / 3.860 | Diagnostic only; rejection disabled |
+| Variance bounds, stationary 400 frames | 6.22% | 3.112 / 5.547 | Rejected; visible noise remains |
+| Variance bounds, moving 100 frames | 9.32% | 3.176 / 3.760 | Rejected; lighting-change regression |
+
+Single RTX 3060 runs at 1440p with FXAA, two rays/two candidates, 16 warmup frames. HLFS-only excludes TLAS and other passes. Stationary comparisons retain the earlier moving-reference fog-history limitation. The static p95 spike is retained, not discarded as an outlier. Full numbers are in `history-experiments.json`; CSVs preserve timings and all quality rows.
+
+The 14 hardware-RT regression tests passed with variance bounds. However, the existing four-seed quality frontier (seeds 11/29/47/71, setting 2:2, presampling, reactive history, discovery=1) failed **45 of 90 final-output rows**, primarily after blockers appeared/disappeared. Restoring the original shader passed all 90 rows with the same settings. This is a measured regression, not an accepted noise/performance tradeoff. Reproduce with `cargo test --release -p helio-pass-hlfs --test gpu_hlfs_rt benchmark_rt_quality_frontier -- --ignored --test-threads=1`, setting `HLFS_RT_QUALITY_OUTPUT`, `HLFS_RT_QUALITY_SETTING=2:2`, `HLFS_RT_QUALITY_PRESAMPLE=1`, `HLFS_RT_QUALITY_REACTIVE=1`, and `HLFS_RT_QUALITY_DISCOVERY=1`.
+
+Next: distinguish a spatially coherent lighting change from stochastic single-pixel disagreement before clipping temporal history. Test both stationary variance and the unchanged blocker-motion gate; a smoother still image alone is insufficient. No production defaults changed and the visual gate remains failed.
+
+![Unclipped stationary diagnostic](history-unclipped.png)
+![Rejected variance bounds during camera motion](history-variance-aware-moving.png)

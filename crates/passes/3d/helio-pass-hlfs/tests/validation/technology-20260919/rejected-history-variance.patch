@@ -1,0 +1,16 @@
+--- a/crates/passes/3d/helio-pass-hlfs/shaders/temporal.wgsl
++++ b/crates/passes/3d/helio-pass-hlfs/shaders/temporal.wgsl
+@@ -18,7 +18,12 @@
+ fn filtered_history(current: vec3<f32>, history: vec4<f32>, mean: vec3<f32>, extent: vec3<f32>, age: f32) -> vec4<f32> {
+     let original=to_ycocg(history.rgb);
+     var bounds=extent;
+-    if globals.ray_settings.z>0.5 { bounds.x=min(bounds.x,0.05*abs(mean.x)); }
++    if globals.ray_settings.z>0.5 {
++        let history_luma=luminance(max(history.rgb,vec3<f32>(0.0)));
++        let variance=max(history.a-history_luma*history_luma,0.0);
++        let uncertainty=3.0*sqrt(variance/max(age,1.0));
++        bounds=max(bounds,vec3<f32>(uncertainty));
++    }
+     let clipped=clamp(original,mean-bounds,mean+bounds);
+     let distance=length((original-clipped)/max(bounds,vec3<f32>(0.01)));
+     // Strongly inconsistent history expires immediately; never a fixed 95% blend.
