@@ -48,6 +48,11 @@ pub fn run_scene(
     let candidate_count = std::env::var("HLFS_CANDIDATE_COUNT").ok().map(|value| {
         value.parse::<u32>().expect("HLFS_CANDIDATE_COUNT must be an integer")
     });
+    let fixed_camera = std::env::var("HLFS_FIXED_CAMERA").ok().map(|value| {
+        let t = value.parse::<f32>().expect("HLFS_FIXED_CAMERA must be a number in [0, 1]");
+        assert!(t.is_finite() && (0.0..=1.0).contains(&t), "invalid fixed camera position");
+        t
+    });
     pollster::block_on(async {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -169,7 +174,7 @@ pub fn run_scene(
                     },
                 );
             }
-            let t = (frame as f32 / 99.0).clamp(0.0, 1.0);
+            let t = fixed_camera.unwrap_or((frame as f32 / 99.0).clamp(0.0, 1.0));
             let camera = camera_path(t, width as f32 / height as f32);
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
@@ -211,7 +216,7 @@ pub fn run_scene(
                     candle_light_ids.len()
                 );
             }
-            if [0, 31, 63, 99].contains(&frame) {
+            if [0, 31, 63, 99].contains(&frame) || frame + 1 == capture_frames {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Capture readback"),
                     size: u64::from(width * height * 4),

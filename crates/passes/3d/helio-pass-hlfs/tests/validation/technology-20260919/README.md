@@ -29,3 +29,12 @@ Added `HLFS_CANDIDATE_COUNT` to the capture harness to vary candidate scoring in
 | Wider temporal bounds, 2 rays / 2 candidates | 3.175 | 3.770 | 14.65 / 14.49 / 13.54% |
 
 The wider-history experiment removed the fixed 5% luminance bound and used sample standard deviation instead of standard error for clipping. It worsened error and was reverted. Increasing candidates helps modestly, but four rays exceed the budget while retaining obvious mottling. None passes the visual gate, and no production defaults changed. This rules out solving the current scene through these simple parameter increases alone; sampling/reuse needs further work.
+
+## Stationary-camera control
+
+`HLFS_FIXED_CAMERA=1` holds the final camera pose from frame zero, and the capture harness now also saves its final frame for runs longer than 100 frames. A 400-frame default two-ray run remains at display-RGB NRMSE 13.05 / 12.97 / 12.99 / 12.91% at frames 31 / 63 / 99 / 399 against the prior final-pose reference. Camera motion alone therefore does not explain the variance floor. Fog temporal history is not identical between the moving and fixed reference paths, so these are diagnostic image differences, not a strict isolated lighting-energy test.
+
+A temporary composite visualization displayed stored history age divided by the configured maximum while leaving temporal processing in normal mode. Broad surfaces reached the configured age; low-age pixels clustered around edges. The diagnostic shader was removed and the normal binary rebuilt. This rules against a wholesale history reset as the main cause; it does not prove every reprojection or lighting-change case correct.
+
+![Stationary frame 399, still rejected](static-399.png)
+![History age diagnostic, white indicates mature history](history-age.png)
