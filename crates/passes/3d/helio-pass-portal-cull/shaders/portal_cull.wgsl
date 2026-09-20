@@ -212,7 +212,7 @@ fn select(
                 pos = (coordinate_spaces[p.coordinate_space] * vec4<f32>(pos, 1.0)).xyz;
                 let local = (p.inverse_transform * vec4<f32>(pos, 1.0)).xyz;
                 let is_outermost = s == 1u;
-                if local.z > radius || (!is_outermost && (
+                if local.z < -radius || (!is_outermost && (
                     abs(local.x) > p.half_extent.x + radius || abs(local.y) > p.half_extent.y + radius
                 )) {
                     rejected = true;

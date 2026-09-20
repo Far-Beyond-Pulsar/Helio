@@ -330,7 +330,7 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
 }
 
 fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
-    return local.z > 0.0 || abs(local.x) > half_extent.x || abs(local.y) > half_extent.y;
+    return local.z < 0.0 || abs(local.x) > half_extent.x || abs(local.y) > half_extent.y;
 }
 
 // The physical outer portal's screen-space mask is the exact X/Y aperture.
@@ -339,7 +339,7 @@ fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
 // doorway dimensions. Inner recursive stages have no physical screen mask,
 // so they continue to use `clip_stage` below.
 fn clip_depth_only(local: vec4<f32>) -> bool {
-    return local.z > 0.0;
+    return local.z < 0.0;
 }
 
 // Basic SceneDB materials carry texture-store indices directly. An explicit

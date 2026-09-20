@@ -15,6 +15,7 @@ use pulsar_scenedb::Entity;
 use helio_pass_gbuffer::{SubLevelActorComponent, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX};
 
 use crate::components::{PortalComponent, PortalViewComponent, NO_PORTAL_PEER};
+use crate::portal_math::portal_view_map;
 use crate::MAX_CHAIN_DEPTH;
 
 /// A component row together with its owning SceneDB entity.
@@ -102,8 +103,11 @@ pub struct PortalProjection {
     pub source: PortalOccurrence,
     /// Peer portal whose context supplies the displayed contents.
     pub target: PortalOccurrence,
-    /// Maps target-context coordinates into the source portal's context.
-    /// This is the same direction as `PortalPair::pair_map_inverse`.
+    /// Maps target-context coordinates into the source portal's render space.
+    /// This is the standard target-content-to-source-opening view map, which
+    /// includes the portal-local 180-degree turn needed to place the target
+    /// level beyond the source opening. It is intentionally distinct from
+    /// the teleport map used when an actor crosses a portal.
     pub target_to_source: Mat4,
 }
 
@@ -292,7 +296,7 @@ impl SubLevelResolver {
         for source in occurrences.iter().cloned() {
             let targets = self.resolve_peer_targets(&source, &occurrences, &index)?;
             projections.extend(targets.into_iter().map(|target| PortalProjection {
-                target_to_source: source.transform * target.transform.inverse(),
+                target_to_source: portal_view_map(source.transform, target.transform),
                 source: source.clone(),
                 target,
             }));
@@ -466,7 +470,7 @@ impl SubLevelResolver {
         let targets = self.resolve_peer_targets(&source, occurrences, portal_index)?;
         for target in targets {
             projections.push(PortalProjection {
-                target_to_source: source.transform * target.transform.inverse(),
+                target_to_source: portal_view_map(source.transform, target.transform),
                 source: source.clone(),
                 target: target.clone(),
             });

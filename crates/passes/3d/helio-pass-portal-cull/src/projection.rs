@@ -467,7 +467,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(frame.coordinate_spaces[0], Mat4::IDENTITY);
-        assert_eq!(frame.coordinate_spaces.len(), 1);
+        // Even identity-authored portal poses get a distinct render-space
+        // turn: the view map includes the standard 180-degree portal-plane
+        // flip, so target contents land beyond the source opening.
+        assert_eq!(frame.coordinate_spaces.len(), 2);
         assert_eq!(frame.portal_views.len(), 2);
         assert_eq!(frame.portal_chains.len(), 2);
         assert_eq!(frame.counts.portal_view_count, 2);

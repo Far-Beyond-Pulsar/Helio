@@ -29,6 +29,20 @@ pub fn portal_pose_facing(position: Vec3, forward: Vec3, up: Vec3) -> PortalPose
     PortalPose::from_look_at(position, position + forward, up)
 }
 
+/// Build the render-space map that places target-level contents beyond the
+/// source portal opening.
+///
+/// This is intentionally different from the teleport map. A portal view
+/// crosses from the target portal's local front side into the source portal's
+/// local back side, so the standard 180-degree turn in portal-local space is
+/// required before placing the target contents at the source. Without it,
+/// opposing room portals map their far room onto the camera side of the source
+/// surface (or behind the camera), which can make the opening look empty even
+/// though the peer transform itself is algebraically valid.
+pub fn portal_view_map(source: Mat4, target: Mat4) -> Mat4 {
+    source * Mat4::from_rotation_y(std::f32::consts::PI) * target.inverse()
+}
+
 // ── Portal pose ───────────────────────────────────────────────────────────────
 
 /// Position + orientation of a portal surface.
@@ -100,6 +114,11 @@ impl PortalPair {
     /// The inverse mapping (B's frame to A's frame).
     pub fn pair_map_inverse(&self) -> Mat4 {
         self.a.transform * self.b.transform.inverse()
+    }
+
+    /// The target-content-to-source-opening map used by portal rendering.
+    pub fn view_map_inverse(&self) -> Mat4 {
+        portal_view_map(self.a.transform, self.b.transform)
     }
 
     /// Map a world point through the portal (A's frame → B's frame).
@@ -193,6 +212,19 @@ mod tests {
         for i in 0..16 {
             assert!((round[i] - id[i]).abs() < 1e-3, "index {i}: {round:?}");
         }
+    }
+
+    #[test]
+    fn view_map_places_target_contents_beyond_an_opposing_source_portal() {
+        let source = pose_at(Vec3::new(0.0, 0.0, 6.0), Vec3::NEG_Z);
+        let target = pose_at(Vec3::new(0.0, 0.0, -6.0), Vec3::Z);
+        let map = PortalPair { a: source, b: target }.view_map_inverse();
+
+        // The target-room center is six units in front of the target portal.
+        // It must land six units beyond the source portal, not on the camera
+        // side of it.
+        let mapped = map.transform_point3(Vec3::ZERO);
+        assert!((mapped - Vec3::new(0.0, 0.0, 12.0)).length() < 1e-4);
     }
 
     #[test]
