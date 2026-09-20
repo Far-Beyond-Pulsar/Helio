@@ -409,6 +409,16 @@ impl Renderer {
         self.ray_frame.publish(self.frame_count, tlas);
     }
 
+    /// Publish a TLAS and its matching per-instance transmission buffer for one
+    /// frame. Material rows must follow the exact TLAS instance ordering.
+    pub fn set_ray_tracing_frame_with_transmission(
+        &mut self,
+        tlas: Option<&wgpu::Tlas>,
+        transmission: Option<&wgpu::Buffer>,
+    ) {
+        self.ray_frame.publish_with_transmission(self.frame_count, tlas, transmission);
+    }
+
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
     /// external debug capture (e.g. an example dumping it to a PNG to
     /// answer "is anything actually being rasterized"). Every other

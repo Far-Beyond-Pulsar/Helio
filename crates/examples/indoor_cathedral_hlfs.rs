@@ -2,8 +2,8 @@
 //!
 //! A Gothic interior with ribbed vaults, clustered limestone piers, marble
 //! paving, carved oak pews, bronze chandeliers and leaded stained glass.
-//! Panes use alpha blending; coloured transmission and refraction are not
-//! simulated by the opaque RT shadow path.
+//! Panes use alpha blending, with explicit thin-sheet RGB shadow transmission
+//! in RT mode. Refraction and caustics are not simulated.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
 //! temporal/spatial filtering with a bounded shadow budget per shading pixel.
@@ -540,8 +540,8 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &mut self.acceleration {
-            let frame = acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
-            renderer.set_ray_tracing_frame(Some(frame));
+            acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
+            renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
         }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
@@ -563,8 +563,15 @@ fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
         ));
     }
     // Stained glass shafts — static, no need to store ids
+    // RT uses white exterior sources: pane materials supply the transmitted tint.
     for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-        spawn_light(world, point_light([x, y, z], [r, g, b], 35.0, 10.0));
+        let light = if std::env::var_os("HLFS_RT").is_some() {
+            let position = if x == 0.0 { [0.0, 17.0, 34.0] } else { [x.signum() * 16.0, 12.0, z] };
+            point_light(position, [1.0; 3], 2500.0, 65.0)
+        } else {
+            point_light([x, y, z], [r, g, b], 35.0, 10.0)
+        };
+        spawn_light(world, light);
     }
     let mut candle_light_ids = Vec::new();
     for &(x, y, z) in CANDLES {

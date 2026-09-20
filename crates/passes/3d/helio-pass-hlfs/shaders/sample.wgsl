@@ -38,7 +38,7 @@ fn record_visible(id: u32, s: Surface, index: u32) {
     if weight>=0.0 { atomicMax(&bucket_weights[hash_u32(id)&63u],select(bitcast<u32>(weight),0u,weight==0.0)); }
 }
 
-fn trace_visibility(id: u32, surface: Surface, pixel: vec2<u32>) -> f32 {
+fn trace_visibility(id: u32, surface: Surface, pixel: vec2<u32>) -> Visibility {
     return shadow_factor(id,surface.position,surface.normal,vec2<f32>(pixel)+0.5,globals.frame);
 }
 
@@ -118,8 +118,11 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
             let grid_count=grid[tile].count;
             let overflow=grid_count>GRID_CAPACITY;
             let population=select(grid_count,globals.light_count,overflow);
-            if population<=pixel_sample_count || globals.debug_mode==1u {
+            if population<=pixel_sample_count || (USE_RAY_TRANSMISSION && population<=32u) || globals.debug_mode==1u {
                 // Exact path for small sets, and an uncapped oracle for GPU regression tests.
+                // Transmitting sheets create sharp chromatic visibility changes;
+                // use exact local sets up to 32 lights at the shading resolution.
+                // This is a separate quality/cost tier from the opaque two-ray path.
                 let n=select(population,globals.light_count,globals.debug_mode==1u);
                 for(var i=0u;i<n;i++) {
                     var id=i;
@@ -129,7 +132,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     let vis=trace_visibility(id,s,pixel);
                     let light=evaluate_light(id,s,vis);
                     result.diffuse+=light.diffuse; result.specular+=light.specular;
-                    if vis>0.0 && i<4u { record_visible(id,s,i*64u+lane); }
+                    if visibility_nonzero(vis) && i<4u { record_visible(id,s,i*64u+lane); }
                 }
             } else {
                 confidence=0.0;
@@ -157,7 +160,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 var covered_energy=0.0;
                 var selected_ids=vec4<u32>(INVALID_LIGHT);
                 var selected_normalization=vec4<f32>(0.0);
-                var traced_visibility=vec4<f32>(-1.0);
+                var traced_visibility: VisibilityCache;
                 // The guide and surface are shared by every sample. Preserve
                 // their accumulation order without rescoring the same lights.
                 var guided_directional_weight=0.0; var guided_local_weight=0.0;
@@ -263,14 +266,13 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 for(var sample=0u;sample<pixel_sample_count;sample++) {
                     let selected=selected_ids[sample];
                     if selected==INVALID_LIGHT { continue; }
-                    var vis=-1.0;
-                    if sample>0u && selected_ids.x==selected { vis=traced_visibility.x; }
-                    else if sample>1u && selected_ids.y==selected { vis=traced_visibility.y; }
-                    else if sample>2u && selected_ids.z==selected { vis=traced_visibility.z; }
-                    let first_trace=vis<0.0;
+                    var vis=Visibility(-1.0);
+                    if sample>0u && selected_ids.x==selected { vis=traced_visibility[0]; }
+                    else if sample>1u && selected_ids.y==selected { vis=traced_visibility[1]; }
+                    else if sample>2u && selected_ids.z==selected { vis=traced_visibility[2]; }
+                    let first_trace=visibility_missing(vis);
                     if first_trace { vis=trace_visibility(selected,s,pixel); }
-                    let mask=vec4<u32>(0u,1u,2u,3u)==vec4<u32>(sample);
-                    traced_visibility=select(traced_visibility,vec4<f32>(vis),mask);
+                    traced_visibility[sample]=vis;
                     let normalization=selected_normalization[sample];
                     let light=evaluate_light(selected,s,vis);
                     if first_trace && guided(guide_tile,guide_count,selected) {
@@ -278,7 +280,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     }
                     result.diffuse+=light.diffuse*normalization;
                     result.specular+=light.specular*normalization;
-                    if vis>0.0 { record_visible(selected,s,sample*64u+lane); }
+                    if visibility_nonzero(vis) { record_visible(selected,s,sample*64u+lane); }
                 }
                 // Only the >= 0.8 decision is stored. Once a nonnegative
                 // partial sum makes the ratio smaller, remaining terms cannot
@@ -286,7 +288,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 // so preserve the full sum for that input range.
                 if valid_history && covered_energy>0.0 {
                     for(var i=0u;i<guide_count;i++) {
-                        let potential=evaluate_light(previous_visible[guide_tile].indices[i],s,1.0);
+                        let potential=evaluate_light(previous_visible[guide_tile].indices[i],s,Visibility(1.0));
                         guide_energy+=luminance(potential.diffuse*s.albedo+potential.specular*s.specular_factor);
                         if all(s.albedo<=vec3<f32>(1.0)) && guide_energy>0.00001
                             && covered_energy/guide_energy<0.8 { break; }

@@ -443,6 +443,13 @@ pub fn populate(world: &mut World) {
         );
         material.flags |= helio_mats::FLAG_ALPHA_BLEND | helio_mats::FLAG_TRANSPARENT_ONLY;
         let material = spawn_material(world, material);
+        // Per-sheet linear RGB, independent of the pane's raster display alpha.
+        let transmission = if std::env::var_os("HLFS_CLEAR_GLASS").is_some() {
+            [1.0; 3] // Diagnostic: identical geometry, no spectral attenuation.
+        } else {
+            colour.map(|c| 0.04 + 0.76 * c)
+        };
+        world.insert(material, helio_pass_hlfs::RayTransmission(transmission));
         let mesh = spawn_mesh(
             world,
             MeshUpload {

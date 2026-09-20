@@ -164,10 +164,10 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             if ray_traced {
-                let tlas = acceleration
+                acceleration
                     .prepare(&scene_db.world)
                     .expect("SceneDB RT geometry");
-                renderer.set_ray_tracing_frame(Some(tlas));
+                renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
             }
             renderer.render(&camera, &view).expect("cathedral frame");
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -252,8 +252,7 @@ pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity
     });
 }
 
-/// Mark only opaque geometry as binary RT casters; panes still render through
-/// the transparent pass, without claiming coloured ray transmission.
+/// Include opaque geometry and explicitly authored thin-sheet RT materials.
 pub fn enable_ray_shadows(world: &mut World) {
     let ids: Vec<_> = world
         .query::<(&helio_pass_forward_lit::LightComponent,)>()
@@ -280,10 +279,9 @@ pub fn enable_ray_shadows(world: &mut World) {
             .any(|(entity, (material,))| {
                 entity.index() == object.material_slot
                     && material.flags & helio_mats::FLAG_ALPHA_BLEND != 0
+                    && world.get::<helio_pass_hlfs::RayTransmission>(entity).is_none()
             });
-        // Alpha-blended panes are rasterized, but binary opaque ray
-        // queries cannot model their transmission. Only opaque
-        // architecture enters this capture's RT caster set.
+        // Display alpha alone is not a transmission model.
         if !transparent {
             world
                 .get_mut::<helio_pass_gbuffer::StaticObjectComponent>(id)

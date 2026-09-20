@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 pub struct Fixture {
     pub ambient: [f32; 3],
     pub publish_ray_frame: bool,
+    pub transmission: Option<wgpu::Buffer>,
     pub ray_frame: helio_core::FrameAcceleration,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -190,6 +191,7 @@ impl Fixture {
         Self {
             ambient: [0.03; 3],
             publish_ray_frame: true,
+            transmission: None,
             ray_frame: Default::default(),
             device,
             queue,
@@ -258,7 +260,7 @@ impl Fixture {
         self.scene.flush();
         if self.publish_ray_frame {
             self.ray_frame
-                .publish(self.scene.frame_count, self.scene.tlas_manager.tlas());
+                .publish_with_transmission(self.scene.frame_count, self.scene.tlas_manager.tlas(), self.transmission.as_ref());
         }
         let mut resources = helio_core::ResourceRegistry::empty();
         resources.write(
@@ -271,6 +273,9 @@ impl Fixture {
             },
             "Fixture",
         );
+        if let Some(buffer) = self.ray_frame.transmission(self.scene.frame_count) {
+            resources.write(helio_core::ResourceKey::new("ray_transmission"), buffer, "Fixture");
+        }
         resources.write(
             helio_core::ResourceKey::new("gbuffer"),
             helio_core::ViewGroup::<4> {

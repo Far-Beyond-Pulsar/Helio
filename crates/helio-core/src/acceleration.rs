@@ -515,10 +515,31 @@ pub struct TlasInstanceInput {
 #[derive(Default)]
 pub struct FrameAcceleration {
     frame: Option<(u64, wgpu::Tlas)>,
+    transmission: Option<wgpu::Buffer>,
 }
 impl FrameAcceleration {
     pub fn publish(&mut self, frame: u64, tlas: Option<&wgpu::Tlas>) {
+        self.transmission = None;
         self.frame = tlas.map(|tlas| (frame, tlas.clone()));
+    }
+    /// Storage rows are `[f32; 4]`: finite linear RGB transmission in [0, 1],
+    /// then reserved zero padding. Opaque instances use RGB zero.
+    /// Transmission rows are indexed by TLAS instance index and must be built
+    /// from the same authoritative instance ordering as the acceleration data.
+    /// An opaque-only publication explicitly discards any older material rows.
+    pub fn publish_with_transmission(
+        &mut self,
+        frame: u64,
+        tlas: Option<&wgpu::Tlas>,
+        transmission: Option<&wgpu::Buffer>,
+    ) {
+        self.publish(frame, tlas);
+        if self.frame.is_some() {
+            self.transmission = transmission.cloned();
+        }
+    }
+    pub fn transmission(&self, frame: u64) -> Option<&wgpu::Buffer> {
+        self.tlas(frame).and(self.transmission.as_ref())
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
         self.frame.as_ref().filter(|(generation, _)| *generation == frame).map(|(_, tlas)| tlas)

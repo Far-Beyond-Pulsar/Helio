@@ -1167,8 +1167,8 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                       acceleration: &mut helio_pass_hlfs::SceneDbRayTracing,
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
-            let tlas = acceleration.prepare(&db.world).unwrap();
-            f.ray_frame.publish(f.scene.frame_count, Some(tlas));
+            acceleration.prepare(&db.world).unwrap();
+            f.ray_frame.publish_with_transmission(f.scene.frame_count, acceleration.tlas(), acceleration.transmission());
             f.frame();
             mean(&f.read())
         };
@@ -1225,6 +1225,18 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
             shadow < clear * 0.2,
             "SceneDB offscreen caster missing: {shadow}/{clear}"
         );
+        db.world.get_mut::<MaterialComponent>(material).unwrap().flags |= helio_mats::FLAG_ALPHA_BLEND;
+        db.world.insert(material, helio_pass_hlfs::RayTransmission([1.0; 3]));
+        assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01);
+        db.world.insert(material, helio_pass_hlfs::RayTransmission([0.25; 3]));
+        assert!((render(&mut f, &mut acceleration, &db) / clear - 0.25).abs() < 0.015);
+        db.world.insert(material, helio_pass_hlfs::RayTransmission([f32::NAN; 3]));
+        db.world.flush_gpu_mirror(&f.queue);
+        assert!(acceleration.prepare(&db.world).is_err());
+        assert!(acceleration.transmission().is_none());
+        db.world.remove::<helio_pass_hlfs::RayTransmission>(material);
+        db.world.get_mut::<MaterialComponent>(material).unwrap().flags &= !helio_mats::FLAG_ALPHA_BLEND;
+        assert!(render(&mut f, &mut acceleration, &db) < clear * 0.2);
         {
             let mut mesh = db.world.get_mut::<MeshComponent>(mesh).unwrap();
             for vertex in &mut mesh.vertices {
@@ -1262,5 +1274,81 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
             (removed - clear).abs() < clear * 0.01,
             "removed caster remained in TLAS"
         );
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
+    pollster::block_on(async {
+        for debug_mode in [HlfsDebugMode::Reference, HlfsDebugMode::Unfiltered] {
+            let mut f = Fixture::new_rt(65, 49).await;
+            f.config(HlfsConfig { debug_mode, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
+            f.lights(vec![light()]);
+            empty_scene(&mut f);
+            f.frame();
+            let clear = f.read();
+            blocker(&mut f, 5.0);
+            for (rows, expected) in [
+                (vec![[1.0f32, 1.0, 1.0, 0.0]], [1.0, 1.0, 1.0]),
+                (vec![[0.8, 0.2, 0.05, 0.0]], [0.8, 0.2, 0.05]),
+                (vec![[0.8, 0.2, 0.05, 0.0], [0.5, 0.6, 0.8, 0.0]], [0.4, 0.12, 0.04]),
+                (vec![[0.8, 0.2, 0.05, 0.0], [0.0; 4]], [0.0; 3]),
+                (vec![[0.0; 4], [0.8, 0.2, 0.05, 0.0]], [0.0; 3]),
+            ] {
+                let instances: Vec<_> = (0..rows.len()).map(|i| TlasInstanceInput {
+                    mesh_id: 1,
+                    transform: [1.0,0.0,0.0,i as f32,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0],
+                }).collect();
+                let mut encoder = f.device.create_command_encoder(&Default::default());
+                f.scene.tlas_manager.build(&mut encoder, &instances, &f.scene.blas_manager).unwrap();
+                f.queue.submit([encoder.finish()]);
+                f.transmission = Some(f.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("test thin sheets"), contents: bytemuck::cast_slice(&rows), usage: wgpu::BufferUsages::STORAGE,
+                }));
+                f.frame();
+                let actual = f.read();
+                for channel in 0..3 {
+                    let lit: f32 = clear.iter().map(|p| p[channel]).sum();
+                    let transmitted: f32 = actual.iter().map(|p| p[channel]).sum();
+                    assert!((transmitted / lit - expected[channel]).abs() < 0.015,
+                        "{debug_mode:?}: channel {channel}, expected {}, actual {}", expected[channel], transmitted / lit);
+                }
+            }
+            // Dropping metadata restores the binary path, never stale tint.
+            f.transmission = None;
+            f.frame();
+            assert!(mean(&f.read()) < mean(&clear) * 0.01);
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn colored_visibility_cache_preserves_channels_with_many_lights() {
+    pollster::block_on(async {
+        let mut f = Fixture::new_rt(65, 49).await;
+        let mut source = light();
+        source.color_intensity[3] /= 33.0;
+        f.lights(vec![source; 33]);
+        blocker(&mut f, 5.0);
+        f.transmission = Some(f.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("colored RIS regression"),
+            contents: bytemuck::cast_slice(&[0.7f32, 0.3, 0.1, 0.0]),
+            usage: wgpu::BufferUsages::STORAGE,
+        }));
+        f.config(HlfsConfig { debug_mode: HlfsDebugMode::Reference, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
+        f.frame();
+        let reference = f.read();
+        f.config(HlfsConfig { debug_mode: HlfsDebugMode::Unfiltered, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
+        for _ in 0..8 {
+            f.frame();
+            let result = f.read();
+            for channel in 0..3 {
+                let expected: f32 = reference.iter().map(|p| p[channel]).sum();
+                let actual: f32 = result.iter().map(|p| p[channel]).sum();
+                assert!((actual / expected - 1.0).abs() < 0.04, "colored RIS channel {channel}: {actual}/{expected}");
+            }
+        }
     });
 }

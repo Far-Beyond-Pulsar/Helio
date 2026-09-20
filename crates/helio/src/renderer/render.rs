@@ -414,6 +414,9 @@ impl Renderer {
             },
             "Renderer",
         );
+        if let Some(transmission) = self.ray_frame.transmission(self.frame_count) {
+            resource_registry.write(helio_core::ResourceKey::new("ray_transmission"), transmission, "Renderer");
+        }
         // See `GBufferPass::coordinate_spaces_buffer`'s doc: every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/
         // sublevel producer exists. Without this, `OcclusionCullPass`/

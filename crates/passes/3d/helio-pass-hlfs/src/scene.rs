@@ -1,4 +1,4 @@
-//! Frontend-owned acceleration projection of SceneDB's opaque static objects.
+//! Frontend-owned acceleration projection of SceneDB's static shadow casters.
 //! No renderer-owned scene table or GPU readback is involved.
 use helio_core::{BlasGeometry, BlasManager, TlasInstanceInput, TlasManager};
 use helio_pass_gbuffer::{
@@ -11,11 +11,20 @@ use std::{
     sync::Arc,
 };
 
+/// Explicit linear-RGB transmission for each crossed triangle of a thin sheet.
+/// Attach to the material entity. This is independent of display alpha and does
+/// not model refraction, thickness, or caustics. Closed meshes attenuate at both
+/// entrance and exit surfaces; use a single surface for a single pane.
+#[derive(Clone, Copy, Debug)]
+pub struct RayTransmission(pub [f32; 3]);
+
 pub struct SceneDbRayTracing {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     blas: BlasManager,
     tlas: TlasManager,
+    transmission: Option<wgpu::Buffer>,
+    has_transmission: bool,
 }
 impl SceneDbRayTracing {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
@@ -24,6 +33,8 @@ impl SceneDbRayTracing {
             tlas: TlasManager::new(device.clone(), 1),
             device,
             queue,
+            transmission: None,
+            has_transmission: false,
         }
     }
 
@@ -41,7 +52,15 @@ impl SceneDbRayTracing {
         Ok(self.tlas.tlas().expect("successful TLAS build"))
     }
 
+    /// Valid only after successful preparation; rows follow TLAS instance order.
+    pub fn transmission(&self) -> Option<&wgpu::Buffer> {
+        self.has_transmission.then_some(self.transmission.as_ref()).flatten()
+    }
+
+    pub fn tlas(&self) -> Option<&wgpu::Tlas> { self.tlas.tlas() }
+
     fn build(&mut self, world: &World) -> helio_core::Result<()> {
+        self.has_transmission = false;
         let error =
             |message: &str| helio_core::Error::InvalidPassConfig(format!("SceneDB RT: {message}"));
         let mirror = world
@@ -82,6 +101,8 @@ impl SceneDbRayTracing {
             });
         let mut live = HashSet::new();
         let mut instances = Vec::new();
+        let mut transmission_rows = Vec::<[f32; 4]>::new();
+        let mut has_transmission = false;
         for (object_entity, (object,)) in world.query::<(&StaticObjectComponent,)>() {
             if object.flags & helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW == 0 {
                 continue;
@@ -101,17 +122,19 @@ impl SceneDbRayTracing {
             if material_entity.generation().wrapping_add(1) != object.material_generation {
                 return Err(error("stale caster material identity"));
             }
-            if material.flags
-                & (helio_mats::FLAG_ALPHA_BLEND
-                    | helio_mats::FLAG_ALPHA_TEST
-                    | helio_mats::FLAG_HAS_CUSTOM_SHADER)
-                != 0
+            let transmission = world.get::<RayTransmission>(*material_entity);
+            if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER) != 0
                 || object.graph_hash() != 0
+                || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
             {
-                return Err(error(
-                    "masked, transparent and custom-shader casters are unsupported",
-                ));
+                return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
             }
+            let rgb = transmission.map_or([0.0; 3], |value| value.0);
+            if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+                return Err(error("transmission must be finite linear RGB in [0, 1]"));
+            }
+            has_transmission |= transmission.is_some();
+            transmission_rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
             let (entity, mesh) = meshes
                 .get(&object.mesh_slot)
                 .ok_or_else(|| error("missing caster mesh"))?;
@@ -177,6 +200,19 @@ impl SceneDbRayTracing {
         self.tlas
             .build(&mut encoder, &instances, &self.blas)
             .map_err(|e| error(&e.to_string()))?;
+        if has_transmission {
+            let size = (transmission_rows.len() * 16).max(16) as u64;
+            if self.transmission.as_ref().is_none_or(|buffer| buffer.size() < size) {
+                self.transmission = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("SceneDB RT thin-sheet transmission"),
+                    size: size.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            self.queue.write_buffer(self.transmission.as_ref().unwrap(), 0, bytemuck::cast_slice(&transmission_rows));
+        }
+        self.has_transmission = has_transmission;
         self.queue.submit([encoder.finish()]);
         Ok(())
     }

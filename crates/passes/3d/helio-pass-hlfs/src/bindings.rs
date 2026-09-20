@@ -174,7 +174,8 @@ impl GBufferKey {
 #[derive(Default)]
 pub(crate) struct ExternalBindings {
     pub ray: Option<wgpu::BindGroup>,
-    ray_key: Option<wgpu::Tlas>,
+    pub transmission: bool,
+    ray_key: Option<(wgpu::Tlas, wgpu::Buffer)>,
     pub common: Option<wgpu::BindGroup>,
     pub gbuffer: Option<wgpu::BindGroup>,
     common_key: Option<CommonKey>,
@@ -190,15 +191,16 @@ impl ExternalBindings {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         tlas: &wgpu::Tlas,
+        transmission: &wgpu::Buffer,
     ) {
-        if self.ray_key.as_ref() != Some(tlas) {
+        if !self.ray_key.as_ref().is_some_and(|(old_tlas, old_buffer)| old_tlas == tlas && old_buffer == transmission) {
             self.ray = Some(bind_group(
                 device,
                 "HLFS scene TLAS",
                 layout,
-                &[tlas.as_binding()],
+                &[tlas.as_binding(), transmission.as_entire_binding()],
             ));
-            self.ray_key = Some(tlas.clone());
+            self.ray_key = Some((tlas.clone(), transmission.clone()));
         }
     }
     pub fn update(

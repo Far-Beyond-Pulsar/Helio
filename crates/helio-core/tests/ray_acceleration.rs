@@ -304,3 +304,27 @@ fn padded_pool_vertices_copy_the_complete_stride() {
     let readback = gpu.trace(&mut encoder, tlas.tlas().unwrap());
     assert_eq!(gpu.read(encoder, &readback), [1, 0, 0, 0]);
 }
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn transmission_rows_expire_with_their_acceleration_frame() {
+    let gpu = Gpu::new();
+    let tlas = gpu.device.create_tlas(&wgpu::CreateTlasDescriptor {
+        label: Some("frame material lifetime"), max_instances: 1,
+        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+    });
+    let rows = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("transmission rows"), size: 16,
+        usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
+    });
+    let mut frame = helio_core::FrameAcceleration::default();
+    frame.publish_with_transmission(7, Some(&tlas), Some(&rows));
+    assert_eq!(frame.transmission(7), Some(&rows));
+    assert!(frame.transmission(6).is_none());
+    assert!(frame.transmission(8).is_none());
+    frame.publish(8, Some(&tlas));
+    assert!(frame.transmission(8).is_none(), "opaque publication retained stale glass");
+    frame.publish_with_transmission(9, None, Some(&rows));
+    assert!(frame.transmission(9).is_none(), "materials published without their TLAS");
+}

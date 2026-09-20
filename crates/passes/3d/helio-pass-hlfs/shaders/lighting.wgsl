@@ -49,7 +49,7 @@ fn importance(id: u32, s: Surface) -> f32 {
     if USE_TILE_PRESAMPLING {
         // Current-frame RIS uses the actual unshadowed luminance target.
         // Absolute color retains support for the existing HDR-albedo range.
-        let light=evaluate_light(id,s,1.0);
+        let light=evaluate_light(id,s,Visibility(1.0));
         return luminance(abs(light.diffuse*s.albedo+light.specular*s.specular_factor));
     }
     let inc=incident(lights[id],s.position);
@@ -61,14 +61,14 @@ fn importance(id: u32, s: Surface) -> f32 {
         // Only a tiny proxy pays for the exact unshadowed bound. Dividing the
         // exposure-space error budget by population bounds aggregate loss even
         // when a scene contains thousands of individually dim lights.
-        let bound=evaluate_light(id,s,1.0);
+        let bound=evaluate_light(id,s,Visibility(1.0));
         let color=bound.diffuse*s.albedo+bound.specular*s.specular_factor;
         let budget=0.00001*min(globals.exposure,1.0);
         if max(color.r,max(color.g,color.b))*f32(globals.light_count)<budget { return 0.0; }
     }
     return proxy;
 }
-fn evaluate_light(id: u32, s: Surface, visibility: f32) -> Lighting {
+fn evaluate_light(id: u32, s: Surface, visibility: Visibility) -> Lighting {
     let inc=incident(lights[id],s.position);
     let ndl=max(dot(s.normal,inc.direction),0.0);
     let ndv=max(dot(s.normal,s.view),0.0);

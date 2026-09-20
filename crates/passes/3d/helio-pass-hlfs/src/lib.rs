@@ -23,7 +23,7 @@ mod scene;
 use bindings::{ExternalBindings, Inputs, InternalBindings};
 use pipelines::Pipelines;
 use resources::{Fallbacks, Targets, COARSE_TILE_SIZE, TILE_SIZE};
-pub use scene::SceneDbRayTracing;
+pub use scene::{RayTransmission, SceneDbRayTracing};
 
 /// Visibility evaluation used by the shared HLFS pipeline.
 ///
@@ -37,7 +37,8 @@ pub enum HlfsMode {
     /// visibility and sampling settings. Never selects hardware rays implicitly.
     #[default]
     ScreenSpace,
-    /// Native Vulkan opaque triangle ray queries. Requires a current built TLAS;
+    /// Native Vulkan triangle ray queries, optionally with thin-sheet RGB transmission.
+    /// Requires a current built TLAS;
     /// never falls back to screen-space visibility when it is unavailable.
     RayTraced,
 }
@@ -528,7 +529,7 @@ impl HlfsPass {
         dispatch(
             encoder,
             "HLFS sample and visibility",
-            p.visibility.pipeline(small),
+            if self.external.transmission { p.transmission_visibility.as_ref().unwrap().pipeline(small) } else { p.visibility.pipeline(small) },
             &self.internal.sample[parity],
             t.sample_width.div_ceil(8),
             t.sample_height.div_ceil(8),
@@ -573,7 +574,7 @@ impl HlfsPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&p.composite);
+            pass.set_pipeline(if self.external.transmission { p.transmission_composite.as_ref().unwrap() } else { &p.composite });
             pass.set_bind_group(0, common, &[]);
             pass.set_bind_group(1, gbuffer, &[]);
             pass.set_bind_group(2, &self.internal.composite[parity], &[]);
@@ -797,6 +798,7 @@ impl RenderPass for HlfsPass {
             &self.shadows,
             &inputs,
         );
+        self.external.transmission = self.config.mode == HlfsMode::RayTraced && ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some();
         if self.config.mode == HlfsMode::RayTraced {
             let tlas = ctx
                 .resources
@@ -811,6 +813,7 @@ impl RenderPass for HlfsPass {
                 ctx.device,
                 self.pipelines.rt_bgl.as_ref().expect("validated RT layout"),
                 tlas,
+                ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).unwrap_or(&f.empty_lights),
             );
         }
         // These dispatches read the GBuffer just rendered, so they belong on the

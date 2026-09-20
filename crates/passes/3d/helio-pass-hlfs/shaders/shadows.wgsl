@@ -214,7 +214,7 @@ fn screen_occluded(light: GpuLight, position: vec3<f32>, normal: vec3<f32>) -> b
     return false;
 }
 
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+fn scalar_shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
     if light_idx >= globals.light_count { return 1.0; }
 
@@ -299,4 +299,8 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
         layer = light.shadow_index;
         return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
     }
+}
+
+fn shadow_factor(id: u32, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
+    return Visibility(scalar_shadow_factor(id,position,normal,pixel,frame));
 }
