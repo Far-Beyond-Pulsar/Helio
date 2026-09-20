@@ -340,3 +340,7 @@ path = "procedural_clouds_demo.rs"
 [[bin]]
 name = "monumental_arch_hlfs"
 path = "monumental_arch_hlfs.rs"
+
+[[bin]]
+name = "technology_gallery_hlfs"
+path = "technology_gallery_hlfs.rs"
