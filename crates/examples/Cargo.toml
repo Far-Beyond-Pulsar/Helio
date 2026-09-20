@@ -76,6 +76,10 @@ name = "indoor_cathedral_hlfs"
 path = "indoor_cathedral_hlfs.rs"
 
 [[bin]]
+name = "drone_flight"
+path = "drone_flight.rs"
+
+[[bin]]
 name = "indoor_server_room"
 path = "indoor_server_room.rs"
 
