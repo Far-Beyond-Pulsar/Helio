@@ -24,3 +24,7 @@ Reproduce with `HLFS_RT=1`, `HLFS_PRESAMPLED=1`, `HLFS_SSR=1`, `HLFS_RESOLUTION=
 
 ![Slow all-light reference with reflections](reference-with-reflections.png)
 ![Sampled lighting with reflections, still visually rejected](sampled-with-reflections.png)
+
+## Transmission and geometry follow-up
+
+The [next validation report](../transmission-20260920/README.md) covers material-aware colored reflection transmission and smooth technology specimens. Its two-query transmission path supersedes the single-query claim above for scenes with transmission metadata. The original captures remain historical controls.

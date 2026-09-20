@@ -50,6 +50,51 @@ impl Mesh {
             self.triangle(b, b + p, b + q);
         }
     }
+    /// Smooth cylindrical sides with a duplicated UV seam and flat end caps.
+    pub(crate) fn smooth_rod(&mut self, a: Vec3, b: Vec3, radius: f32, sides: usize) {
+        assert!(sides >= 3 && radius > 0.0 && a.distance_squared(b) > 0.0);
+        let axis = (b - a).normalize();
+        let helper = if axis.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+        let u = axis.cross(helper).normalize();
+        let v = axis.cross(u).normalize();
+        let base = self.vertices.len() as u32;
+        for i in 0..=sides {
+            let uv_x = i as f32 / sides as f32;
+            // Make the seam geometrically identical instead of relying on sin(TAU).
+            let angle = (i % sides) as f32 * std::f32::consts::TAU / sides as f32;
+            let radial = u * angle.cos() + v * angle.sin();
+            let tangent = -u * angle.sin() + v * angle.cos();
+            for (center, uv_y) in [(a, 0.0), (b, 1.0)] {
+                self.vertices.push(PackedVertex::from_components(
+                    (center + radial * radius).to_array(), radial.to_array(),
+                    [uv_x, uv_y], tangent.to_array(), 1.0,
+                ));
+            }
+        }
+        for i in 0..sides {
+            let first = base + (2 * i) as u32;
+            self.indices.extend_from_slice(&[first, first+2, first+3, first, first+3, first+1]);
+            let angle = i as f32 * std::f32::consts::TAU / sides as f32;
+            let next = ((i+1) % sides) as f32 * std::f32::consts::TAU / sides as f32;
+            let p = (u * angle.cos() + v * angle.sin()) * radius;
+            let q = (u * next.cos() + v * next.sin()) * radius;
+            for (center, normal, offsets, sign) in [
+                (a, -axis, [Vec3::ZERO, q, p], -1.0),
+                (b, axis, [Vec3::ZERO, p, q], 1.0),
+            ] {
+                let cap_base = self.vertices.len() as u32;
+                for offset in offsets {
+                    self.vertices.push(PackedVertex::from_components(
+                        (center + offset).to_array(), normal.to_array(),
+                        [0.5 + 0.5 * offset.dot(u) / radius,
+                         0.5 + sign * 0.5 * offset.dot(v) / radius],
+                        u.to_array(), 1.0,
+                    ));
+                }
+                self.indices.extend_from_slice(&[cap_base, cap_base+1, cap_base+2]);
+            }
+        }
+    }
     pub(crate) fn ring(&mut self, center: Vec3, u: Vec3, v: Vec3, radius: f32, thickness: f32) {
         for i in 0..48 {
             let t = i as f32 * std::f32::consts::TAU / 48.;

@@ -38,13 +38,13 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
             meshes[4+row%3].block([side*8.0,0.018,z],[0.06,0.018,1.7]);
         }
     }
-    // Faceted metallic specimens at several roughnesses, on display plinths.
+    // Smooth metallic specimens at several roughnesses, on display plinths.
     for row in 0..6 {
         let z=-24.0+row as f32*8.0;
         for side in [-1.0,1.0] {
             let center=Vec3::new(side*9.5,0.6,z);
             meshes[1].block(center.to_array(),[2.0,0.6,2.0]);
-            meshes[if row%2==0 {3}else{7}].rod(center+Vec3::Y*0.6,center+Vec3::Y*3.5,1.35,48);
+            meshes[if row%2==0 {3}else{7}].smooth_rod(center+Vec3::Y*0.6,center+Vec3::Y*3.5,1.35,96);
             meshes[4+row%3].ring(center+Vec3::Y*0.65,Vec3::X,Vec3::Z,1.65,0.045);
         }
     }

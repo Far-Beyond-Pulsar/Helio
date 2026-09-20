@@ -56,15 +56,50 @@ fn exit_cell(
     return o + d * min(delta.x, delta.y);
 }
 
-fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>) -> vec4<f32> {
+// Transmission query contract: nearest opaque endpoint, then tint only the
+// segment before it. Candidate traversal order is unspecified, so accumulating
+// tint while searching for the endpoint would include panes behind that hit.
+struct RayTransmissionData { header: vec4<u32>, rows: array<vec4<f32>> };
+@group(2) @binding(2) var<storage, read> ray_transmission: RayTransmissionData;
+struct ReflectionHit { position: vec4<f32>, throughput: vec3<f32> };
+fn reflection_tint(instance: u32) -> vec3<f32> {
+    if instance>=min(ray_transmission.header.y,arrayLength(&ray_transmission.rows)) {
+        return vec3<f32>(0.0);
+    }
+    return ray_transmission.rows[instance].rgb;
+}
+fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>) -> ReflectionHit {
     let origin = world_pos + normal * 0.002;
+    let transmitting=ray_transmission.header.y!=0u;
     var rq: ray_query;
+    // Force candidates when metadata is present, including generic TLAS inputs
+    // whose BLAS opacity may not yet match their material classification.
     rayQueryInitialize(&rq, acc_struct,
-        RayDesc(0x01u, 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
-    rayQueryProceed(&rq);
+        RayDesc(select(0x01u,0x02u,transmitting), 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
+    while rayQueryProceed(&rq) {
+        let candidate=rayQueryGetCandidateIntersection(&rq);
+        if all(reflection_tint(candidate.instance_index)==vec3<f32>(0.0)) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
     let hit=rayQueryGetCommittedIntersection(&rq);
-    if hit.kind==RAY_QUERY_INTERSECTION_NONE { return vec4<f32>(0.0); }
-    return vec4<f32>(origin+R*hit.t,1.0);
+    if hit.kind==RAY_QUERY_INTERSECTION_NONE {
+        return ReflectionHit(vec4<f32>(0.0),vec3<f32>(1.0));
+    }
+    var throughput=vec3<f32>(1.0);
+    if transmitting {
+        var tint_query: ray_query;
+        rayQueryInitialize(&tint_query,acc_struct,
+            RayDesc(0x02u,0xFFu,0.001,hit.t,origin,R));
+        while rayQueryProceed(&tint_query) {
+            let sheet=rayQueryGetCandidateIntersection(&tint_query);
+            // Strict endpoint exclusion also rejects coplanar endpoint hits.
+            if sheet.t<hit.t {
+                throughput*=reflection_tint(sheet.instance_index);
+            }
+        }
+    }
+    return ReflectionHit(vec4<f32>(origin+R*hit.t,1.0),throughput);
 }
 
 // Screen color is valid only if it represents this RT hit, rather than an
@@ -215,8 +250,8 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
         tr = next;
     }
 
-    // Prefer reliable screen hits. Low-confidence rays get one hardware query,
-    // and reuse screen radiance only after checking the projected hit depth.
+    // Prefer reliable screen hits in opaque scenes. Hardware fallback reuses
+    // screen radiance only after checking the projected hit depth.
     var final_color=vec3<f32>(0.0);
     var final_confidence=0.0;
     if hiz_hit {
@@ -234,12 +269,19 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
             final_color=textureSampleLevel(scene_color,linear_sampler,hit_uv,0.0).rgb;
         }
     }
-    if final_confidence<0.5 {
+    // Screen-space traversal cannot see panes absent from the opaque G-buffer.
+    // Validate all reflection segments when transmission metadata is present.
+    if final_confidence<0.5 || ray_transmission.header.y!=0u {
         let hit=ray_query_hit_position(world_pos,N,R2);
-        let radiance=projected_hit_color(hit,R2);
+        let radiance=projected_hit_color(hit.position,R2);
         if radiance.a>0.0 {
-            final_color=radiance.rgb;
+            final_color=radiance.rgb*hit.throughput;
             final_confidence=roughness_fade;
+        } else if ray_transmission.header.y!=0u {
+            // Do not keep an unfiltered Hi-Z hit when hardware found a different
+            // endpoint. Offscreen hit shading remains a separate missing path.
+            final_color=vec3<f32>(0.0);
+            final_confidence=0.0;
         } else if final_confidence==0.0 && roughness>0.6 {
             final_color=sample_rc_reflection(world_pos,R2,roughness);
             final_confidence=roughness_fade*0.2;
