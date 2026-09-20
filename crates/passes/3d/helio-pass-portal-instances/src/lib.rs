@@ -48,7 +48,7 @@ struct ScreenSize {
     _pad1: f32,
 }
 
-type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize);
+type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize, usize);
 
 pub struct PortalInstancePass {
     material_binding: helio_mats::MaterialBindingConfig,
@@ -101,11 +101,11 @@ impl PortalInstancePass {
                     storage_entry(0, wgpu::ShaderStages::VERTEX, true), // cameras
                     uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false), // screen size
                     storage_entry(2, wgpu::ShaderStages::VERTEX, true), // instance_data
-                    storage_entry(3, wgpu::ShaderStages::VERTEX, true), // coordinate_spaces
+                    storage_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // coordinate_spaces
                     storage_entry(4, wgpu::ShaderStages::VERTEX, true), // coordinate_spaces_prev
                     storage_entry(5, wgpu::ShaderStages::VERTEX, true), // portal_compacted_indices
                     storage_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_views
-                    storage_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_chains
+                    storage_entry(7, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // chain handles
                     storage_entry(8, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // portal_compacted_chains
                     wgpu::BindGroupLayoutEntry {
                         binding: 9,
@@ -117,6 +117,7 @@ impl PortalInstancePass {
                         },
                         count: None,
                     }, // portal_mask — written by helio-pass-portal-mask
+                    storage_entry(10, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // chain portal IDs
                 ],
             });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
@@ -490,7 +491,16 @@ impl RenderPass for PortalInstancePass {
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
-        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
+        let Some(portal_chain_handles) = ctx
+            .scene_buffers
+            .get(BufferKey::of(helio_pass_portal_cull::PORTAL_CHAIN_HANDLE_BUFFER))
+        else {
+            return Ok(());
+        };
+        let Some(portal_chain_portals) = ctx
+            .scene_buffers
+            .get(BufferKey::of(helio_pass_portal_cull::PORTAL_CHAIN_PORTAL_POOL_BUFFER))
+        else {
             return Ok(());
         };
 
@@ -500,7 +510,8 @@ impl RenderPass for PortalInstancePass {
             batch.instances as *const _ as usize,
             coord_data.coordinate_spaces as *const _ as usize,
             &portal_views.buffer as *const _ as usize,
-            &portal_chains.buffer as *const _ as usize,
+            &portal_chain_handles.buffer as *const _ as usize,
+            &portal_chain_portals.buffer as *const _ as usize,
             &*self.portal_compacted_indices_buf as *const _ as usize,
             &*self.portal_compacted_chains_buf as *const _ as usize,
             portal_mask_view as *const _ as usize,
@@ -540,7 +551,7 @@ impl RenderPass for PortalInstancePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: portal_chains.buffer.as_entire_binding(),
+                        resource: portal_chain_handles.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 8,
@@ -549,6 +560,10 @@ impl RenderPass for PortalInstancePass {
                     wgpu::BindGroupEntry {
                         binding: 9,
                         resource: wgpu::BindingResource::TextureView(portal_mask_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: portal_chain_portals.buffer.as_entire_binding(),
                     },
                 ],
             }));

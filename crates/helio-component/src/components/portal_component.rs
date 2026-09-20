@@ -88,8 +88,7 @@ impl ComponentRuntimeBehavior for PortalComponent {
             _pad: 0,
         };
         let chain = helio_pass_portal_cull::components::PortalChainComponent {
-            portals: [entity.index(), 0, 0],
-            depth: 1,
+            portals: vec![entity.index()],
         };
         writes.push(move |world| {
             world.insert(entity, view);

@@ -16,7 +16,6 @@ use helio_pass_gbuffer::{SubLevelActorComponent, SubLevelIndex, DEFAULT_SUBLEVEL
 
 use crate::components::{PortalComponent, PortalViewComponent, NO_PORTAL_PEER};
 use crate::portal_math::portal_view_map;
-use crate::MAX_CHAIN_DEPTH;
 
 /// A component row together with its owning SceneDB entity.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,7 +167,8 @@ pub enum ResolutionError {
         /// Missing peer.
         peer: Entity,
     },
-    /// Portal recursion must fit the fixed GPU chain ABI.
+    /// Portal recursion depth must be non-zero. The upper bound is supplied
+    /// by the caller at runtime; there is no fixed-depth GPU ABI anymore.
     InvalidRecursionDepth {
         /// Requested depth.
         requested: usize,
@@ -305,20 +305,26 @@ impl SubLevelResolver {
     }
 
     /// Resolve bounded recursive portal chains. Loops are valid portal
-    /// topology; the fixed depth is what makes traversal finite and matches
-    /// the existing GPU chain ABI. Every prefix is returned: a recursive
-    /// portal image is built from the one-hop, two-hop, ... views, not only
-    /// from the deepest walk. This is what makes an ordinary peer graph read
-    /// as a recursively repeating space without a demo-authored continuation
-    /// object.
+    /// topology; the caller-supplied depth is what makes traversal finite.
+    /// Every prefix is returned: a recursive portal image is built from the
+    /// one-hop, two-hop, ... views, not only from the deepest walk.
+    ///
+    /// After a projection through `source` into its peer's context, the next
+    /// hop is any portal authored in that target context except the entry
+    /// peer itself. Following the peer immediately would just compose a
+    /// portal map with its inverse (`A -> B -> A`), which collapses the image
+    /// back onto the camera and makes every ordinary two-way pair appear to
+    /// stop at one recursion. Continuing through the target context is the
+    /// same rule used by a real portal view: render the target level, then
+    /// follow whichever portals are present in that level.
     pub fn resolve_chains(
         &self,
         max_depth: usize,
     ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
-        if max_depth == 0 || max_depth > MAX_CHAIN_DEPTH {
+        if max_depth == 0 {
             return Err(ResolutionError::InvalidRecursionDepth {
                 requested: max_depth,
-                maximum: MAX_CHAIN_DEPTH,
+                maximum: usize::MAX,
             });
         }
 
@@ -456,6 +462,42 @@ impl SubLevelResolver {
         }
     }
 
+    fn context_matches(left: &SubLevelRuntimeContext, right: &SubLevelRuntimeContext) -> bool {
+        left.sublevel_index == right.sublevel_index && left.actor_path == right.actor_path
+    }
+
+    /// Return the portals that can be seen from a resolved target context.
+    ///
+    /// Reachable actor placements already occur in `occurrences`. A
+    /// cross-sublevel peer can instead resolve to a canonical, uninstanced
+    /// context; in that case materialize that context from the indexed
+    /// sublevel contents so it can still continue through its other portals.
+    fn portals_in_context(
+        &self,
+        context: &SubLevelRuntimeContext,
+        occurrences: &[PortalOccurrence],
+    ) -> Vec<PortalOccurrence> {
+        let mut candidates: Vec<_> = occurrences
+            .iter()
+            .filter(|occurrence| Self::context_matches(&occurrence.context, context))
+            .cloned()
+            .collect();
+        if !candidates.is_empty() {
+            return candidates;
+        }
+
+        let Some(contents) = self.contents.get(&context.sublevel_index) else {
+            return candidates;
+        };
+        candidates.extend(contents.portals.iter().filter_map(|record| {
+            record
+                .component
+                .is_enabled()
+                .then(|| self.occurrence_in_context(*record, context.clone()))
+        }));
+        candidates
+    }
+
     fn extend_chain(
         &self,
         source: PortalOccurrence,
@@ -486,15 +528,28 @@ impl SubLevelResolver {
             });
 
             if portals.len() < max_depth {
-                self.extend_chain(
-                    target,
-                    occurrences,
-                    portal_index,
-                    max_depth,
-                    portals.clone(),
-                    projections.clone(),
-                    output,
-                )?;
+                // The target portal is the surface we just entered. It is
+                // not the next portal in the target view; use the other
+                // portals in that resolved context, including the original
+                // source portal when the pair is same-sublevel. This makes
+                // A -> B -> A a real repeated placement rather than an
+                // inverse-map cancel.
+                let next_sources = self
+                    .portals_in_context(&target.context, occurrences)
+                    .into_iter()
+                    .filter(|candidate| candidate.entity != target.entity)
+                    .collect::<Vec<_>>();
+                for next_source in next_sources {
+                    self.extend_chain(
+                        next_source,
+                        occurrences,
+                        portal_index,
+                        max_depth,
+                        portals.clone(),
+                        projections.clone(),
+                        output,
+                    )?;
+                }
             }
             projections.pop();
         }
@@ -623,6 +678,49 @@ mod tests {
     }
 
     #[test]
+    fn recursive_chains_continue_through_the_target_context() {
+        let mut world = pulsar_scenedb::World::new();
+        let a_entity = world.spawn();
+        let b_entity = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (
+                        a_entity,
+                        PortalComponent::new(
+                            Some(b_entity),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, 6.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                    (
+                        b_entity,
+                        PortalComponent::new(
+                            Some(a_entity),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, -6.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                ],
+            ),
+        );
+
+        let chains = resolver.resolve_chains(3).unwrap();
+        assert!(chains
+            .iter()
+            .any(|chain| chain.portals == vec![a_entity, a_entity, a_entity]));
+        assert!(chains.iter().all(|chain| {
+            chain
+                .portals
+                .windows(2)
+                .all(|pair| pair != [a_entity, b_entity] && pair != [b_entity, a_entity])
+        }));
+    }
+
+    #[test]
     fn cross_sublevel_portal_uses_target_canonical_context() {
         let mut world = pulsar_scenedb::World::new();
         let source_entity = world.spawn();
@@ -715,11 +813,9 @@ mod tests {
     }
 
     #[test]
-    fn recursion_depth_is_bounded_by_gpu_chain_abi() {
+    fn recursion_depth_is_runtime_configured() {
         let resolver = SubLevelResolver::new();
-        assert!(matches!(
-            resolver.resolve_chains(MAX_CHAIN_DEPTH + 1),
-            Err(ResolutionError::InvalidRecursionDepth { .. })
-        ));
+        assert!(resolver.resolve_chains(4).is_ok());
+        assert!(matches!(resolver.resolve_chains(0), Err(ResolutionError::InvalidRecursionDepth { .. })));
     }
 }

@@ -15,9 +15,9 @@ mod wasm_cpp_alloc;
 
 /// Portal pair math and SceneDB GPU contracts owned by the portal passes.
 pub use helio_pass_portal_cull::{
-    crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalChain, GpuPortalView,
-    PortalPair, PortalPose, PortalProjectionBridge, PortalProjectionFrame, PortalProjectionKey,
-    ProjectionError, RuntimePortalKey, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS,
+    crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalView, PortalPair,
+    PortalPose, PortalProjectionBridge, PortalProjectionConfig, PortalProjectionFrame,
+    PortalProjectionKey, ProjectionError, RuntimePortalKey, MAX_PORTAL_CHAINS,
 };
 pub use helio_pass_sky::{CloudPipelineConfig, CloudQuality, CloudRenderMode, CloudResolution};
 pub use helio_pass_tsr::TsrQuality;

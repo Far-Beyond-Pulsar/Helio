@@ -1,8 +1,7 @@
 // Per-portal-*chain* GPU frustum culling — selects which instances get a
 // duplicate draw through each active portal chain (a sequence of up to
-// `MAX_CHAIN_DEPTH` portals, e.g. "through P, then through P again, then
-// again" — see `libhelio::GpuPortalChain`'s docs for why chains, not single
-// portals, are what makes portals reflect each other automatically).
+// a runtime-sized portal sequence, e.g. "through P, then through P again,
+// then again" — chains, not single portals, make recursive views automatic.
 //
 // Two passes, `select` then `finalize`, mirroring why the main scene's own
 // GPU cull does the same split:
@@ -97,14 +96,23 @@ struct GpuPortalView {
 }
 @group(0) @binding(5) var<storage, read> portal_views: array<GpuPortalView>;
 
-// One valid portal chain. Must match libhelio::GpuPortalChain (16 bytes at
-// the default MAX_CHAIN_DEPTH=3) — `portals[0]` outermost (nearest the real
-// camera) to `portals[depth-1]` innermost (deepest reflection).
-struct GpuPortalChain {
-    portals: array<u32, 3>,
-    depth:   u32,
+// SceneDB's variable-length chain field: one handle row per chain and one
+// contiguous payload pool. `count` is the runtime recursion depth.
+struct GpuPortalChainHandle {
+    offset: u32,
+    count:  u32,
 }
-@group(0) @binding(9) var<storage, read> portal_chains: array<GpuPortalChain>;
+@group(0) @binding(9) var<storage, read> portal_chain_handles: array<GpuPortalChainHandle>;
+@group(0) @binding(11) var<storage, read> portal_chain_portals: array<u32>;
+
+fn chain_depth(chain_idx: u32) -> u32 {
+    return portal_chain_handles[chain_idx].count;
+}
+
+fn chain_portal(chain_idx: u32, stage: u32) -> u32 {
+    let handle = portal_chain_handles[chain_idx];
+    return portal_chain_portals[handle.offset + stage];
+}
 
 struct DrawIndexedIndirect {
     index_count:    u32,
@@ -160,7 +168,7 @@ fn select(
     workgroupBarrier();
 
     if is_active {
-        let chain = portal_chains[chain_idx];
+        let chain = portal_chain_handles[chain_idx];
         let dc = draw_calls[draw_idx];
         let group_base = draw_idx * cull.group_capacity;
 
@@ -174,8 +182,8 @@ fn select(
             // Generalizes the single-portal recursion guard the pre-chain
             // cull used.
             var self_referential = false;
-            for (var k = 0u; k < chain.depth; k++) {
-                if own_space_id == portal_views[chain.portals[k]].coordinate_space {
+            for (var k = 0u; k < chain.count; k++) {
+                if own_space_id == portal_views[chain_portal(chain_idx, k)].coordinate_space {
                     self_referential = true;
                 }
             }
@@ -187,34 +195,25 @@ fn select(
             let radius = inst.bounds.w;
 
             // Apply the chain deepest-portal-first, same order as the draw
-            // pass, but *also* reject as soon as the mapped bounding sphere
-            // clearly misses that stage's own portal window (padded by the
-            // sphere's radius) — a coarse, conservative version of the
-            // fragment shader's exact per-stage clip. Without this the cull
-            // pass is frustum-only: a chain's composed position can still
-            // land broadly "somewhere in the camera's frustum" even when
-            // nowhere near any of its portals' actual openings, which
-            // massively overselects (every wall panel through every chain)
-            // and blows straight through the per-group capacity.
+            // pass. The fragment shader owns the exact portal-window clip.
+            // Do not reject against an inner portal's rectangle here: the
+            // instance bound is only a sphere, and a large wall can have its
+            // center outside that rectangle while a real part of the mesh
+            // still intersects the opening. That false negative is exactly
+            // what makes room walls disappear while small center props and
+            // portal frames remain visible. Frustum culling below remains
+            // conservative; the fragment stage is the correctness gate.
             //
-            // The *outermost* stage (`s == 1`, portal `chain.portals[0]`)
-            // only checks "behind the surface", not the X/Y window — that
-            // window is enforced precisely by the screen-space mask in the
-            // fragment shader instead (see gbuffer_portal.wgsl's module doc
-            // for why), and content behind a portal is allowed to be wider
-            // than the opening itself. Rejecting on X/Y here too would
-            // coarse-cull away content the fragment shader would have
-            // legitimately kept.
+            // The outermost stage (`s == 1`, portal `chain.portals[0]`)
+            // only checks "behind the surface". The screen-space mask and
+            // fragment shader enforce the actual aperture.
             var pos = (own_space * vec4<f32>(inst.bounds.xyz, 1.0)).xyz;
             var rejected = false;
-            for (var s = chain.depth; s > 0u; s--) {
-                let p = portal_views[chain.portals[s - 1u]];
+            for (var s = chain.count; s > 0u; s--) {
+                let p = portal_views[chain_portal(chain_idx, s - 1u)];
                 pos = (coordinate_spaces[p.coordinate_space] * vec4<f32>(pos, 1.0)).xyz;
                 let local = (p.inverse_transform * vec4<f32>(pos, 1.0)).xyz;
-                let is_outermost = s == 1u;
-                if local.z < -radius || (!is_outermost && (
-                    abs(local.x) > p.half_extent.x + radius || abs(local.y) > p.half_extent.y + radius
-                )) {
+                if local.z < -radius {
                     rejected = true;
                     break;
                 }

@@ -20,14 +20,33 @@ use crate::components::{
 use crate::resolver::{
     PortalOccurrence, PortalProjection, ResolutionError, ResolvedPortalChain, SubLevelResolver,
 };
-use crate::{MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
 use helio_pass_gbuffer::SubLevelIndex;
 
 /// The coordinate-space slot reserved for root/world coordinates.
 pub const IDENTITY_COORDINATE_SPACE_SLOT: u32 = 0;
 
-/// The G-buffer coordinate-space table has 32 entries, including identity.
-pub const MAX_COORDINATE_SPACES: usize = 32;
+/// Runtime limits for one portal projection build.
+///
+/// `max_chain_depth` is the only recursion control. It is ordinary runtime
+/// data and is intentionally not represented by a const-generic or fixed
+/// array type. The other two limits are optional safety budgets for callers
+/// that want to bound allocation/work; `None` means grow with the scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortalProjectionConfig {
+    pub max_chain_depth: usize,
+    pub max_chains: Option<usize>,
+    pub max_coordinate_spaces: Option<usize>,
+}
+
+impl Default for PortalProjectionConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_depth: 3,
+            max_chains: None,
+            max_coordinate_spaces: None,
+        }
+    }
+}
 
 /// A stable identity for one runtime portal occurrence.
 ///
@@ -247,10 +266,10 @@ impl PortalProjectionFrame {
             }
         }
         for (entity, row) in view_entities.iter().zip(&self.portal_views) {
-            world.insert(*entity, *row);
+            world.insert(*entity, row.clone());
         }
         for (entity, row) in chain_entities.iter().zip(&self.portal_chains) {
-            world.insert(*entity, *row);
+            world.insert(*entity, row.clone());
         }
         world.insert(counts_entity, self.counts);
         Ok(())
@@ -260,30 +279,49 @@ impl PortalProjectionFrame {
 /// Converts resolver output into the existing SceneDB/GPU projection seam.
 #[derive(Clone, Copy, Debug)]
 pub struct PortalProjectionBridge {
-    max_chain_depth: usize,
+    config: PortalProjectionConfig,
 }
 
 impl Default for PortalProjectionBridge {
     fn default() -> Self {
         Self {
-            max_chain_depth: MAX_CHAIN_DEPTH,
+            config: PortalProjectionConfig::default(),
         }
     }
 }
 
 impl PortalProjectionBridge {
     pub fn new(max_chain_depth: usize) -> Result<Self, ResolutionError> {
-        if max_chain_depth == 0 || max_chain_depth > MAX_CHAIN_DEPTH {
+        if max_chain_depth == 0 {
             return Err(ResolutionError::InvalidRecursionDepth {
                 requested: max_chain_depth,
-                maximum: MAX_CHAIN_DEPTH,
+                maximum: usize::MAX,
             });
         }
-        Ok(Self { max_chain_depth })
+        Ok(Self {
+            config: PortalProjectionConfig {
+                max_chain_depth,
+                ..Self::default().config
+            },
+        })
+    }
+
+    pub fn with_config(config: PortalProjectionConfig) -> Result<Self, ResolutionError> {
+        if config.max_chain_depth == 0 {
+            return Err(ResolutionError::InvalidRecursionDepth {
+                requested: config.max_chain_depth,
+                maximum: usize::MAX,
+            });
+        }
+        Ok(Self { config })
     }
 
     pub fn max_chain_depth(&self) -> usize {
-        self.max_chain_depth
+        self.config.max_chain_depth
+    }
+
+    pub fn config(&self) -> PortalProjectionConfig {
+        self.config
     }
 
     pub fn build(
@@ -301,7 +339,7 @@ impl PortalProjectionBridge {
             .iter()
             .map(PortalProjectionKey::from_projection)
             .collect();
-        let mut chains = resolver.resolve_chains(self.max_chain_depth)?;
+        let mut chains = resolver.resolve_chains(self.max_chain_depth())?;
         for projection in &projections {
             all_occurrences
                 .entry(RuntimePortalKey::from_occurrence(&projection.source))
@@ -352,10 +390,14 @@ impl PortalProjectionBridge {
             let coordinate_space = if let Some(&slot) = coordinate_space_indices.get(&key) {
                 slot
             } else {
-                if coordinate_spaces.len() == MAX_COORDINATE_SPACES {
+                if self
+                    .config
+                    .max_coordinate_spaces
+                    .is_some_and(|maximum| coordinate_spaces.len() >= maximum)
+                {
                     return Err(ProjectionError::CoordinateSpaceCapacity {
                         requested: coordinate_spaces.len() + 1,
-                        maximum: MAX_COORDINATE_SPACES,
+                        maximum: self.config.max_coordinate_spaces.unwrap(),
                     });
                 }
                 let slot = coordinate_spaces.len() as u32;
@@ -376,24 +418,26 @@ impl PortalProjectionBridge {
 
         chains.sort_by_key(chain_sort_key);
         chains.dedup_by(|left, right| chain_sort_key(left) == chain_sort_key(right));
-        if chains.len() > MAX_PORTAL_CHAINS {
-            return Err(ProjectionError::ChainCapacity {
-                requested: chains.len(),
-                maximum: MAX_PORTAL_CHAINS,
-            });
+        if let Some(maximum) = self.config.max_chains {
+            if chains.len() > maximum {
+                return Err(ProjectionError::ChainCapacity {
+                    requested: chains.len(),
+                    maximum,
+                });
+            }
         }
         let mut portal_chains = Vec::with_capacity(chains.len());
         for chain in chains {
-            let mut portals = [0; MAX_CHAIN_DEPTH];
-            for (index, projection) in chain.projections.iter().enumerate() {
-                portals[index] = *projection_indices
+            let portals = chain
+                .projections
+                .iter()
+                .map(|projection| {
+                    *projection_indices
                     .get(&PortalProjectionKey::from_projection(projection))
-                    .expect("chain projection was included in projection rows");
-            }
-            portal_chains.push(PortalChainComponent {
-                portals,
-                depth: chain.projections.len() as u32,
-            });
+                    .expect("chain projection was included in projection rows")
+                })
+                .collect();
+            portal_chains.push(PortalChainComponent { portals });
         }
 
         let occurrence_indices = all_occurrences
@@ -517,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_projection_rows_do_not_stamp_virtual_openings() {
+    fn disabled_entry_portal_does_not_create_a_recursive_opening() {
         let mut world = pulsar_scenedb::World::new();
         let source = world.spawn();
         let target = world.spawn();
@@ -554,7 +598,7 @@ mod tests {
         assert!(frame
             .portal_views
             .iter()
-            .any(|view| view._pad == PortalViewComponent::FLAG_MASK_HIDDEN));
+            .all(|view| view._pad != PortalViewComponent::FLAG_MASK_HIDDEN));
         assert!(frame
             .portal_views
             .iter()
@@ -670,12 +714,38 @@ mod tests {
             .unwrap();
         assert_eq!(frame.portal_chains.len(), 4);
         assert!(frame.portal_chains.iter().all(|chain| {
-            (chain.depth == 1 || chain.depth == 2)
+            (chain.portals.len() == 1 || chain.portals.len() == 2)
                 && chain
                     .portals
                     .iter()
-                    .take(chain.depth as usize)
                     .all(|id| (*id as usize) < frame.portal_views.len())
         }));
+    }
+
+    #[test]
+    fn chain_rows_accept_runtime_depth_above_legacy_default() {
+        let mut world = pulsar_scenedb::World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                ],
+            ),
+        );
+
+        let frame = PortalProjectionBridge::new(4)
+            .unwrap()
+            .build(&resolver)
+            .unwrap();
+        assert!(frame
+            .portal_chains
+            .iter()
+            .any(|chain| chain.portals.len() == 4));
     }
 }

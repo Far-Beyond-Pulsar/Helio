@@ -91,14 +91,17 @@ impl PortalViewComponent {
     pub const FLAG_MASK_HIDDEN: u32 = 1 << 0;
 }
 
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
-#[repr(C)]
-#[gpu(layout = packed, buffer = "portal_chains")]
+/// One derived portal chain row.
+///
+/// The chain is deliberately a variable-length SceneDB field. SceneDB mirrors
+/// `portals` through one growable `u32` payload pool and one growable
+/// `VarLenHandle` table; the renderer binds both buffers and uses the handle's
+/// `count` as the runtime recursion depth. This is the single representation
+/// for every depth, rather than a family of fixed `[u32; N]` component types.
+#[derive(SceneStore, Clone, Debug, PartialEq)]
 pub struct PortalChainComponent {
-    #[gpu]
-    pub portals: [u32; 3],
-    #[gpu]
-    pub depth: u32,
+    #[gpu(buffer = "PortalChainComponent::portals")]
+    pub portals: Vec<u32>,
 }
 
 /// Derived frame counts for the portal projection tables.
@@ -132,17 +135,6 @@ impl From<PortalViewComponent> for crate::GpuPortalView {
         bytemuck::cast(v)
     }
 }
-impl From<crate::GpuPortalChain> for PortalChainComponent {
-    fn from(v: crate::GpuPortalChain) -> Self {
-        bytemuck::cast(v)
-    }
-}
-impl From<PortalChainComponent> for crate::GpuPortalChain {
-    fn from(v: PortalChainComponent) -> Self {
-        bytemuck::cast(v)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,7 +143,6 @@ mod tests {
     fn scene_records_preserve_gpu_abi() {
         assert_eq!(std::mem::size_of::<PortalComponent>(), 88);
         assert_eq!(std::mem::size_of::<PortalViewComponent>(), 144);
-        assert_eq!(std::mem::size_of::<PortalChainComponent>(), 16);
         assert_eq!(std::mem::size_of::<PortalProjectionCountsComponent>(), 16);
     }
 
@@ -174,11 +165,10 @@ mod tests {
         let entity = world.spawn();
         let view = PortalViewComponent::zeroed();
         let chain = PortalChainComponent {
-            portals: [entity.index(), 0, 0],
-            depth: 1,
+            portals: vec![entity.index()],
         };
         world.insert(entity, view);
-        world.insert(entity, chain);
+        world.insert(entity, chain.clone());
 
         world
             .get_mut::<PortalViewComponent>(entity)

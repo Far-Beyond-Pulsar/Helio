@@ -19,27 +19,21 @@ enable wgpu_binding_array;
 //! closely (own copy — see that file for the fuller commentary on each
 //! piece); the differences are: (1) composing the instance's own coordinate
 //! space through an entire *chain* of portal spaces, deepest first, instead
-//! of world space directly, capturing each stage's intermediate position;
-//! (2) the fragment-shader world-space clip test against *every* portal in
-//! the chain, nested — content only survives if it was legitimately visible
-//! through each one, not just the outermost; and (3) the `portal_mask`
+//! of world space directly; (2) a depth-side test at every composed stage;
+//! and (3) the `portal_mask`
 //! screen-space gate (see below). Debug-visualization modes, lightmap
 //! sampling, and the Radiant material graph override hook are not reachable
 //! here — a portal duplicate always renders through the plain default PBR
 //! path.
 //!
-//! # Why both nested world-space clips *and* a screen-space mask
+//! # Why the depth-side tests and screen-space mask
 //!
-//! Each stage's world-space clip (`local.z <= 0`, `|local.xy| <= half_extent`,
-//! evaluated in *that* portal's own local frame) bounds content to that
-//! portal's little box in world space — necessary (it's what makes a
-//! 3-chain [P, P, P] only show content that's legitimately behind each of
-//! the three hops), but not sufficient on its own: it says nothing about
-//! whether the *camera* is actually looking at the outermost portal's
-//! opening from here. Standing in front of a portal looking straight
-//! through, perspective makes "bounded in world space" and "visible on
-//! screen" coincide; move the camera outside that alignment and the same
-//! content, which has real size, projects wherever it actually sits.
+//! Each composed stage still rejects content on the camera-facing side of
+//! its portal plane. X/Y aperture clipping is deliberately not repeated for
+//! inner stages: that rectangle is a bound on the portal surface, not on the
+//! dimensions of the entire target scene. Reapplying it to every mapped
+//! fragment makes large wall geometry disappear while compact props survive.
+//! The outer physical opening is instead enforced by the screen-space mask.
 //!
 //! `helio-pass-portal-mask` fixes this the standard way non-recursive
 //! portal renderers do: it stamps the *outermost* portal's true on-screen
@@ -49,7 +43,7 @@ enable wgpu_binding_array;
 //! where that chain's real, physical entry point is actually visible on
 //! screen right now. Inner portals in the chain don't get their own mask
 //! stamp (they're virtual — mapped, not physically where the camera can
-//! look directly) and rely entirely on their own world-space clip stage.
+//! look directly), so their depth-side tests are the remaining guard.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -130,11 +124,10 @@ struct GpuPortalView {
     _pad:              u32,
 }
 
-/// Must match libhelio::GpuPortalChain (16 bytes at MAX_CHAIN_DEPTH=3).
-const MAX_CHAIN_DEPTH: u32 = 3u;
-struct GpuPortalChain {
-    portals: array<u32, 3>,
-    depth:   u32,
+/// SceneDB's variable-length portal-chain field.
+struct GpuPortalChainHandle {
+    offset: u32,
+    count:  u32,
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -148,7 +141,7 @@ struct GpuPortalChain {
 // this group's region, so no per-draw offset math is needed here.
 @group(0) @binding(5) var<storage, read> portal_compacted_indices: array<u32>;
 @group(0) @binding(6) var<storage, read> portal_views: array<GpuPortalView>;
-@group(0) @binding(7) var<storage, read> portal_chains: array<GpuPortalChain>;
+@group(0) @binding(7) var<storage, read> portal_chain_handles: array<GpuPortalChainHandle>;
 // Parallel to portal_compacted_indices — which chain each compacted entry
 // was selected under.
 @group(0) @binding(8) var<storage, read> portal_compacted_chains: array<u32>;
@@ -157,6 +150,7 @@ struct GpuPortalChain {
 // elsewhere. See the module doc above for why this is needed alongside the
 // per-stage world-space clip below.
 @group(0) @binding(9) var portal_mask: texture_2d<u32>;
+@group(0) @binding(10) var<storage, read> portal_chain_portals: array<u32>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -182,12 +176,7 @@ struct VertexOutput {
     @location(5) @interpolate(flat) material_id: u32,
     @location(6) prev_clip_position: vec4<f32>,
     @location(7) @interpolate(flat) chain_idx: u32,
-    // Position after applying stage i..depth-1 (deepest-first) — what stage
-    // i's own clip test (against `portal_chains[chain_idx].portals[i]`)
-    // needs. `stage_pos_0` is always valid and equals `world_position`;
-    // `stage_pos_1`/`stage_pos_2` are only meaningful when depth >= 2/3.
-    @location(8) stage_pos_1: vec3<f32>,
-    @location(9) stage_pos_2: vec3<f32>,
+    @location(8) pre_portal_position: vec3<f32>,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -199,48 +188,34 @@ fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOut
     let slot_idx = portal_compacted_indices[instance_index];
     let chain_idx = portal_compacted_chains[instance_index];
     let inst = instance_data[slot_idx];
-    let chain = portal_chains[chain_idx];
+    let chain = portal_chain_handles[chain_idx];
 
     // Compose the instance's own coordinate space (identity for an ordinary
     // world-space object, or its sublevel's transform) through the whole
-    // chain, deepest portal first — see the module doc for why. Capture
-    // each stage's intermediate position for the fragment shader's nested
-    // clip test.
+    // chain, deepest portal first — see the module doc for why. The fragment
+    // shader reconstructs intermediate positions by undoing each outer map,
+    // so the number of stages remains fully runtime-sized.
     let own_space_id  = (inst.flags >> 8u) & 0xFFu;
     let own_space      = coordinate_spaces[own_space_id];
     let own_space_prev = coordinate_spaces_prev[own_space_id];
 
     var pos      = own_space * (inst.transform * vec4<f32>(v.position, 1.0));
     var pos_prev = own_space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0));
+    let pre_portal_position = pos.xyz;
     var space_rot = mat3x3<f32>(own_space[0].xyz, own_space[1].xyz, own_space[2].xyz);
 
-    var stage_pos_2 = vec3<f32>(0.0);
-    if chain.depth >= 3u {
-        let p2 = portal_views[chain.portals[2]];
-        let p2_space = coordinate_spaces[p2.coordinate_space];
-        let p2_space_prev = coordinate_spaces_prev[p2.coordinate_space];
-        pos = p2_space * pos;
-        pos_prev = p2_space_prev * pos_prev;
-        space_rot = mat3x3<f32>(p2_space[0].xyz, p2_space[1].xyz, p2_space[2].xyz) * space_rot;
-        stage_pos_2 = pos.xyz;
+    var stage = chain.count;
+    loop {
+        if stage == 0u { break; }
+        stage -= 1u;
+        let portal_index = portal_chain_portals[chain.offset + stage];
+        let p = portal_views[portal_index];
+        let p_space = coordinate_spaces[p.coordinate_space];
+        let p_space_prev = coordinate_spaces_prev[p.coordinate_space];
+        pos = p_space * pos;
+        pos_prev = p_space_prev * pos_prev;
+        space_rot = mat3x3<f32>(p_space[0].xyz, p_space[1].xyz, p_space[2].xyz) * space_rot;
     }
-    var stage_pos_1 = vec3<f32>(0.0);
-    if chain.depth >= 2u {
-        let p1 = portal_views[chain.portals[1]];
-        let p1_space = coordinate_spaces[p1.coordinate_space];
-        let p1_space_prev = coordinate_spaces_prev[p1.coordinate_space];
-        pos = p1_space * pos;
-        pos_prev = p1_space_prev * pos_prev;
-        space_rot = mat3x3<f32>(p1_space[0].xyz, p1_space[1].xyz, p1_space[2].xyz) * space_rot;
-        stage_pos_1 = pos.xyz;
-    }
-    // depth is always >= 1 — every chain has at least one portal.
-    let p0 = portal_views[chain.portals[0]];
-    let p0_space = coordinate_spaces[p0.coordinate_space];
-    let p0_space_prev = coordinate_spaces_prev[p0.coordinate_space];
-    pos = p0_space * pos;
-    pos_prev = p0_space_prev * pos_prev;
-    space_rot = mat3x3<f32>(p0_space[0].xyz, p0_space[1].xyz, p0_space[2].xyz) * space_rot;
 
     let world_pos = pos;
 
@@ -267,8 +242,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOut
     out.material_id        = inst.material_id;
     out.prev_clip_position = prev_clip;
     out.chain_idx          = chain_idx;
-    out.stage_pos_1        = stage_pos_1;
-    out.stage_pos_2        = stage_pos_2;
+    out.pre_portal_position = pre_portal_position;
     return out;
 }
 
@@ -329,15 +303,10 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
     return input.clip_position.xy - prev_pixel;
 }
 
-fn clip_stage(local: vec4<f32>, half_extent: vec2<f32>) -> bool {
-    return local.z < 0.0 || abs(local.x) > half_extent.x || abs(local.y) > half_extent.y;
-}
-
 // The physical outer portal's screen-space mask is the exact X/Y aperture.
 // Its mapped target geometry must not also be forced through the portal's
 // local rectangular tube: that would clip the target room itself down to the
-// doorway dimensions. Inner recursive stages have no physical screen mask,
-// so they continue to use `clip_stage` below.
+// doorway dimensions. Recursive stages use the same depth-side test below.
 fn clip_depth_only(local: vec4<f32>) -> bool {
     return local.z < 0.0;
 }
@@ -356,8 +325,8 @@ fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData 
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
-    let chain = portal_chains[input.chain_idx];
-    let p0 = portal_views[chain.portals[0]];
+    let chain = portal_chain_handles[input.chain_idx];
+    let outer_portal = portal_chain_portals[chain.offset];
 
     // Screen-space gate: only draw where `helio-pass-portal-mask` determined
     // this chain's *outermost* portal is actually visible from the current
@@ -365,7 +334,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     // below aren't enough on their own.
     let mask_px = vec2<i32>(input.clip_position.xy);
     let mask_value = textureLoad(portal_mask, mask_px, 0).r;
-    if mask_value != chain.portals[0] + 1u {
+    if mask_value != outer_portal + 1u {
         discard;
     }
 
@@ -383,29 +352,27 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     // invisible for infinite_tunnel (corridor width == portal width by
     // construction there) but clips away nearly everything for any portal
     // whose far side is bigger than its opening.
-    let p0_local = p0.inverse_transform * vec4<f32>(input.world_position, 1.0);
-    // The screen mask is an additional visibility gate, not a replacement
-    // for the exact portal-local aperture boundary. This keeps target room
-    // geometry from escaping when the screen-space mask is stale or mapped
-    // through a different viewport coordinate space.
-    if clip_depth_only(p0_local) {
-        discard;
-    }
-    // Inner stages (depth >= 2) have no screen-space mask of their own —
-    // they're virtual, not a real surface the camera can look at directly —
-    // so the world-space box *is* their only spatial bound, same as the
-    // pre-mask single-portal design.
-    if chain.depth >= 2u {
-        let p1 = portal_views[chain.portals[1]];
-        if clip_stage(p1.inverse_transform * vec4<f32>(input.stage_pos_1, 1.0), p1.half_extent) {
-            discard;
-        }
-    }
-    if chain.depth >= 3u {
-        let p2 = portal_views[chain.portals[2]];
-        if clip_stage(p2.inverse_transform * vec4<f32>(input.stage_pos_2, 1.0), p2.half_extent) {
-            discard;
-        }
+    // Re-run the same deepest-to-outer composition on the interpolated point
+    // before the portal maps. This gives the exact local position for every
+    // stage without requiring an inverse-matrix buffer or a fixed number of
+    // interpolants. The loop follows the runtime handle count.
+    var stage_pos = input.pre_portal_position;
+    var stage = chain.count;
+    loop {
+        if stage == 0u { break; }
+        stage -= 1u;
+        let portal_index = portal_chain_portals[chain.offset + stage];
+        let p = portal_views[portal_index];
+        stage_pos = (coordinate_spaces[p.coordinate_space] * vec4<f32>(stage_pos, 1.0)).xyz;
+        let local = p.inverse_transform * vec4<f32>(stage_pos, 1.0);
+        // The outer portal's screen-space mask is the exact physical
+        // aperture. For recursive stages, the mapped scene is already in the
+        // target portal's continuation space; applying the source aperture's
+        // X/Y rectangle again clips large room geometry down to the size of
+        // the doorway and leaves only compact props visible. Keep the
+        // half-space test at every stage, while the outer mask supplies the
+        // screen-space boundary.
+        if clip_depth_only(local) { discard; }
     }
 
     let material = materials[input.material_id];
