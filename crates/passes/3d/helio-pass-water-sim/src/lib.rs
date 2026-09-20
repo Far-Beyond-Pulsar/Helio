@@ -556,6 +556,7 @@ impl RenderPass for WaterSimPass {
             ResourceFormat::from(self.surface_format),
             ResourceSize::MatchSurface,
         );
+        builder.publish_alias("water_output", "pre_aa");
         builder.write_color_raw(
             "water_caustics",
             wgpu::TextureFormat::Rgba16Float,

@@ -1,0 +1,42 @@
+warning: unused variable: `writer`
+   --> crates\helio-core\src\registry.rs:304:9
+    |
+304 |         writer: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_writer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reader`
+   --> crates\helio-core\src\registry.rs:332:9
+    |
+332 |         reader: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `target`
+   --> crates\helio-core\src\traits.rs:476:9
+    |
+476 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `depth`
+   --> crates\helio-core\src\traits.rs:477:9
+    |
+477 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\helio-core\src\traits.rs:478:9
+    |
+478 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
+   Compiling helio-pass-fxaa v0.1.0 (C:\Users\thiag\Documents\GitHub\Helio\crates\passes\3d\helio-pass-fxaa)
+    Finished `release` profile [optimized] target(s) in 4.42s
+     Running tests\edge_symmetry.rs (target\release\deps\edge_symmetry-713b528ffe893fff.exe)
+
+running 1 test
+test edges_are_reflection_symmetric_and_constant_borders_stay_constant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
+

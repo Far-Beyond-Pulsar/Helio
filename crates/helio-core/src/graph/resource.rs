@@ -128,12 +128,14 @@ pub struct ResourceDecl {
 /// Resource dependency builder — used in `RenderPass::declare_resources()`.
 pub struct ResourceBuilder {
     declarations: Vec<ResourceDecl>,
+    pub(crate) published_aliases: Vec<(&'static str, &'static str)>,
 }
 
 impl ResourceBuilder {
     pub fn new() -> Self {
         Self {
             declarations: Vec::with_capacity(8),
+            published_aliases: Vec::new(),
         }
     }
 
@@ -148,6 +150,13 @@ impl ResourceBuilder {
             extra_usage: wgpu::TextureUsages::empty(),
             group: None,
         });
+    }
+
+    /// Keep an allocation alive through consumers of another name under
+    /// which this pass publishes its view. This declares lifetime only; the
+    /// pass still performs the registry publication itself.
+    pub fn publish_alias(&mut self, allocation: &'static str, published: &'static str) {
+        self.published_aliases.push((allocation, published));
     }
 
     /// Shared push path for every single-view write declaration — reused by

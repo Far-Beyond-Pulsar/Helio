@@ -1449,7 +1449,7 @@ fn build_fxaa_hlfs_graph_internal(
         device, lighting_format,
     ).with_pre_aa_target()));
 
-    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    graph.add_pass(Box::new(FxaaPass::new(device, lighting_format).with_intermediate_target(lighting_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,
@@ -1458,7 +1458,7 @@ fn build_fxaa_hlfs_graph_internal(
         config.height,
         config.surface_format,
         None,
-    )));
+    ).with_fxaa_input()));
 
     add_final_passes(
         &mut graph,

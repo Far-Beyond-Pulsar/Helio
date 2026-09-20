@@ -71,6 +71,7 @@ pub struct UserEffectEntry {
 }
 
 pub struct PostProcessPass {
+    fxaa_input: bool,
     avg_luminance_buf: wgpu::Buffer,
 
     exposure_pipeline: wgpu::ComputePipeline,
@@ -140,6 +141,12 @@ pub struct PostProcessPass {
 }
 
 impl PostProcessPass {
+    /// Consume the linear HDR intermediate published by FXAA.
+    pub fn with_fxaa_input(mut self) -> Self {
+        self.fxaa_input = true;
+        self
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -633,6 +640,7 @@ impl PostProcessPass {
         let stored_snippet = user_effects_fn.map(|s| s.to_string());
 
         Self {
+            fxaa_input: false,
             avg_luminance_buf,
             exposure_pipeline,
             bloom_extract_pipeline,
@@ -1062,7 +1070,8 @@ impl RenderPass for PostProcessPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "fog_accum", "color_grading_lut"]
+        if self.fxaa_input { &["fxaa_color", "fog_accum", "color_grading_lut"] }
+        else { &["pre_aa", "fog_accum", "color_grading_lut"] }
     }
 
     fn render_pass_descriptor<'a>(
@@ -1075,7 +1084,7 @@ impl RenderPass for PostProcessPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("pre_aa");
+        builder.read(if self.fxaa_input { "fxaa_color" } else { "pre_aa" });
         // Optional: graphs without a VolumetricFogPass never publish this, and the
         // uber shader falls back to a 1x1 no-op texture.
         builder.read("fog_accum");
@@ -1171,7 +1180,8 @@ impl RenderPass for PostProcessPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+        let input_key = if self.fxaa_input { "fxaa_color" } else { "pre_aa" };
+        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new(input_key)) {
             Some(v) => v,
             None => return Ok(()),
         };
