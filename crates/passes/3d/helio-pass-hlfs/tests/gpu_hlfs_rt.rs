@@ -6,6 +6,15 @@ use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode, HlfsMode, HlfsPass};
 use support::{mean, point, Fixture};
 use wgpu::util::DeviceExt;
 
+fn transmission_buffer(device: &wgpu::Device, rows: &[[f32; 4]]) -> wgpu::Buffer {
+    let mut bytes = bytemuck::cast_slice(&[0u32, rows.len() as u32, 0, 0]).to_vec();
+    bytes.extend_from_slice(bytemuck::cast_slice(rows));
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("generic RT transmission"), contents: &bytes,
+        usage: wgpu::BufferUsages::STORAGE,
+    })
+}
+
 fn blocker(f: &mut Fixture, x: f32) {
     // Entirely offscreen to the right of the fixture's orthographic camera.
     let vertices = f
@@ -1228,6 +1237,17 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         db.world.get_mut::<MaterialComponent>(material).unwrap().flags |= helio_mats::FLAG_ALPHA_BLEND;
         db.world.insert(material, helio_pass_hlfs::RayTransmission([1.0; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01);
+        // One mesh may simultaneously use both acceleration opacity classes.
+        let opaque_material = db.world.spawn();
+        db.world.insert(opaque_material, MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0));
+        let mut opaque_row = *db.world.get::<StaticObjectComponent>(object).unwrap();
+        opaque_row.material_slot = opaque_material.index();
+        opaque_row.material_generation = opaque_material.generation() + 1;
+        let opaque_object = db.world.spawn();
+        db.world.insert(opaque_object, opaque_row);
+        assert!(render(&mut f, &mut acceleration, &db) < clear * 0.01, "opaque mesh variant must block through clear glass");
+        db.world.despawn(opaque_object);
+        assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01, "opaque variant removal must preserve the glass variant");
         db.world.insert(material, helio_pass_hlfs::RayTransmission([0.25; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 0.25).abs() < 0.015);
         db.world.insert(material, helio_pass_hlfs::RayTransmission([f32::NAN; 3]));
@@ -1303,9 +1323,7 @@ fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
                 let mut encoder = f.device.create_command_encoder(&Default::default());
                 f.scene.tlas_manager.build(&mut encoder, &instances, &f.scene.blas_manager).unwrap();
                 f.queue.submit([encoder.finish()]);
-                f.transmission = Some(f.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("test thin sheets"), contents: bytemuck::cast_slice(&rows), usage: wgpu::BufferUsages::STORAGE,
-                }));
+                f.transmission = Some(transmission_buffer(&f.device, &rows));
                 f.frame();
                 let actual = f.read();
                 for channel in 0..3 {
@@ -1332,11 +1350,7 @@ fn colored_visibility_cache_preserves_channels_with_many_lights() {
         source.color_intensity[3] /= 33.0;
         f.lights(vec![source; 33]);
         blocker(&mut f, 5.0);
-        f.transmission = Some(f.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("colored RIS regression"),
-            contents: bytemuck::cast_slice(&[0.7f32, 0.3, 0.1, 0.0]),
-            usage: wgpu::BufferUsages::STORAGE,
-        }));
+        f.transmission = Some(transmission_buffer(&f.device, &[[0.7, 0.3, 0.1, 0.0]]));
         f.config(HlfsConfig { debug_mode: HlfsDebugMode::Reference, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
         f.frame();
         let reference = f.read();

@@ -304,3 +304,10 @@ fn scalar_shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag
 fn shadow_factor(id: u32, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
     return Visibility(scalar_shadow_factor(id,position,normal,pixel,frame));
 }
+
+fn shadow_receiver(position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {
+    return position;
+}
+fn shadow_factor_from_receiver(id: u32, origin: vec3<f32>, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
+    return shadow_factor(id,position,normal,pixel,frame);
+}

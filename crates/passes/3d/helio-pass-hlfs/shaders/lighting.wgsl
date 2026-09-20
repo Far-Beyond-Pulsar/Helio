@@ -45,6 +45,13 @@ fn incident(light: GpuLight, position: vec3<f32>) -> Incident {
     }
     return Incident(direction,max(light.color_intensity.rgb*light.color_intensity.w*attenuation,vec3<f32>(0.0)));
 }
+// Necessary support test for direct illumination, without evaluating the BRDF.
+// Exact light loops only need to reject guaranteed zero contribution here.
+fn can_illuminate(id: u32, s: Surface) -> bool {
+    let inc=incident(lights[id],s.position);
+    return dot(s.normal,inc.direction)>0.0 && any(inc.radiance>vec3<f32>(0.0)) && globals.exposure>0.0;
+}
+
 fn importance(id: u32, s: Surface) -> f32 {
     if USE_TILE_PRESAMPLING {
         // Current-frame RIS uses the actual unshadowed luminance target.

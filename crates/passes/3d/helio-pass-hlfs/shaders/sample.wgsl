@@ -124,12 +124,15 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 // use exact local sets up to 32 lights at the shading resolution.
                 // This is a separate quality/cost tier from the opaque two-ray path.
                 let n=select(population,globals.light_count,globals.debug_mode==1u);
+                let origin=shadow_receiver(s.position,s.normal,vec2<f32>(pixel)+0.5);
                 for(var i=0u;i<n;i++) {
                     var id=i;
                     if !overflow && globals.debug_mode!=1u { id=((grid[tile].indices[i/2u]>>(16u*(i&1u)))&65535u); }
                     if USE_TILE_PRESAMPLING && globals.light_count<=65535u && id==tile_proposals[0].key_light { continue; }
-                    if importance(id,s)<=0.0 { continue; }
-                    let vis=trace_visibility(id,s,pixel);
+                    if USE_RAY_TRANSMISSION {
+                        if !can_illuminate(id,s) { continue; }
+                    } else if importance(id,s)<=0.0 { continue; }
+                    let vis=shadow_factor_from_receiver(id,origin,s.position,s.normal,vec2<f32>(pixel)+0.5,globals.frame);
                     let light=evaluate_light(id,s,vis);
                     result.diffuse+=light.diffuse; result.specular+=light.specular;
                     if visibility_nonzero(vis) && i<4u { record_visible(id,s,i*64u+lane); }

@@ -45,3 +45,17 @@ Clear transmission control:
 All-lights reference:
 
 ![All-lights reference](reference.png)
+
+## Traversal optimization follow-up
+
+The transmitting exact-light loops now reject zero incident energy without evaluating the whole BRDF twice, and prepare the precision-corrected ray origin once per receiver. SceneDB builds separate opaque/non-opaque BLAS variants when one mesh uses both kinds of material. Opacity is part of the BLAS cache key. The classified path allows hardware to terminate on opaque stone while the shader multiplies glass candidates. Generic caller-owned TLAS inputs can retain opacity override behavior.
+
+The transmission buffer ABI now begins with four u32 words: flags, live row count, zero, zero, followed by the existing 16-byte RGB rows. Flag bit 0 asserts that BLAS opacity matches the rows; flags=0 requests generic opacity override. Buffer capacity and live row count both bound shader access. Frame ownership remains unchanged.
+
+An intermediate shared traversal version regressed the opaque sampling stage (primary median 4.285 ms), so it was rejected. Dedicated opaque and transmitting traversal shaders preserve the scalar baseline. A branch intended to skip legacy depth reconstruction also failed to show improvement and was reverted.
+
+Final colored-cathedral runs (HLFS only) measured **4.859 / 4.870 / 4.931 ms median**, with **5.551 / 5.520 / 5.623 ms p95**. All nine checked captures (frames 31/63/99 in each run) are pixel-identical to the prior 5.398 ms checkpoint. The adjacent optimized CSVs and JSON retain the evidence.
+
+Final opaque-primary runs (HLFS + TLAS) measured **4.093 / 3.848 / 3.913 ms median**, with **4.578 / 4.280 / 4.661 ms p95**. This spread is not a strict all-runs-under-4-ms pass. The colored scene still misses the 3-4 ms target, and the prior reconstruction blur/aliasing is unchanged.
+
+Validation: 13 RT regressions, 14 screen-space regressions, 6 core acceleration GPU regressions, and 2 CPU/WGSL checks pass. New checks cover changing BLAS opacity without changing geometry revision, plus simultaneous opaque/transmitting instances of the same SceneDB mesh and removal of the opaque variant. Final example release build succeeds. This remains an in-progress checkpoint; broader scene, texture, reflection, fog and review gates remain open.

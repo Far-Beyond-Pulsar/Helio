@@ -43,6 +43,9 @@ impl Gpu {
     }
 
     fn trace(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas) -> wgpu::Buffer {
+        self.trace_opacity(encoder, tlas, true)
+    }
+    fn trace_opacity(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas, force_opaque: bool) -> wgpu::Buffer {
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("known world-space ray segments"),
             source: wgpu::ShaderSource::Wgsl(r#"
@@ -57,7 +60,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     while rayQueryProceed(&query) {}
     hits[id.x] = select(1u, 0u, rayQueryGetCommittedIntersection(&query).kind == RAY_QUERY_INTERSECTION_NONE);
 }
-"#.into()),
+"#.replace("0x05u", if force_opaque { "0x05u" } else { "0x04u" }).into()),
         });
         let pipeline = self
             .device
@@ -327,4 +330,20 @@ fn transmission_rows_expire_with_their_acceleration_frame() {
     assert!(frame.transmission(8).is_none(), "opaque publication retained stale glass");
     frame.publish_with_transmission(9, None, Some(&rows));
     assert!(frame.transmission(9).is_none(), "materials published without their TLAS");
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn changing_blas_opacity_rebuilds_and_changes_hardware_candidate_handling() {
+    let gpu = Gpu::new();
+    let mut blas = BlasManager::new(gpu.device.clone());
+    let mut tlas = TlasManager::new(gpu.device.clone(), 1);
+    let vertices = gpu.buffer(&triangle(0.0));
+    for (opaque, rebuild) in [(true, true), (false, true), (false, false), (true, true)] {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        assert_eq!(blas.build_from_buffers_with_opacity(1, &mut encoder, geometry(&vertices, 0), opaque).unwrap(), rebuild);
+        tlas.build(&mut encoder, &[instance(1, 0.0)], &blas).unwrap();
+        let results = gpu.trace_opacity(&mut encoder, tlas.tlas().unwrap(), false);
+        assert_eq!(gpu.read(encoder, &results), vec![u32::from(opaque), 0, 0, 0]);
+    }
 }

@@ -27,7 +27,7 @@ Research references for subsequent scene work:
 
 - [Epic MegaLights documentation](https://dev.epicgames.com/documentation/unreal-engine/megalights-in-unreal-engine): stochastic light sampling, complexity diagnostics, area lights, fog/translucency and limitations.
 - [Cologne Cathedral official dimensions](https://www.koelner-dom.de/erleben/der-dom-in-zahlen): exterior length 144.58 m, width 86.25 m, nave interior width 45.19 m, nave height 43.35 m, side aisle height 19.80 m. These support a real-scale scene, not a claim of an exact architectural replica without detailed plans.
-- [Arc de Triomphe educational material](https://www.paris-arc-de-triomphe.fr/var/cmn_inter/storage/original/application/96c69db2ffcd9842fbd27e3e029883b5.pdf): dimensional drawing to inspect before implementing the arch.
+- [City of Paris architectural overview](https://www.paris.fr/pages/a-la-place-de-l-arc-de-triomphe-devait-troner-un-elephant-18396): approximate exterior dimensions 50 m high, 44.8 m long and 22.2 m wide. The previously linked educational PDF concerns the 2021 wrapping installation, not dimensional plans; it was inspected and rejected as a geometry reference. A monument inspired by these proportions is not an exact replica.
 
 ## Compact-population sampling follow-up
 

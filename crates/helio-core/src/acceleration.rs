@@ -35,6 +35,7 @@ pub struct BlasGeometry<'a> {
 
 #[derive(PartialEq, Eq)]
 struct GeometryKey {
+    opaque: bool,
     revision: u64,
     vertices: wgpu::Buffer,
     first_vertex: u32,
@@ -92,8 +93,9 @@ impl BlasGeometry<'_> {
         Ok(())
     }
 
-    fn key(&self) -> GeometryKey {
+    fn key(&self, opaque: bool) -> GeometryKey {
         GeometryKey {
+            opaque,
             revision: self.revision,
             vertices: self.vertices.clone(),
             first_vertex: self.first_vertex,
@@ -147,6 +149,19 @@ impl BlasManager {
         encoder: &mut wgpu::CommandEncoder,
         geometry: BlasGeometry<'_>,
     ) -> Result<bool, AccelerationError> {
+        self.build_from_buffers_with_opacity(mesh_id, encoder, geometry, true)
+    }
+
+    /// As `build_from_buffers`, with explicit triangle opacity. Non-opaque
+    /// triangles are reported as candidates to ray-query shaders. Opacity is
+    /// part of the cache key and changing it rebuilds the BLAS.
+    pub fn build_from_buffers_with_opacity(
+        &mut self,
+        mesh_id: u64,
+        encoder: &mut wgpu::CommandEncoder,
+        geometry: BlasGeometry<'_>,
+        opaque: bool,
+    ) -> Result<bool, AccelerationError> {
         if !self.rt_available {
             return Err(AccelerationError::Unsupported);
         }
@@ -166,7 +181,7 @@ impl BlasManager {
                 "triangle count exceeds the device limit",
             ));
         }
-        let key = geometry.key();
+        let key = geometry.key(opaque);
         if self.geometry_keys.get(&mesh_id) == Some(&key) {
             return Ok(false);
         }
@@ -200,7 +215,7 @@ impl BlasManager {
             vertex_count: geometry.vertex_count,
             index_format: geometry.indices.map(|_| wgpu::IndexFormat::Uint32),
             index_count: geometry.indices.map(|_| geometry.index_count),
-            flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
+            flags: if opaque { wgpu::AccelerationStructureGeometryFlags::OPAQUE } else { wgpu::AccelerationStructureGeometryFlags::empty() },
         };
         let blas = self.device.create_blas(
             &wgpu::CreateBlasDescriptor {
@@ -522,8 +537,11 @@ impl FrameAcceleration {
         self.transmission = None;
         self.frame = tlas.map(|tlas| (frame, tlas.clone()));
     }
-    /// Storage rows are `[f32; 4]`: finite linear RGB transmission in [0, 1],
-    /// then reserved zero padding. Opaque instances use RGB zero.
+    /// Storage starts with a `[u32; 4]` header: flags, row count, zero, zero.
+    /// Flag bit 0 means BLAS triangle opacity matches the rows (zero RGB opaque,
+    /// all other rows non-opaque). With flags=0 the shader overrides BLAS opacity.
+    /// Rows are `[f32; 4]`: finite linear RGB in [0, 1], then zero padding.
+    /// Opaque instances use RGB zero.
     /// Transmission rows are indexed by TLAS instance index and must be built
     /// from the same authoritative instance ordering as the acceleration data.
     /// An opaque-only publication explicitly discards any older material rows.
