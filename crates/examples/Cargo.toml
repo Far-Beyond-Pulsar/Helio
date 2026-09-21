@@ -164,22 +164,6 @@ name = "oil_rig_night"
 path = "oil_rig_night.rs"
 
 [[bin]]
-name = "editor_demo"
-path = "editor_demo.rs"
-
-[[bin]]
-name = "editor_demo_mini"
-path = "editor_demo_mini.rs"
-
-[[bin]]
-name = "editor_demo_xl"
-path = "editor_demo_xl.rs"
-
-[[bin]]
-name = "editor_demo_tsr"
-path = "editor_demo_tsr.rs"
-
-[[bin]]
 name = "meshlet_cull_benchmark"
 path = "meshlet_cull_benchmark.rs"
 
