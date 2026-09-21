@@ -27,10 +27,11 @@ pub const IDENTITY_COORDINATE_SPACE_SLOT: u32 = 0;
 
 /// Runtime limits for one portal projection build.
 ///
-/// `max_chain_depth` is the only recursion control. It is ordinary runtime
+/// `max_chain_depth` is the recursion-depth control. It is ordinary runtime
 /// data and is intentionally not represented by a const-generic or fixed
-/// array type. The other two limits are optional safety budgets for callers
-/// that want to bound allocation/work; `None` means grow with the scene.
+/// array type. `max_chains` is an optional runtime work/allocation budget
+/// for highly connected portal graphs; it does not reduce chain depth.
+/// `None` means grow with the scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortalProjectionConfig {
     pub max_chain_depth: usize,
@@ -328,6 +329,38 @@ impl PortalProjectionBridge {
         &self,
         resolver: &SubLevelResolver,
     ) -> Result<PortalProjectionFrame, ProjectionError> {
+        self.build_with_visibility(resolver, None, None)
+    }
+
+    /// Build a projection frame after pruning recursive branches against the
+    /// current camera view. The visibility test happens before dense chain
+    /// rows are allocated, so an uncapped depth request does not first
+    /// serialize invisible paths into CPU memory.
+    pub fn build_visible(
+        &self,
+        resolver: &SubLevelResolver,
+        view_projection: Mat4,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
+        self.build_with_visibility(resolver, Some(view_projection), None)
+    }
+
+    /// Build a visible projection frame with the camera position available
+    /// for conservative portal back-face rejection during recursion.
+    pub fn build_visible_from_camera(
+        &self,
+        resolver: &SubLevelResolver,
+        view_projection: Mat4,
+        camera_position: glam::Vec3,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
+        self.build_with_visibility(resolver, Some(view_projection), Some(camera_position))
+    }
+
+    fn build_with_visibility(
+        &self,
+        resolver: &SubLevelResolver,
+        view_projection: Option<Mat4>,
+        camera_position: Option<glam::Vec3>,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
         let occurrences = resolver.resolve_portals()?;
         let mut all_occurrences = BTreeMap::<RuntimePortalKey, PortalOccurrence>::new();
         for occurrence in occurrences {
@@ -339,7 +372,25 @@ impl PortalProjectionBridge {
             .iter()
             .map(PortalProjectionKey::from_projection)
             .collect();
-        let mut chains = resolver.resolve_chains(self.max_chain_depth())?;
+        let mut chains = match (view_projection, camera_position) {
+            (Some(view_projection), Some(camera_position)) => resolver
+                .resolve_chains_visible_from_camera(
+                    self.max_chain_depth(),
+                    self.config.max_chains,
+                    view_projection,
+                    camera_position,
+                )?,
+            (Some(view_projection), None) => resolver.resolve_chains_visible(
+                self.max_chain_depth(),
+                self.config.max_chains,
+                view_projection,
+            )?,
+            (None, None) => resolver.resolve_chains_bounded(
+                self.max_chain_depth(),
+                self.config.max_chains,
+            )?,
+            (None, Some(_)) => unreachable!("camera position requires a view projection"),
+        };
         for projection in &projections {
             all_occurrences
                 .entry(RuntimePortalKey::from_occurrence(&projection.source))

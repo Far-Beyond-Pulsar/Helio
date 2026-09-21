@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use glam::Mat4;
+use glam::{Mat4, Vec2, Vec4};
 use pulsar_scenedb::Entity;
 
 use helio_pass_gbuffer::{SubLevelActorComponent, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX};
@@ -321,27 +321,214 @@ impl SubLevelResolver {
         &self,
         max_depth: usize,
     ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
+        self.resolve_chains_bounded(max_depth, None)
+    }
+
+    /// Resolve recursive chains with an optional runtime row budget.
+    ///
+    /// A highly connected portal graph can have exponentially many valid
+    /// paths. `max_chains` is therefore a work/allocation budget, not a
+    /// recursion-depth cap. Bounded traversal is deterministic and
+    /// breadth-first: complete recursion layers are emitted first, and a
+    /// partial layer is sampled evenly across the whole frontier. That keeps
+    /// a bounded frame spatially balanced instead of spending its budget on
+    /// one arbitrary deep branch.
+    pub fn resolve_chains_bounded(
+        &self,
+        max_depth: usize,
+        max_chains: Option<usize>,
+    ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
+        self.resolve_chains_internal(max_depth, max_chains, None, None)
+    }
+
+    /// Resolve recursive chains while pruning branches whose portal aperture
+    /// cannot intersect the current camera view. This is deliberately a
+    /// conservative screen-space test: an aperture that crosses the camera
+    /// near plane is retained, while a branch is expanded only when its
+    /// projected rectangle overlaps the visible rectangle inherited from its
+    /// parent portal.
+    ///
+    /// This stage must run before chain rows are materialized. GPU instance
+    /// culling cannot prevent the CPU from exploding a highly connected graph
+    /// if every mathematical path has already been serialized into a chain.
+    pub fn resolve_chains_visible(
+        &self,
+        max_depth: usize,
+        max_chains: Option<usize>,
+        view_projection: Mat4,
+    ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
+        self.resolve_chains_internal(max_depth, max_chains, Some(view_projection), None)
+    }
+
+    /// Variant of [`Self::resolve_chains_visible`] that also supplies the
+    /// camera position. The extra point lets traversal reject back-facing
+    /// apertures in world space instead of relying on projected winding,
+    /// which is ambiguous when a portal crosses the near plane.
+    pub fn resolve_chains_visible_from_camera(
+        &self,
+        max_depth: usize,
+        max_chains: Option<usize>,
+        view_projection: Mat4,
+        camera_position: glam::Vec3,
+    ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
+        self.resolve_chains_internal(
+            max_depth,
+            max_chains,
+            Some(view_projection),
+            Some(camera_position),
+        )
+    }
+
+    fn resolve_chains_internal(
+        &self,
+        max_depth: usize,
+        max_chains: Option<usize>,
+        view_projection: Option<Mat4>,
+        camera_position: Option<glam::Vec3>,
+    ) -> Result<Vec<ResolvedPortalChain>, ResolutionError> {
         if max_depth == 0 {
             return Err(ResolutionError::InvalidRecursionDepth {
                 requested: max_depth,
                 maximum: usize::MAX,
             });
         }
+        if max_chains == Some(0) {
+            return Ok(Vec::new());
+        }
 
         let occurrences = self.resolve_portals()?;
         let index = self.portal_index();
-        let mut chains = Vec::new();
-        for source in occurrences.iter().cloned() {
-            self.extend_chain(
-                source,
-                &occurrences,
-                &index,
-                max_depth,
-                Vec::new(),
-                Vec::new(),
-                &mut chains,
-            )?;
+
+        #[derive(Clone)]
+        struct ChainState {
+            source: PortalOccurrence,
+            portals: Vec<Entity>,
+            projections: Vec<PortalProjection>,
+            context_to_outer: Mat4,
+            visible_rect: ScreenRect,
         }
+
+        // One frontier is one recursion depth. Keeping it separate from the
+        // output is what lets the bounded path select remain layer-balanced.
+        let mut frontier: Vec<ChainState> = occurrences
+            .iter()
+            .cloned()
+            .map(|source| ChainState {
+                source,
+                portals: Vec::new(),
+                projections: Vec::new(),
+                context_to_outer: Mat4::IDENTITY,
+                visible_rect: ScreenRect::full(),
+            })
+            .collect();
+        let mut chains = Vec::new();
+
+        for _depth in 0..max_depth {
+            if frontier.is_empty() {
+                break;
+            }
+
+            let mut layer = Vec::new();
+            let mut next_frontier = Vec::new();
+            for state in frontier.drain(..) {
+                let ChainState {
+                    source,
+                    mut portals,
+                    mut projections,
+                    context_to_outer,
+                    visible_rect,
+                } = state;
+                let Some(source_rect) = view_projection
+                    .and_then(|view_projection| {
+                        portal_screen_rect(
+                            &source,
+                            context_to_outer,
+                            view_projection,
+                            camera_position,
+                        )
+                    })
+                    .map(|rect| visible_rect.intersect(rect))
+                    .flatten()
+                    .or_else(|| view_projection.is_none().then_some(visible_rect))
+                else {
+                    continue;
+                };
+                portals.push(source.entity);
+                let targets = self.resolve_peer_targets(&source, &occurrences, &index)?;
+                for target in targets {
+                    projections.push(PortalProjection {
+                        target_to_source: portal_view_map(source.transform, target.transform),
+                        source: source.clone(),
+                        target: target.clone(),
+                    });
+                    layer.push(ResolvedPortalChain {
+                        portals: portals.clone(),
+                        projections: projections.clone(),
+                        truncated: portals.len() == max_depth,
+                    });
+
+                    if portals.len() < max_depth {
+                        let child_context_to_outer = context_to_outer
+                            * projections
+                                .last()
+                                .expect("projection was pushed for this target")
+                                .target_to_source;
+                        let next_sources = self
+                            .portals_in_context(&target.context, &occurrences)
+                            .into_iter()
+                            .filter(|candidate| candidate.entity != target.entity)
+                            .filter_map(|next_source| {
+                                let next_visible_rect = view_projection
+                                    .and_then(|view_projection| {
+                                        portal_screen_rect(
+                                            &next_source,
+                                            child_context_to_outer,
+                                            view_projection,
+                                            camera_position,
+                                        )
+                                    })
+                                    .and_then(|rect| source_rect.intersect(rect))
+                                    .or_else(|| {
+                                        view_projection
+                                            .is_none()
+                                            .then_some(source_rect)
+                                    })?;
+                                Some(ChainState {
+                                    source: next_source,
+                                    portals: portals.clone(),
+                                    projections: projections.clone(),
+                                    context_to_outer: child_context_to_outer,
+                                    visible_rect: next_visible_rect,
+                                })
+                            });
+                        next_frontier.extend(next_sources);
+                    }
+                    projections.pop();
+                }
+            }
+
+            let Some(limit) = max_chains else {
+                chains.extend(layer);
+                frontier = next_frontier;
+                continue;
+            };
+
+            let remaining = limit.saturating_sub(chains.len());
+            if remaining == 0 {
+                break;
+            }
+            if layer.len() <= remaining {
+                chains.extend(layer);
+                frontier = next_frontier;
+            } else {
+                // The layer is ordered by root and then by parent branch. A
+                // strided selection gives every branch a share of the
+                // remaining budget and is deterministic across frames.
+                chains.extend(select_evenly(layer, remaining));
+                break;
+            }
+        }
+
         Ok(chains)
     }
 
@@ -498,63 +685,108 @@ impl SubLevelResolver {
         candidates
     }
 
-    fn extend_chain(
-        &self,
-        source: PortalOccurrence,
-        occurrences: &[PortalOccurrence],
-        portal_index: &HashMap<Entity, (SubLevelIndex, PortalRecord)>,
-        max_depth: usize,
-        mut portals: Vec<Entity>,
-        mut projections: Vec<PortalProjection>,
-        output: &mut Vec<ResolvedPortalChain>,
-    ) -> Result<(), ResolutionError> {
-        portals.push(source.entity);
-        let targets = self.resolve_peer_targets(&source, occurrences, portal_index)?;
-        for target in targets {
-            projections.push(PortalProjection {
-                target_to_source: portal_view_map(source.transform, target.transform),
-                source: source.clone(),
-                target: target.clone(),
-            });
+}
 
-            // Publish this prefix before descending. The renderer needs all
-            // visible recursion depths so the shallower image can contain the
-            // deeper image instead of being replaced by one over-constrained
-            // max-depth chain.
-            output.push(ResolvedPortalChain {
-                portals: portals.clone(),
-                projections: projections.clone(),
-                truncated: portals.len() == max_depth,
-            });
+#[derive(Clone, Copy, Debug)]
+struct ScreenRect {
+    min: Vec2,
+    max: Vec2,
+}
 
-            if portals.len() < max_depth {
-                // The target portal is the surface we just entered. It is
-                // not the next portal in the target view; use the other
-                // portals in that resolved context, including the original
-                // source portal when the pair is same-sublevel. This makes
-                // A -> B -> A a real repeated placement rather than an
-                // inverse-map cancel.
-                let next_sources = self
-                    .portals_in_context(&target.context, occurrences)
-                    .into_iter()
-                    .filter(|candidate| candidate.entity != target.entity)
-                    .collect::<Vec<_>>();
-                for next_source in next_sources {
-                    self.extend_chain(
-                        next_source,
-                        occurrences,
-                        portal_index,
-                        max_depth,
-                        portals.clone(),
-                        projections.clone(),
-                        output,
-                    )?;
-                }
-            }
-            projections.pop();
+impl ScreenRect {
+    fn full() -> Self {
+        Self {
+            min: Vec2::splat(-1.0),
+            max: Vec2::splat(1.0),
         }
-        Ok(())
     }
+
+    fn intersect(self, other: Self) -> Option<Self> {
+        let rect = Self {
+            min: self.min.max(other.min),
+            max: self.max.min(other.max),
+        };
+        (rect.min.x <= rect.max.x && rect.min.y <= rect.max.y).then_some(rect)
+    }
+}
+
+fn portal_screen_rect(
+    portal: &PortalOccurrence,
+    context_to_outer: Mat4,
+    view_projection: Mat4,
+    camera_position: Option<glam::Vec3>,
+) -> Option<ScreenRect> {
+    let transform = context_to_outer * portal.transform;
+    if let Some(camera_position) = camera_position {
+        let center = transform.w_axis.truncate();
+        let front = -transform.z_axis.truncate().normalize();
+        if (camera_position - center).dot(front) <= 0.0 {
+            return None;
+        }
+    }
+    let corners = [
+        Vec2::new(-portal.half_extent[0], -portal.half_extent[1]),
+        Vec2::new(portal.half_extent[0], -portal.half_extent[1]),
+        Vec2::new(portal.half_extent[0], portal.half_extent[1]),
+        Vec2::new(-portal.half_extent[0], portal.half_extent[1]),
+    ];
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    let mut has_front_corner = false;
+    let mut has_visible_depth = false;
+    let mut crosses_near_plane = false;
+    for corner in corners {
+        let clip = view_projection * transform * Vec4::new(corner.x, corner.y, 0.0, 1.0);
+        // A portal crossing the near plane is conservatively retained. The
+        // recursive renderer, rather than this coarse traversal, owns the
+        // exact aperture/half-space test.
+        if clip.w <= 1e-5 {
+            crosses_near_plane = true;
+            continue;
+        }
+        has_front_corner = true;
+        let ndc = clip.truncate() / clip.w;
+        has_visible_depth |= (-0.001..=1.001).contains(&ndc.z);
+        let ndc_xy = ndc.truncate();
+        min = min.min(ndc_xy);
+        max = max.max(ndc_xy);
+    }
+    if !has_front_corner {
+        return None;
+    }
+    if !has_visible_depth {
+        return None;
+    }
+    if crosses_near_plane {
+        // A small portal should not straddle the camera plane during ordinary
+        // recursive traversal. Keep only a genuinely front-facing crossing;
+        // a back-facing/edge-on crossing is a numerical artifact and is a
+        // particularly bad source of combinatorial expansion.
+        let center_clip = view_projection * transform * Vec4::W;
+        return (center_clip.w > 1e-5).then_some(ScreenRect::full());
+    }
+    let rect = ScreenRect {
+        min: min.max(Vec2::splat(-1.0)),
+        max: max.min(Vec2::splat(1.0)),
+    };
+    (rect.min.x <= rect.max.x && rect.min.y <= rect.max.y).then_some(rect)
+}
+
+fn select_evenly<T>(items: Vec<T>, count: usize) -> Vec<T> {
+    debug_assert!(count > 0 && count < items.len());
+    let total = items.len();
+    items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            // Select the item that crosses each evenly spaced budget
+            // boundary. This avoids biasing the first branch when the layer
+            // is not divisible by the budget.
+            let selected = ((index * count) / total) != (((index + 1) * count) / total);
+            selected.then_some(item)
+        })
+        .take(count)
+        .collect()
 }
 
 #[cfg(test)]
@@ -718,6 +950,180 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair != [a_entity, b_entity] && pair != [b_entity, a_entity])
         }));
+    }
+
+    #[test]
+    fn bounded_recursion_fills_even_layers_before_sampling_frontier() {
+        let mut world = pulsar_scenedb::World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                ],
+            ),
+        );
+
+        let chains = resolver.resolve_chains_bounded(10, Some(10)).unwrap();
+        assert_eq!(chains.len(), 10);
+        assert_eq!(
+            chains
+                .iter()
+                .filter(|chain| chain.portals.len() == 1)
+                .count(),
+            2
+        );
+        assert_eq!(
+            chains
+                .iter()
+                .filter(|chain| chain.portals.len() == 5)
+                .count(),
+            2
+        );
+        assert!(chains.iter().all(|chain| chain.portals.len() <= 5));
+    }
+
+    #[test]
+    fn uncapped_recursion_reaches_requested_runtime_depth() {
+        let mut world = pulsar_scenedb::World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                ],
+            ),
+        );
+
+        let chains = resolver.resolve_chains(10).unwrap();
+        assert_eq!(chains.len(), 20);
+        assert!(chains.iter().any(|chain| chain.portals.len() == 10));
+    }
+
+    #[test]
+    fn visible_recursion_prunes_portals_behind_camera_before_expansion() {
+        let mut world = pulsar_scenedb::World::new();
+        let front = world.spawn();
+        let front_peer = world.spawn();
+        let back = world.spawn();
+        let back_peer = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (
+                        front,
+                        PortalComponent::new(
+                            Some(front_peer),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, -4.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                    (
+                        front_peer,
+                        PortalComponent::new(
+                            Some(front),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, -8.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                    (
+                        back,
+                        PortalComponent::new(
+                            Some(back_peer),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, 4.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                    (
+                        back_peer,
+                        PortalComponent::new(
+                            Some(back),
+                            Mat4::from_translation(glam::vec3(0.0, 0.0, 8.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                ],
+            ),
+        );
+
+        let view_projection = glam::camera::rh::proj::directx::perspective(
+            std::f32::consts::FRAC_PI_2,
+            1.0,
+            0.1,
+            100.0,
+        );
+        let chains = resolver
+            .resolve_chains_visible(3, None, view_projection)
+            .unwrap();
+        assert!(!chains.iter().any(|chain| chain.portals[0] == back));
+        assert!(!chains.iter().any(|chain| chain.portals[0] == back_peer));
+        assert!(!chains.is_empty());
+    }
+
+    #[test]
+    fn visible_cube_frontier_does_not_expand_every_wall_path() {
+        let mut world = pulsar_scenedb::World::new();
+        let entities: Vec<_> = (0..6).map(|_| world.spawn()).collect();
+        let faces = [
+            (glam::Vec3::X, glam::Vec3::Y),
+            (glam::Vec3::NEG_X, glam::Vec3::Y),
+            (glam::Vec3::Y, glam::Vec3::Z),
+            (glam::Vec3::NEG_Y, glam::Vec3::Z),
+            (glam::Vec3::Z, glam::Vec3::Y),
+            (glam::Vec3::NEG_Z, glam::Vec3::Y),
+        ];
+        let opposite = [1usize, 0, 3, 2, 5, 4];
+        let mut portals = Vec::new();
+        for (index, (normal, up_hint)) in faces.into_iter().enumerate() {
+            let right = up_hint.cross(normal).normalize();
+            let up = normal.cross(right).normalize();
+            let pose = crate::portal_math::portal_pose_facing(
+                normal * 6.0,
+                -normal,
+                up,
+            );
+            portals.push((
+                entities[index],
+                PortalComponent::new(
+                    Some(entities[opposite[index]]),
+                    pose.transform,
+                    [1.6, 1.6],
+                ),
+            ));
+        }
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(0, SubLevelContents::new([], portals));
+        let position = glam::Vec3::new(4.0, 3.0, 4.0);
+        let forward = glam::Vec3::new(
+            -std::f32::consts::FRAC_1_SQRT_2 * 0.883,
+            -0.469,
+            -std::f32::consts::FRAC_1_SQRT_2 * 0.883,
+        )
+        .normalize();
+        let view = glam::camera::rh::view::look_at_mat4(position, position + forward, glam::Vec3::Y);
+        let projection = glam::camera::rh::proj::directx::perspective(
+            std::f32::consts::FRAC_PI_4,
+            1280.0 / 720.0,
+            0.1,
+            300.0,
+        );
+        let chains = resolver
+            .resolve_chains_visible_from_camera(10, None, projection * view, position)
+            .unwrap();
+        assert!(chains.len() < 10_000);
     }
 
     #[test]

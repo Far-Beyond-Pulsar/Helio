@@ -19,7 +19,8 @@ enable wgpu_binding_array;
 //! closely (own copy — see that file for the fuller commentary on each
 //! piece); the differences are: (1) composing the instance's own coordinate
 //! space through an entire *chain* of portal spaces, deepest first, instead
-//! of world space directly; (2) a depth-side test at every composed stage;
+//! of world space directly; (2) a depth-side and ray-through-aperture test at
+//! every composed stage;
 //! and (3) the `portal_mask`
 //! screen-space gate (see below). Debug-visualization modes, lightmap
 //! sampling, and the Radiant material graph override hook are not reachable
@@ -43,7 +44,8 @@ enable wgpu_binding_array;
 //! where that chain's real, physical entry point is actually visible on
 //! screen right now. Inner portals in the chain don't get their own mask
 //! stamp (they're virtual — mapped, not physically where the camera can
-//! look directly), so their depth-side tests are the remaining guard.
+//! look directly). Their exact projected aperture is evaluated per fragment
+//! by intersecting the camera ray with each mapped portal plane.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -303,12 +305,75 @@ fn compute_velocity(input: VertexOutput) -> vec2<f32> {
     return input.clip_position.xy - prev_pixel;
 }
 
-// The physical outer portal's screen-space mask is the exact X/Y aperture.
-// Its mapped target geometry must not also be forced through the portal's
-// local rectangular tube: that would clip the target room itself down to the
-// doorway dimensions. Recursive stages use the same depth-side test below.
+// A portal aperture is a finite plane, not an infinite clipping tube. A
+// target point is visible through it when the ray from the camera in that
+// portal's current context intersects the portal plane inside its X/Y bounds.
+// This perspective-correct projected aperture test is evaluated per fragment
+// so object culling can remain conservative for large meshes.
 fn clip_depth_only(local: vec4<f32>) -> bool {
+    // Portal-view mapping places valid target contents on the positive-Z side
+    // of the source portal plane. Negative-Z points are camera-facing and
+    // must not leak into the portal image.
     return local.z < 0.0;
+}
+
+// Portal coordinate spaces are rigid placement maps. Inverting one here is
+// cheaper and more portable than requiring a second GPU matrix table, while
+// preserving the runtime-sized chain ABI.
+fn inverse_rigid_point(transform: mat4x4<f32>, point: vec3<f32>) -> vec3<f32> {
+    let delta = point - transform[3].xyz;
+    return vec3<f32>(
+        dot(delta, transform[0].xyz),
+        dot(delta, transform[1].xyz),
+        dot(delta, transform[2].xyz),
+    );
+}
+
+// Return the camera position in the source context of `stage`. Outer portal
+// maps have already been crossed when looking at a deeper portal, so undo
+// those maps before testing that deeper aperture.
+fn camera_before_stage(chain: GpuPortalChainHandle, stage: u32) -> vec3<f32> {
+    var camera_position = cameras[0].position_near.xyz;
+    var i = 0u;
+    loop {
+        if i >= stage { break; }
+        let portal_index = portal_chain_portals[chain.offset + i];
+        let p = portal_views[portal_index];
+        camera_position = inverse_rigid_point(
+            coordinate_spaces[p.coordinate_space],
+            camera_position,
+        );
+        i += 1u;
+    }
+    return camera_position;
+}
+
+fn ray_hits_aperture(
+    portal: GpuPortalView,
+    camera_position: vec3<f32>,
+    mapped_point: vec3<f32>,
+) -> bool {
+    let camera_local = (portal.inverse_transform * vec4<f32>(camera_position, 1.0)).xyz;
+    let point_local = (portal.inverse_transform * vec4<f32>(mapped_point, 1.0)).xyz;
+
+    // The camera must be on the source/front side and mapped content on the
+    // target/back side of the portal plane. In Helio's inward-facing portal
+    // convention those are negative and positive local Z respectively.
+    if camera_local.z >= 0.0 || point_local.z < 0.0 {
+        return false;
+    }
+
+    let direction = point_local - camera_local;
+    if abs(direction.z) < 1e-5 {
+        return false;
+    }
+    let plane_t = -camera_local.z / direction.z;
+    if plane_t < 0.0 || plane_t > 1.0 {
+        return false;
+    }
+    let hit = camera_local + direction * plane_t;
+    return abs(hit.x) <= portal.half_extent.x
+        && abs(hit.y) <= portal.half_extent.y;
 }
 
 // Basic SceneDB materials carry texture-store indices directly. An explicit
@@ -338,24 +403,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         discard;
     }
 
-    // Outermost portal: the mask above is the real spatial bound (an exact
-    // screen-space silhouette of the actual opening, from the actual
-    // camera) — so only the behind-the-surface half of the world-space clip
-    // still pulls weight here. The X/Y half-extent bound is deliberately
-    // *not* applied at this stage: content behind the portal can be wider
-    // than the opening itself (a window can legitimately show a whole room
-    // beyond it, not just a tube exactly as wide as the window), and the
-    // mask already confines what's visible to the opening's true silhouette
-    // regardless. Applying the X/Y bound here too (as earlier versions of
-    // this shader did) incorrectly shrank every portal's visible depth down
-    // to a tube no wider than its own opening, which happens to be
-    // invisible for infinite_tunnel (corridor width == portal width by
-    // construction there) but clips away nearly everything for any portal
-    // whose far side is bigger than its opening.
     // Re-run the same deepest-to-outer composition on the interpolated point
-    // before the portal maps. This gives the exact local position for every
-    // stage without requiring an inverse-matrix buffer or a fixed number of
-    // interpolants. The loop follows the runtime handle count.
+    // before the portal maps. At every stage, test the camera ray against the
+    // corresponding finite portal plane. This gives the exact perspective
+    // aperture for arbitrary room geometry without a fixed number of
+    // recursion slots or a per-object rectangle approximation.
     var stage_pos = input.pre_portal_position;
     var stage = chain.count;
     loop {
@@ -365,14 +417,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         let p = portal_views[portal_index];
         stage_pos = (coordinate_spaces[p.coordinate_space] * vec4<f32>(stage_pos, 1.0)).xyz;
         let local = p.inverse_transform * vec4<f32>(stage_pos, 1.0);
-        // The outer portal's screen-space mask is the exact physical
-        // aperture. For recursive stages, the mapped scene is already in the
-        // target portal's continuation space; applying the source aperture's
-        // X/Y rectangle again clips large room geometry down to the size of
-        // the doorway and leaves only compact props visible. Keep the
-        // half-space test at every stage, while the outer mask supplies the
-        // screen-space boundary.
-        if clip_depth_only(local) { discard; }
+        if clip_depth_only(local)
+            || !ray_hits_aperture(p, camera_before_stage(chain, stage), stage_pos)
+        {
+            discard;
+        }
     }
 
     let material = materials[input.material_id];

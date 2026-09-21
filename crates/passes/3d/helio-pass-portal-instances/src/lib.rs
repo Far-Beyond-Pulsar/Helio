@@ -98,7 +98,7 @@ impl PortalInstancePass {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("PortalInstance BGL 0"),
                 entries: &[
-                    storage_entry(0, wgpu::ShaderStages::VERTEX, true), // cameras
+                    storage_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // cameras
                     uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false), // screen size
                     storage_entry(2, wgpu::ShaderStages::VERTEX, true), // instance_data
                     storage_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // coordinate_spaces

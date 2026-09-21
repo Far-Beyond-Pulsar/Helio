@@ -213,6 +213,10 @@ fn select(
                 let p = portal_views[chain_portal(chain_idx, s - 1u)];
                 pos = (coordinate_spaces[p.coordinate_space] * vec4<f32>(pos, 1.0)).xyz;
                 let local = (p.inverse_transform * vec4<f32>(pos, 1.0)).xyz;
+                // Keep the complete far-side half-space. Reject only bounds
+                // that are entirely on the camera-facing side. In Helio's
+                // inward-facing portal convention the camera side is
+                // negative local Z and mapped target content is positive.
                 if local.z < -radius {
                     rejected = true;
                     break;
