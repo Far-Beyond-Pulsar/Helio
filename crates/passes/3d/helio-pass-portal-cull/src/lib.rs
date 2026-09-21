@@ -303,16 +303,12 @@ impl RenderPass for PortalCullPass {
             .pass_resources
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.draw_count)
             .unwrap_or(0);
-        self.chain_count = self.active_chain_count.unwrap_or_else(|| {
-            ctx.scene_buffers
-                .get(BufferKey::of(PORTAL_CHAIN_HANDLE_BUFFER))
-                .map(|h| {
-                    (h.buffer.size()
-                        / std::mem::size_of::<pulsar_scenedb::gpu::VarLenHandle>() as u64)
-                        as u32
-                })
-                .unwrap_or(0)
-        });
+        // A growable SceneDB buffer reports reserved capacity, not the number
+        // of live rows. Never turn that capacity into dispatch work: doing so
+        // makes a zero-portal scene run one cull lane per draw group for every
+        // reserved chain slot. The resolver/projection bridge publishes the
+        // live count explicitly through `set_active_chain_count`.
+        self.chain_count = self.active_chain_count.unwrap_or(0);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {

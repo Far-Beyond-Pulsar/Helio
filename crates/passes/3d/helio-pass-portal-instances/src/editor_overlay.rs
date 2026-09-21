@@ -222,17 +222,11 @@ impl RenderPass for PortalEditorOverlayPass {
         })
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = self.active_portal_count.unwrap_or_else(|| {
-            ctx.scene_buffers
-                .get(BufferKey::of("portal_views"))
-                .map(|h| {
-                    (h.buffer.size()
-                        / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                        as u32
-                })
-                .unwrap_or(0)
-        });
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        // Growable SceneDB storage exposes capacity, not live portal rows.
+        // An absent active count therefore means no authored/projected
+        // portals, not "draw the whole reserve".
+        self.portal_count = self.active_portal_count.unwrap_or(0);
         Ok(())
     }
 

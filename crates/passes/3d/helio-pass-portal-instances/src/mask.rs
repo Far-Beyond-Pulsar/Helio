@@ -251,17 +251,11 @@ impl RenderPass for PortalMaskPass {
         None
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = self.active_portal_count.unwrap_or_else(|| {
-            ctx.scene_buffers
-                .get(BufferKey::of("portal_views"))
-                .map(|h| {
-                    (h.buffer.size()
-                        / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                        as u32
-                })
-                .unwrap_or(0)
-        });
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        // SceneDB storage is growable, so its buffer size is reserved
+        // capacity rather than the active number of portal views. Only the
+        // projection bridge knows which dense rows are live this frame.
+        self.portal_count = self.active_portal_count.unwrap_or(0);
         Ok(())
     }
 
