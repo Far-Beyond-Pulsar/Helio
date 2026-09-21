@@ -12,7 +12,7 @@ use helio_mats::radiant::RadiantTemplateRegistry;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer};
+use super::renderer_impl::{CullStatsReadbackState, GraphRebuilder, Renderer};
 
 impl Renderer {
     pub(crate) fn create_depth_resources(

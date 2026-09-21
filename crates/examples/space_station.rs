@@ -13,7 +13,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
     box_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, point_light,
@@ -136,21 +136,8 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, fmt);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
-                build_default_graph_external(
-                    d,
-                    q,
-                    cb,
-                    graph_config,
-                    debug_state,
-                    dcb,
-                    csb,
-                    None,
-                    graph_scene_db.clone(),
-                )
-            }))
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
             .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
         renderer.set_ambient([0.08, 0.10, 0.18], 0.035);

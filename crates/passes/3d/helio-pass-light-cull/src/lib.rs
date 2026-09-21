@@ -232,10 +232,6 @@ impl RenderPass for LightCullPass {
         "LightCull"
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["tile_light_lists", "tile_light_counts"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_buffer("tile_light_lists");
         builder.write_buffer("tile_light_counts");

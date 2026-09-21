@@ -1473,14 +1473,14 @@ impl ApplicationHandler for App {
             PlanetaryVoxelRenderConfig::horizon_demo()
         };
         let mut renderer = RendererBuilder::new(renderer_config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, _config, _debug_state, _cb, _dcb, _csb| {
+            .with_pass_build_context(Box::new(move |ctx| {
                 let planet_pass =
-                    PlanetaryVoxelRenderPass::new(d, q, surface_format, planet_config)
+                    PlanetaryVoxelRenderPass::new(ctx.device, ctx.queue, surface_format, planet_config)
                         .expect("bounded planetary render pass");
-                let mut graph = RenderGraph::new(d, q);
+                let mut graph = RenderGraph::new(ctx.device, ctx.queue);
                 graph.add_pass(Box::new(planet_pass));
-                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
-                graph.lock(size.width, size.height);
+                graph.add_pass(Box::new(FxaaPass::new(ctx.device, surface_format)));
+                graph.lock(ctx.config.width, ctx.config.height);
                 graph
             }))
             .build(device.clone(), queue.clone(), size.width, size.height, surface_format);

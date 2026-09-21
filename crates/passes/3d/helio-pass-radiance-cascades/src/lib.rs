@@ -488,7 +488,7 @@ impl RenderPass for RadianceCascadesPass {
             0
         };
         let sky = ctx
-            .pass_resources
+            .registry
             .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
             .map(|sky| sky.sky_color)
             .unwrap_or([0.0, 0.0, 0.0]);
@@ -539,11 +539,11 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let depth_view = match ctx.resources.get(helio_core::ResourceKey::new("hiz")) {
+        let depth_view = match ctx.registry.get(helio_core::ResourceKey::new("hiz")) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+        let pre_aa_view = match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -630,7 +630,7 @@ impl RadianceCascadesPass {
             .unwrap_or(ctx.camera);
 
         // Get TLAS from frame resources (set by the renderer from GpuScene)
-        let environment = ctx.resources.read::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment"), "RadianceCascades");
+        let environment = ctx.registry.read::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment(), "RadianceCascades");
         let tlas = environment.and_then(|value| value.tlas);
 
         let Some(tlas) = tlas else {

@@ -724,7 +724,7 @@ impl RenderPass for HiZBuildPass {
 
         if self.depth_copy_supported {
             let depth_texture = ctx
-                .resources
+                .registry
                 .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
                 .expect("Renderer must publish the active depth texture for HiZ");
             encoder.copy_texture_to_buffer(

@@ -1190,11 +1190,11 @@ impl RenderPass for PostProcessPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let input_key = self.color_input;
-        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new(input_key)) {
+        let pre_aa_view = match ctx.registry.get(helio_core::ResourceKey::new(input_key)) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let postprocess_buf = match ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
+        let postprocess_buf = match ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -1205,9 +1205,9 @@ impl RenderPass for PostProcessPass {
         // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
         // added, removed, or resized rebuilds the group instead of leaving b17
         // pointing at a stale view.
-        let fog_view = ctx.resources.get(helio_core::ResourceKey::new("fog_accum"));
-        let velocity_view = ctx.resources.get(helio_core::ResourceKey::new("gbuffer_velocity"));
-        let lut_view = ctx.resources.get(helio_core::ResourceKey::new("color_grading_lut"));
+        let fog_view = ctx.registry.get(helio_core::ResourceKey::new("fog_accum"));
+        let velocity_view = ctx.registry.get(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx.registry.get(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
             pre_aa_view as *const _ as usize,

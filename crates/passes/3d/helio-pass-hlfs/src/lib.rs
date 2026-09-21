@@ -616,9 +616,6 @@ impl RenderPass for HlfsPass {
     fn reads(&self) -> &'static [&'static str] {
         &["gbuffer", "pre_aa", "render_environment", "ray_transmission"]
     }
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let output: &'a wgpu::TextureView =
             unsafe { std::mem::transmute(&self.targets.output.view) };
@@ -638,7 +635,7 @@ impl RenderPass for HlfsPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         if self.config.mode == HlfsMode::RayTraced
             && ctx
-                .pass_resources
+                .registry
                 .get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new(
                     "render_environment",
                 ))
@@ -677,7 +674,7 @@ impl RenderPass for HlfsPass {
             && !ctx.resize;
         let mut ambient = [0.03, 0.03, 0.03, self.config.screen_trace_distance];
         if let Some(environment) =
-            ctx.pass_resources
+            ctx.registry
                 .get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new(
                     "render_environment",
                 ))
@@ -696,24 +693,24 @@ impl RenderPass for HlfsPass {
             sample_scale: self.config.sample_scale,
             candidate_count: self.config.candidates_per_sample,
             has_velocity: ctx
-                .pass_resources
+                .registry
                 .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"))
                 .is_some() as u32,
             // Baked lightmaps are optional.  Screen-space HLFS is the dynamic,
             // no-bake path, so use non-panicking lookups for these resources.
             surface_flags: (ctx
-                .pass_resources
-                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("baked_lightmap"))
+                .registry
+                .get::<&wgpu::TextureView>(helio_core::resource_keys::baked_lightmap())
                 .is_some()
                 && ctx
-                    .pass_resources
+                    .registry
                     .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
                     .is_some()) as u32
                 | (u32::from(self.previous_light_generation == Some(ctx.frame_num)) << 1)
                 | (u32::from(self.config.tile_presampling) << 2)
                 | (u32::from(self.config.temporal_resampling) << 3)
                 | (u32::from(self.config.mode == HlfsMode::RayTraced
-                    && ctx.pass_resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some()) << 4),
+                    && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some()) << 4),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,
@@ -749,13 +746,13 @@ impl RenderPass for HlfsPass {
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let gbuffer = ctx
-            .resources
+            .registry
             .read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "HLFS")
             .ok_or_else(|| {
                 helio_core::Error::InvalidPassConfig("HLFS requires a GBuffer".into())
             })?;
         let pre_aa = ctx
-            .resources
+            .registry
             .read_texture_view(helio_core::ResourceKey::new("pre_aa"), "HLFS")
             .ok_or_else(|| helio_core::Error::InvalidPassConfig("HLFS requires pre_aa".into()))?;
         let f = &self.fallbacks;
@@ -765,9 +762,9 @@ impl RenderPass for HlfsPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(&f.empty_lights);
         let shadow_matrices_buf = ctx
-            .resources
+            .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::ResourceKey::new("shadow_matrices"),
+                helio_core::resource_keys::shadow_matrices(),
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(&f.empty_shadow_matrices);
@@ -776,11 +773,11 @@ impl RenderPass for HlfsPass {
             lights: lights_buf,
             shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx
-                .resources
+                .registry
                 .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("shadow_atlas"))
                 .unwrap_or(&f.shadow_view),
             shadow_sampler: ctx
-                .resources
+                .registry
                 .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("shadow_sampler"))
                 .unwrap_or(&f.shadow_sampler),
             textures: [
@@ -789,19 +786,19 @@ impl RenderPass for HlfsPass {
                 gbuffer.views[2],
                 gbuffer.views[3],
                 ctx.depth,
-                ctx.resources
+                ctx.registry
                     .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
                     .unwrap_or(&f.lightmap_uv.view),
-                ctx.resources
-                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("baked_lightmap"))
+                ctx.registry
+                    .get::<&wgpu::TextureView>(helio_core::resource_keys::baked_lightmap())
                     .unwrap_or(&f.black.view),
                 pre_aa,
-                ctx.resources
+                ctx.registry
                     .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"))
                     .unwrap_or(&f.black.view),
             ],
             lightmap_sampler: ctx
-                .resources
+                .registry
                 .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("baked_lightmap_sampler"))
                 .unwrap_or(&f.linear_sampler),
         };
@@ -813,10 +810,10 @@ impl RenderPass for HlfsPass {
             &self.shadows,
             &inputs,
         );
-        self.external.transmission = self.config.mode == HlfsMode::RayTraced && ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some();
+        self.external.transmission = self.config.mode == HlfsMode::RayTraced && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some();
         if self.config.mode == HlfsMode::RayTraced {
             let tlas = ctx
-                .resources
+                .registry
                 .get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new(
                     "render_environment",
                 ))
@@ -828,7 +825,7 @@ impl RenderPass for HlfsPass {
                 ctx.device,
                 self.pipelines.rt_bgl.as_ref().expect("validated RT layout"),
                 tlas,
-                ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).unwrap_or(&f.empty_lights),
+                ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).unwrap_or(&f.empty_lights),
             );
         }
         // These dispatches read the GBuffer just rendered, so they belong on the

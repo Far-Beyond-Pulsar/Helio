@@ -114,12 +114,12 @@ impl RenderPass for SsrCompositePass {
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let Some(gbuffer) = ctx
-            .resources
+            .registry
             .read::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer"), self.name())
         else {
             return Ok(());
         };
-        let Some(output) = ctx.resources.get(ResourceKey::new("pre_aa")) else {
+        let Some(output) = ctx.registry.get(ResourceKey::new("pre_aa")) else {
             return Ok(());
         };
         let Some(reflection) = ctx.resource_pool.get_view("ssr_trace") else {

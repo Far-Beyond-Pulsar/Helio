@@ -395,10 +395,6 @@ impl RenderPass for SsaoPass {
         );
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["ssao"]
-    }
-
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);
     }

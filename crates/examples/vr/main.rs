@@ -39,7 +39,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RenderMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_forward_opaque_graph_external;
+use helio_default_graphs::build_forward_opaque_graph_with_context;
 use input::FreeCam;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, update_object_transform};
@@ -450,20 +450,10 @@ impl ApplicationHandler for App {
         }));
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
-                build_forward_opaque_graph_external(
-                    d,
-                    q,
-                    cb,
-                    graph_config,
-                    debug_state,
-                    dcb,
-                    csb,
-                    None,
-                    graph_scene_db.clone(),
-                )
+            .with_pass_build_context(Box::new(|mut ctx| {
+                ctx.owns_device = false;
+                build_forward_opaque_graph_with_context(ctx)
             }))
             .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
         renderer.set_editor_mode(true);

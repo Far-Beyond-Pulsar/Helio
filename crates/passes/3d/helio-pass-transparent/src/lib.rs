@@ -372,10 +372,10 @@ impl RenderPass for TransparentPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.get::<helio_pass_occlusion_cull::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx.registry.get::<helio_pass_occlusion_cull::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -407,7 +407,7 @@ impl RenderPass for TransparentPass {
         // buffer pointers change. Lights are always read from the SceneDB
         // component buffer; the camera buffer is a valid binding fallback
         // when no light component has been authored yet.
-        let cluster = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
+        let cluster = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
         let lights_buf = ctx
             .scene_buffers
             .get(BufferKey::of("scene_lights"))

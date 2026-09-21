@@ -588,10 +588,6 @@ impl RenderPass for DofPass {
         "DofPass"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["pre_dof", "depth"]
-    }
-
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -683,14 +679,14 @@ impl RenderPass for DofPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let src_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_dof")) {
+        let src_view = match ctx.registry.get(helio_core::ResourceKey::new("pre_dof")) {
             Some(v) => v,
-            None => match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+            None => match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
                 Some(v) => v,
                 None => return Ok(()),
             },
         };
-        let Some(pp_buf) = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
+        let Some(pp_buf) = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
         let depth_view = ctx.depth;

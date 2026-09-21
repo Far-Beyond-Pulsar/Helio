@@ -433,7 +433,7 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx.pass_resources
+        self.draw_count = ctx.registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
             .map(|b| b.draw_count).unwrap_or(0);
         let screen = ScreenSize {
@@ -465,7 +465,7 @@ impl RenderPass for PortalInstancePass {
             );
             return Ok(());
         };
-        let material_textures = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "PortalInstance");
+        let material_textures = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "PortalInstance");
         if ctx.frame_num < 3 {
             log::info!(
                 "[PortalInstance] frame={} material_textures_available={}",
@@ -482,10 +482,10 @@ impl RenderPass for PortalInstancePass {
             return Ok(());
         };
 
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {

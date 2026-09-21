@@ -112,19 +112,9 @@ pub fn build_default_renderer(
     let graph_scene_db = scene_db_handle(scene_db);
     RendererBuilder::new(config, graph_scene_db.clone())
         .with_external_device()
-        .with_graph(Box::new(move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
-            helio_default_graphs::build_default_graph_external(
-                device,
-                queue,
-                camera,
-                config,
-                debug_state,
-                debug_camera,
-                cull_stats,
-                None,
-                graph_scene_db.clone(),
-            )
-        }))
+        .with_pass_build_context(Box::new(
+            helio_default_graphs::build_default_graph_external_with_context,
+        ))
         .build(
             device,
             queue,

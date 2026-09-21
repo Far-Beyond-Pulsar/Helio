@@ -1,5 +1,5 @@
 //! Builder for [`Renderer`] that eliminates boilerplate by creating internal
-//! buffers, the scene, and debug state automatically.
+//! GPU buffers and debug state automatically.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,41 +10,14 @@ use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::renderer_impl::Renderer;
 
-/// Closure that builds a [`RenderGraph`] at init time.
-///
-/// The arguments match the public `helio_default_graphs::build_*` functions,
-/// so any of them can be called from inside the closure.
-///
-/// # Arguments
-///
-/// * `device`   – the WGPU device
-/// * `queue`    – the WGPU queue
-/// * `scene`    – the newly-created scene (ready for population)
-/// * `config`   – the [`RendererConfig`]
-/// * `debug_state` – shared debug-draw state
-/// * `debug_camera_buffer` – camera-uniform buffer (64‑byte, `UNIFORM | COPY_DST`)
-/// * `cull_stats_buffer`   – cull‑statistics buffer (`STORAGE | COPY_DST`)
-pub type GraphBuilderFn = Box<
-    dyn FnOnce(
-        &Arc<wgpu::Device>,
-        &Arc<wgpu::Queue>,
-        RendererConfig,
-        Arc<Mutex<DebugDrawState>>,
-        &wgpu::Buffer,
-        &wgpu::Buffer,
-        &wgpu::Buffer,
-    ) -> RenderGraph,
->;
-
 /// Shared construction inputs for passes and graph composition. New graph
-/// builders can accept this context instead of repeating the seven common
-/// arguments used by the legacy `GraphBuilderFn` ABI.
 pub struct PassBuildContext<'a> {
     pub device: &'a Arc<wgpu::Device>,
     pub queue: &'a Arc<wgpu::Queue>,
     pub config: RendererConfig,
     pub debug_state: Arc<Mutex<DebugDrawState>>,
     pub camera_buffer: &'a wgpu::Buffer,
+    pub debug_camera_buffer: &'a wgpu::Buffer,
     pub cull_stats_buffer: &'a wgpu::Buffer,
     /// Whether the renderer owns the device and graph allocations.
     pub owns_device: bool,
@@ -73,8 +46,6 @@ pub type SceneDbHandle = GpuMirrorHandle;
 ///
 /// * [`with_pass_build_context`](Self::with_pass_build_context) – a closure
 ///   that builds the graph from one shared construction context.
-/// * [`with_graph`](Self::with_graph) – the legacy seven-argument ABI, retained
-///   for custom graphs and existing applications.
 ///
 /// # Example – default deferred graph
 ///
@@ -103,7 +74,6 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// ```
 pub struct RendererBuilder {
     config: RendererConfig,
-    graph_fn: Option<GraphBuilderFn>,
     pass_graph_fn: Option<PassGraphBuilderFn>,
     editor_mode: bool,
     ambient_color: [f32; 3],
@@ -125,7 +95,6 @@ impl RendererBuilder {
     pub fn new(config: RendererConfig, scene_db: SceneDbHandle) -> Self {
         Self {
             config,
-            graph_fn: None,
             pass_graph_fn: None,
             editor_mode: false,
             ambient_color: [0.05, 0.05, 0.08],
@@ -136,19 +105,9 @@ impl RendererBuilder {
         }
     }
 
-    /// Provide a closure that builds the [`RenderGraph`].
-    ///
-    /// **Required** – `build()` will panic if no graph builder has been set.
-    pub fn with_graph(mut self, f: GraphBuilderFn) -> Self {
-        self.graph_fn = Some(f);
-        self.pass_graph_fn = None;
-        self
-    }
-
     /// Provide a graph builder using a single shared construction context.
     pub fn with_pass_build_context(mut self, f: PassGraphBuilderFn) -> Self {
         self.pass_graph_fn = Some(f);
-        self.graph_fn = None;
         self
     }
 
@@ -194,13 +153,13 @@ impl RendererBuilder {
 
     /// Build the [`Renderer`].
     ///
-    /// Creates the scene, debug buffers, and debug state internally, then calls
-    /// the closure registered via [`with_graph`](Self::with_graph) to obtain the
-    /// render graph, and finally constructs the renderer.
+    /// Creates the debug buffers and debug state internally, then calls the
+    /// closure registered via [`with_pass_build_context`](Self::with_pass_build_context)
+    /// to obtain the render graph, and finally constructs the renderer.
     ///
     /// # Panics
     ///
-    /// Panics if `with_graph` was not called before `build`.
+    /// Panics if `with_pass_build_context` was not called before `build`.
     pub fn build(
         self,
         device: Arc<wgpu::Device>,
@@ -237,31 +196,20 @@ impl RendererBuilder {
         });
 
         let config = self.config;
-        let graph = if let Some(pass_graph_fn) = self.pass_graph_fn {
-            pass_graph_fn(PassBuildContext {
-                device: &device,
-                queue: &queue,
-                config,
-                debug_state: debug_state.clone(),
-                camera_buffer: &camera_buffer,
-                cull_stats_buffer: &cull_stats_buffer,
-                owns_device: self.owns_device,
-                scene_db: self.scene_db.clone(),
-            })
-        } else {
-            let graph_fn = self.graph_fn.expect(
-                "RendererBuilder::build: call .with_graph() or .with_pass_build_context() first",
-            );
-            graph_fn(
-                &device,
-                &queue,
-                config,
-                debug_state.clone(),
-                &camera_buffer,
-                &debug_camera_buffer,
-                &cull_stats_buffer,
-            )
-        };
+        let pass_graph_fn = self.pass_graph_fn.expect(
+            "RendererBuilder::build: call .with_pass_build_context() before .build()",
+        );
+        let graph = pass_graph_fn(PassBuildContext {
+            device: &device,
+            queue: &queue,
+            config,
+            debug_state: debug_state.clone(),
+            camera_buffer: &camera_buffer,
+            debug_camera_buffer: &debug_camera_buffer,
+            cull_stats_buffer: &cull_stats_buffer,
+            owns_device: self.owns_device,
+            scene_db: self.scene_db.clone(),
+        });
 
         let scene_db = self.scene_db;
         let mut renderer = Renderer::construct(

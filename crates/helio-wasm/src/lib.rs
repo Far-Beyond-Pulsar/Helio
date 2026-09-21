@@ -115,12 +115,15 @@ pub trait HelioWasmApp: Sized + 'static {
     /// in `init` (passes bind scene resources at render time) and only
     /// assemble the pass pipeline here.
     ///
-    /// Arguments mirror [`helio::GraphBuilderFn`]: `config` already carries
-    /// this demo's [`render_scale`](HelioWasmApp::render_scale) and the
-    /// current `width`/`height`; use `config.width` / `config.height` when
-    /// locking the graph. There is no scene parameter -- SceneDB access for a
-    /// custom graph goes through `helio::PassBuildContext`/
-    /// `RendererBuilder::with_pass_build_context` instead of this closure ABI.
+    /// The runner installs the graph through
+    /// `RendererBuilder::with_pass_build_context`; the arguments here are
+    /// retained as the wasm demo hook so existing demos keep their graph
+    /// construction behavior while the renderer itself uses the typed
+    /// [`helio::PassBuildContext`] ABI. `config` already carries this demo's
+    /// [`render_scale`](HelioWasmApp::render_scale) and the current
+    /// `width`/`height`; use `config.width` / `config.height` when locking the
+    /// graph. SceneDB access for a custom graph remains frontend-owned and is
+    /// provided to the renderer through its GPU mirror handle.
     fn build_graph(
         _device: &std::sync::Arc<wgpu::Device>,
         _queue: &std::sync::Arc<wgpu::Queue>,

@@ -405,10 +405,10 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(postprocess_buf) = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
+        let Some(postprocess_buf) = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
-        let Some(shadow_atlas) = ctx.resources.get(helio_core::ResourceKey::new("shadow_atlas")) else {
+        let Some(shadow_atlas) = ctx.registry.get(helio_core::ResourceKey::new("shadow_atlas")) else {
             return Ok(());
         };
 
@@ -419,9 +419,9 @@ impl RenderPass for VolumetricFogPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices = ctx
-            .resources
+            .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::ResourceKey::new("shadow_matrices"),
+                helio_core::resource_keys::shadow_matrices(),
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);

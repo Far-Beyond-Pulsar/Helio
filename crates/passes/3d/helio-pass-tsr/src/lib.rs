@@ -658,14 +658,14 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view: &wgpu::TextureView = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
+        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )
         })?;
 
         let reactive_view = if self.transparency_reactivity {
-            ctx.resources.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
+            ctx.registry.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
                 .ok_or_else(|| helio_core::Error::InvalidPassConfig(
                     "TSR coverage mode requires transparency_reactivity".into()))?
         } else { &self.reactivity_fallback_view };

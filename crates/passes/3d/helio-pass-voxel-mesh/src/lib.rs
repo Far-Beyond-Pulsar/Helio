@@ -694,10 +694,6 @@ impl RenderPass for VoxelMeshPass {
         "VoxelMesh"
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     // The constructor selects whether this pass initializes `pre_aa` and depth
     // or composites over attachments produced by earlier graph passes.
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

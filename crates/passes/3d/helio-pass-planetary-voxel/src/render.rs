@@ -1829,10 +1829,6 @@ impl RenderPass for PlanetaryVoxelRenderPass {
         "PlanetaryVoxel"
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }

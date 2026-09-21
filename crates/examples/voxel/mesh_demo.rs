@@ -377,15 +377,17 @@ impl ApplicationHandler for App {
         // "pre_aa" and discard FXAA's result if chained after it, see how
         // build_fxaa_graph_internal in helio-default-graphs composes them).
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(
-                move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
-                    let mut graph = RenderGraph::new(d, q);
-                    graph.add_pass(Box::new(VoxelMeshPass::new(d, q, surface_format)));
-                    graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
-                    graph.lock(graph_config.width, graph_config.height);
-                    graph
-                },
-            ))
+            .with_pass_build_context(Box::new(move |ctx| {
+                let mut graph = RenderGraph::new(ctx.device, ctx.queue);
+                graph.add_pass(Box::new(VoxelMeshPass::new(
+                    ctx.device,
+                    ctx.queue,
+                    surface_format,
+                )));
+                graph.add_pass(Box::new(FxaaPass::new(ctx.device, surface_format)));
+                graph.lock(ctx.config.width, ctx.config.height);
+                graph
+            }))
             .build(
                 device.clone(),
                 queue.clone(),

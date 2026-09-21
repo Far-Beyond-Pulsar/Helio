@@ -396,15 +396,51 @@ pub mod entity;
 pub mod error;
 pub mod frame_storage;
 pub mod graph;
+mod frame_inputs;
 pub mod movability;
 pub mod profiling;
 pub mod registry;
 pub mod render_environment;
+pub mod resource_keys;
 pub mod scene_input;
 pub mod shader;
 pub mod temporal;
 pub mod traits;
 pub mod upload;
+
+/// RAII CPU span that lands in the engine flamegraph's profiler, on the thread
+/// that creates it. A no-op unless the `profiling` feature is enabled (and always
+/// on wasm, where the profiler is not built). The feature check lives here, not
+/// in the [`cpu_scope!`] expansion, so callers need no matching cfg.
+pub struct CpuScope {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    _scope: ::profiling::ProfileScope,
+}
+
+impl CpuScope {
+    #[inline]
+    pub fn new(name: &'static str) -> Self {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+        {
+            Self {
+                _scope: ::profiling::ProfileScope::new_static(name),
+            }
+        }
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
+        {
+            let _ = name;
+            Self {}
+        }
+    }
+}
+
+/// Open a [`CpuScope`] named `$name` that ends with the enclosing block.
+#[macro_export]
+macro_rules! cpu_scope {
+    ($name:expr) => {
+        let _helio_cpu_scope = $crate::CpuScope::new($name);
+    };
+}
 
 // Generic types owned directly by helio-core: graph scheduling, the open
 // resource registry, and render primitives (camera, mobility) that name no
@@ -439,3 +475,4 @@ pub use profiling::{
 pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
 pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};
+pub use frame_inputs::{CoordinateSpacesFrameData, RenderFrameInputs};

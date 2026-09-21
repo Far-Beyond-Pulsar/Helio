@@ -59,7 +59,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let color_texture = if let Some(pre_aa) = ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+        let color_texture = if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
             pre_aa
         } else {
             ctx.target
@@ -251,8 +251,8 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
-            ctx.resources.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
-            ctx.resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
+            ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+            ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
             let cost_compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PerfOverlay Cost Compute BG"),

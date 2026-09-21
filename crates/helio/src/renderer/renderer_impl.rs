@@ -5,8 +5,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use bytemuck::{Pod, Zeroable};
-use helio_core::{RenderGraph, RenderPass};
+use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
 use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::builder::SceneDbHandle;
@@ -32,20 +31,6 @@ use crate::camera::Camera;
 
 use super::config::GiConfig;
 use super::debug::DebugDrawState;
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct DebugCameraUniform {
-    pub view_proj: [[f32; 4]; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct DebugVertex {
-    pub position: [f32; 3],
-    pub _pad: f32,
-    pub color: [f32; 4],
-}
 
 /// Backend-only fallback bindings for the material sampling contract.
 ///
@@ -236,178 +221,6 @@ pub struct Renderer {
     /// target must match it (usually Bgra8UnormSrgb on Windows), not the XR
     /// swapchain format. Set via [`Renderer::set_xr_mirror_format`].
     pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
-}
-
-pub struct DebugBatch<'a> {
-    pub(crate) state: &'a mut DebugDrawState,
-    pub(crate) lines_changed: bool,
-    pub(crate) tris_changed: bool,
-}
-
-impl<'a> DebugBatch<'a> {
-    pub fn line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
-        self.state.user_lines.push(DebugVertex {
-            position: from,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_lines.push(DebugVertex {
-            position: to,
-            _pad: 0.0,
-            color,
-        });
-        self.lines_changed = true;
-    }
-
-    pub fn tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
-        self.state.user_tris.push(DebugVertex {
-            position: v0,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v1,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v2,
-            _pad: 0.0,
-            color,
-        });
-        self.tris_changed = true;
-    }
-
-    pub fn sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 {
-            return;
-        }
-        for plane in 0..3 {
-            let mut prev = glam::Vec3::ZERO;
-            for i in 0..=segments {
-                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-                let pos = match plane {
-                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
-                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
-                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
-                } + glam::Vec3::from(center);
-                if i > 0 {
-                    self.line(prev.to_array(), pos.to_array(), color);
-                }
-                prev = pos;
-            }
-        }
-    }
-
-    pub fn cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.line(prev.to_array(), cur.to_array(), color);
-            self.line(cur.to_array(), apex_v.to_array(), color);
-            prev = cur;
-        }
-    }
-
-    pub fn filled_cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
-            self.tri(base.to_array(), cur.to_array(), prev.to_array(), color);
-            prev = cur;
-        }
-    }
-
-    pub fn filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
-        let c = glam::Vec3::from(center);
-        let h = half;
-        let corners = [
-            c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new(h, -h, -h),
-            c + glam::Vec3::new(h, h, -h),
-            c + glam::Vec3::new(-h, h, -h),
-            c + glam::Vec3::new(-h, -h, h),
-            c + glam::Vec3::new(h, -h, h),
-            c + glam::Vec3::new(h, h, h),
-            c + glam::Vec3::new(-h, h, h),
-        ];
-        let quads: [[usize; 4]; 6] = [
-            [0, 3, 2, 1],
-            [4, 5, 6, 7],
-            [0, 4, 7, 3],
-            [1, 2, 6, 5],
-            [0, 1, 5, 4],
-            [3, 7, 6, 2],
-        ];
-        for [a, b, cc, d] in quads {
-            self.tri(
-                corners[a].to_array(),
-                corners[b].to_array(),
-                corners[cc].to_array(),
-                color,
-            );
-            self.tri(
-                corners[a].to_array(),
-                corners[cc].to_array(),
-                corners[d].to_array(),
-                color,
-            );
-        }
-    }
-
-    pub(crate) fn finish(self) {
-        if self.lines_changed {
-            self.state.user_lines_generation = self.state.user_lines_generation.wrapping_add(1);
-        }
-        if self.tris_changed {
-            self.state.user_tris_generation = self.state.user_tris_generation.wrapping_add(1);
-        }
-    }
 }
 
 impl Renderer {
@@ -608,64 +421,41 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
-    /// Upload portal/sublevel coordinate spaces into the G-buffer's transient
-    /// transform table. Slot zero remains identity; callers provide slots 1+.
+    /// Forward portal/sublevel coordinate spaces through the generic graph
+    /// input seam. The owning pass uploads its own GPU table during prepare.
     pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
         self.coordinate_spaces.clear();
         self.coordinate_spaces.extend_from_slice(spaces);
-        let spaces = self.coordinate_spaces.clone();
-        let queue = Arc::clone(&self.queue);
-        if let Some(pass) = self.find_pass_mut::<helio_pass_gbuffer::GBufferPass>() {
-            pass.set_coordinate_spaces(&queue, &spaces);
-        }
+        self.apply_coordinate_spaces();
     }
 
     /// Upload a resolver-generated portal projection frame while preserving
     /// the renderer's existing coordinate-space seam. The frame owns slot
     /// zero as identity and this facade accepts the non-identity tail because
-    /// `GBufferPass::set_coordinate_spaces` reserves slot zero itself.
+    /// The graph broadcasts the frame to whichever pass families consume it;
+    /// the renderer does not need to know their concrete types.
     pub fn set_portal_projection_frame(
         &mut self,
         frame: &helio_pass_portal_cull::PortalProjectionFrame,
     ) {
-        self.set_coordinate_spaces(frame.renderer_coordinate_spaces());
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces
+            .extend_from_slice(frame.renderer_coordinate_spaces());
         self.portal_projection_counts = Some((
             frame.counts.portal_view_count,
             frame.counts.portal_chain_count,
         ));
-        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_cull::PortalCullPass>() {
-            pass.set_active_chain_count(frame.counts.portal_chain_count);
-        }
-        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalMaskPass>() {
-            pass.set_active_portal_count(frame.counts.portal_view_count);
-        }
-        if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>() {
-            pass.set_active_portal_count(frame.counts.portal_view_count);
-        }
+        self.apply_coordinate_spaces();
     }
 
     pub(crate) fn apply_coordinate_spaces(&mut self) {
-        if !self.coordinate_spaces.is_empty() {
-            let spaces = self.coordinate_spaces.clone();
-            let queue = Arc::clone(&self.queue);
-            if let Some(pass) = self.find_pass_mut::<helio_pass_gbuffer::GBufferPass>() {
-                pass.set_coordinate_spaces(&queue, &spaces);
-            }
-        }
-        if let Some((view_count, chain_count)) = self.portal_projection_counts {
-            if let Some(pass) = self.find_pass_mut::<helio_pass_portal_cull::PortalCullPass>() {
-                pass.set_active_chain_count(chain_count);
-            }
-            if let Some(pass) = self.find_pass_mut::<helio_pass_portal_instances::PortalMaskPass>()
-            {
-                pass.set_active_portal_count(view_count);
-            }
-            if let Some(pass) =
-                self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
-            {
-                pass.set_active_portal_count(view_count);
-            }
-        }
+        let inputs = RenderFrameInputs {
+            coordinate_spaces: &self.coordinate_spaces,
+            projection_counts: self
+                .portal_projection_counts
+                .map(|(view_count, chain_count)| [view_count, chain_count]),
+        };
+        self.graph.set_frame_inputs(&inputs);
     }
 
     /// Select the cloud representation used by the default sky pass.

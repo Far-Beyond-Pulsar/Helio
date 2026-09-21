@@ -74,7 +74,7 @@ pub use contract::{
 pub use helio_pass_gbuffer::CoordinateSpacesFrameData;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, RenderFrameInputs, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 pub mod components;
 
@@ -281,8 +281,8 @@ impl RenderPass for PortalCullPass {
         "PortalCull"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch"]
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_chain_count = inputs.projection_counts.map(|counts| counts[1]);
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
@@ -300,7 +300,7 @@ impl RenderPass for PortalCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx
-            .pass_resources
+            .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.draw_count)
             .unwrap_or(0);
         // A growable SceneDB buffer reports reserved capacity, not the number
@@ -341,10 +341,10 @@ impl RenderPass for PortalCullPass {
         if self.draw_count == 0 || self.chain_count == 0 {
             return Ok(());
         }
-        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.registry.get(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {

@@ -305,11 +305,11 @@ impl ApplicationHandler for App {
         // PostProcessPass would instead clear+rewrite the target straight from
         // "pre_aa" and discard FXAA's result if chained after it).
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, _debug_state, _cb, _dcb, _csb| {
-                let mut graph = RenderGraph::new(d, q);
-                let mut voxel_rm_pass = VoxelRayMarchPass::new(d, surface_format);
+            .with_pass_build_context(Box::new(move |ctx| {
+                let mut graph = RenderGraph::new(ctx.device, ctx.queue);
+                let mut voxel_rm_pass = VoxelRayMarchPass::new(ctx.device, surface_format);
                 voxel_rm_pass.upload_volume(
-                    q,
+                    ctx.queue,
                     0,
                     &GpuVoxelVolume {
                         local_to_world: glam::Mat4::IDENTITY.to_cols_array(),
@@ -326,10 +326,10 @@ impl ApplicationHandler for App {
                 // only resizes them in on_resize(), which the engine normally calls from a
                 // window-resize event. Since RenderGraph::lock() never calls it, we have to
                 // size the pass explicitly here or it ray marches into a 1x1 texture forever.
-                voxel_rm_pass.on_resize(d, graph_config.width, graph_config.height);
+                voxel_rm_pass.on_resize(ctx.device, ctx.config.width, ctx.config.height);
                 graph.add_pass(Box::new(voxel_rm_pass));
-                graph.add_pass(Box::new(FxaaPass::new(d, surface_format)));
-                graph.lock(graph_config.width, graph_config.height);
+                graph.add_pass(Box::new(FxaaPass::new(ctx.device, surface_format)));
+                graph.lock(ctx.config.width, ctx.config.height);
                 graph
             }))
             .build(device.clone(), queue.clone(), size.width, size.height, surface_format);

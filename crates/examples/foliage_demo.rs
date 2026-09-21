@@ -27,7 +27,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_foliage_place::components::{
     FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
 };
@@ -430,21 +430,8 @@ impl ApplicationHandler for App {
         // scene content -- the pass owns these schemas and its GPU mirror
         // publishes insert/mutate/remove through the World.
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
-                build_default_graph_external(
-                    d,
-                    q,
-                    cb,
-                    graph_config,
-                    debug_state,
-                    dcb,
-                    csb,
-                    None,
-                    graph_scene_db.clone(),
-                )
-            }))
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
             .build(
                 device.clone(),
                 queue.clone(),

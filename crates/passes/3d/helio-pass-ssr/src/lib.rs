@@ -242,10 +242,6 @@ impl RenderPass for SsrPass {
         ]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["ssr_trace"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
             "ssr_trace",
@@ -276,7 +272,7 @@ impl RenderPass for SsrPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(
+        let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
             helio_core::ResourceKey::new("gbuffer"),
             "SsrPass",
         ) {
@@ -286,7 +282,7 @@ impl RenderPass for SsrPass {
 
         let depth_view = ctx.depth;
         let pre_aa_view: &wgpu::TextureView =
-            match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
+            match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
                 Some(v) => v,
                 None => return Ok(()),
             };
@@ -337,18 +333,18 @@ impl RenderPass for SsrPass {
 
         // ── Decide between default and RT path ──────────────────────────
         if self.use_rt {
-            let environment = ctx.resources.read::<helio_core::RenderEnvironment>(
-                helio_core::ResourceKey::new("render_environment"),
+            let environment = ctx.registry.read::<helio_core::RenderEnvironment>(
+                helio_core::resource_keys::render_environment(),
                 "SsrPass",
             );
             let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
                 let rc_view: Option<&wgpu::TextureView> =
-                    ctx.resources.get(helio_core::ResourceKey::new("rc_view"));
+                    ctx.registry.get(helio_core::ResourceKey::new("rc_view"));
 
                 let transmission = ctx
-                    .resources
+                    .registry
                     .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
                     .unwrap_or(&self.transmission_fallback);
                 let rt_key = (tlas_binding.clone(), rc_view.cloned(), transmission.clone());

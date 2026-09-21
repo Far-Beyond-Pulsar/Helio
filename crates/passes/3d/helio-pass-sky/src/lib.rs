@@ -1883,7 +1883,7 @@ impl RenderPass for SkyPass {
         };
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniform));
-        let (cloud_base, cloud_top) = ctx.pass_resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
+        let (cloud_base, cloud_top) = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
             .map(|clouds| (clouds.base, clouds.top))
             .unwrap_or((32.0, 120.0));
         let temporal_values = [
@@ -1899,9 +1899,9 @@ impl RenderPass for SkyPass {
         );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
-        if ctx.pass_resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+        if ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
-            if let Some(clouds) = ctx.pass_resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds) {
+            if let Some(clouds) = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds) {
                 sky_uniforms.clouds_enabled = self.config.enabled as u32;
                 sky_uniforms.cloud_coverage = clouds.coverage;
                 sky_uniforms.cloud_density = clouds.density;
@@ -1947,7 +1947,7 @@ impl RenderPass for SkyPass {
         // SceneDB atmosphere rows do not publish the retired SkyActor context.
         // Empty/deleted rows are rejected in the shaders before integration.
         let has_sky = scene_sky_buf.is_some()
-            || ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+            || ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
                 .is_some_and(|sky| sky.has_sky);
 
         // ── 1) Sky LUT generation (192x108) ─────────────────────────────────
@@ -1955,7 +1955,7 @@ impl RenderPass for SkyPass {
             // Ensure LUT bind group is up to date (for generation)
             // LUT generation render pass — writes to graph-owned sky_lut texture if available.
             // We use encoder_ptr directly because this pass also owns the subsequent pre_aa pass.
-            if let Some(sky_lut_view) = ctx.resources.get(helio_core::ResourceKey::new("sky_lut")) {
+            if let Some(sky_lut_view) = ctx.registry.get(helio_core::ResourceKey::new("sky_lut")) {
                 if self.sky_lut_bg1_key != Some(scene_sky_key) {
                     self.sky_lut_bg1 =
                         Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2000,7 +2000,7 @@ impl RenderPass for SkyPass {
         // also simulate/overlay the legacy 3D volume: that path is expensive
         // and its empty/default volume is the source of the gray/black veil
         // seen over the procedural demo.
-        let procedural_clouds = ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
+        let procedural_clouds = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
             .map(|clouds| clouds.infinite_extent)
             .unwrap_or(false);
 
@@ -2013,7 +2013,7 @@ impl RenderPass for SkyPass {
 
         if !self.use_high_perf {
             // Fallback: legacy fullscreen raymarch (writes to pre_aa when available)
-            let target_view = ctx.resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
+            let target_view = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
             if let Some(ptr) = ctx.active_render_pass_ptr() {
                 unsafe { self.render(&mut *ptr) };
             } else {
@@ -2038,7 +2038,7 @@ impl RenderPass for SkyPass {
                 };
                 if has_sky {
                     // Also composite sky when in legacy mode
-                    if let Some(sky_lut_view) = ctx.resources.get(helio_core::ResourceKey::new("sky_lut")) {
+                    if let Some(sky_lut_view) = ctx.registry.get(helio_core::ResourceKey::new("sky_lut")) {
                         let key = (sky_lut_view as *const _ as usize, scene_sky_key);
                         if self.sky_bg1_key != Some(key) {
                             self.sky_bg1 =
@@ -2090,8 +2090,8 @@ impl RenderPass for SkyPass {
 
         let volume_clouds_enabled = self.config.enabled
             && self.config.mode == CloudRenderMode::Volume3D
-            && ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky)
-            && ctx.resources.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds).is_some();
+            && ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky)
+            && ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds).is_some();
         // Godot's reference path deliberately keeps reduced-resolution cloud
         // frames free of temporal color history.  Reusing coarse texels and
         // then filtering them at presentation resolution is what creates the
@@ -2229,7 +2229,7 @@ impl RenderPass for SkyPass {
 
         // ── 3) Composite sky + clouds into pre_aa (active render pass) ─────────
         // Lazy bind group for sky composite (needs LUT view)
-        if let Some(sky_lut_view) = ctx.resources.get(helio_core::ResourceKey::new("sky_lut")) {
+        if let Some(sky_lut_view) = ctx.registry.get(helio_core::ResourceKey::new("sky_lut")) {
             let key = (sky_lut_view as *const _ as usize, scene_sky_key);
             if self.sky_bg1_key != Some(key) {
                 self.sky_bg1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2284,7 +2284,7 @@ impl RenderPass for SkyPass {
             }
         } else {
             // No active pass — manual fallback (writes to pre_aa when graph allocates it)
-            let target_view = ctx.resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
+            let target_view = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,

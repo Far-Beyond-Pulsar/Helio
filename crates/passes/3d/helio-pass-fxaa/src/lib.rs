@@ -122,19 +122,11 @@ impl RenderPass for FxaaPass {
         "FXAA"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
         if let Some(format) = self.intermediate_format {
             builder.write_color_raw("fxaa_color", format, helio_core::graph::ResourceSize::MatchSurface);
         }
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        if self.intermediate_format.is_some() { &["fxaa_color"] } else { &[] }
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -168,7 +160,7 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
+        let input_view = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
         if self.bind_group_key.as_ref() != Some(input_view) {

@@ -278,10 +278,6 @@ impl RenderPass for ShadowDirtyPass {
         "ShadowDirty"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
     }
@@ -296,8 +292,8 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let movable_draw_count = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.shadow_movable_draw_count).unwrap_or(0);
-        let face_count = ctx.pass_resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")).map(|s| s.shadow_count).unwrap_or(0)
+        let movable_draw_count = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.shadow_movable_draw_count).unwrap_or(0);
+        let face_count = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()).map(|s| s.shadow_count).unwrap_or(0)
             .min(MAX_SHADOW_FACES as u32);
 
         // Detect topology changes (objects added/removed from movable set).
@@ -320,11 +316,11 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
         let movable_draw_count = batch.shadow_movable_draw_count;
-        let Some(shadow_data) = ctx.resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")) else {
+        let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
             return Ok(());
         };
         let face_count = shadow_data.shadow_count;

@@ -114,7 +114,7 @@ pub struct OcclusionCullPass {
 impl OcclusionCullPass {
     /// Create the occlusion-cull pass.
     ///
-    /// The HiZ texture view is read from `ctx.resources.hiz` each frame (routed
+    /// The HiZ texture view is read from `ctx.registry.hiz` each frame (routed
     /// by the graph). `hiz_sampler` is owned by HiZBuildPass and shared via Arc.
     pub fn new(
         device: &wgpu::Device,
@@ -411,10 +411,6 @@ impl RenderPass for OcclusionCullPass {
         ]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["culled_batch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
         builder.read("indirect_dispatch");
@@ -470,7 +466,7 @@ impl RenderPass for OcclusionCullPass {
             self.set_screen_size(ctx.width.max(1), ctx.height.max(1));
         }
 
-        let batch = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
+        let batch = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
@@ -478,8 +474,8 @@ impl RenderPass for OcclusionCullPass {
         // (only present once real baked data is loaded via `load_static_hiz`)
         // -- `read_texture_view` falls through to a debug-only panic on a
         // missing key, which fires before this `.is_some()` ever sees it.
-        let static_hiz_available = ctx.pass_resources.get(helio_core::ResourceKey::new("static_hiz"))
-            .or_else(|| ctx.pass_resources.texture_binding("static_hiz"))
+        let static_hiz_available = ctx.registry.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.registry.texture_binding("static_hiz"))
             .is_some();
         let p = CullParams {
             screen_width: self.screen_width,
@@ -502,13 +498,13 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(indirect_dispatch) = ctx.resources.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+        let Some(indirect_dispatch) = ctx.registry.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -551,7 +547,7 @@ impl RenderPass for OcclusionCullPass {
         // Lazy bind-group rebuild: rebuild whenever any buffer pointer or the
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
         let hiz_view =
-            ctx.resources.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
+            ctx.registry.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
                 "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
             );
 
@@ -560,10 +556,10 @@ impl RenderPass for OcclusionCullPass {
         // `static_hiz_available` above -- `read_texture_view`/`read_sampler` fall
         // through to a debug-only panic on a missing key, which would fire before
         // `unwrap_or` ever sees it, even though this resource is legitimately optional.
-        let static_hiz_view = ctx.resources.get(helio_core::ResourceKey::new("static_hiz"))
-            .or_else(|| ctx.resources.texture_binding("static_hiz"))
+        let static_hiz_view = ctx.registry.get(helio_core::ResourceKey::new("static_hiz"))
+            .or_else(|| ctx.registry.texture_binding("static_hiz"))
             .unwrap_or(&self.placeholder_static_hiz_view);
-        let static_hiz_sampler = ctx.resources.get(helio_core::ResourceKey::new("static_hiz_sampler"))
+        let static_hiz_sampler = ctx.registry.get(helio_core::ResourceKey::new("static_hiz_sampler"))
             .unwrap_or(&self.placeholder_static_hiz_sampler);
 
         let key = (

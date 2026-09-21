@@ -464,13 +464,13 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(shadow_data) = ctx.resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices")) else {
+        let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let face_count = (shadow_data.shadow_count as usize)

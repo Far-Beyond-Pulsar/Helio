@@ -394,17 +394,17 @@ impl RenderPass for DecalPass {
         if self.decal_count == 0 {
             return Ok(());
         }
-        let gb = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), self.name()) {
+        let gb = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), self.name()) {
             Some(g) => g,
             None => return Ok(()),
         };
-        let depth_view = match ctx.resources.read(helio_core::ResourceKey::new("hiz"), self.name()) {
+        let depth_view = match ctx.registry.read(helio_core::ResourceKey::new("hiz"), self.name()) {
             Some(v) => v,
             None => return Ok(()),
         };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
-        let material_textures = match ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), self.name()) {
+        let material_textures = match ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), self.name()) {
             Some(m) => m,
             None => return Ok(()),
         };

@@ -101,7 +101,6 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             camera_generation: 0,
             scene_buffers: &scene_buffers,
             registry: &helio_core::ResourceRegistry::empty(),
-            pass_resources: &helio_core::ResourceRegistry::empty(),
             width: size[0],
             height: size[1],
             frame_num: frame,

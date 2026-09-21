@@ -1248,10 +1248,6 @@ impl RenderPass for ObjectBatchPass {
         None // Compute-only pass -- no render pass.
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["object_batch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.write_buffer("object_batch");
     }

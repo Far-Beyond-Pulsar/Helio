@@ -517,14 +517,6 @@ impl RenderPass for VoxelRayMarchPass {
         "VoxelRayMarch"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color(
             "pre_aa",

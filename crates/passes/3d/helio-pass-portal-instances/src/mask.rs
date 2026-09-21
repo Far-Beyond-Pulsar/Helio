@@ -11,7 +11,7 @@
 //!    against unrelated nearby real geometry.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalMaskPass {
@@ -223,6 +223,10 @@ impl RenderPass for PortalMaskPass {
         "PortalMask"
     }
 
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_portal_count = inputs.projection_counts.map(|counts| counts[0]);
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
             "portal_mask",
@@ -230,14 +234,6 @@ impl RenderPass for PortalMaskPass {
             ResourceSize::MatchSurface,
         );
         builder.with_extra_usage(wgpu::TextureUsages::TEXTURE_BINDING);
-    }
-
-    fn reads(&self) -> &'static [&'static str] {
-        &["depth"]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["portal_mask"]
     }
 
     fn render_pass_descriptor<'a>(

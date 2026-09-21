@@ -1021,7 +1021,7 @@ impl RenderPass for WaterSimPass {
                     self.caustics_bg_key = Some(new_key);
                 }
 
-                let caustics_view = ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap();
+                let caustics_view = ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap();
                 let cau_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: caustics_view,
                     resolve_target: None,
@@ -1058,7 +1058,7 @@ impl RenderPass for WaterSimPass {
             .as_ref()
             .expect("water_output view from graph");
         let scene_view: &wgpu::TextureView = ctx
-            .resources
+            .registry
             .get(helio_core::ResourceKey::new("pre_aa"))
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
@@ -1107,7 +1107,7 @@ impl RenderPass for WaterSimPass {
         if volume_count > 0 {
             if let Some(vols_buf) = water_volumes_buf {
                 let gbuffer_normal_view = ctx
-                    .resources
+                    .registry
                     .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"))
                     .map(|gb| gb.views[1])
                     .unwrap_or(&self.gbuffer_fallback_view);
@@ -1160,7 +1160,7 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
+                                        ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -1307,7 +1307,7 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 8,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.resources.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
+                                            ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
                                         ),
                                     },
                                 ],

@@ -264,7 +264,7 @@ impl Fixture {
         }
         let mut resources = helio_core::ResourceRegistry::empty();
         resources.write(
-            helio_core::ResourceKey::new("render_environment"),
+            helio_core::resource_keys::render_environment(),
             helio_core::RenderEnvironment {
                 clear_color: [0.0; 4],
                 ambient_color: self.ambient,
@@ -294,7 +294,7 @@ impl Fixture {
             "Fixture",
         );
         resources.write(
-            helio_core::ResourceKey::new("shadow_matrices"),
+            helio_core::resource_keys::shadow_matrices(),
             helio_pass_shadow_matrix::ShadowMatricesFrameData {
                 shadow_matrices: &self.scene.shadow_matrices.buffer,
                 shadow_count: 6,

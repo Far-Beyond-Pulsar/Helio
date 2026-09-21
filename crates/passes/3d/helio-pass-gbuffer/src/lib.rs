@@ -120,6 +120,9 @@ pub struct GBufferPass {
     /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
     /// generic Renderer has no business knowing it.
     fallback_material_textures: wgpu::Buffer,
+    /// CPU-side projection input staged by the generic graph interface and
+    /// uploaded during `prepare()` with the current frame queue.
+    pending_coordinate_spaces: Option<Vec<glam::Mat4>>,
 }
 
 impl GBufferPass {
@@ -289,6 +292,7 @@ impl GBufferPass {
             coordinate_spaces,
             coordinate_spaces_prev,
             fallback_material_textures,
+            pending_coordinate_spaces: None,
         }
     }
 
@@ -334,6 +338,37 @@ impl GBufferPass {
 impl RenderPass for GBufferPass {
     fn name(&self) -> &'static str {
         "GBuffer"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.pending_coordinate_spaces = Some(inputs.coordinate_spaces.to_vec());
+    }
+
+    fn publish_frame_inputs<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // SAFETY: these buffers are owned by the GBuffer pass, which is owned
+        // by the RenderGraph for longer than the current frame registry.
+        let coordinate_spaces: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.coordinate_spaces)
+        };
+        let coordinate_spaces_prev: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.coordinate_spaces_prev)
+        };
+        let fallback_material_textures: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.fallback_material_textures)
+        };
+        frame.write(
+            helio_core::resource_keys::coordinate_spaces(),
+            helio_core::CoordinateSpacesFrameData {
+                coordinate_spaces,
+                coordinate_spaces_prev,
+            },
+            "GBuffer",
+        );
+        frame.write(
+            helio_core::ResourceKey::new("material_texture_fallback"),
+            fallback_material_textures,
+            "GBuffer",
+        );
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -508,13 +543,29 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from pass_resources so the GBuffer globals match
+        if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.as_ref() {
+            let mut words = [0.0f32; 32 * 16];
+            words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
+            for (slot, space) in pending_coordinate_spaces.iter().take(31).enumerate() {
+                words[(slot + 1) * 16..(slot + 2) * 16]
+                    .copy_from_slice(&space.to_cols_array());
+            }
+            ctx.queue
+                .write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
+            ctx.queue.write_buffer(
+                &self.coordinate_spaces_prev,
+                0,
+                bytemuck::cast_slice(&words),
+            );
+            self.pending_coordinate_spaces = None;
+        }
+        // Read per-scene values from the frame registry so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let rc_volume = ctx
-            .pass_resources
+            .registry
             .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")).as_ref() {
+            if let Some(ref environment) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).as_ref() {
                 (
                     [
                         environment.ambient_color[0],
@@ -568,17 +619,17 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx.registry.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(material_textures) = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "GBuffer") else {
+        let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "GBuffer") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -600,7 +651,7 @@ impl RenderPass for GBufferPass {
         let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let coord_spaces = ctx.resources.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces"));
+        let coord_spaces = ctx.registry.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces());
         let coordinate_spaces_buf = coord_spaces
             .map(|c| c.coordinate_spaces)
             .unwrap_or(ctx.camera);
@@ -774,15 +825,6 @@ impl RenderPass for GBufferPass {
         &["material_textures", "render_environment", "object_batch", "culled_batch"]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &[
-            "gbuffer",
-            "gbuffer_lightmap_uv",
-            "gbuffer_sss",
-            "gbuffer_extra",
-            "gbuffer_velocity",
-        ]
-    }
 }
 
 impl GBufferPass {

@@ -3,20 +3,24 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, Renderer, SceneEntityId};
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
-use crate::common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh, point_light};
+use crate::common::{
+    cube_mesh, insert_object, make_material, plane_mesh, point_light, spawn_light, spawn_material,
+    spawn_mesh,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
 
 pub struct Demo {
-    cube1: SceneEntityId,
-    cube2: SceneEntityId,
-    cube3: SceneEntityId,
-    _ground: SceneEntityId,
-    light_p0: LightId,
+    _cube1: Entity,
+    _cube2: Entity,
+    _cube3: Entity,
+    _ground: Entity,
+    _light_p0: Entity,
 
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -29,71 +33,52 @@ impl HelioWasmApp for Demo {
     }
 
     fn init(
-        renderer: &mut Renderer,
+        _renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer.scene().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let world = &mut scene_db.world;
+        let mat = spawn_material(
+            world,
+            make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
-        let cube1 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
-        let cube2 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
-        let cube3 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
+        let cube1_mesh = spawn_mesh(world, cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2_mesh = spawn_mesh(world, cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3_mesh = spawn_mesh(world, cube_mesh([2.0, 0.3, 0.5], 0.3));
+        let ground_mesh = spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
-        let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
-        let _ = insert_object(renderer, cube3, mat, glam::Mat4::IDENTITY, 0.3);
-        let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let cube1 = insert_object(world, cube1_mesh, mat, glam::Mat4::IDENTITY, 0.5)
+            .expect("cube mesh should have a GPU range");
+        let cube2 = insert_object(world, cube2_mesh, mat, glam::Mat4::IDENTITY, 0.4)
+            .expect("cube mesh should have a GPU range");
+        let cube3 = insert_object(world, cube3_mesh, mat, glam::Mat4::IDENTITY, 0.3)
+            .expect("cube mesh should have a GPU range");
+        let ground = insert_object(world, ground_mesh, mat, glam::Mat4::IDENTITY, 5.0)
+            .expect("ground mesh should have a GPU range");
 
-        let light_p0 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [0.0, 2.2, 0.0],
-                [1.0, 0.55, 0.15],
-                6.0,
-                5.0,
-            )))
-            .as_light()
-            .expect("insert_entity returned non-Light for light actor");
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [-3.5, 2.0, -1.5],
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [3.5, 1.5, 1.5],
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        let light_p0 = spawn_light(
+            world,
+            point_light([0.0, 2.2, 0.0], [1.0, 0.55, 0.15], 6.0, 5.0),
+        );
+        spawn_light(
+            world,
+            point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0),
+        );
+        spawn_light(
+            world,
+            point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0),
+        );
 
         Self {
-            cube1,
-            cube2,
-            cube3,
+            _cube1: cube1,
+            _cube2: cube2,
+            _cube3: cube3,
             _ground: ground,
-            light_p0,
+            _light_p0: light_p0,
             cam_pos: Vec3::new(0.0, 2.5, 7.0),
             cam_yaw: 0.0,
             cam_pitch: -0.2,
@@ -102,9 +87,9 @@ impl HelioWasmApp for Demo {
 
     fn update(
         &mut self,
-        renderer: &mut Renderer,
+        _renderer: &mut Renderer,
         dt: f32,
-        elapsed: f32,
+        _elapsed: f32,
         input: &InputState,
     ) -> Camera {
         // Mouse look
@@ -134,12 +119,6 @@ impl HelioWasmApp for Demo {
         if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) {
             self.cam_pos.y -= FLY_SPEED * dt;
         }
-
-        // Animate light p0
-        let p0 = [0.0_f32, 2.2 + (elapsed * 0.7).sin() * 0.3, 0.0];
-        let _ = renderer
-            .scene()
-            .update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
 
         Camera::perspective_look_at(
             self.cam_pos,

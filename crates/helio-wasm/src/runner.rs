@@ -15,7 +15,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use helio::{Renderer, RendererConfig};
+use helio::{PassBuildContext, Renderer, RendererConfig};
 
 use crate::{HelioWasmApp, InputState};
 
@@ -423,19 +423,18 @@ async fn init_wgpu<T: HelioWasmApp>(
     let mut renderer = {
         let scene_db_handle = scene_db_handle.clone();
         helio::RendererBuilder::new(config, scene_db_handle.clone())
-            .with_graph(Box::new(move |d, q, cfg, ds, cam, dcam, csb| {
-                T::build_graph(d, q, cfg, ds.clone(), cam, dcam, csb).unwrap_or_else(|| {
-                    helio_default_graphs::build_default_graph_external(
-                        d,
-                        q,
-                        cam,
-                        cfg,
-                        ds,
-                        dcam,
-                        csb,
-                        None,
-                        scene_db_handle.clone(),
-                    )
+            .with_pass_build_context(Box::new(move |ctx: PassBuildContext<'_>| {
+                T::build_graph(
+                    ctx.device,
+                    ctx.queue,
+                    ctx.config,
+                    ctx.debug_state.clone(),
+                    ctx.camera_buffer,
+                    ctx.debug_camera_buffer,
+                    ctx.cull_stats_buffer,
+                )
+                .unwrap_or_else(|| {
+                    helio_default_graphs::build_default_graph_external_with_context(ctx)
                 })
             }))
             .build(device.clone(), queue.clone(), width, height, surface_format)

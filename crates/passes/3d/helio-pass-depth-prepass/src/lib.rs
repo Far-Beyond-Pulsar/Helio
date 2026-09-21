@@ -137,10 +137,6 @@ impl RenderPass for DepthPrepassPass {
         "DepthPrepass"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch", "culled_batch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
         builder.read("culled_batch");
@@ -177,10 +173,10 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx.registry.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.

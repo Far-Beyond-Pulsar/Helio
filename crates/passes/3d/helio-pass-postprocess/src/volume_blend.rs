@@ -159,7 +159,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             return Ok(());
         }
 
-        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
+        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
         let pp_volumes_buf = ctx

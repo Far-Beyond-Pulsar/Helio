@@ -8,7 +8,7 @@
 //! that owns them).
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalEditorOverlayPass {
@@ -151,6 +151,10 @@ impl PortalEditorOverlayPass {
 impl RenderPass for PortalEditorOverlayPass {
     fn name(&self) -> &'static str {
         "PortalEditorOverlay"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_portal_count = inputs.projection_counts.map(|counts| counts[0]);
     }
 
     fn reads(&self) -> &'static [&'static str] {
