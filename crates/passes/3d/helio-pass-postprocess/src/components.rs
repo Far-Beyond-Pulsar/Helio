@@ -46,6 +46,26 @@ const _: () = assert!(
     std::mem::size_of::<[u32; 116]>() == std::mem::size_of::<crate::GpuPostProcessUniforms>()
 );
 
+// The pinned SceneDB version dispatches removals/despawns through this release
+// registry, but only generates registrations for variable-length components.
+// Packed PP rows need an explicit tombstone too: the shaders scan capacity,
+// and stale blend_weight would otherwise keep a deleted volume alive forever.
+pulsar_reflection::inventory::submit! {
+    pulsar_scenedb::gpu::world_mirror::VarLenReleaseRegistration {
+        component_id: pulsar_scenedb::component::component_id::<PostProcessVolumeComponent>,
+        release: clear_volume_row,
+    }
+}
+
+fn clear_volume_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
+    let zero: PostProcessVolumeComponent = bytemuck::Zeroable::zeroed();
+    mirror.store().mark_gpu_row_dirty(
+        pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_PostProcessVolumeComponent>(),
+        row,
+        bytemuck::bytes_of(&zero),
+    );
+}
+
 impl From<crate::GpuPostProcessVolume> for PostProcessVolumeComponent {
     fn from(v: crate::GpuPostProcessVolume) -> Self {
         bytemuck::cast(v)

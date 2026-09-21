@@ -250,6 +250,8 @@ pub enum FogMode {
     Uniform = 0,
     /// Density decays exponentially with world height above `fog_height`.
     HeightBased = 1,
+    /// Animated world-space billows with height falloff, for smoke volumes.
+    Smoke = 2,
 }
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
@@ -1127,6 +1129,7 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         fog_enabled: gpu.fog_enabled != 0,
         fog_mode: match gpu.fog_mode {
             1 => FogMode::HeightBased,
+            2 => FogMode::Smoke,
             _ => FogMode::Uniform,
         },
         fog_density: gpu.fog_density,

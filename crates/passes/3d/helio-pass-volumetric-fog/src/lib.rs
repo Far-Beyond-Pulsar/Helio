@@ -3,16 +3,17 @@
 //! A view-space 3D grid (Hillaire, "Physically Based and Unified Volumetric
 //! Rendering in Frostbite", SIGGRAPH 2015), rather than a raymarch per pixel:
 //!
-//! 1. **Inject** — one thread per froxel: density, one shadow tap per opted-in
+//! 1. **Classify** — compact active SceneDB volume/light rows once per frame.
+//! 2. **Inject** — one thread per froxel: density, one shadow tap per opted-in
 //!    light, blended against the reprojected previous frame.
-//! 2. **Integrate** — one thread per (x,y) column: marches z once, producing
+//! 3. **Integrate** — one thread per (x,y) column: marches z once, producing
 //!    accumulated in-scattering + transmittance.
-//! 3. **Composite** (in `postprocess.wgsl`) — one trilinear 3D fetch at the
+//! 4. **Composite** (in `postprocess.wgsl`) — one trilinear 3D fetch at the
 //!    pixel's depth.
 //!
 //! # Why a grid
 //!
-//! Cost is decoupled from screen resolution: ~920k froxels lit once each, against
+//! Cost is decoupled from screen resolution: ~2.65M froxels lit once each, against
 //! ~59M samples for a 1280x720 per-pixel march at 64 steps. The trilinear fetch
 //! filters in depth as well as x/y, so there is no reduced-resolution upsample to
 //! hide — which is what made the earlier per-pixel version pixelate the geometry
@@ -23,9 +24,9 @@
 //!
 //! # Placement
 //!
-//! Runs before TAA. The grid is a fixed size, so unlike the per-pixel version it
-//! does not care about the internal resolution. It needs the shadow atlas and
-//! lights, not the scene colour.
+//! Builds the grid before AA; post-processing composites it afterward. Fog has
+//! its own temporal history. Optional scene lights/shadow atlas illuminate the
+//! medium; camera defaults and SceneDB PP volume rows define its density.
 //!
 //! # Owned resources
 //!
@@ -40,12 +41,12 @@ pub use components::{FogComponent, FogSceneBinding};
 
 /// Froxel grid dimensions.
 ///
-/// 160x90 keeps the 16:9 aspect so froxels stay roughly square on screen; 64
-/// depth slices is the usual budget. Fixed rather than derived from the window:
-/// the point of the grid is that cost does not track resolution.
-const FROXEL_W: u32 = 160;
-const FROXEL_H: u32 = 90;
-const FROXEL_D: u32 = 64;
+/// Fixed screen footprint and 128 logarithmic depth slices. Empty froxels
+/// skip lighting, and active scene rows are compacted once per frame. The
+/// three RGBA16F grids allocate ~60.75 MiB, independent of output resolution.
+const FROXEL_W: u32 = 192;
+const FROXEL_H: u32 = 108;
+const FROXEL_D: u32 = 128;
 
 const WG_X: u32 = 8;
 const WG_Y: u32 = 8;
@@ -58,18 +59,25 @@ const WG_Y: u32 = 8;
 const TEMPORAL_BLEND: f32 = 0.05;
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+// FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
+const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 304);
+const _: () = assert!(std::mem::size_of::<helio_pass_postprocess::GpuPostProcessVolume>() == 528);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct FogGlobals {
     csm_splits: [f32; 4],
-    light_count: u32,
+    _reserved: u32,
     frame: u32,
     history_valid: u32,
     temporal_blend: f32,
+    time: f32,
+    _pad: [f32; 3],
 }
 
 pub struct VolumetricFogPass {
+    timing_query: Option<wgpu::QuerySet>,
+    classify_pipeline: wgpu::ComputePipeline,
     inject_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
     inject_bgl: wgpu::BindGroupLayout,
@@ -87,6 +95,10 @@ pub struct VolumetricFogPass {
     globals_buf: wgpu::Buffer,
     shadow_sampler: wgpu::Sampler,
     linear_sampler: wgpu::Sampler,
+    active_media_buf: wgpu::Buffer,
+    fallback_volumes: wgpu::Buffer,
+    fallback_lights: wgpu::Buffer,
+    fallback_shadow: wgpu::TextureView,
 
     /// Ping-ponged scattering grids: one is read as history while the other is
     /// written. Sampling and storing to one texture in a single dispatch is a
@@ -100,13 +112,15 @@ pub struct VolumetricFogPass {
     write_idx: usize,
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
-    inject_bg_key: Option<(usize, usize, usize)>,
+    inject_bg_key: Option<[wgpu::Buffer; 4]>,
+    inject_shadow: Option<wgpu::TextureView>,
     integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
     frame: u32,
     history_valid: bool,
     temporal_blend: f32,
+    time: f32,
 }
 
 fn make_grid(device: &wgpu::Device, label: &str) -> (wgpu::Texture, wgpu::TextureView) {
@@ -223,13 +237,14 @@ impl VolumetricFogPass {
                     count: None,
                 },
                 storage3d(9), // scatter out
+                storage_ro(11), // SceneDB post-process volumes
                 wgpu::BindGroupLayoutEntry {
-                    binding: 10,
+                    binding: 12,
                     visibility: cv,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -258,6 +273,14 @@ impl VolumetricFogPass {
             immediate_size: 0,
         });
 
+        let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Volumetric Fog Classify"),
+            layout: Some(&inject_pl),
+            module: &shader,
+            entry_point: Some("cs_classify"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let inject_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Volumetric Fog Inject"),
             layout: Some(&inject_pl),
@@ -312,7 +335,44 @@ impl VolumetricFogPass {
         let (s1, v1) = make_grid(device, "Fog Scatter 1");
         let (integrated, integrated_view) = make_grid(device, "Fog Integrated");
 
+        let active_media_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fog Active Volume and Light Indices"),
+            size: (4 + 64 + 256) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let fallback_volumes = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fog Empty SceneDB Volumes"),
+            size: std::mem::size_of::<helio_pass_postprocess::GpuPostProcessVolume>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let fallback_lights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fog Empty Lights"),
+            size: 128,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let fallback_shadow = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Fog Empty Shadow Atlas"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }).create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         Self {
+            timing_query: None,
+            classify_pipeline,
+            active_media_buf,
+            fallback_volumes,
+            fallback_lights,
+            fallback_shadow,
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
@@ -329,11 +389,13 @@ impl VolumetricFogPass {
             write_idx: 0,
             inject_bg: [None, None],
             inject_bg_key: None,
+            inject_shadow: None,
             integrate_g0_bg: None,
             integrate_bg: [None, None],
             frame: 0,
             history_valid: false,
             temporal_blend: TEMPORAL_BLEND,
+            time: 0.0,
         }
     }
 
@@ -349,6 +411,23 @@ impl VolumetricFogPass {
     /// from the previous shot smears across the first frames of the new one.
     pub fn reset_history(&mut self) {
         self.history_valid = false;
+    }
+
+    /// Optional GPU timestamps around classification, injection and integration.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("Volumetric fog timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 4,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
     }
 }
 
@@ -384,20 +463,16 @@ impl RenderPass for VolumetricFogPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.frame = ctx.frame_num as u32;
+        self.time += ctx.delta_time.max(0.0);
 
         let globals = FogGlobals {
             csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
-            light_count: if ctx
-                .scene_buffers
-                .contains(helio_core::BufferKey::of("scene_lights"))
-            {
-                256
-            } else {
-                0
-            },
+            _reserved: 0,
             frame: self.frame,
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
+            time: self.time,
+            _pad: [0.0; 3],
         };
         ctx.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -408,16 +483,19 @@ impl RenderPass for VolumetricFogPass {
         let Some(postprocess_buf) = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
-        let Some(shadow_atlas) = ctx.registry.get(helio_core::ResourceKey::new("shadow_atlas")) else {
-            return Ok(());
-        };
+        let shadow_atlas = ctx.registry.get(helio_core::ResourceKey::new("shadow_atlas"))
+            .unwrap_or(&self.fallback_shadow);
 
         let camera_buf = ctx.camera;
         let lights_buf = ctx
             .scene_buffers
             .get(helio_core::BufferKey::of("scene_lights"))
             .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.camera);
+            .unwrap_or(&self.fallback_lights);
+        let volumes_buf = ctx.scene_buffers
+            .get(helio_core::BufferKey::of("post_process_volumes"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_volumes);
         let shadow_matrices = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
@@ -431,18 +509,16 @@ impl RenderPass for VolumetricFogPass {
         let write_idx = self.write_idx;
         let history_idx = 1 - write_idx;
 
-        let depth_view = ctx.depth;
-        let depth_tex_ptr = depth_view as *const _ as usize;
-        let key = (
-            shadow_atlas as *const _ as usize,
-            lights_buf as *const _ as usize,
-            depth_tex_ptr,
-        );
-        if self.inject_bg_key != Some(key) {
+        let key = [camera_buf.clone(), lights_buf.clone(), shadow_matrices.clone(), volumes_buf.clone()];
+        if self.inject_bg_key.as_ref() != Some(&key)
+            || self.inject_shadow.as_ref() != Some(shadow_atlas)
+        {
             // Both sides are rebuilt together: each pins a fixed history/write
             // pair, so a stale one would read the grid it is also writing.
             self.inject_bg = [None, None];
             self.inject_bg_key = Some(key);
+            self.inject_shadow = Some(shadow_atlas.clone());
+            self.integrate_g0_bg = None;
         }
 
         if self.inject_bg[write_idx].is_none() {
@@ -451,6 +527,14 @@ impl RenderPass for VolumetricFogPass {
                     label: Some("Volumetric Fog Inject BG"),
                     layout: &self.inject_bgl,
                     entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: volumes_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: self.active_media_buf.as_entire_binding(),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 0,
                             resource: camera_buf.as_entire_binding(),
@@ -494,10 +578,6 @@ impl RenderPass for VolumetricFogPass {
                             resource: wgpu::BindingResource::TextureView(
                                 &self.scatter_view[write_idx],
                             ),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 10,
-                            resource: wgpu::BindingResource::TextureView(&depth_view),
                         },
                     ],
                 }));
@@ -560,6 +640,21 @@ impl RenderPass for VolumetricFogPass {
             helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
         );
 
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 0);
+        }
+        {
+            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Volumetric Fog Classify"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.classify_pipeline);
+            cpass.set_bind_group(0, inject_bg, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 1);
+        }
         {
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Volumetric Fog Inject"),
@@ -570,6 +665,9 @@ impl RenderPass for VolumetricFogPass {
             cpass.dispatch_workgroups(FROXEL_W.div_ceil(WG_X), FROXEL_H.div_ceil(WG_Y), FROXEL_D);
         }
 
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 2);
+        }
         {
             // One thread per (x,y) column — each marches all FROXEL_D slices, so
             // z is 1 here, not FROXEL_D.
@@ -583,6 +681,9 @@ impl RenderPass for VolumetricFogPass {
             cpass.dispatch_workgroups(FROXEL_W.div_ceil(WG_X), FROXEL_H.div_ceil(WG_Y), 1);
         }
 
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 3);
+        }
         // History is only meaningful once a grid has actually been written.
         self.history_valid = true;
 

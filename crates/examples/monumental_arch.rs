@@ -5,6 +5,7 @@
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec2, Vec3};
 use helio::{Camera, MeshUpload};
+use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, World};
 
 // Extrude a counter-clockwise polygon along depth. Rotating the entire prism
@@ -33,12 +34,13 @@ fn voussoirs(meshes: &mut [Mesh], radius: f32, spring: f32, front: f32, back: f3
 
 pub fn camera(t: f32, aspect: f32) -> Camera {
     let angle=0.30+t*0.28;
-    let distance=110.0-18.0*t;
-    let mut camera = Camera::perspective_look_at(Vec3::new(angle.sin()*distance,8.0+3.0*t,angle.cos()*distance),
+    let distance=66.0-12.0*t;
+    let mut camera = Camera::perspective_look_at(Vec3::new(angle.sin()*distance,14.0+3.0*t,angle.cos()*distance),
         Vec3::new(0.0,24.0,0.0),Vec3::Y,0.85,aspect,0.1,350.0);
     let settings = &mut camera.postprocess_settings;
-    settings.fog_enabled = std::env::var_os("HLFS_NO_FOG").is_none();
-    settings.fog_density = 0.0008;
+    // The smoke is a SceneDB volume, visible even with global camera fog off.
+    settings.fog_enabled = false;
+    settings.fog_density = 0.0;
     settings.fog_mode = helio_pass_postprocess::FogMode::HeightBased;
     settings.fog_height_falloff = 0.025;
     settings.fog_max_distance = 350.0;
@@ -154,10 +156,51 @@ pub fn populate(world: &mut World) -> (Vec<Entity>,Vec<Entity>) {
         let geometry=spawn_mesh(world,MeshUpload{vertices:mesh.vertices,indices:mesh.indices});
         spawn_object(world,geometry,material,Mat4::IDENTITY,160.0).expect("monument geometry");
     }
-    spawn_light(world,directional_light([-0.5,-0.75,-0.4],[1.0,0.86,0.66],3.5));
+    let mut sun = directional_light([-0.5,-0.75,-0.4],[1.0,0.86,0.66],3.5);
+    sun.god_rays_enabled = 1;
+    sun.god_rays_weight = 1.0;
+    sun.god_rays_exposure = 1.0;
+    sun.god_rays_density = 1.0;
+    spawn_light(world, sun);
+    let mut smoke_rim = point_light([3.0, 22.0, 9.0], [1.0, 0.72, 0.42], 650.0, 30.0);
+    smoke_rim.god_rays_enabled = 1;
+    smoke_rim.god_rays_weight = 1.0;
+    smoke_rim.god_rays_exposure = 1.0;
+    smoke_rim.god_rays_density = 1.0;
+    spawn_light(world, smoke_rim);
     for x in [-18.0,18.0] { for z in [-15.0,15.0] {
         spawn_light(world,point_light([x,0.8,z],[1.0,0.72,0.42],100.0,22.0));
     }}
+
+    // Hero fog volume for the HLFS cathedral/monument showcase. The bounds sit
+    // inside the grand vault so the camera can orbit through a clear exterior
+    // view and then reveal a denser, shaft-catching pocket beneath the arch.
+    let fog = world.spawn();
+    world.insert(
+        fog,
+        helio_pass_postprocess::PostProcessVolumeComponent::from(
+            PostProcessVolumeDescriptor {
+                bounds_min: [-8.5, 8.0, -14.0],
+                bounds_max: [8.5, 29.0, 14.0],
+                priority: 20.0,
+                blend_radius: 1.8,
+                blend_weight: if std::env::var_os("HLFS_NO_FOG").is_some() { 0.0 } else { 1.0 },
+                unbound: false,
+                settings: PostProcessSettings {
+                    fog_enabled: true,
+                    fog_mode: FogMode::Smoke,
+                    fog_density: 0.65,
+                    fog_height_falloff: 0.04,
+                    fog_height: 23.0,
+                    fog_max_distance: 140.0,
+                    fog_scattering_anisotropy: 0.28,
+                    fog_color: [0.09, 0.095, 0.11],
+                    ..PostProcessSettings::default()
+                },
+            }
+            .to_gpu(),
+        ),
+    );
     eprintln!("Monumental arch: {triangles} triangles, 7 material batches, intersecting open vaults");
     (Vec::new(),Vec::new())
 }

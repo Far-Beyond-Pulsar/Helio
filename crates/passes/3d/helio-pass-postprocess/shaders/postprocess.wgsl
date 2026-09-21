@@ -339,7 +339,7 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
     var vol_count: u32 = 0u;
 
     // Phase 1: evaluate all active volumes, store weight + index
-    for (var i = 0u; i < MAX_PP_VOLUMES; i++) {
+    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
         let v = pp_volumes[i];
         if v.blend_weight <= 0.0 { continue; }
 
@@ -370,10 +370,11 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
         }
         vol_indices[vol_count] = i;
         vol_count++;
+        if vol_count == MAX_PP_VOLUMES { break; }
     }
 
     if vol_count == 0u {
-        blend_output = postprocess;
+        blend_output = spatial_fog_settings(postprocess, 0u);
         return;
     }
 
@@ -404,7 +405,41 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
         total_weight += w;
     }
 
-    blend_output = result;
+    blend_output = spatial_fog_settings(result, vol_count);
+}
+
+// Screen effects are selected at the camera. Media are evaluated in world
+// space by the fog pass, including volumes seen from outside their bounds.
+fn spatial_fog_settings(screen: GpuPostProcessUniforms, count: u32) -> GpuPostProcessUniforms {
+    var r = screen;
+    var medium = postprocess;
+    // Only unbounded media participate in the global fog settings. Apply in
+    // ascending priority so the highest priority is the final override.
+    for (var n = count; n > 0u; n--) {
+        let v = pp_volumes[vol_indices[n - 1u]];
+        if v.unbound != 0u {
+            medium = blend_settings(medium, v.settings, clamp(v.blend_weight, 0.0, 1.0));
+        }
+    }
+    r.fog_enabled = medium.fog_enabled;
+    r.fog_density = select(0.0, medium.fog_density, medium.fog_enabled != 0u);
+    r.fog_mode = medium.fog_mode;
+    r.fog_height_falloff = medium.fog_height_falloff;
+    r.fog_start_distance = medium.fog_start_distance;
+    r.fog_height = medium.fog_height;
+    r.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
+    r.fog_color = medium.fog_color;
+    r.fog_emissive = medium.fog_emissive;
+    var range = select(0.0, medium.fog_max_distance, medium.fog_enabled != 0u);
+    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
+        let v = pp_volumes[i];
+        if v.blend_weight > 0.0 && v.unbound == 0u && v.settings.fog_enabled != 0u && v.settings.fog_density > 0.0 {
+            r.fog_enabled = 1u;
+            range = max(range, v.settings.fog_max_distance);
+        }
+    }
+    r.fog_max_distance = max(range, 1.0);
+    return r;
 }
 
 // ── cs_exposure: histogram-based auto exposure ─────────────────────────────────
@@ -787,23 +822,23 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     //
     // fog.rgb is already premultiplied by the transmittance in front of it, so this
     // is a straight over: attenuate the scene, add what scattered in.
-    // The min/max clamps ensure the fog never fully hides the background and never
-    // clips — otherwise dense fog + bright sun produces values > 1.0 that blow out
-    // every surface to solid white.
+    // Preserve HDR radiance and Beer-Lambert extinction; exposure and tonemapping
+    // below handle bright scattering. Dense smoke may fully obscure the scene.
     if postprocess.fog_enabled != 0u {
         let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
         // Slices are planes of constant view depth, so convert the buffer value
         // rather than using radial distance.
         let view_depth = helio_view_depth(fog_d, cameras[0].position_near.w, cameras[0].forward_far.w);
         let slice = clamp(
-            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance),
+            // Integration stores the cumulative value at each slice's far
+            // face, not its centre. Account for texture texel-centre sampling.
+            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance)
+                - 0.5 / f32(textureDimensions(fog_input).z),
             0.0,
             1.0,
         );
         let fog = textureSampleLevel(fog_input, linear_samp, vec3<f32>(uv, slice), 0.0);
-        // Cap the fog contribution so the background is always at least 5% visible
-        // and the inscattering never clips — a soft failure mode instead of blowout.
-        color = color * max(fog.a, 0.05) + min(fog.rgb, vec3<f32>(0.95));
+        color = color * clamp(fog.a, 0.0, 1.0) + max(fog.rgb, vec3<f32>(0.0));
     }
 
     //%P0

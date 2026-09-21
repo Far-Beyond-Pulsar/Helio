@@ -54,7 +54,7 @@ impl ApplicationHandler for App {
         let hlfs=if presampled {helio_pass_hlfs::HlfsConfig::ray_traced_presampled()}
             else {helio_pass_hlfs::HlfsConfig{mode:if rt {helio_pass_hlfs::HlfsMode::RayTraced}else{helio_pass_hlfs::HlfsMode::ScreenSpace},..Default::default()}};
         let mut renderer=RendererBuilder::new(RendererConfig::new(config.width,config.height,format).with_ssr(std::env::var_os("HLFS_SSR").is_some()),scene_db_handle(&scene_db))
-            .with_editor_mode(false)
+            .with_editor_mode(true)
             .with_pass_build_context(Box::new(move |ctx| {
                 let device=ctx.device.clone();
                 let mut graph=helio_default_graphs::build_fxaa_hlfs_graph_with_context(ctx);
@@ -96,6 +96,23 @@ impl ApplicationHandler for App {
                 if s.window.inner_size().width==0||s.window.inner_size().height==0 {return;}
                 let frame=match s.surface.get_current_texture(){wgpu::CurrentSurfaceTexture::Success(v)|wgpu::CurrentSurfaceTexture::Suboptimal(v)=>v,_=>{s.surface.configure(&s.device,&s.config);return;}};
                 flush_scene_db(&s.scene_db,&s.queue);
+                // The post-process volume is authored in SceneDB and mirrored
+                // to the GPU, but editor wireframes are a separate Helio debug
+                // stream. Keep that stream synchronized from the same rows so
+                // the editor overlay has actual volume vertices to draw.
+                let volume_bounds: Vec<[[f32; 3]; 2]> = s.scene_db.world
+                    .query::<&helio_pass_postprocess::PostProcessVolumeComponent>()
+                    .filter_map(|(_, volume)| {
+                        if volume.blend_weight <= 0.0 || volume.unbound != 0 {
+                            return None;
+                        }
+                        Some([
+                            [volume.bounds_min[0], volume.bounds_min[1], volume.bounds_min[2]],
+                            [volume.bounds_max[0], volume.bounds_max[1], volume.bounds_max[2]],
+                        ])
+                    })
+                    .collect();
+                s.renderer.debug_set_editor_volume_bounds(&volume_bounds);
                 if let Some(acceleration)=&mut s.acceleration {
                     acceleration.prepare(&s.scene_db.world).expect("scene acceleration");
                     s.renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(),acceleration.transmission());

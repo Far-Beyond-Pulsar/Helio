@@ -73,6 +73,8 @@ pub enum FogMode {
     Uniform,
     /// Density decays exponentially with world height above `fog_height`.
     HeightBased,
+    /// Animated world-space billows with height falloff.
+    Smoke,
 }
 impl Default for FogMode {
     fn default() -> Self {
@@ -504,6 +506,7 @@ impl PostProcessVolumeComponent {
             fog_mode: match self.fog_mode {
                 FogMode::Uniform => HelioFogMode::Uniform,
                 FogMode::HeightBased => HelioFogMode::HeightBased,
+                FogMode::Smoke => HelioFogMode::Smoke,
             },
             fog_density: self.fog_density,
             fog_height_falloff: self.fog_height_falloff,

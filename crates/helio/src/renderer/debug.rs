@@ -1088,6 +1088,43 @@ struct InfiniteGridUniform {
 }
 
 impl Renderer {
+    /// Rebuild the editor-only wireframe cache for bounded post-process volumes.
+    ///
+    /// The cache is consumed by `DebugDrawPass` only in editor mode, so this is
+    /// intentionally kept separate from transient user debug geometry.
+    pub fn debug_set_editor_volume_bounds(&mut self, bounds: &[[[f32; 3]; 2]]) {
+        const COLOR: [f32; 4] = [0.15, 0.8, 1.0, 1.0];
+        let mut lines = Vec::with_capacity(bounds.len() * 24);
+        for [[min_x, min_y, min_z], [max_x, max_y, max_z]] in bounds {
+            let corners = [
+                [*min_x, *min_y, *min_z],
+                [*max_x, *min_y, *min_z],
+                [*max_x, *max_y, *min_z],
+                [*min_x, *max_y, *min_z],
+                [*min_x, *min_y, *max_z],
+                [*max_x, *min_y, *max_z],
+                [*max_x, *max_y, *max_z],
+                [*min_x, *max_y, *max_z],
+            ];
+            const EDGES: [(usize, usize); 12] = [
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            ];
+            for (a, b) in EDGES {
+                lines.push(DebugVertex { position: corners[a], _pad: 0.0, color: COLOR });
+                lines.push(DebugVertex { position: corners[b], _pad: 0.0, color: COLOR });
+            }
+        }
+
+        if let Ok(mut state) = self.debug_state.lock() {
+            if state.editor_volume_lines != lines {
+                state.editor_volume_lines = lines;
+                state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
+            }
+        }
+    }
+
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
             if !s.user_lines.is_empty() {

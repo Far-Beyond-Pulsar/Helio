@@ -40,14 +40,10 @@ const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
 const WG_EXPOSURE_X: u32 = 16;
 const WG_EXPOSURE_Y: u32 = 16;
-/// Fixed capacity for the `"post_process_volumes"` SceneDB buffer, kept
-/// equal to `DEFAULT_AUTO_REGISTER_CAPACITY` -- same reasoning as
-/// `helio_pass_forward_lit::MAX_LIGHTS` (was `256` when this was a
-/// Renderer-owned CPU arena; SceneDB's auto-register capacity is what
-/// governs it now, so this stays in lockstep with that by construction).
-/// Also hardcoded into `postprocess.wgsl`'s own `MAX_PP_VOLUMES` -- the
-/// assertion below keeps the two from drifting apart.
-pub const MAX_PP_VOLUMES: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
+/// Maximum active volumes blended per frame. SceneDB buffers can be larger:
+/// rows are addressed by sparse entity index, so shaders scan the full buffer
+/// before compacting into this fixed active-volume budget.
+pub const MAX_PP_VOLUMES: u32 = 64;
 const _: () = assert!(MAX_PP_VOLUMES == 64);
 
 /// Position in the uber-shader effect chain where a user effect is injected.

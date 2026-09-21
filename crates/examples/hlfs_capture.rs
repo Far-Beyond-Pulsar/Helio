@@ -202,6 +202,23 @@ pub fn run_scene(
             (query, resolve, read)
         });
         let mut timing_csv = String::from("frame,coarse_ms,fine_ms,sampling_ms,temporal_ms,spatial_ms,composite_ms,hlfs_only_ms\n");
+        let fog_timing = std::env::var_os("HLFS_FOG_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_volumetric_fog::VolumetricFogPass>().expect("fog pass");
+            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
+            let query = pass.timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Fog timestamps"), size: 32,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Fog timing readback"), size: 32,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut fog_timing_csv = String::from("frame,classify_ms,inject_ms,integrate_ms,fog_ms\n");
         for frame in 0..capture_frames {
             if texture_lifecycle {
                 let mut store=diagnostic_texture_store.as_ref().unwrap().write().unwrap();
@@ -300,6 +317,23 @@ pub fn run_scene(
                 drop(bytes);
                 read.unmap();
             }
+            if let Some((query, resolve, read)) = &fog_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..4, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 32);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let stages: [f64; 3] = std::array::from_fn(|i|
+                    (ticks[i + 1] - ticks[i]) as f64 * queue.get_timestamp_period() as f64 / 1e6);
+                fog_timing_csv.push_str(&format!("{frame},{},{},{},{}\n", stages[0], stages[1], stages[2], stages.iter().sum::<f64>()));
+                drop(bytes);
+                read.unmap();
+            }
             if frame == 0 {
                 eprintln!(
                     "Scene: {} chandelier lights, {} candle lights",
@@ -353,6 +387,9 @@ pub fn run_scene(
         eprintln!("Serialized frame latency (CPU + GPU, excluding capture readback): median_ms={:.3} p95_ms={:.3}", frame_times[frame_times.len()/2], frame_times[frame_times.len()*95/100]);
         if timing.is_some() {
             std::fs::write(std::path::Path::new(directory).join("hlfs-gpu-timings.csv"), timing_csv).unwrap();
+        }
+        if fog_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("fog-gpu-timings.csv"), fog_timing_csv).unwrap();
         }
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });

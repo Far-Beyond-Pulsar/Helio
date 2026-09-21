@@ -1059,6 +1059,7 @@ dependencies = [
  "helio-pass-sprite-simulate",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
+ "helio-pass-volumetric-fog",
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-pass-water-sim",
@@ -2205,9 +2206,11 @@ name = "helio-pass-volumetric-fog"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
+ "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
