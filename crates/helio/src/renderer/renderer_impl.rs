@@ -146,15 +146,6 @@ pub struct Renderer {
     /// Helio and is flushed by its owner at the frame boundary.
     pub(crate) scene_db: SceneDbHandle,
 
-    /// Whether the graph was built with the sky passes present.
-    ///
-    /// `SkyLutPass`/`SkyPass` are added conditionally on `Scene::sky_context().has_sky` at
-    /// graph *build* time, but the natural call order is renderer construction followed by
-    /// only then populate the scene — so a scene that gains a sky afterwards has a graph
-    /// that will never draw it. Tracking what the graph was built with is what lets
-    /// `rebuild_graph_if_sky_changed` notice.
-    pub(crate) graph_has_sky: bool,
-
     /// Engine-world transform of the headset's stage origin — the locomotion hook.
     ///
     /// Identity means the player stands at the world origin. Translating/rotating this

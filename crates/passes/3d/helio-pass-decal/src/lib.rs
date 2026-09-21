@@ -520,9 +520,6 @@ impl RenderPass for DecalPass {
         Ok(())
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "hiz", "material_textures"]
-    }
     fn writes(&self) -> &'static [&'static str] {
         &["gbuffer"]
     }

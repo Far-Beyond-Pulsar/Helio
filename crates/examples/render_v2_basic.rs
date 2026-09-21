@@ -48,7 +48,7 @@ mod scene_light_tests {
     }
 }
 
-fn main() {
+pub fn main() {
     env_logger::init();
     log::info!("Starting Helio Render V2 Basic Example");
 

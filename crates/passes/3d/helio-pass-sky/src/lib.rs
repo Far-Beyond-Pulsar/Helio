@@ -1749,10 +1749,6 @@ impl RenderPass for SkyPass {
     fn name(&self) -> &'static str {
         "Sky"
     }
-    fn writes(&self) -> &'static [&'static str] {
-        &["sky_lut", "pre_aa"]
-    }
-
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn render_pass_descriptor<'a>(

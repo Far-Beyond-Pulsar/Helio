@@ -94,6 +94,30 @@ impl MaterialComponent {
             class_params: [0.0; 4],
         }
     }
+
+    /// A surface material with an opacity. `alpha < 1` selects the blended,
+    /// transparent-only path (glass); the alpha rides in `base_color.w`.
+    pub fn from_surface(
+        base_color: [f32; 3],
+        alpha: f32,
+        roughness: f32,
+        metallic: f32,
+        emissive: [f32; 3],
+        emissive_strength: f32,
+    ) -> Self {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let mut material = Self::new(
+            [base_color[0], base_color[1], base_color[2], alpha],
+            roughness,
+            metallic,
+            emissive,
+            emissive_strength,
+        );
+        if alpha < 1.0 {
+            material.flags |= helio_mats::FLAG_ALPHA_BLEND | helio_mats::FLAG_TRANSPARENT_ONLY;
+        }
+        material
+    }
 }
 
 /// Stable group membership. `group_mask == 0` means always visible.

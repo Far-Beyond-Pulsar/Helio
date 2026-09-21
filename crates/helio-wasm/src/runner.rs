@@ -404,16 +404,7 @@ async fn init_wgpu<T: HelioWasmApp>(
     // SceneDB is the sole scene authority: create the frontend-owned World,
     // attach its GPU mirror, and hand the renderer only the cloneable mirror
     // handle. `demo` authors rows through `scene_db.world` in `init`.
-    let mut scene_db = pulsar_scenedb::SceneDb::new();
-    let gpu_ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
-    let gpu_cfg = pulsar_scenedb::gpu::SceneGpuConfig {
-        classes: Vec::new(),
-        tombstone_headroom: 0,
-        max_cells_metadata: 0,
-    };
-    let gpu_store = Arc::new(pulsar_scenedb::gpu::SceneGpuStore::new(&gpu_ctx, gpu_cfg));
-    let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
-    scene_db.world.attach_gpu_mirror(mirror);
+    let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let scene_db_handle = scene_db
         .world
         .gpu_mirror()
@@ -448,6 +439,10 @@ async fn init_wgpu<T: HelioWasmApp>(
         width,
         height,
     );
+
+    // Demo initialization authors CPU-side SceneDB rows. Upload those rows
+    // before the first frame so the renderer never observes an empty mirror.
+    scene_db.world.flush_gpu_mirror(&queue);
 
     let now = now_secs();
     *state_cell.borrow_mut() = Some(RunnerState {
@@ -500,6 +495,10 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
 
     let camera = state.demo.update(&mut state.renderer, dt, elapsed, &input);
 
+    // World is the sole scene authority. Keep its GPU projection current at
+    // the frame boundary after demo updates and before encoding render work.
+    state.scene_db.world.flush_gpu_mirror(&state.queue);
+
     let output = match state.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(texture)
         | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -516,6 +515,75 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
         log::error!("helio-wasm: render error: {:?}", e);
     }
     state.queue.present(output);
+}
+
+/// Create the frontend-owned SceneDB and register every GPU component column
+/// used by the standard Helio graphs before demos can spawn their first row.
+///
+/// Registration is intentionally eager: several generated GPU mirrors can
+/// lazily register their columns on first insertion, but doing that from the
+/// same dispatch that writes the first row loses that initial write. Keeping
+/// this setup in the runner also means every `HelioWasmApp` gets the same
+/// mirror contract without requiring demos to know about GPU storage.
+fn new_scene_db_with_gpu_mirror(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+) -> pulsar_scenedb::SceneDb {
+    let mut scene_db = pulsar_scenedb::SceneDb::new();
+    let gpu_ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
+    let gpu_cfg = pulsar_scenedb::gpu::SceneGpuConfig {
+        classes: Vec::new(),
+        tombstone_headroom: 0,
+        max_cells_metadata: 0,
+    };
+    let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&gpu_ctx, gpu_cfg);
+
+    helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
+    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_gbuffer::SubLevelActorComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalViewComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalChainComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalProjectionCountsComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1,
+        device,
+    );
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        helio_pass_forward_lit::MAX_LIGHTS,
+        device,
+    );
+
+    let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(gpu_store), queue.clone());
+    scene_db.world.attach_gpu_mirror(mirror);
+    scene_db
 }
 
 // ── Canvas helper (WASM only) ─────────────────────────────────────────────────

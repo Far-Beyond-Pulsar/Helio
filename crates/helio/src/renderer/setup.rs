@@ -221,9 +221,7 @@ impl Renderer {
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        let scene_has_sky = false;
-
-        let mut renderer = Self {
+        let renderer = Self {
             device,
             queue,
             graph,
@@ -282,7 +280,6 @@ impl Renderer {
             #[cfg(feature = "bake")]
             bake_scene: None,
             clear_target_next_frame: true,
-            graph_has_sky: scene_has_sky,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
             pending_resize: None,

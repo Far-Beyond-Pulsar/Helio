@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{Camera, LightId, ObjectId, Renderer};
+use helio::{Camera, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use crate::common::{
     cube_mesh, directional_light, insert_object, make_material, point_light, spot_light,
@@ -62,7 +63,7 @@ fn follow(strength: f32, dt: f32) -> f32 {
 // ── Ship state ────────────────────────────────────────────────────────────────
 
 struct ShipState {
-    ids: Vec<ObjectId>,
+    ids: Vec<Entity>,
     radius: f32,
     pos: Vec3,
     quat: Quat,
@@ -73,13 +74,13 @@ struct ShipState {
     thrusting: bool,
     thrust_accel: f32,
     max_speed: f32,
-    engine_light: LightId,
-    spotlight_left: LightId,
-    spotlight_right: LightId,
-    hull_port: LightId,
-    hull_starboard: LightId,
-    hull_top: LightId,
-    hull_belly: LightId,
+    engine_light: Entity,
+    spotlight_left: Entity,
+    spotlight_right: Entity,
+    hull_port: Entity,
+    hull_starboard: Entity,
+    hull_top: Entity,
+    hull_belly: Entity,
 }
 
 impl ShipState {
@@ -226,11 +227,13 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
+        let world = &mut scene_db.world;
         let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
@@ -257,8 +260,8 @@ impl HelioWasmApp for Demo {
                 let extents = (max - min).max(Vec3::splat(0.1));
                 let radius = (extents.length() * 0.5).max(1.0);
 
-                let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
-                let ids: Vec<ObjectId> = scene
+                let mat_ids = upload_scene_materials(world, &scene);
+                let ids: Vec<Entity> = scene
                     .meshes
                     .iter()
                     .map(|mesh| {
@@ -266,18 +269,18 @@ impl HelioWasmApp for Demo {
                         for v in &mut vertices {
                             v.position = (Vec3::from(v.position) - center).to_array();
                         }
-                        let mesh_id = renderer.scene().insert_entity(helio::SceneEntity::mesh(
+                        let mesh_id = crate::common::spawn_mesh(world,
                             helio::MeshUpload {
                                 vertices,
                                 indices: mesh.indices.clone(),
                             },
-                        ));
+                        );
                         let mat_id = mesh
                             .material_index
                             .and_then(|i| mat_ids.get(i).copied())
                             .or_else(|| mat_ids.first().copied())
                             .unwrap_or_else(|| {
-                                renderer.scene().insert_material(make_material(
+                                crate::common::spawn_material(world, make_material(
                                     [0.25, 0.40, 0.70, 1.0],
                                     0.25,
                                     0.85,
@@ -285,7 +288,7 @@ impl HelioWasmApp for Demo {
                                     0.0,
                                 ))
                             });
-                        insert_object(renderer, mesh_id, mat_id, Mat4::IDENTITY, radius).unwrap()
+                        insert_object(world, mesh_id, mat_id, Mat4::IDENTITY, radius).unwrap()
                     })
                     .collect();
                 let thrust = (radius * 120.0).clamp(60.0, 2400.0);
@@ -293,39 +296,35 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("ship FBX load failed: {e:?}, using fallback cube");
-                let mat = renderer.scene().insert_material(make_material(
+                let mat = crate::common::spawn_material(world, make_material(
                     [0.25, 0.40, 0.70, 1.0],
                     0.25,
                     0.85,
                     [0.0; 3],
                     0.0,
                 ));
-                let mesh = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0)));
-                let id = insert_object(renderer, mesh, mat, Mat4::IDENTITY, 2.0).unwrap();
+                let mesh = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 2.0));
+                let id = insert_object(world, mesh, mat, Mat4::IDENTITY, 2.0).unwrap();
                 (vec![id], 2.0, 240.0)
             }
         };
 
         // Asteroid field
-        let rocky = renderer.scene().insert_material(make_material(
+        let rocky = crate::common::spawn_material(world, make_material(
             [0.15, 0.12, 0.09, 1.0],
             0.90,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let dark = renderer.scene().insert_material(make_material(
+        let dark = crate::common::spawn_material(world, make_material(
             [0.09, 0.09, 0.11, 1.0],
             0.70,
             0.25,
             [0.0; 3],
             0.0,
         ));
-        let cube = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)));
+        let cube = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         let field_radius = 12000.0_f32;
         let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
@@ -355,7 +354,7 @@ impl HelioWasmApp for Demo {
                 );
                 let mat = if i % 3 == 0 { dark } else { rocky };
                 let t = Mat4::from_scale_rotation_translation(scale, rot, pos);
-                let _ = insert_object(renderer, cube, mat, t, base);
+                let _ = insert_object(world, cube, mat, t, base);
             };
         for i in 0..LOCAL_ASTEROID_COUNT {
             let d = ship_radius * 10.0 + lcg(&mut seed) * local_radius;
@@ -367,19 +366,13 @@ impl HelioWasmApp for Demo {
         }
 
         // Ship lights
-        let engine_light = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+        let engine_light = crate::common::spawn_light(world, point_light(
                 [0.0; 3],
                 [0.35, 0.65, 1.0],
                 1.8,
                 ship_radius * 3.5,
-            )))
-            .as_light()
-            .unwrap();
-        let spotlight_left = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(spot_light(
+            ));
+        let spotlight_left = crate::common::spawn_light(world, spot_light(
                 [0.0; 3],
                 [0.0, 0.0, -1.0],
                 [1.0, 1.0, 0.95],
@@ -387,12 +380,8 @@ impl HelioWasmApp for Demo {
                 ship_radius * 15.0,
                 25_f32.to_radians(),
                 35_f32.to_radians(),
-            )))
-            .as_light()
-            .unwrap();
-        let spotlight_right = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(spot_light(
+            ));
+        let spotlight_right = crate::common::spawn_light(world, spot_light(
                 [0.0; 3],
                 [0.0, 0.0, -1.0],
                 [1.0, 1.0, 0.95],
@@ -400,65 +389,43 @@ impl HelioWasmApp for Demo {
                 ship_radius * 15.0,
                 25_f32.to_radians(),
                 35_f32.to_radians(),
-            )))
-            .as_light()
-            .unwrap();
-        let hull_port = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        let hull_port = crate::common::spawn_light(world, point_light(
                 [0.0; 3],
                 [1.0, 0.1, 0.1],
                 12.0,
                 ship_radius * 4.0,
-            )))
-            .as_light()
-            .unwrap();
-        let hull_starboard = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        let hull_starboard = crate::common::spawn_light(world, point_light(
                 [0.0; 3],
                 [0.1, 1.0, 0.1],
                 12.0,
                 ship_radius * 4.0,
-            )))
-            .as_light()
-            .unwrap();
-        let hull_top = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        let hull_top = crate::common::spawn_light(world, point_light(
                 [0.0; 3],
                 [1.0, 1.0, 1.0],
                 9.6,
                 ship_radius * 4.0,
-            )))
-            .as_light()
-            .unwrap();
-        let hull_belly = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        let hull_belly = crate::common::spawn_light(world, point_light(
                 [0.0; 3],
                 [0.4, 0.6, 1.0],
                 8.4,
                 ship_radius * 4.0,
-            )))
-            .as_light()
-            .unwrap();
+            ));
 
         // Distant stars (directional)
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+        crate::common::spawn_light(world, directional_light(
                 [-0.5, -0.4, 0.8],
                 [1.0, 0.98, 0.95],
                 0.8,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+            ));
+        crate::common::spawn_light(world, directional_light(
                 [0.6, 0.2, -0.7],
                 [0.2, 0.25, 0.4],
                 0.04,
-            )));
+            ));
         renderer.set_ambient([0.04, 0.05, 0.08], 0.003);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 

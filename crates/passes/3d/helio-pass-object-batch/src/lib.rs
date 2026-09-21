@@ -72,8 +72,9 @@ const DRAW_CALL_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `GpuInstanceDataOut` -- 208 bytes,
 /// see `helio_pass_object_batch::GpuInstanceData`'s own doc for the exact field breakdown.
 const INSTANCE_BYTES: u64 = 208;
-/// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 16 bytes.
-const AABB_BYTES: u64 = 16;
+/// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 32 bytes (min, pad, max, pad),
+/// the layout `indirect_dispatch.wgsl` reads as `GpuAabb`.
+const AABB_BYTES: u64 = 32;
 /// Matches `shaders/object_batch.wgsl`'s `GpuRangeOut` -- 20 bytes.
 const RANGE_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `DrawIndexedIndirectArgsOut` -- 20
@@ -1376,7 +1377,7 @@ mod tests {
     #[test]
     fn output_struct_sizes_match_wgsl() {
         assert_eq!(INSTANCE_BYTES, 208);
-        assert_eq!(AABB_BYTES, 16);
+        assert_eq!(AABB_BYTES, 32);
         assert_eq!(DRAW_CALL_BYTES, 20);
         assert_eq!(RANGE_BYTES, 20);
         assert_eq!(INDIRECT_ARGS_BYTES, 20);

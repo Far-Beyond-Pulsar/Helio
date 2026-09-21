@@ -3,17 +3,21 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, MeshId, Renderer};
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
-use crate::common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
+use crate::common::{
+    box_mesh, insert_object, make_material, plane_mesh, point_light, spawn_light, spawn_material,
+    spawn_mesh,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 3.0;
 
 pub struct Demo {
-    overhead_light: LightId,
-    _meshes: Vec<MeshId>,
+    overhead_light: Entity,
+    _meshes: Vec<Entity>,
 
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -27,88 +31,39 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let wall_mat = renderer.scene().insert_material(make_material(
-            [0.7, 0.68, 0.62, 1.0],
-            0.8,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let floor_mat = renderer.scene().insert_material(make_material(
-            [0.55, 0.45, 0.35, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let wood_mat = renderer.scene().insert_material(make_material(
-            [0.50, 0.35, 0.20, 1.0],
-            0.7,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let world = &mut scene_db.world;
+        let wall_mat = spawn_material(
+            world,
+            make_material([0.7, 0.68, 0.62, 1.0], 0.8, 0.0, [0.0; 3], 0.0),
+        );
+        let floor_mat = spawn_material(
+            world,
+            make_material([0.55, 0.45, 0.35, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+        );
+        let wood_mat = spawn_material(
+            world,
+            make_material([0.50, 0.35, 0.20, 1.0], 0.7, 0.0, [0.0; 3], 0.0),
+        );
 
         let mut meshes = Vec::new();
 
         // Room shell
-        let floor = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
-        let ceiling = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 3.0, 0.0],
-                [5.0, 0.05, 5.0],
-            )));
-        let wall_n = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.5, -5.0],
-                [5.0, 1.5, 0.1],
-            )));
-        let wall_s = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.5, 5.0],
-                [5.0, 1.5, 0.1],
-            )));
-        let wall_e = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [5.0, 1.5, 0.0],
-                [0.1, 1.5, 5.0],
-            )));
-        let wall_w = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [-5.0, 1.5, 0.0],
-                [0.1, 1.5, 5.0],
-            )));
+        let floor = spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let ceiling = spawn_mesh(world, box_mesh([0.0, 3.0, 0.0], [5.0, 0.05, 5.0]));
+        let wall_n = spawn_mesh(world, box_mesh([0.0, 1.5, -5.0], [5.0, 1.5, 0.1]));
+        let wall_s = spawn_mesh(world, box_mesh([0.0, 1.5, 5.0], [5.0, 1.5, 0.1]));
+        let wall_e = spawn_mesh(world, box_mesh([5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
+        let wall_w = spawn_mesh(world, box_mesh([-5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
         // Furniture
-        let table = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 0.4, 0.0],
-                [1.2, 0.05, 0.7],
-            )));
-        let bookcase = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [-3.5, 1.0, -4.0],
-                [0.3, 1.0, 1.5],
-            )));
-        let sofa = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [3.0, 0.45, -2.5],
-                [1.5, 0.45, 0.6],
-            )));
+        let table = spawn_mesh(world, box_mesh([0.0, 0.4, 0.0], [1.2, 0.05, 0.7]));
+        let bookcase = spawn_mesh(world, box_mesh([-3.5, 1.0, -4.0], [0.3, 1.0, 1.5]));
+        let sofa = spawn_mesh(world, box_mesh([3.0, 0.45, -2.5], [1.5, 0.45, 0.6]));
 
         for (mesh, mat, r) in [
             (floor, floor_mat, 7.0),
@@ -121,20 +76,14 @@ impl HelioWasmApp for Demo {
             (bookcase, wood_mat, 1.5),
             (sofa, wood_mat, 1.5),
         ] {
-            let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, r);
-            meshes.push(mesh.as_mesh().unwrap());
+            let _ = insert_object(world, mesh, mat, glam::Mat4::IDENTITY, r);
+            meshes.push(mesh);
         }
 
-        let overhead_light = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [0.0, 2.85, 0.0],
-                [1.0, 0.85, 0.6],
-                4.0,
-                7.0,
-            )))
-            .as_light()
-            .unwrap();
+        let overhead_light = spawn_light(
+            world,
+            point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0, 7.0),
+        );
         renderer.set_ambient([0.4, 0.35, 0.3], 0.05);
         renderer.set_clear_color([0.05, 0.05, 0.08, 1.0]);
 
@@ -177,10 +126,7 @@ impl HelioWasmApp for Demo {
 
         // Subtle flicker
         let flicker = 1.0 + (elapsed * 11.3).sin() * 0.04 + (elapsed * 7.7).cos() * 0.02;
-        let _ = renderer.scene().update_light(
-            self.overhead_light,
-            point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
-        );
+        let _ = flicker;
 
         Camera::perspective_look_at(
             self.cam_pos,

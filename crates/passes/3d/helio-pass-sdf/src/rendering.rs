@@ -373,10 +373,8 @@ impl SdfPass {
             brick_size,
             grid_dim,
             base_voxel_size,
-            padded_brick_voxels,
             volume_min,
             volume_max,
-            surface_format,
             cached_snap_origins: [[i32::MIN; 3]; 8],
             gpu_passes_clean: false,
         }

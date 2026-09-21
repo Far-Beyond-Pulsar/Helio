@@ -622,10 +622,6 @@ impl RenderPass for LensFlarePass {
         "LensFlare"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["depth"]
-    }
-
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }

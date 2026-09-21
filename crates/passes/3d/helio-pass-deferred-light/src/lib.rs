@@ -1118,7 +1118,7 @@ impl RenderPass for DeferredLightPass {
 
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx
-            .registry.get(helio_core::ResourceKey::new("baked_lightmap"))
+            .registry.get(helio_core::resource_keys::baked_lightmap())
             .unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx
             .registry.get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
@@ -1161,7 +1161,7 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
-            .registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices"))
+            .registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices())
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
         let scene_key = [

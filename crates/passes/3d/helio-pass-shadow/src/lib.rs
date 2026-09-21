@@ -449,10 +449,6 @@ impl RenderPass for ShadowPass {
         "Shadow"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch"]
-    }
-
     fn writes(&self) -> &'static [&'static str] {
         &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }

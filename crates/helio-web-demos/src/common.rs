@@ -6,6 +6,8 @@ use glam::{Mat4, Vec3};
 use helio::{GpuLight, LightType, MeshUpload, PackedVertex};
 use pulsar_scenedb::{Entity, World};
 
+pub type SceneResult<T> = Result<T, &'static str>;
+
 pub fn make_material(
     base_color: [f32; 4],
     roughness: f32,

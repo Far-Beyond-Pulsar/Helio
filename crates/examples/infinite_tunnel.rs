@@ -32,13 +32,12 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    DebugDrawState, GroupId, GroupMask, LightId, ObjectDescriptor, Renderer, RendererConfig, Scene,
-    SceneEntity, SublevelDescriptor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
-use helio_pass_object_batch::INSTANCE_FLAG_ALWAYS_VISIBLE;
-use v3_demo_common::{box_mesh, make_material, point_light};
+use helio_pass_portal_cull::{components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver};
+use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object};
 
 use winit::{
     application::ApplicationHandler,
@@ -101,6 +100,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: glam::Vec3,
@@ -113,7 +113,7 @@ struct AppState {
     portal_near: helio::PortalPair,
     portal_far: helio::PortalPair,
 
-    _light_ids: Vec<LightId>,
+    _light_ids: Vec<Entity>,
 
     /// Debug-only: when `TUNNEL_SCREENSHOT` is set, counts frames so a single
     /// PNG can be captured after the scene has settled, then the process exits.
@@ -196,70 +196,35 @@ impl ApplicationHandler for App {
 
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
-        let scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            config.surface_format,
-            config.width,
-            config.height,
-            config.render_scale,
-            config,
-            scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_external_device()
+            .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
 
         // ── Shared geometry & materials for every segment ─────────────────────
-        let wall_mat = renderer.scene().insert_material(make_material(
+        let wall_mat = spawn_material(&mut scene_db.world, make_material(
             [0.72, 0.72, 0.75, 1.0],
             0.8,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let strip_mat = renderer.scene().insert_material(make_material(
+        let strip_mat = spawn_material(&mut scene_db.world, make_material(
             [0.95, 0.85, 0.55, 1.0],
             0.6,
             0.0,
             [1.0, 0.7, 0.3],
             2.5,
         ));
-        let post_mat = renderer.scene().insert_material(make_material(
+        let post_mat = spawn_material(&mut scene_db.world, make_material(
             [0.35, 0.8, 1.0, 1.0],
             0.5,
             0.0,
             [0.2, 0.7, 1.0],
             1.5,
         ));
-        let frame_mat = renderer.scene().insert_material(make_material(
+        let frame_mat = spawn_material(&mut scene_db.world, make_material(
             [0.25, 0.95, 1.0, 1.0],
             0.4,
             0.0,
@@ -269,50 +234,15 @@ impl ApplicationHandler for App {
 
         // Meshes are inserted once and shared by every copy's instances (the
         // copies batch into the same draw calls by mesh+material).
-        let slab_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [HALF_WIDTH, 0.02, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let side_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.02, HALF_HEIGHT, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let strip_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.06, 0.02, HALF_LENGTH],
-            )))
-            .as_mesh()
-            .unwrap();
-        let post_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.08, 0.8, 0.08],
-            )))
-            .as_mesh()
-            .unwrap();
-        let frame_box_mesh = renderer
-            .scene()
-            .insert_entity(SceneEntity::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.12, 0.12, 0.12],
-            )))
-            .as_mesh()
-            .unwrap();
+        let slab_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]));
+        let side_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]));
+        let strip_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.06, 0.02, HALF_LENGTH]));
+        let post_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.08, 0.8, 0.08]));
+        let frame_box_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.12, 0.12, 0.12]));
 
         // Central corridor segment (world space, no sublevel).
         insert_segment(
-            &mut renderer,
+            &mut scene_db.world,
             slab_mesh,
             side_mesh,
             strip_mesh,
@@ -320,7 +250,7 @@ impl ApplicationHandler for App {
             wall_mat,
             strip_mat,
             post_mat,
-            GroupMask::NONE,
+            glam::Mat4::IDENTITY,
         );
 
         // ── Copy segments as buried sublevels, ±16 m apart, out to ±160 m ──
@@ -338,10 +268,9 @@ impl ApplicationHandler for App {
         let mut coord_slots = 2u32; // the two portals below
         for sign in [-1.0f32, 1.0] {
             for copy in 1..=COPIES {
-                let idx = (if sign > 0.0 { COPIES } else { 0 }) + (copy - 1);
-                let group = GroupId::new(COPY_GROUP_BASE + idx as u8);
+                let z = sign * copy as f32 * COPY_STRIDE;
                 insert_segment(
-                    &mut renderer,
+                    &mut scene_db.world,
                     slab_mesh,
                     side_mesh,
                     strip_mesh,
@@ -349,20 +278,8 @@ impl ApplicationHandler for App {
                     wall_mat,
                     strip_mat,
                     post_mat,
-                    GroupMask::from(group),
+                    glam::Mat4::from_translation(glam::Vec3::new(0.0, -HIDE_OFFSET, z)),
                 );
-                let z = sign * copy as f32 * COPY_STRIDE;
-                renderer
-                    .scene()
-                    .add_sublevel(SublevelDescriptor {
-                        group,
-                        placement: glam::Mat4::from_translation(glam::Vec3::new(
-                            0.0,
-                            -HIDE_OFFSET,
-                            z,
-                        )),
-                    })
-                    .expect("add_sublevel");
                 coord_slots += 1;
             }
         }
@@ -377,19 +294,9 @@ impl ApplicationHandler for App {
         // as a framed doorway rather than a bare change in the corridor.
         let frame_t = 0.12; // frame half-thickness
         let mut insert_frame = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32| {
-            let _ = renderer
-                .scene()
-                .insert_entity(SceneEntity::object(ObjectDescriptor {
-                    mesh: frame_box_mesh,
-                    material: frame_mat,
-                    transform: glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
-                        * glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                    bounds: [cx, cy, cz, (hx * hx + hy * hy + hz * hz).sqrt()],
-                    flags: INSTANCE_FLAG_ALWAYS_VISIBLE,
-                    groups: helio::GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+            let transform = glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
+                * glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz));
+            let _ = spawn_object(&mut scene_db.world, frame_box_mesh, frame_mat, transform, (hx * hx + hy * hy + hz * hz).sqrt());
         };
         for &z in &[PORTAL_Z, -PORTAL_Z] {
             // Top / bottom rails (full opening width), left / right posts.
@@ -431,18 +338,7 @@ impl ApplicationHandler for App {
         // fall off into ambient, which sells the "endless" distance. ─────────
         let mut light_ids = Vec::new();
         for &z in &[0.0f32, -16.0, 16.0, -32.0, 32.0, -48.0, 48.0] {
-            light_ids.push(
-                renderer
-                    .scene()
-                    .insert_entity(SceneEntity::light(point_light(
-                        [0.0, 2.2, z],
-                        [0.9, 0.95, 1.0],
-                        3.0,
-                        12.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(spawn_light(&mut scene_db.world, point_light([0.0, 2.2, z], [0.9, 0.95, 1.0], 3.0, 12.0)));
         }
 
         // ── Portals: each pairs its real surface (a, on the corridor end)
@@ -493,6 +389,23 @@ impl ApplicationHandler for App {
             b: pose_far_b,
         };
 
+        let near_entity = scene_db.world.spawn();
+        let far_entity = scene_db.world.spawn();
+        scene_db.world.insert(
+            near_entity,
+            PortalComponent::new(Some(far_entity), pose_near.transform, [HALF_WIDTH, HALF_HEIGHT]),
+        );
+        scene_db.world.insert(
+            far_entity,
+            PortalComponent::new(Some(near_entity), pose_far.transform, [HALF_WIDTH, HALF_HEIGHT]),
+        );
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(0, SubLevelContents::new([], [(near_entity, PortalComponent::new(Some(far_entity), pose_near.transform, [HALF_WIDTH, HALF_HEIGHT])), (far_entity, PortalComponent::new(Some(near_entity), pose_far.transform, [HALF_WIDTH, HALF_HEIGHT]))]));
+        let projection = PortalProjectionBridge::new(1).expect("portal projection depth").build(&resolver).expect("portal projection");
+        let projection_entities = [near_entity, far_entity];
+        projection.publish_to_world(&mut scene_db.world, &projection_entities, &projection_entities, near_entity).expect("portal projection rows");
+        renderer.set_portal_projection_frame(&projection);
+
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
@@ -509,6 +422,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 1.6, 0.0),
             cam_yaw: std::f32::consts::PI,
@@ -677,7 +591,6 @@ impl AppState {
         // uses `pair.a` (the real surface at the corridor end); the remap is
         // the corridor's own symmetry map, (-x, y, -z), which sends the near
         // end to the far end and vice versa. Only one teleport per frame.
-        let scene = self.renderer.scene();
         let mut teleported = false;
         for portal in [self.portal_near, self.portal_far] {
             if let Some(pair) = Some(portal) {
@@ -719,6 +632,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
@@ -865,41 +779,19 @@ fn capture_screenshot(
 /// far plane) and only selected by the portal cull, when their mapped
 /// position is actually in view.
 fn insert_segment(
-    renderer: &mut Renderer,
-    slab_mesh: helio::MeshId,
-    side_mesh: helio::MeshId,
-    strip_mesh: helio::MeshId,
-    post_mesh: helio::MeshId,
-    wall_mat: helio::MaterialId,
-    strip_mat: helio::MaterialId,
-    post_mat: helio::MaterialId,
-    groups: GroupMask,
+    world: &mut pulsar_scenedb::World,
+    slab_mesh: Entity,
+    side_mesh: Entity,
+    strip_mesh: Entity,
+    post_mesh: Entity,
+    wall_mat: Entity,
+    strip_mat: Entity,
+    post_mat: Entity,
+    placement: glam::Mat4,
 ) {
-    let flags = if groups == GroupMask::NONE {
-        INSTANCE_FLAG_ALWAYS_VISIBLE
-    } else {
-        0
+    let mut insert = |mesh: Entity, material: Entity, transform: glam::Mat4, radius: f32| {
+        let _ = spawn_object(world, mesh, material, placement * transform, radius);
     };
-    let mut insert =
-        |mesh: helio::MeshId, material: helio::MaterialId, transform: glam::Mat4, radius: f32| {
-            let _ = renderer
-                .scene()
-                .insert_entity(SceneEntity::object(ObjectDescriptor {
-                    mesh,
-                    material,
-                    transform,
-                    bounds: [
-                        transform.w_axis.x,
-                        transform.w_axis.y,
-                        transform.w_axis.z,
-                        radius,
-                    ],
-                    flags,
-                    groups,
-                    movability: None,
-                    user_tag: 0,
-                }));
-        };
     // Floor + ceiling share the slab mesh; left + right walls share the side mesh.
     insert(slab_mesh, wall_mat, glam::Mat4::IDENTITY, HALF_LENGTH);
     insert(

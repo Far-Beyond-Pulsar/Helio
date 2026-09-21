@@ -374,9 +374,12 @@ struct GpuInstanceDataOut {
     flags: u32,
     lightmap_index: u32,
 }
+// Layout mirrors `GpuAabb` in indirect_dispatch.wgsl (32 bytes: min, pad, max, pad).
 struct GpuInstanceAabbOut {
-    center: array<f32, 3>,
-    radius: f32,
+    min: array<f32, 3>,
+    _pad0: f32,
+    max: array<f32, 3>,
+    _pad1: f32,
 }
 @group(0) @binding(3) var<storage, read_write> instances_out: array<GpuInstanceDataOut>;
 @group(0) @binding(4) var<storage, read_write> aabbs_out: array<GpuInstanceAabbOut>;
@@ -398,9 +401,13 @@ fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
         row.flags,
         0xFFFFFFFFu,
     );
+    // Conservative world AABB: the bounding sphere's box.
+    let r = row.bounds[3];
     aabbs_out[i] = GpuInstanceAabbOut(
-        array<f32, 3>(row.bounds[0], row.bounds[1], row.bounds[2]),
-        row.bounds[3],
+        array<f32, 3>(row.bounds[0] - r, row.bounds[1] - r, row.bounds[2] - r),
+        0.0,
+        array<f32, 3>(row.bounds[0] + r, row.bounds[1] + r, row.bounds[2] + r),
+        0.0,
     );
 }
 

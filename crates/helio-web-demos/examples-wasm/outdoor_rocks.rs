@@ -13,9 +13,10 @@
 use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{Camera, LightId, Renderer};
+use helio::{Camera, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use crate::common::{cube_mesh, directional_light, insert_object, make_material, point_light};
 
@@ -40,7 +41,7 @@ pub struct Demo {
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
-    sun_light_id: LightId,
+    sun_light_id: Entity,
     sun_angle: f32,
 }
 
@@ -51,13 +52,15 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
+        let world = &mut scene_db.world;
         // Ground plane
-        let ground_mat = renderer.scene().insert_material(make_material(
+        let ground_mat = crate::common::spawn_material(world, make_material(
             [0.30, 0.27, 0.22, 1.0],
             0.85,
             0.0,
@@ -65,31 +68,29 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
         let ground =
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(crate::common::box_mesh(
+            crate::common::spawn_mesh(world, crate::common::box_mesh(
                     [0.0, -1.0, 0.0],
                     [200.0, 0.4, 200.0],
-                )));
-        let _ = insert_object(renderer, ground, ground_mat, Mat4::IDENTITY, 10.0);
+                ));
+        let _ = insert_object(world, ground, ground_mat, Mat4::IDENTITY, 10.0);
 
         // Rock materials
         let mats = [
-            renderer.scene().insert_material(make_material(
+            crate::common::spawn_material(world, make_material(
                 [0.20, 0.18, 0.14, 1.0],
                 0.90,
                 0.0,
                 [0.0; 3],
                 0.0,
             )),
-            renderer.scene().insert_material(make_material(
+            crate::common::spawn_material(world, make_material(
                 [0.28, 0.24, 0.20, 1.0],
                 0.80,
                 0.05,
                 [0.0; 3],
                 0.0,
             )),
-            renderer.scene().insert_material(make_material(
+            crate::common::spawn_material(world, make_material(
                 [0.15, 0.14, 0.12, 1.0],
                 0.95,
                 0.0,
@@ -97,9 +98,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             )),
         ];
-        let rock_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)));
+        let rock_mesh = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         let mut seed: u64 = 0xB00B1E5_CAFEBABE;
         for i in 0..ROCK_COUNT {
@@ -121,7 +120,7 @@ impl HelioWasmApp for Demo {
                 pos + Vec3::Y * (h * 0.5 - 0.8),
             );
             let mat = mats[i % mats.len()];
-            let _ = insert_object(renderer, rock_mesh, mat, t, w.max(h).max(d));
+            let _ = insert_object(world, rock_mesh, mat, t, w.max(h).max(d));
         }
 
         // Embedded ship parked near origin
@@ -135,20 +134,20 @@ impl HelioWasmApp for Demo {
             LoadConfig::default().with_uv_flip(false),
         ) {
             Ok(scene) => {
-                let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
+                let mat_ids = upload_scene_materials(world, &scene);
                 for mesh in &scene.meshes {
-                    let mesh_id = renderer.scene().insert_entity(helio::SceneEntity::mesh(
+                    let mesh_id = crate::common::spawn_mesh(world,
                         helio::MeshUpload {
                             vertices: mesh.vertices.clone(),
                             indices: mesh.indices.clone(),
                         },
-                    ));
+                    );
                     let mat_id = mesh
                         .material_index
                         .and_then(|i| mat_ids.get(i).copied())
                         .or_else(|| mat_ids.first().copied())
                         .unwrap_or_else(|| {
-                            renderer.scene().insert_material(make_material(
+                            crate::common::spawn_material(world, make_material(
                                 [0.40, 0.40, 0.48, 1.0],
                                 0.3,
                                 0.7,
@@ -161,43 +160,35 @@ impl HelioWasmApp for Demo {
                         Quat::IDENTITY,
                         Vec3::new(8.0, 2.5, 0.0),
                     );
-                    let _ = insert_object(renderer, mesh_id, mat_id, t, 3.0);
+                    let _ = insert_object(world, mesh_id, mat_id, t, 3.0);
                 }
             }
             Err(e) => log::warn!("ship FBX unavailable: {e:?}"),
         }
 
         // Lighting
-        let sun_light_id = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+        let sun_light_id = crate::common::spawn_light(world, directional_light(
                 [-0.5, -0.8, 0.3],
                 [1.0, 0.97, 0.88],
                 2.2,
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+            ));
+        crate::common::spawn_light(world, directional_light(
                 [0.3, 0.6, -0.8],
                 [0.3, 0.4, 0.6],
                 0.05,
-            )));
+            ));
         // Scatter a few warm rock pool lights
         let mut light_seed: u64 = 0xFEEDFACE;
         for _ in 0..6 {
             let a = lcg(&mut light_seed) * std::f32::consts::TAU;
             let d = 5.0 + lcg(&mut light_seed) * 25.0;
             let p = Vec3::new(a.cos() * d, 1.5, a.sin() * d);
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
+            crate::common::spawn_light(world, point_light(
                     p.to_array(),
                     [1.0, 0.85, 0.60],
                     4.0,
                     18.0,
-                )));
+                ));
         }
         renderer.set_ambient([0.4, 0.42, 0.48], 0.12);
 

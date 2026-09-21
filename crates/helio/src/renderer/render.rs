@@ -3,7 +3,6 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
 
 use crate::camera::Camera;
@@ -994,8 +993,6 @@ impl Renderer {
         image_index: u32,
         mirror: &wgpu::TextureView,
     ) -> HelioResult<()> {
-        use wgpu::util::DeviceExt as _;
-
         if self.xr_mirror_sampler.is_none() {
             self.xr_mirror_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("XR Mirror Sampler"),

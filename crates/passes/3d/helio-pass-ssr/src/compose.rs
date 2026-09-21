@@ -93,16 +93,14 @@ impl RenderPass for SsrCompositePass {
     fn name(&self) -> &'static str {
         "SsrCompositePass"
     }
-    fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "ssr_trace", "pre_aa"]
-    }
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        for name in self.reads() {
-            builder.read(name);
-        }
+        builder.read("gbuffer");
+        builder.read("depth");
+        builder.read("ssr_trace");
+        builder.read("pre_aa");
     }
     fn render_pass_descriptor<'a>(
         &'a self,
