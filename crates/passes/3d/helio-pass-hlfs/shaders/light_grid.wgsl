@@ -49,38 +49,47 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
     // same identity is used by every tile so filtering never crosses different
     // decompositions. Composition evaluates this emitter exactly at full size.
     if lane==0u { key_light=INVALID_LIGHT; }
-    // A small outdoor population still benefits from a full-resolution sun:
-    // denoising its hard visibility edge blurs architectural reliefs. Keep
-    // point/spot residuals on the normal sampling path, and use one stable
-    // directional identity for the whole frame.
-    if lane==0u && presample && globals.debug_mode!=1u && globals.light_count<=GRID_CAPACITY {
-        var peak=0.0;
-        for(var i=0u;i<globals.light_count;i++) {
-            if lights[i].light_type!=0u { continue; }
-            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
-            if power>peak { peak=power; key_light=i; }
-        }
-    }
-    if presample && globals.debug_mode!=1u && globals.light_count>GRID_CAPACITY && globals.light_count<=65535u {
+    // Population means active emitters, not allocated SceneDB entity slots.
+    // Keep the same decomposition for equivalent dense and sparse light sets.
+    if presample && globals.debug_mode!=1u && globals.light_count<=65535u {
         var power_sum=0.0; var maximum=0.0; var best=INVALID_LIGHT;
+        var active_count=0u; var sun_power=0.0; var sun=INVALID_LIGHT;
         for(var i=lane;i<globals.light_count;i+=256u) {
-            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
+            let light=lights[i];
+            if light.color_intensity.w<=0.0 || all(light.color_intensity.rgb<=vec3<f32>(0.0)) { continue; }
+            if light.light_type!=0u && light.position_range.w<=0.0 { continue; }
+            let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
+            if !(power>0.0) { continue; }
+            active_count+=1u;
             power_sum+=power;
             if power>maximum { maximum=power; best=i; }
+            if light.light_type==0u && power>sun_power { sun_power=power; sun=i; }
         }
         proposal_weights[lane]=power_sum;
         alias_probabilities[lane]=maximum;
         alias_indices[lane]=best;
+        packed[lane]=active_count;
+        small_aliases[lane]=sun;
+        large_aliases[lane]=bitcast<u32>(sun_power);
         workgroupBarrier();
         if lane==0u {
             var total=0.0; var peak=0.0; var id=INVALID_LIGHT;
+            var population=0u; var directional_power=0.0; var directional=INVALID_LIGHT;
             for(var i=0u;i<256u;i++) {
                 total+=proposal_weights[i];
+                population+=packed[i];
                 if alias_probabilities[i]>peak || (alias_probabilities[i]==peak && alias_indices[i]<id) {
                     peak=alias_probabilities[i]; id=alias_indices[i];
                 }
+                let power=bitcast<f32>(large_aliases[i]);
+                if power>directional_power || (power==directional_power && small_aliases[i]<directional) {
+                    directional_power=power; directional=small_aliases[i];
+                }
             }
-            if peak>16.0*total/f32(globals.light_count) { key_light=id; }
+            // Small outdoor sets retain a full-resolution sun. Larger sets
+            // split only a globally dominant emitter from their residual.
+            if population<=GRID_CAPACITY { key_light=directional; }
+            else if peak>16.0*total/f32(population) { key_light=id; }
         }
     }
     workgroupBarrier();

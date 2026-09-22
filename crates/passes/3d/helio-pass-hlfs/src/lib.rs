@@ -837,6 +837,9 @@ impl RenderPass for HlfsPass {
 }
 
 #[cfg(test)]
+mod key_selection_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn quality_and_reference_settings_retain_screen_space_mode() {
