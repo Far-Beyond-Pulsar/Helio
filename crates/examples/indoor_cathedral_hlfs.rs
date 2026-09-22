@@ -116,6 +116,7 @@ struct AppState {
     cam_yaw: f32,
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
+    alt_pressed: bool,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
@@ -206,6 +207,7 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
+            .with_tsr_quality(helio_pass_tsr::TsrQuality::Native)
             .with_shadow_quality(helio::ShadowQuality::Ultra)
             .with_ssr(true)
             .with_environment_reflections(true);
@@ -217,7 +219,7 @@ impl ApplicationHandler for App {
         let has_stone = stone_store.is_some();
         if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
         let mut renderer = RendererBuilder::new(config, scene_handle)
-            .with_editor_mode(true)
+            .with_editor_mode(false)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
         if has_stone { hlfs_capture::architectural_materials::configure_sampler(&mut renderer); }
@@ -269,9 +271,10 @@ impl ApplicationHandler for App {
             acceleration,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
-            cam_pitch: -0.05,
+            cam_yaw: 0.0,
+            cam_pitch: 0.065,
             keys: HashSet::new(),
+            alt_pressed: false,
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             debug_mode: 0,
@@ -287,6 +290,19 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(false) => {
+                // Some platforms swallow key-up while a system menu or another
+                // window owns focus. Never keep flying on a stale movement key.
+                state.keys.clear();
+                state.alt_pressed = false;
+                state.mouse_delta = (0.0, 0.0);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.alt_pressed = modifiers.state().alt_key();
+                if state.alt_pressed {
+                    state.keys.clear();
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -384,7 +400,9 @@ impl ApplicationHandler for App {
                 ..
             } => match ks {
                 ElementState::Pressed => {
-                    state.keys.insert(key);
+                    if !state.alt_pressed {
+                        state.keys.insert(key);
+                    }
                 }
                 ElementState::Released => {
                     state.keys.remove(&key);

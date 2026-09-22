@@ -8,34 +8,30 @@ use pulsar_scenedb::World;
 use crate::architectural_mesh::Mesh;
 
 pub fn populate(world: &mut World) {
-    // Limestone, mouldings, basalt, marble, oak, bronze, wax, luminous flame.
+    // Limestone, mouldings, basalt, paving, oak, bronze, wax, flame, altar marble.
     let properties = [
         ([0.53, 0.47, 0.37, 1.], 0.88, 0., [0., 0., 0.], 0.),
         ([0.72, 0.65, 0.51, 1.], 0.72, 0., [0., 0., 0.], 0.),
-        ([0.07, 0.085, 0.095, 1.], 0.32, 0., [0., 0., 0.], 0.),
-        ([0.51, 0.49, 0.42, 1.], 0.3, 0., [0., 0., 0.], 0.),
+        ([0.11, 0.12, 0.13, 1.], 0.75, 0., [0., 0., 0.], 0.),
+        ([0.55, 0.54, 0.50, 1.], 0.62, 0., [0., 0., 0.], 0.),
         ([0.14, 0.062, 0.027, 1.], 0.53, 0., [0., 0., 0.], 0.),
         ([0.42, 0.25, 0.075, 1.], 0.24, 0.8, [0., 0., 0.], 0.),
         ([0.86, 0.74, 0.50, 1.], 0.65, 0., [0., 0., 0.], 0.),
         ([1., 0.6, 0.15, 1.], 0.5, 0., [1., 0.36, 0.045], 5.),
+        ([0.51, 0.49, 0.42, 1.], 0.30, 0., [0., 0., 0.], 0.),
     ];
     let mut meshes: Vec<Mesh> = (0..properties.len()).map(|_| Mesh::default()).collect();
-    // Stone paving, fine mortar gaps and a dark processional border.
+    // Staggered stone paving with a restrained processional band. Keep the
+    // broad walking surface matte; the raised altar is polished separately.
     meshes[0].block([0., -0.13, 0.], [11., 0.1, 28.]);
     for x in -9_i32..9 {
         for z in -23_i32..23 {
-            let mat = if x.abs() <= 1 {
-                if (x + z).rem_euclid(2) == 0 {
-                    2
-                } else {
-                    3
-                }
+            let mat = if x.abs() <= 1 && z.rem_euclid(7) == 0 {
+                2
+            } else if (x * 13 + z * 7).rem_euclid(11) < 4 {
+                0
             } else {
-                if (x * 13 + z * 7).rem_euclid(11) == 0 {
-                    0
-                } else {
-                    3
-                }
+                3
             };
             meshes[mat].block(
                 [x as f32 * 1.2 + 0.6, -0.015, z as f32 * 1.2 + 0.6],
@@ -149,12 +145,12 @@ pub fn populate(world: &mut World) {
     );
     // East end: raised sanctuary, altar, reredos and gilded cross.
     for i in 0..3 {
-        meshes[3].block(
+        meshes[8].block(
             [0., 0.12 + i as f32 * 0.18, -25.1 - i as f32 * 0.3],
             [5.2 - i as f32 * 0.35, 0.12, 2.7 - i as f32 * 0.3],
         );
     }
-    meshes[3].block([0., 1.65, -25.6], [2.4, 0.17, 0.9]);
+    meshes[8].block([0., 1.65, -25.6], [2.4, 0.17, 0.9]);
     for x in [-1.8, 1.8] {
         meshes[1].block([x, 1.05, -25.6], [0.28, 0.6, 0.6]);
     }

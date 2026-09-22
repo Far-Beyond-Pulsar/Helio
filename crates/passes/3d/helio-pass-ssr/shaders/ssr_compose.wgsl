@@ -23,9 +23,16 @@
     let p10=clamp(reflection_base+vec2<i32>(1,0),vec2<i32>(0),reflection_max);
     let p01=clamp(reflection_base+vec2<i32>(0,1),vec2<i32>(0),reflection_max);
     let p11=clamp(reflection_base+vec2<i32>(1),vec2<i32>(0),reflection_max);
-    let hit=mix(
-        mix(textureLoad(reflection,p00,0),textureLoad(reflection,p10,0),reflection_frac.x),
-        mix(textureLoad(reflection,p01,0),textureLoad(reflection,p11,0),reflection_frac.x),
+    // Trace RGB is unassociated with confidence. Premultiply each tap before
+    // reconstruction so a hit beside an empty trace pixel keeps its energy.
+    // Interpolating RGB and confidence independently would fade it twice.
+    let h00=textureLoad(reflection,p00,0);
+    let h10=textureLoad(reflection,p10,0);
+    let h01=textureLoad(reflection,p01,0);
+    let h11=textureLoad(reflection,p11,0);
+    let premul=mix(
+        mix(h00.rgb*h00.a,h10.rgb*h10.a,reflection_frac.x),
+        mix(h01.rgb*h01.a,h11.rgb*h11.a,reflection_frac.x),
         reflection_frac.y,
     );
     let n=textureLoad(normals,p,0);
@@ -35,5 +42,5 @@
     let v=normalize(cameras[0].position_near.xyz-world);
     let ndv=max(dot(helio_gbuffer_normal(n.xyz),v),0.0);
     let f=f0+(max(vec3<f32>(1.0-material.g),f0)-f0)*pow(1.0-ndv,5.0);
-    return vec4<f32>(max(hit.rgb,vec3<f32>(0.0))*clamp(hit.a,0.0,1.0)*f*clamp(material.r,0.0,1.0),0.0);
+    return vec4<f32>(max(premul,vec3<f32>(0.0))*f*clamp(material.r,0.0,1.0),0.0);
 }
