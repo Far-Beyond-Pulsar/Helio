@@ -82,10 +82,7 @@ impl PortalInstancePass {
 
         let shader_source = portal_shader_source(material_binding);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PortalInstance Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_source),
-        });
+        let shader = helio_core::shader::module(device, "PortalInstance Shader", &shader_source);
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),

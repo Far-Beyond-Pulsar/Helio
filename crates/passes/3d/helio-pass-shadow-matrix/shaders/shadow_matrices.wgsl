@@ -109,7 +109,7 @@ fn mat4_orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32,
     return mat4x4f(
         vec4f(2.0 * rml, 0.0, 0.0, 0.0),
         vec4f(0.0, 2.0 * tmb, 0.0, 0.0),
-        vec4f(0.0, 0.0, fmn, 0.0),
+        vec4f(0.0, 0.0, -fmn, 0.0),
         vec4f(-(right + left) * rml, -(top + bottom) * tmb, -near * fmn, 1.0),
     );
 }
@@ -174,45 +174,34 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
     let dir = normalize(direction);
     let up = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(dot(dir, vec3f(0.0, 1.0, 0.0))) > 0.99);
 
-    // Unproject 8 NDC corners to world space
-    let ndc = array<vec4f, 8>(
-        vec4f(-1.0, -1.0, 0.0, 1.0), vec4f(1.0, -1.0, 0.0, 1.0),
-        vec4f(-1.0,  1.0, 0.0, 1.0), vec4f(1.0,  1.0, 0.0, 1.0),
-        vec4f(-1.0, -1.0, 1.0, 1.0), vec4f(1.0, -1.0, 1.0, 1.0),
-        vec4f(-1.0,  1.0, 1.0, 1.0), vec4f(1.0,  1.0, 1.0, 1.0),
-    );
-
-    var world: array<vec3f, 8>;
-    for (var i = 0u; i < 8u; i++) {
-        let v = cameras[0].inv_view_proj * ndc[i];
-        world[i] = v.xyz / v.w;
+    // Build unjittered frustum rays from rotation and projection scale. Avoid
+    // far-plane inverse projection: it amplifies f32 error at large far/near
+    // ratios and makes stationary shadows depend on temporal AA jitter.
+    let camera=cameras[0];
+    let rotation=transpose(mat3x3f(camera.view[0].xyz,camera.view[1].xyz,camera.view[2].xyz));
+    var rays:array<vec3f,4>;
+    var ortho_offsets:array<vec3f,4>;
+    for(var j=0u;j<4u;j++) {
+        let xy=vec2f(select(-1.0,1.0,(j&1u)!=0u),select(-1.0,1.0,(j&2u)!=0u));
+        let asymmetric=xy+camera.proj[2].xy+camera.jitter_frame.xy;
+        rays[j]=rotation*normalize(vec3f(asymmetric.x/camera.proj[0][0],asymmetric.y/camera.proj[1][1],-1.0));
+        let ortho_xy=xy-camera.proj[3].xy+camera.jitter_frame.xy;
+        ortho_offsets[j]=rotation*vec3f(ortho_xy.x/camera.proj[0][0],ortho_xy.y/camera.proj[1][1],0.0);
     }
-
-    // Compute camera distances for near/far planes
-    var near_dist = 0.0;
-    var far_dist = 0.0;
-    for (var i = 0u; i < 4u; i++) {
-        near_dist += length(world[i] - cameras[0].position_near.xyz);
-        far_dist  += length(world[i + 4u] - cameras[0].position_near.xyz);
-    }
-    near_dist /= 4.0;
-    far_dist  /= 4.0;
-    let depth = max(far_dist - near_dist, 1.0);
-
-    let prev_d = array<f32, 4>(0.0, CSM_SPLITS.x, CSM_SPLITS.y, CSM_SPLITS.z);
-
-    // Compute 4 cascade matrices
-    for (var cascade_idx = 0u; cascade_idx < 4u; cascade_idx++) {
-        let t0 = clamp((prev_d[cascade_idx] - near_dist) / depth, 0.0, 1.0);
-        let t1 = clamp((CSM_SPLITS[cascade_idx] - near_dist) / depth, 0.0, 1.0);
-
-        // 8 world-space corners of this frustum slice
-        var cc: array<vec3f, 8>;
-        for (var j = 0u; j < 4u; j++) {
-            cc[j * 2u]       = mix(world[j], world[j + 4u], t0);
-            cc[j * 2u + 1u]  = mix(world[j], world[j + 4u], t1);
+    let prev_d = array<f32,4>(0.0,CSM_SPLITS.x,CSM_SPLITS.y,CSM_SPLITS.z);
+    for(var cascade_idx=0u;cascade_idx<4u;cascade_idx++) {
+        // Adjacent slices cover the lighting pass's five-percent blend margins.
+        let d0=max(camera.position_near.w,prev_d[cascade_idx]*0.95);
+        let d1=CSM_SPLITS[cascade_idx]*1.05;
+        var cc:array<vec3f,8>;
+        for(var j=0u;j<4u;j++) {
+            cc[j*2u]=rays[j]*d0;
+            cc[j*2u+1u]=rays[j]*d1;
+            if camera.proj[3].w!=0.0 {
+                cc[j*2u]=ortho_offsets[j]-rotation[2]*d0;
+                cc[j*2u+1u]=ortho_offsets[j]-rotation[2]*d1;
+            }
         }
-
         // Sphere fit: centroid + radius
         var centroid = vec3f(0.0);
         for (var i = 0u; i < 8u; i++) {
@@ -225,25 +214,26 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
             radius = max(radius, length(cc[i] - centroid));
         }
 
-        // Snap radius to texel boundaries
-        let texel_size = (2.0 * radius) / f32(max(params.shadow_atlas_size, 1u));
-        let radius_snap = ceil(radius / texel_size) * texel_size;
-
-        // Texel-snapped light view
-        let light_view_raw = mat4_look_at_rh(centroid - dir * SCENE_DEPTH, centroid, up);
-        let centroid_ls_v4 = light_view_raw * vec4f(centroid, 1.0);
-        let centroid_ls = centroid_ls_v4.xyz / centroid_ls_v4.w;  // Match CPU transform_point3
-        let snap = texel_size;
-        let snapped_x = round(centroid_ls.x / snap) * snap;
-        let snapped_y = round(centroid_ls.y / snap) * snap;
-
-        // Apply snap offset in world space
-        let right_ws = normalize(vec3f(light_view_raw[0][0], light_view_raw[1][0], light_view_raw[2][0]));
-        let up_ws    = normalize(vec3f(light_view_raw[0][1], light_view_raw[1][1], light_view_raw[2][1]));
-        let snap_offset = right_ws * (snapped_x - centroid_ls.x) + up_ws * (snapped_y - centroid_ls.y);
-        let stable_centroid = centroid + snap_offset;
-
-        let light_view = mat4_look_at_rh(stable_centroid - dir * SCENE_DEPTH, stable_centroid, up);
+        // Quantize the rotation-invariant sphere radius, then reserve one texel
+        // of padding for snapping. The old radius / texel_size was always N/2
+        // and did not stabilize the radius.
+        let resolution=f32(max(params.shadow_atlas_size,4u));
+        let radius_snap=ceil(radius*16.0)/16.0*resolution/(resolution-2.0);
+        let texel_size=2.0*radius_snap/resolution;
+        let right_ws=normalize(cross(dir,up));
+        let up_ws=cross(right_ws,dir);
+        let world_centroid=camera.position_near.xyz+centroid;
+        // Snap in a fixed light basis. Transforming the centroid by a view
+        // centred on itself yields zero and cannot anchor texels to the world.
+        let cx=round(dot(right_ws,world_centroid)/texel_size)*texel_size;
+        let cy=round(dot(up_ws,world_centroid)/texel_size)*texel_size;
+        let cz=dot(dir,world_centroid);
+        let light_view=mat4x4f(
+            vec4f(right_ws.x,up_ws.x,-dir.x,0.0),
+            vec4f(right_ws.y,up_ws.y,-dir.y,0.0),
+            vec4f(right_ws.z,up_ws.z,-dir.z,0.0),
+            vec4f(-cx,-cy,cz-SCENE_DEPTH,1.0),
+        );
         let proj = mat4_orthographic_rh(-radius_snap, radius_snap, -radius_snap, radius_snap, 0.1, SCENE_DEPTH * 2.0);
 
         shadow_mats[base + cascade_idx].mat = proj * light_view;

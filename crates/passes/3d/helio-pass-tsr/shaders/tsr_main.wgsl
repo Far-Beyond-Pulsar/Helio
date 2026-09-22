@@ -6,13 +6,12 @@
 //   3. Neighbourhood sampling in YCoCg space (5×5 tap for Quality/Native, 3×3 otherwise)
 //   4. AABB clamping of the history sample
 //   5. Adaptive temporal blend driven by classification
-//   6. Contrast-Adaptive Sharpening (CAS) on the upsampled output
+//   6. Display sharpening in a separate blit after storing this resolve
 //
 // References:
 //   UE5 TSR — https://docs.unrealengine.com/en-US/temporal-super-resolution/
 //   FSR 2.x — https://gpuopen.com/fidelityfx-super-resolution-2
 //   Playdead temporal — https://github.com/playdeadgames/temporal (MIT)
-//   AMD CAS — https://gpuopen.com/fidelityfx-cas
 
 // ── Classification bit flags ──────────────────────────────────────────────────
 const CLASS_NONE:             u32 = 0u;
@@ -27,10 +26,9 @@ const C_NEG_INFTY:              f32 = -1.0e32;
 const MIN_HISTORY_BLEND_RATE:   f32 = 0.04;
 const MAX_HISTORY_BLEND_RATE:   f32 = 1.0;
 const LARGE_MOTION_THRESHOLD:   f32 = 0.01;  // UV-space velocity magnitude
-const DISOCCLUSION_THRESHOLD:   f32 = 0.05;  // normalised depth difference
+const DISOCCLUSION_THRESHOLD:   f32 = 0.01;  // relative perspective depth difference
 const SHIMMER_VAR_THRESHOLD:    f32 = 0.03;
 const EDGE_DEPTH_THRESHOLD:     f32 = 0.02;
-const CAS_SHARPNESS:            f32 = 0.45;
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
 
@@ -58,9 +56,22 @@ struct TsrUniform {
     reset:          u32,       // 1 on first frame / after reset_history()
     time_delta:     f32,       // seconds since last frame
     tap_radius:     u32,       // 1 = 3×3, 2 = 5×5
-    _pad:           vec2<f32>,
+    previous_jitter: vec2<f32>, // previous projection translation in render pixels
+    clip_to_previous: mat4x4<f32>, // composed in f64 on the CPU
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
+@group(0) @binding(7) var history_depth: texture_2d<f32>; // centered RG32Float depth interval, never color alpha
+@group(0) @binding(8) var history_mean: texture_2d<f32>; // raw sample YCoCg mean, A=count
+@group(0) @binding(9) var history_variance: texture_2d<f32>;
+
+// The default graph uses forward device depth. Compare both surfaces in the
+// PREVIOUS projection, including camera translation. The 1-depth scale avoids
+// accepting nearly every occlusion once device depth approaches one. The small
+// absolute floor covers f32 projection rounding, not a world-space LOD change.
+fn history_depth_matches(expected: f32, stored: f32) -> bool {
+    if (expected >= 1.0) != (stored >= 1.0) { return false; }
+    return abs(expected - stored) <= max(0.00000012, (1.0 - min(expected, stored)) * DISOCCLUSION_THRESHOLD);
+}
 
 // ── Vertex passthrough ────────────────────────────────────────────────────────
 
@@ -103,38 +114,50 @@ fn max3(v: vec3<f32>) -> f32 { return max(v.r, max(v.g, v.b)); }
 fn tonemap(c: vec3<f32>)         -> vec3<f32> { return c / (max3(c) + 1.0); }
 fn reverse_tonemap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 - max3(c) + 1.0e-8); }
 
-// ── Catmull-Rom history sampling ──────────────────────────────────────────────
-
-fn sample_catmull_rom(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec3<f32> {
-    let dims = vec2<f32>(textureDimensions(tex));
-    let sp   = uv * dims;
-    let tc   = floor(sp - 0.5) + 0.5;
-    let f    = sp - tc;
-
-    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    let w3 = f * f * (-0.5 + 0.5 * f);
-
-    let w12 = w1 + w2;
-    let o12 = w2 / w12;
-
-    let ts   = 1.0 / dims;
-    let uv0  = (tc - 1.0) * ts;
-    let uv12 = (tc + o12) * ts;
-    let uv3  = (tc + 2.0) * ts;
-
-    var r = vec3<f32>(0.0);
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv0.x,  uv0.y),  0.0).rgb * w0.x  * w0.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv0.y),  0.0).rgb * w12.x * w0.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv3.x,  uv0.y),  0.0).rgb * w3.x  * w0.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv0.x,  uv12.y), 0.0).rgb * w0.x  * w12.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv12.y), 0.0).rgb * w12.x * w12.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv3.x,  uv12.y), 0.0).rgb * w3.x  * w12.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv0.x,  uv3.y),  0.0).rgb * w0.x  * w3.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv3.y),  0.0).rgb * w12.x * w3.y;
-    r += textureSampleLevel(tex, samp, vec2<f32>(uv3.x,  uv3.y),  0.0).rgb * w3.x  * w3.y;
-    return max(r, vec3<f32>(0.0));
+// Reconstruct color and validity from the same Catmull-Rom footprint. A lone
+// nearest-depth test rejects ordinary edge coverage; color filtering without
+// geometric validity leaks unrelated surfaces. Signed cubic weights preserve
+// resolved detail without applying a second bilinear blur to every frame.
+fn cubic_weights(f:f32)->vec4<f32> {
+    return vec4<f32>(f*(-0.5+f*(1.0-0.5*f)),1.0+f*f*(-2.5+1.5*f),
+        f*(0.5+f*(2.0-1.5*f)),f*f*(-0.5+0.5*f));
+}
+struct HistorySample {
+    color:vec3<f32>, weight:f32,
+    mean:vec3<f32>, count:f32,
+    variance:vec3<f32>,
+}
+fn sample_geometric_history(uv: vec2<f32>, expected_depth: f32) -> HistorySample {
+    let dims = vec2<i32>(textureDimensions(history_frame));
+    let point = uv * vec2<f32>(dims) - 0.5;
+    let base = vec2<i32>(floor(point));
+    let fraction = fract(point);
+    let wx=cubic_weights(fraction.x);let wy=cubic_weights(fraction.y);
+    var color = vec3<f32>(0.0);
+    var weight = 0.0;
+    var mean_sum=vec4<f32>(0.0);var second_sum=vec3<f32>(0.0);var moment_weight=0.0;
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let pixel = clamp(base + vec2<i32>(x-1,y-1), vec2<i32>(0), dims-1);
+            let depth_range = textureLoad(history_depth,pixel,0).rg;
+            let stored_depth = clamp(expected_depth,depth_range.x,depth_range.y);
+            let w = wx[x]*wy[y];
+            if history_depth_matches(expected_depth,stored_depth) {
+                color += textureLoad(history_frame,pixel,0).rgb * w;
+                weight += w;
+                // Pool moments with positive weights. Signed cubic colour
+                // reconstruction must not create a negative sample variance.
+                let mw=max(w,0.0);let mean=textureLoad(history_mean,pixel,0);
+                let variance=textureLoad(history_variance,pixel,0).rgb;
+                mean_sum+=mean*mw;
+                second_sum+=(variance+mean.rgb*mean.rgb)*mw;
+                moment_weight+=mw;
+            }
+        }
+    }
+    let mean=mean_sum/max(moment_weight,0.00001);
+    let variance=max(second_sum/max(moment_weight,0.00001)-mean.rgb*mean.rgb,vec3<f32>(0.0));
+    return HistorySample(max(color/max(weight,0.00001),vec3<f32>(0.0)),weight,mean.rgb,mean.a,variance);
 }
 
 // ── Neighbourhood statistics ──────────────────────────────────────────────────
@@ -205,8 +228,7 @@ fn gather_neighbourhood(
 // Classify this pixel and return a bitmask of CLASS_* flags.
 fn classify_pixel(
     velocity:      vec2<f32>, // screen-space velocity (UV per frame)
-    depth:         f32,
-    history_depth: f32,
+    valid_depth:   bool,
     n:             Neighbourhood,
 ) -> u32 {
     var flags = CLASS_NONE;
@@ -217,8 +239,7 @@ fn classify_pixel(
     }
 
     // Disocclusion: reprojected history depth mismatches current depth
-    let depth_diff = abs(depth - history_depth) / (depth + 1.0e-5);
-    if depth_diff > DISOCCLUSION_THRESHOLD {
+    if !valid_depth {
         flags |= CLASS_DISOCCLUSION;
     }
 
@@ -250,7 +271,7 @@ fn compute_blend_factor(
 
     // Forced fast-blend cases
     if (flags & CLASS_DISOCCLUSION) != 0u {
-        base = 0.5;
+        return 1.0;
     } else if (flags & CLASS_LARGE_MOTION) != 0u {
         base = 0.25;
     }
@@ -277,39 +298,69 @@ fn compute_blend_factor(
     return clamp(base, MIN_HISTORY_BLEND_RATE, MAX_HISTORY_BLEND_RATE);
 }
 
-// ── Contrast-Adaptive Sharpening (CAS) ───────────────────────────────────────
-
-// Lightweight CAS pass on the resolved colour.
-// Locally modulated: less sharpening in high-variance (noisy) regions.
-fn apply_cas(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
-    // Use output-res texel size from current_frame dimensions scaled to output dims
-    let texel = 1.0 / vec2<f32>(textureDimensions(current_frame));
-
-    // 5-tap cross kernel
-    let c = rgb;
-    let n = textureSampleLevel(current_frame, point_sampler, uv + vec2<f32>(0.0, -texel.y), 0.0).rgb;
-    let s = textureSampleLevel(current_frame, point_sampler, uv + vec2<f32>(0.0,  texel.y), 0.0).rgb;
-    let e = textureSampleLevel(current_frame, point_sampler, uv + vec2<f32>( texel.x, 0.0), 0.0).rgb;
-    let w = textureSampleLevel(current_frame, point_sampler, uv + vec2<f32>(-texel.x, 0.0), 0.0).rgb;
-
-    let luma    = vec3<f32>(0.2126, 0.7152, 0.0722);
-    let lc = dot(c, luma);
-    let ln = dot(n, luma); let ls = dot(s, luma);
-    let le = dot(e, luma); let lw = dot(w, luma);
-
-    let contrast = max(max(max(max(lc, ln), ls), le), lw)
-                 - min(min(min(min(lc, ln), ls), le), lw);
-
-    // CAS formula: sharpen flat areas, leave edges alone
-    let blur     = (n + s + e + w) * 0.25;
-    let strength = CAS_SHARPNESS * saturate(1.0 - 2.0 * contrast);
-    return clamp(c + (c - blur) * strength, vec3<f32>(0.0), vec3<f32>(1.0));
-}
+// Display sharpening runs after the unsharpened resolve is stored.
 
 // ── Main fragment shader ──────────────────────────────────────────────────────
 
+// Current color and stored history are centered images, while both camera
+// matrices include projection jitter. Deproject the current sample in its
+// jittered image, then remove previous projection jitter from the history UV.
+fn reproject_history_point(center_uv:vec2<f32>, depth:f32, in_dims:vec2<f32>)->vec3<f32> {
+    let current_uv=center_uv+tsr.jitter_offset*vec2<f32>(1.0,-1.0)/in_dims;
+    let ndc=vec2<f32>(current_uv.x*2.0-1.0,1.0-current_uv.y*2.0);
+    let previous=tsr.clip_to_previous*vec4<f32>(ndc,depth,1.0);
+    if previous.w<=0.0 {return vec3<f32>(-1.0);}
+    let previous_ndc=previous.xy/previous.w;
+    let previous_uv=vec2<f32>(previous_ndc.x*0.5+0.5,0.5-previous_ndc.y*0.5);
+    return vec3<f32>(previous_uv-tsr.previous_jitter*vec2<f32>(1.0,-1.0)/in_dims, previous.z/previous.w);
+}
+fn reproject_history(center_uv:vec2<f32>, depth:f32, in_dims:vec2<f32>)->vec2<f32> {
+    return reproject_history_point(center_uv,depth,in_dims).xy;
+}
+// Depth is a point sample from the internal raster, whereas the resolved
+// color pixel is centered and may lie between raster samples. Obtain motion
+// from the actual depth texel, then carry that displacement to the color pixel.
+// Deprojecting point-sampled depth at a different UV invents a different surface.
+fn reproject_sample_motion(center_uv:vec2<f32>, depth:f32, in_dims:vec2<f32>)->vec3<f32> {
+    let jitter_uv=tsr.jitter_offset*vec2<f32>(1.0,-1.0)/in_dims;
+    let pixel=clamp(floor((center_uv+jitter_uv)*in_dims),vec2<f32>(0.0),in_dims-1.0);
+    let sample_center=(pixel+0.5)/in_dims-jitter_uv;
+    let previous=reproject_history_point(sample_center,depth,in_dims);
+    return vec3<f32>(previous.xy+center_uv-sample_center,previous.z);
+}
+struct ResolveOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) depth: vec2<f32>,
+    @location(2) mean: vec4<f32>,
+    @location(3) variance: vec4<f32>,
+}
+fn fresh_resolve(color:vec3<f32>,depth:vec2<f32>)->ResolveOutput {
+    let sample=rgb_to_ycocg(tonemap(color));
+    return ResolveOutput(vec4<f32>(color,1.0),depth,vec4<f32>(sample,1.0),vec4<f32>(0.0));
+}
+
+// The current color reconstruction is bilinear. Retain the depth range of
+// exactly its contributing texels, including partial voxel/sky coverage. A
+// single nearest depth cannot describe that mixed image sample. This range
+// changes history validity only; it does not change the current geometry.
+fn current_depth_range(uv:vec2<f32>)->vec2<f32> {
+    let dims=vec2<i32>(textureDimensions(depth_tex));
+    let point=uv*vec2<f32>(dims)-0.5;
+    let base=vec2<i32>(floor(point));let fraction=fract(point);
+    var lo=1.0;var hi=0.0;
+    for(var y=0;y<2;y++) {for(var x=0;x<2;x++) {
+        let weight=select(1.0-fraction.x,fraction.x,x==1)*select(1.0-fraction.y,fraction.y,y==1);
+        if weight>0.00001 {
+            let pixel=clamp(base+vec2<i32>(x,y),vec2<i32>(0),dims-1);
+            let depth=textureLoad(depth_tex,pixel,0);
+            lo=min(lo,depth);hi=max(hi,depth);
+        }
+    }}
+    return vec2<f32>(lo,hi);
+}
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> ResolveOutput {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
     let out_dims = vec2<f32>(textureDimensions(history_frame));
     let in_texel = 1.0 / in_dims;
@@ -321,49 +372,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ── Current frame sample (jitter-corrected) ───────────────────────────────
     let current_rgb = textureSampleLevel(current_frame, linear_sampler, cur_uv, 0.0).rgb;
 
+    let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
+    let depth_range = current_depth_range(cur_uv);
+
     // ── RESET path ────────────────────────────────────────────────────────────
     if tsr.reset != 0u {
-        let sharpened = apply_cas(current_rgb, cur_uv);
-        return vec4<f32>(sharpened, 1.0);
+        return fresh_resolve(current_rgb, depth_range);
     }
 
     // ── Depth-based reprojection → history UV ─────────────────────────────────
-    let depth_val = textureSample(depth_tex, point_sampler, in.uv);
-    let ndc_xy    = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    let clip      = vec4<f32>(ndc_xy, depth_val, 1.0);
-    let world_h   = cameras[0].inv_view_proj * clip;
-    let world_pos = world_h.xyz / world_h.w;
-    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_pos, 1.0);
-    let prev_ndc  = prev_clip.xy / prev_clip.w;
-    let history_uv = vec2<f32>((prev_ndc.x + 1.0) * 0.5, (1.0 - prev_ndc.y) * 0.5);
+    let previous = reproject_sample_motion(in.uv, depth_val, in_dims);
+    let history_uv = previous.xy;
 
     // If reprojected UV is out of screen, use current frame only
     if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
-        let sharpened = apply_cas(current_rgb, cur_uv);
-        return vec4<f32>(sharpened, 1.0);
+        return fresh_resolve(current_rgb, depth_range);
     }
 
-    // ── History sample (Catmull-Rom for quality) ───────────────────────────────
-    let history_rgb = sample_catmull_rom(history_frame, linear_sampler, history_uv);
-
-    // ── Reprojected history depth ─────────────────────────────────────────────
-    // We use the current depth value for the disocclusion comparison. Sampling
-    // at history_uv would cause false disocclusions at depth edges because the
-    // jitter delta between frames shifts history_uv away from in.uv, even for
-    // a perfectly static scene. That spurious CLASS_DISOCCLUSION forces blend
-    // to 0.5 and prevents temporal accumulation (visible as shimmer/shake).
-    // A proper implementation would keep a separate history depth buffer.
-    let history_depth_approx = depth_val;
+    let history = sample_geometric_history(history_uv,previous.z);
+    let history_rgb = history.color;
 
     // ── Neighbourhood statistics ───────────────────────────────────────────────
     let tap_radius = i32(tsr.tap_radius);
-    let n = gather_neighbourhood(current_frame, depth_tex, cur_uv, in_texel, tap_radius);
+    var n = gather_neighbourhood(current_frame, depth_tex, cur_uv, in_texel, tap_radius);
+    if history.weight>0.01 && history.count>=2.0 {
+        // A single spatial neighbourhood can omit valid subpixel face colours.
+        // Retain measured temporal coverage noise in both clipping and blend
+        // validation, while geometrically invalid history remains rejected.
+        let allowance=3.0*sqrt(history.variance);
+        n.aabb_min-=allowance;n.aabb_max+=allowance;
+    }
 
     // ── Screen-space velocity (UV-space) ──────────────────────────────────────
     let velocity = history_uv - in.uv;
 
     // ── Pixel classification ──────────────────────────────────────────────────
-    let flags = classify_pixel(velocity, depth_val, history_depth_approx, n);
+    let flags = classify_pixel(velocity, history.weight > 0.01, n);
 
     // ── Tonemap for stable accumulation ───────────────────────────────────────
     let current_tm  = rgb_to_ycocg(tonemap(current_rgb));
@@ -398,11 +442,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let blended_rgb   = ycocg_to_rgb(blended_ycocg);
     let result_linear = reverse_tonemap(clamp(blended_rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
 
-    // ── CAS sharpening ────────────────────────────────────────────────────────
-    // Only sharpen in areas with enough variance to have recoverable detail.
-    let cas_weight = clamp((n.variance - 0.002) * 10.0, 0.0, 1.0);
-    let cas_result = apply_cas(result_linear, cur_uv);
-    let output     = mix(result_linear, cas_result, cas_weight);
-
-    return vec4<f32>(output, 1.0);
+    // The display blit sharpens this image without modifying history.
+    let count=select(1.0,min(history.count+1.0,32.0),history.weight>0.01 && tsr.reactivity<1.0);
+    let moment_blend=max(1.0/count,tsr.reactivity);
+    let delta=current_tm-history.mean;
+    let mean=mix(history.mean,current_tm,moment_blend);
+    let variance=(1.0-moment_blend)*(history.variance+moment_blend*delta*delta);
+    return ResolveOutput(vec4<f32>(result_linear, 1.0), depth_range,
+        vec4<f32>(mean,count),vec4<f32>(variance,0.0));
 }

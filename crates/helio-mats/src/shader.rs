@@ -68,9 +68,21 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
     }
     sample_switch.push_str("        default: { return fallback; }\n    }");
 
+    // VT fetches must retain the wanted mip and residency lookup when arrays
+    // are expanded. Compute derivatives before choosing a concrete texture.
+    let mut vt_switch = String::from("let vt_row = vt_meta[slot.texture_index];\n    let vt_wanted = vt_wanted_mip(vt_row, uv);\n    switch slot.texture_index {\n");
+    for index in 0..max_textures {
+        vt_switch.push_str(&format!(
+            "        case {index}u: {{ return vt_sample_level(scene_texture_{index}, scene_sampler_{index}, vt_row, uv, vt_wanted); }}\n",
+        ));
+    }
+    vt_switch.push_str("        default: { return fallback; }\n    }");
     source.replace(
         "return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);",
         &sample_switch,
+    ).replace(
+        "return vt_sample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], vt_meta[slot.texture_index], uv);",
+        &vt_switch,
     )
 }
 
