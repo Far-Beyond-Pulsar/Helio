@@ -119,10 +119,7 @@ impl VirtualGeometryPass {
                 helio_mats::apply_webgpu_material_bindings(&s, material_binding.max_textures)
             }
         };
-        let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("VG GBuffer Shader"),
-            source: wgpu::ShaderSource::Wgsl(draw_shader_source.clone().into()),
-        });
+        let draw_shader = helio_core::shader::module(device, "VG GBuffer Shader", &draw_shader_source);
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
         let object_buf = Self::make_object_buf(device, INITIAL_OBJECTS);

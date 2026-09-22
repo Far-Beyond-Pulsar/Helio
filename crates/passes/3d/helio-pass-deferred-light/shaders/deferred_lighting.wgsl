@@ -154,6 +154,7 @@ struct ShadowConfig {
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
 // Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
+@group(1) @binding(10) var directional_visibility: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -1116,6 +1117,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
     // is handled separately — shadow maps do not occlude it (that is AO's job).
+    let voxel_visibility = textureLoad(directional_visibility, pix, 0);
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
@@ -1139,6 +1141,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             var sf = 1.0;
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
+            if light.light_type==0u && dot(voxel_visibility.yzw,voxel_visibility.yzw)>0.5 {
+                let light_direction=-normalize(light.direction_outer.xyz);
+                if dot(normalize(voxel_visibility.yzw),light_direction)>0.99999 {
+                    // Visibility queries affect this direction's direct lighting only.
+                    if voxel_visibility.x<0.0 {return vec4<f32>(4.0,0.0,2.6,1.0);}
+                    sf*=clamp(voxel_visibility.x,0.0,1.0);
+                }
             }
             let sss_color = sss_r.rgb;
             Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);

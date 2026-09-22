@@ -19,7 +19,7 @@ struct Camera {
     prev_view_proj: mat4x4<f32>,
 }
 
-// Layout must match SkyUniform in renderer.rs (112 bytes, 16-byte aligned)
+// Layout must match SkyUniform in renderer.rs (128 bytes, 16-byte aligned)
 struct SkyUniforms {
     sun_direction:     vec3<f32>,  // toward sun (normalised)
     sun_intensity:     f32,
@@ -45,6 +45,7 @@ struct SkyUniforms {
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
+    planet_observer: vec4<f32>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -97,6 +98,37 @@ const DEPTH_STEPS: u32 = 4u;
 // ──────────────────────────────────────────────────────────────────────────────
 
 // Ray–sphere intersection. Returns (t_near, t_far). Both negative = miss.
+// Concentrate lookup rows around the geometric atmospheric limb. A uniform
+// global-Y panorama magnifies a thin orbital atmosphere into a broad halo.
+fn planet_sky_basis()->mat3x3<f32> {
+    let up=normalize(sky.planet_observer.xyz);
+    let reference=select(vec3<f32>(0.0,1.0,0.0),vec3<f32>(0.0,0.0,1.0),abs(up.y)>0.99);
+    let east=normalize(cross(reference,up));
+    return mat3x3<f32>(east,up,cross(east,up));
+}
+fn planet_horizon_mu()->f32 {
+    let ratio=min(1.0,sky.earth_radius/max(length(sky.planet_observer.xyz),sky.earth_radius));
+    return -sqrt(max(0.0,1.0-ratio*ratio));
+}
+fn planet_lut_direction(uv_up:vec2<f32>)->vec3<f32> {
+    let horizon=planet_horizon_mu();let q=uv_up.y*2.0-1.0;
+    // Preserve exact polar endpoints; subtracting horizon can leave a one-ulp
+    // residual that expands into a visible angular error through sqrt(1-mu^2).
+    let mapped_mu=horizon+select(-(horizon+1.0),1.0-horizon,q>=0.0)*q*q;
+    let mu=select(mapped_mu,sign(q),abs(q)>=1.0);
+    let azimuth=(uv_up.x-0.5)*2.0*PI;
+    let tangent=sqrt(max(0.0,1.0-mu*mu));
+    return planet_sky_basis()*vec3<f32>(tangent*cos(azimuth),mu,tangent*sin(azimuth));
+}
+fn planet_lut_uv(rd:vec3<f32>)->vec2<f32> {
+    let local=transpose(planet_sky_basis())*rd;
+    let horizon=planet_horizon_mu();let delta=clamp(local.y,-1.0,1.0)-horizon;
+    let span=select(horizon+1.0,1.0-horizon,delta>=0.0);
+    let mapped_q=select(-1.0,1.0,delta>=0.0)*sqrt(clamp(abs(delta)/max(span,1e-8),0.0,1.0));
+    let q=select(mapped_q,sign(local.y),local.x==0.0 && local.z==0.0);
+    return vec2<f32>(atan2(local.z,local.x)/(2.0*PI)+0.5,0.5-q*0.5);
+}
+
 fn ray_sphere(ro: vec3<f32>, rd: vec3<f32>, r: f32) -> vec2<f32> {
     let b   = dot(ro, rd);
     let c   = dot(ro, ro) - r * r;
@@ -142,6 +174,7 @@ fn optical_depth(ro: vec3<f32>, rd: vec3<f32>, ray_len: f32) -> vec2<f32> {
 /// Sample the pre-baked sky-view LUT for a given view direction.
 /// Matches the panoramic encoding in sky_lut.wgsl.
 fn sample_sky_lut(ray_dir: vec3<f32>) -> vec3<f32> {
+    if sky.planet_observer.w>0.0 {return textureSampleLevel(sky_lut,sky_sampler,planet_lut_uv(ray_dir),0.0).rgb;}
     let azimuth  = atan2(ray_dir.z, ray_dir.x);        // -π..π
     let sin_elev = clamp(ray_dir.y, -1.0, 1.0);
     let u = azimuth / (2.0 * PI) + 0.5;
@@ -309,18 +342,36 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 // ──────────────────────────────────────────────────────────────────────────────
 
+fn sky_camera_ray(ndc:vec2<f32>)->vec3<f32> {
+    let camera=cameras[0];
+    var view_ray=vec3<f32>(0.0,0.0,-1.0);
+    if camera.proj[3].w==0.0 {
+        // Infinite-far and large far/near projections can unproject z=1 to
+        // w=0. Ray direction requires only projection scale/offset and rotation.
+        let xy=ndc+camera.proj[2].xy;
+        view_ray=vec3<f32>(xy.x/camera.proj[0][0],xy.y/camera.proj[1][1],-1.0);
+    }
+    let rotation=transpose(mat3x3<f32>(camera.view[0].xyz,camera.view[1].xyz,camera.view[2].xyz));
+    return normalize(rotation*view_ray);
+}
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Reconstruct world-space ray direction from the inverse VP matrix
-    let clip      = vec4<f32>(in.ndc_xy, 1.0, 1.0);
-    let world     = cameras[0].view_proj_inv * clip;
-    let camera_pos = cameras[0].position_near.xyz;
-    let ray_dir   = normalize(world.xyz / world.w - camera_pos);
+    let ray_dir=sky_camera_ray(in.ndc_xy);
 
     // Atmosphere: sample the pre-baked sky-view LUT immediately.  sampling
     // must occur under uniform control flow, so we do it before any
     // non-uniform branch/early-return.
     var sky_col = sample_sky_lut(ray_dir);
+
+    if sky.planet_observer.w>0.0 {
+        // The same spherical lookup is used at every altitude. Tone mapping
+        // belongs to the engine post-process; retain linear HDR sky here.
+        let cos_a=dot(ray_dir,sky.sun_direction);
+        if cos_a>sky.sun_disk_cos {
+            sky_col+=smoothstep(sky.sun_disk_cos,sky.sun_disk_cos+0.0002,cos_a)*vec3<f32>(1.5,1.3,0.9)*sky.sun_intensity*0.08;
+        }
+        return vec4<f32>(sky_col*sky.exposure,1.0);
+    }
 
     // Below horizon: preserve sunset colors with gradual darkening to night.
     if ray_dir.y < 0.0 {
