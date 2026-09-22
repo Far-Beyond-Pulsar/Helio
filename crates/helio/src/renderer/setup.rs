@@ -287,6 +287,7 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            graph_rebuild_hook: None,
             scene_db,
             tsr_quality: config.tsr_quality,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(

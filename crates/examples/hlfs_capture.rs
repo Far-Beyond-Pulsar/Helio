@@ -1,10 +1,34 @@
 //! Deterministic offscreen camera path through a populated scene.
-use helio::{Camera, RendererBuilder, RendererConfig};
-use pulsar_scenedb::{Entity, World};
+use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
+use pulsar_scenedb::{Entity, SceneDb, World};
 use std::sync::Arc;
 
 #[path = "architectural_materials.rs"]
 pub mod architectural_materials;
+
+/// The draw-range table is read back asynchronously. Prime it before the
+/// first presented/captured frame so the initial image contains the scene.
+pub fn warm_up_cathedral(
+    scene_db: &SceneDb,
+    renderer: &mut Renderer,
+    acceleration: Option<&mut helio_pass_hlfs::SceneDbRayTracing>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: &Camera,
+    target: &wgpu::TextureView,
+) {
+    let mut acceleration = acceleration;
+    for _ in 0..4 {
+        crate::v3_demo_common::flush_scene_db(scene_db, queue);
+        if let Some(acceleration) = acceleration.as_mut() {
+            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+            renderer.set_ray_tracing_frame_with_transmission(
+                acceleration.tlas(), acceleration.transmission());
+        }
+        renderer.render(camera, target).expect("cathedral warmup frame");
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("cathedral warmup poll");
+    }
+}
 
 pub fn run(directory: &str, populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>)) {
     run_scene(directory, "cathedral", populate, |t, aspect| {
@@ -184,6 +208,29 @@ pub fn run_scene(
         });
         let view = texture.create_view(&Default::default());
         std::fs::create_dir_all(directory).unwrap();
+        if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() {
+            renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                .expect("HLFS pass")
+                .set_config(&device, helio_pass_hlfs::HlfsConfig {
+                    mode: if ray_traced { helio_pass_hlfs::HlfsMode::RayTraced }
+                        else { helio_pass_hlfs::HlfsMode::ScreenSpace },
+                    debug_mode: if reference { helio_pass_hlfs::HlfsDebugMode::Reference }
+                        else { helio_pass_hlfs::HlfsDebugMode::Final },
+                    temporal_resampling,
+                    candidates_per_sample: candidate_count.unwrap_or(if presampled { 2 } else { 8 }),
+                    samples_per_pixel: sample_count.unwrap_or(if presampled {
+                        helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel
+                    } else if performance { 4 } else { 2 }),
+                    ..if presampled { helio_pass_hlfs::HlfsConfig::ray_traced_presampled() }
+                        else if performance { helio_pass_hlfs::HlfsConfig::performance() }
+                        else { Default::default() }
+                });
+        }
+        if name.starts_with("cathedral") {
+            let camera = camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32);
+            warm_up_cathedral(&scene_db, &mut renderer,
+                ray_traced.then_some(&mut acceleration), &device, &queue, &camera, &view);
+        }
         let mut frame_times = Vec::new();
         let timing = std::env::var_os("HLFS_CAPTURE_TIMINGS").map(|_| {
             let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
@@ -226,42 +273,6 @@ pub fn run_scene(
                 if frame==80 { assert_eq!(register_checker(&device,&queue,&mut store,true),0); }
                 if frame+1==capture_frames { eprintln!("Diagnostic texture uploads: {}",store.upload_count()); }
             }
-            if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() {
-                let pass = renderer
-                    .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
-                    .expect("HLFS pass");
-                pass.set_config(
-                    &device,
-                    helio_pass_hlfs::HlfsConfig {
-                        mode: if ray_traced {
-                            helio_pass_hlfs::HlfsMode::RayTraced
-                        } else {
-                            helio_pass_hlfs::HlfsMode::ScreenSpace
-                        },
-                        debug_mode: if reference {
-                            helio_pass_hlfs::HlfsDebugMode::Reference
-                        } else {
-                            helio_pass_hlfs::HlfsDebugMode::Final
-                        },
-                        temporal_resampling,
-                        candidates_per_sample: candidate_count.unwrap_or(if presampled { 2 } else { 8 }),
-                        samples_per_pixel: sample_count.unwrap_or(if presampled {
-                            helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel
-                        } else if performance {
-                            4
-                        } else {
-                            2
-                        }),
-                        ..if presampled {
-                            helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
-                        } else if performance {
-                            helio_pass_hlfs::HlfsConfig::performance()
-                        } else {
-                            Default::default()
-                        }
-                    },
-                );
-            }
             let t = fixed_camera.unwrap_or((frame as f32 / 99.0).clamp(0.0, 1.0));
             let camera = camera_path(t, width as f32 / height as f32);
             let start = std::time::Instant::now();
@@ -283,11 +294,11 @@ pub fn run_scene(
                 let sample_height = size.height.div_ceil(sample_scale);
                 let aa = if fxaa { "fxaa" } else if std::env::var_os("HLFS_TSR_NATIVE").is_some() { "tsr_native" } else { "none" };
                 let transparency_reactivity = aa == "tsr_native" && std::env::var_os("HLFS_NO_TRANSPARENCY_REACTIVITY").is_none();
-                let lighting_setup = if name == "cathedral" && ray_traced {
+                let lighting_setup = if name.starts_with("cathedral") && ray_traced {
                     if std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_some() { "window_emitters" } else { "daylight_sun" }
                 } else { "scene_default" };
                 let texture_set = if !has_architectural_textures { "flat" }
-                    else if name == "cathedral" { "stone_marble_wood" }
+                    else if name.starts_with("cathedral") { "stone_marble_wood" }
                     else { "architectural" };
                 let camera_parameter = fixed_camera.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
                 let metadata = format!(
