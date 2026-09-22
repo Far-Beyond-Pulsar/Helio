@@ -1,10 +1,14 @@
-//! Shared, embedded CC0 architectural material for interactive and capture paths.
+//! Shared, embedded CC0 architectural materials for interactive and capture paths.
 use helio_pass_gbuffer::MaterialComponent;
-use pulsar_scenedb::{gpu::TextureStore, World};
+use pulsar_scenedb::{gpu::TextureStore, Entity, World};
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy)]
 pub struct StoneMaterial;
+#[derive(Clone, Copy)]
+pub struct FloorMaterial;
+#[derive(Clone, Copy)]
+pub struct WoodMaterial;
 
 pub fn configure_sampler(renderer: &mut helio::Renderer) {
     renderer.set_material_sampler(&wgpu::SamplerDescriptor {
@@ -29,51 +33,99 @@ pub fn load(
     {
         return None;
     }
-    let materials: Vec<_> = world
+    let stone: Vec<_> = world
         .query::<(&StoneMaterial,)>()
         .map(|(entity, _)| entity)
         .collect();
-    if materials.is_empty() {
+    let floor: Vec<_> = world
+        .query::<(&FloorMaterial,)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    let wood: Vec<_> = world
+        .query::<(&WoodMaterial,)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    if stone.is_empty() && floor.is_empty() && wood.is_empty() {
         return None;
     }
-    let mut store = TextureStore::new(3);
-    let base = upload(
-        device,
-        queue,
-        &mut store,
-        include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_diff_1k.png"),
-        true,
-    );
-    let normal = upload(
-        device,
-        queue,
-        &mut store,
-        include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_nor_gl_1k.png"),
-        false,
-    );
-    let arm = upload(
-        device,
-        queue,
-        &mut store,
-        include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_arm_1k.png"),
-        false,
-    );
-    for entity in materials {
-        let mut material = world
-            .get_mut::<MaterialComponent>(entity)
-            .expect("stone material");
-        // The photo provides the stone color without the old flat-color tint.
+    let mut store = TextureStore::new(9);
+    if !stone.is_empty() {
+        let base = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_diff_1k.png"),
+            true,
+        );
+        let normal = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_nor_gl_1k.png"),
+            false,
+        );
+        let arm = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_arm_1k.png"),
+            false,
+        );
+        apply_material(
+            world,
+            stone,
+            base,
+            normal,
+            arm,
+            std::env::var_os("HLFS_NO_STONE_NORMALS").is_none(),
+            1.0,
+        );
+    }
+
+    if !floor.is_empty() {
+        let base = upload(device, queue, &mut store,
+            include_bytes!("assets/marble_01/marble_01_diff_2k.jpg"), true);
+        let normal = upload(device, queue, &mut store,
+            include_bytes!("assets/marble_01/marble_01_nor_gl_2k.jpg"), false);
+        let arm = upload(device, queue, &mut store,
+            include_bytes!("assets/marble_01/marble_01_arm_2k.jpg"), false);
+        // The source's median roughness is about 0.5. Worn nave paving is
+        // less reflective than a newly polished slab; retain map variation.
+        apply_material(world, floor, base, normal, arm, true, 1.3);
+    }
+    if !wood.is_empty() {
+        let base = upload(device, queue, &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_col_2k.jpg"), true);
+        let normal = upload(device, queue, &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_nor_gl_2k.jpg"), false);
+        let arm = upload(device, queue, &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_arm_2k.jpg"), false);
+        apply_material(world, wood, base, normal, arm, true, 1.0);
+    }
+    Some(Arc::new(RwLock::new(store)))
+}
+
+fn apply_material(
+    world: &mut World,
+    entities: Vec<Entity>,
+    base: u32,
+    normal: u32,
+    arm: u32,
+    normal_enabled: bool,
+    roughness_scale: f32,
+) {
+    for entity in entities {
+        let mut material = world.get_mut::<MaterialComponent>(entity).expect("architectural material");
         material.base_color = [1.0; 4];
-        material.roughness_metallic[0] = 1.0;
+        material.roughness_metallic[0] = roughness_scale;
         material.tex_base_color = base;
         material.tex_roughness = arm;
         material.tex_occlusion = arm;
-        if std::env::var_os("HLFS_NO_STONE_NORMALS").is_none() {
+        if normal_enabled {
             material.tex_normal = normal;
             material.flags |= helio_mats::FLAG_HAS_NORMAL_MAP;
         }
     }
-    Some(Arc::new(RwLock::new(store)))
 }
 
 fn srgb_to_linear(x: f32) -> f32 {

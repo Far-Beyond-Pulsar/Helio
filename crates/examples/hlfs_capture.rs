@@ -286,9 +286,12 @@ pub fn run_scene(
                 let lighting_setup = if name == "cathedral" && ray_traced {
                     if std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_some() { "window_emitters" } else { "daylight_sun" }
                 } else { "scene_default" };
+                let texture_set = if !has_architectural_textures { "flat" }
+                    else if name == "cathedral" { "stone_marble_wood" }
+                    else { "architectural" };
                 let camera_parameter = fixed_camera.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
                 let metadata = format!(
-                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"transparency_reactivity\": {transparency_reactivity},\n  \"reference\": {reference},\n  \"lighting_setup\": \"{lighting_setup}\",\n  \"fixed_camera_parameter\": {camera_parameter},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
+                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"texture_set\": \"{texture_set}\",\n  \"transparency_reactivity\": {transparency_reactivity},\n  \"reference\": {reference},\n  \"lighting_setup\": \"{lighting_setup}\",\n  \"fixed_camera_parameter\": {camera_parameter},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
                     size.width, size.height);
                 eprintln!("Capture dimensions: {metadata}");
                 std::fs::write(std::path::Path::new(directory).join("capture-config.json"), metadata).unwrap();

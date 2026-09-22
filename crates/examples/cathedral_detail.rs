@@ -26,13 +26,7 @@ pub fn populate(world: &mut World) {
     meshes[0].block([0., -0.13, 0.], [11., 0.1, 28.]);
     for x in -9_i32..9 {
         for z in -23_i32..23 {
-            let mat = if x.abs() <= 1 && z.rem_euclid(7) == 0 {
-                2
-            } else if (x * 13 + z * 7).rem_euclid(11) < 4 {
-                0
-            } else {
-                3
-            };
+            let mat = if x.abs() <= 1 && z.rem_euclid(7) == 0 { 2 } else { 3 };
             meshes[mat].block(
                 [x as f32 * 1.2 + 0.6, -0.015, z as f32 * 1.2 + 0.6],
                 [0.592, 0.015, 0.592],
@@ -335,9 +329,20 @@ pub fn populate(world: &mut World) {
             world,
             make_material(colour, rough, metal, emission, strength),
         );
-        if index == 0 {
-            world.insert(material, crate::hlfs_capture::architectural_materials::StoneMaterial);
-            mesh.world_space_uv(2.0);
+        match index {
+            0 => {
+                world.insert(material, crate::hlfs_capture::architectural_materials::StoneMaterial);
+                mesh.world_space_uv(2.0);
+            }
+            3 => {
+                world.insert(material, crate::hlfs_capture::architectural_materials::FloorMaterial);
+                mesh.world_space_uv(2.0);
+            }
+            4 => {
+                world.insert(material, crate::hlfs_capture::architectural_materials::WoodMaterial);
+                mesh.world_space_uv(0.8);
+            }
+            _ => {}
         }
         let mesh = spawn_mesh(
             world,
