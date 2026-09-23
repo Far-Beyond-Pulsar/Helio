@@ -138,9 +138,12 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     }
     // The extracted key still has to illuminate this receiver. In particular,
     // back-facing surfaces need no full-resolution shadow ray.
-    if key!=INVALID_LIGHT && can_illuminate(key,s) {
-        let exact=evaluate_light(key,s,shadow_factor(key,s.position,s.normal,fragment.xy,globals.frame));
-        diffuse+=exact.diffuse; specular+=exact.specular;
+    if key!=INVALID_LIGHT {
+        let key_incident=incident(lights[key],s.position);
+        if dot(s.normal,key_incident.direction)>0.0 && any(key_incident.radiance>vec3<f32>(0.0)) && globals.exposure>0.0 {
+            let exact=evaluate_incident(s,key_incident,shadow_factor(key,s.position,s.normal,fragment.xy,globals.frame));
+            diffuse+=exact.diffuse; specular+=exact.specular;
+        }
     }
     let direct=(diffuse*s.albedo+specular*s.specular_factor)/globals.exposure;
     let emissive=textureLoad(gbuf_emissive,pixel,0).rgb;

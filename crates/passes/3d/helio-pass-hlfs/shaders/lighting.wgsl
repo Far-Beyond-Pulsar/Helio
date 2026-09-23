@@ -78,8 +78,7 @@ fn importance(id: u32, s: Surface) -> f32 {
     }
     return proxy;
 }
-fn evaluate_light(id: u32, s: Surface, visibility: Visibility) -> Lighting {
-    let inc=incident(lights[id],s.position);
+fn evaluate_incident(s: Surface, inc: Incident, visibility: Visibility) -> Lighting {
     let ndl=max(dot(s.normal,inc.direction),0.0);
     let ndv=max(dot(s.normal,s.view),0.0);
     let h=safe_normalize(s.view+inc.direction);
@@ -94,4 +93,7 @@ fn evaluate_light(id: u32, s: Surface, visibility: Visibility) -> Lighting {
     // Demodulate before filtering; material response returns at full resolution.
     return Lighting((1.0-f)*(1.0-s.metallic)*energy/PI,
         d*g*f*energy/((4.0*ndv*ndl+0.0001)*s.specular_factor));
+}
+fn evaluate_light(id: u32, s: Surface, visibility: Visibility) -> Lighting {
+    return evaluate_incident(s,incident(lights[id],s.position),visibility);
 }
