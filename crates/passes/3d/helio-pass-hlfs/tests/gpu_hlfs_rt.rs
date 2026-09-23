@@ -708,6 +708,28 @@ fn benchmark_rt_resolution_and_acceleration() {
                     graph_ms.is_finite() && graph_ms > 0.0,
                     "missing HLFS stage timestamps"
                 );
+                if std::env::var_os("HLFS_RT_PROBE_CAPTURE").is_some()
+                    && frame >= warmup
+                    && [63, 64, 65, 80, 81, 95].contains(&(frame - warmup))
+                {
+                    let directory = std::env::var("HLFS_RT_PROBE_OUTPUT")
+                        .expect("capture requires HLFS_RT_PROBE_OUTPUT");
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let pixels = f.read();
+                    let mut image = image::RgbImage::new(width, height);
+                    for (out, pixel) in image.pixels_mut().zip(pixels) {
+                        *out = image::Rgb(pixel.map(|value| {
+                            ((value.max(0.0) / (1.0 + value.max(0.0))).powf(1.0 / 2.2) * 255.0)
+                                as u8
+                        }));
+                    }
+                    image
+                        .save(std::path::Path::new(&directory).join(format!(
+                            "{width}x{height}-scale{scale}-spp{samples}-c{candidates}-frame{:03}.png",
+                            frame - warmup
+                        )))
+                        .unwrap();
+                }
                 let (tx, rx) = std::sync::mpsc::channel();
                 read.slice(..)
                     .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
@@ -947,6 +969,8 @@ fn benchmark_rt_quality_frontier() {
     let tile_presampling = std::env::var_os("HLFS_RT_QUALITY_PRESAMPLE").is_some();
     let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
     let glossy_motion = std::env::var_os("HLFS_RT_QUALITY_GLOSSY_MOTION").is_some();
+    let camera_motion = glossy_motion
+        || std::env::var_os("HLFS_RT_QUALITY_CAMERA_MOTION").is_some();
     // Freeze an additional validation fixture; do not replace the original.
     // Constant-depth plane stays geometrically valid under lateral camera motion.
     let camera_at = |frame: u32| {
@@ -960,7 +984,7 @@ fn benchmark_rt_quality_frontier() {
         (eye, view)
     };
     let update_camera = |f: &mut Fixture, frame: u32| {
-        if !glossy_motion {
+        if !camera_motion {
             return;
         }
         let (eye, view) = camera_at(frame);
@@ -1039,7 +1063,7 @@ fn benchmark_rt_quality_frontier() {
                 Ok("1440p") => (2560, 1440),
                 Ok("4k") => (3840, 2160),
                 Ok(other) => panic!("unknown quality resolution: {other}"),
-                Err(_) => if glossy_motion { (257, 145) } else { (129, 73) },
+                Err(_) => if camera_motion { (257, 145) } else { (129, 73) },
             };
             let mut oracle = Fixture::new_rt(width, height).await;
             if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { oracle.ambient = [0.0; 3]; }
@@ -1138,6 +1162,8 @@ fn benchmark_rt_quality_frontier() {
                             let mean_error =
                                 (sum - ref_sum).abs() / ref_sum.abs().max(1e-6 * count as f64);
                             let nrmse = (squared / ref_squared.max(1e-12 * count as f64)).sqrt();
+                            // This numeric screen does not replace inspection
+                            // of noise and shadow stability during motion.
                             let pass = mean_error < 0.08 && nrmse < 0.20;
                             if mode == HlfsDebugMode::Final && !pass {
                                 final_failures += 1;
@@ -1145,7 +1171,9 @@ fn benchmark_rt_quality_frontier() {
                             }
                             csv.push_str(&format!("{seed},{samples},{candidates},{sample_scale},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
                         }
-                        if mode == HlfsDebugMode::Final && [63, 65, 95].contains(&frame) {
+                        if mode == HlfsDebugMode::Final
+                            && [63, 64, 65, 80, 81, 95].contains(&frame)
+                        {
                             for (suffix, buffer) in [("sampled", &pixels), ("reference", reference)]
                             {
                                 let mut image = image::RgbImage::new(f.width, f.height);
@@ -1166,7 +1194,7 @@ fn benchmark_rt_quality_frontier() {
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
         // Write all failures before returning a failing gate, never a misleading
         // successful test exit for the new review-acceptance fixture.
-        if glossy_motion || selected_setting.is_some() {
+        if camera_motion || selected_setting.is_some() {
             assert_eq!(
                 final_failures, 0,
                 "final-output quality gate failed; see quality.csv"
