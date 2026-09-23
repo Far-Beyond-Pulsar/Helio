@@ -4,36 +4,42 @@
 //! multi-draw rendering of per-brick meshlets.  CPU only touches a small
 //! dirty-brick list each frame.
 
-mod marching_cubes;
-mod chunk_codec;
 mod bounded_inbox;
+mod chunk_codec;
 mod data_api;
+mod edits;
+mod marching_cubes;
+mod residency;
 mod source_data;
 mod terrain;
 
-pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use bounded_inbox::{
+    BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain, VoxelInboxDrainBudget,
+    VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits, VoxelPublicationFailure,
+    VoxelPublicationFailureReason, VoxelPublicationOutcome, VoxelPublicationStartError,
+    VoxelPublicationStatus, VoxelPublicationTicket, VoxelPublicationTicketState,
+    VoxelPublicationWorker,
+};
 pub use chunk_codec::{
     bake_padded_chunk, VoxelChunkCodecError, VoxelMaterialChunk, VOXEL_PADDED_EDGE,
     VOXEL_PADDED_WORDS,
 };
-pub use bounded_inbox::{
-    BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain,
-    VoxelInboxDrainBudget, VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits,
-    VoxelPublicationFailure, VoxelPublicationFailureReason, VoxelPublicationOutcome,
-    VoxelPublicationStartError, VoxelPublicationStatus, VoxelPublicationWorker,
-    VoxelPublicationTicket, VoxelPublicationTicketState,
+pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use edits::{VoxelEditError, VoxelSampleEdit};
+pub use residency::{
+    VoxelEntryId, VoxelFrameBudget, VoxelFrameWork, VoxelPreparedBrick, VoxelPromotion,
+    VoxelResidency, VoxelResidencyError, VoxelUpload,
 };
 pub use source_data::{
-    VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload, VoxelChunkUpdate,
-    VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
-    MAX_VOXEL_BATCH_PAYLOAD_BYTES, MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, VOXEL_CHUNK_ENCODING_RAW,
-    VOXEL_CHUNK_SCHEMA_VERSION,
-    VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES,
+    VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload,
+    VoxelChunkUpdate, VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
+    MAX_VOXEL_BATCH_PAYLOAD_BYTES, MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES,
+    VOXEL_CHUNK_EDGE, VOXEL_CHUNK_ENCODING_RAW, VOXEL_CHUNK_SAMPLES, VOXEL_CHUNK_SCHEMA_VERSION,
 };
 
 pub use terrain::{
-    BrickRange, VoxelAreaUpdate, VoxelBlockUpdate, VoxelComponent, VoxelTerrain,
-    VOXEL_MODE_CUBES, VOXEL_MODE_SURFACE, VOXEL_TERRAIN_GRID_DIM,
+    BrickRange, VoxelAreaUpdate, VoxelBlockUpdate, VoxelComponent, VoxelTerrain, VOXEL_MODE_CUBES,
+    VOXEL_MODE_SURFACE, VOXEL_TERRAIN_GRID_DIM,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -170,6 +176,19 @@ fn needs_render_pass(attachment_mode: AttachmentMode, draw_count: u32) -> bool {
     attachment_mode == AttachmentMode::Standalone || draw_count > 0
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VoxelResidencyFrameMetrics {
+    pub upload_bytes: usize,
+    pub uploaded_bricks: usize,
+    pub deferred_bricks: usize,
+    pub promoted_entries: usize,
+    pub resident_bricks: usize,
+    pub staging_bricks: usize,
+    pub evictions: u64,
+    pub rebuilds: u64,
+    pub stale_results: u64,
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelMeshPass {
@@ -180,9 +199,10 @@ pub struct VoxelMeshPass {
     render_pipeline: wgpu::RenderPipeline,
     render_bgl: wgpu::BindGroupLayout,
     render_bind_group: Option<wgpu::BindGroup>,
-    render_bind_group_key: Option<(usize, usize, usize)>,
+    render_bind_group_key: Option<(usize, usize, usize, usize)>,
     meshlet_params_buf: wgpu::Buffer,
     palette_buf: wgpu::Buffer,
+    scene_material_fallback_buf: wgpu::Buffer,
 
     // GPU buffers
     brick_meta_buf: wgpu::Buffer,
@@ -190,10 +210,17 @@ pub struct VoxelMeshPass {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     indirect_buf: wgpu::Buffer,
+    staging_indirect_buf: wgpu::Buffer,
+    material_map_buf: wgpu::Buffer,
     dirty_brick_buf: wgpu::Buffer,
 
     // CPU-side dirty list (uploaded each frame, cleared after compute dispatch)
     dirty_bricks: Vec<DirtyBrick>,
+    immediate_slots: Vec<u32>,
+    promotion_slots: Vec<u32>,
+    retired_slots: Vec<u32>,
+    residency: VoxelResidency,
+    residency_metrics: VoxelResidencyFrameMetrics,
     active_bricks: ActiveBrickRange,
 
     normal_buf: wgpu::Buffer,
@@ -202,6 +229,30 @@ pub struct VoxelMeshPass {
 }
 
 impl VoxelMeshPass {
+    /// Queue one complete CPU-prepared entry result. The result stays hidden
+    /// until all bricks fit through budgeted frames; capacity failure retains
+    /// the previous complete output. Preparation belongs on a worker thread.
+    pub fn queue_prepared_entry(
+        &mut self,
+        id: VoxelEntryId,
+        generation: u64,
+        revision: u64,
+        bricks: Vec<VoxelPreparedBrick>,
+    ) -> Result<(), VoxelResidencyError> {
+        let evicted = self
+            .residency
+            .queue_revision(id, generation, revision, bricks)?;
+        self.retired_slots.extend(evicted);
+        Ok(())
+    }
+
+    pub fn remove_entry(&mut self, id: VoxelEntryId) {
+        self.retired_slots.extend(self.residency.remove(id));
+    }
+
+    pub fn residency_metrics(&self) -> VoxelResidencyFrameMetrics {
+        self.residency_metrics
+    }
     /// Creates a standalone pass that clears color and depth before drawing.
     pub fn new(
         device: &wgpu::Device,
@@ -282,6 +333,23 @@ impl VoxelMeshPass {
             queue.write_buffer(&buffer, 0, &zeros);
             buffer
         };
+        let staging_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Staging Indirect"),
+            size: max_bricks * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let material_map_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Scene Material Map"),
+            size: max_bricks * 256 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &material_map_buf,
+            0,
+            &vec![0u8; max_bricks as usize * 256 * 4],
+        );
         let dirty_brick_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VoxelMesh DirtyBricks"),
             size: max_dirty * std::mem::size_of::<DirtyBrick>() as u64,
@@ -445,7 +513,7 @@ impl VoxelMeshPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: indirect_buf.as_entire_binding(),
+                    resource: staging_indirect_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
@@ -521,6 +589,26 @@ impl VoxelMeshPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -535,6 +623,25 @@ impl VoxelMeshPass {
             contents: bytemuck::cast_slice(&[[0.72f32, 0.72, 0.72, 0.8]]),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let scene_material_fallback_buf =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("VoxelMesh Neutral Scene Material"),
+                contents: bytemuck::bytes_of(&helio_mats::GpuMaterial {
+                    base_color: [0.72, 0.72, 0.72, 1.0],
+                    emissive: [0.0; 4],
+                    roughness_metallic: [0.8, 0.0, 1.5, 0.5],
+                    tex_base_color: u32::MAX,
+                    tex_normal: u32::MAX,
+                    tex_roughness: u32::MAX,
+                    tex_emissive: u32::MAX,
+                    tex_occlusion: u32::MAX,
+                    workflow: 0,
+                    flags: 0,
+                    material_class: 0,
+                    class_params: [0.0; 4],
+                }),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
         // ── Render pipeline ──────────────────────────────────────────────────
         let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -614,6 +721,7 @@ impl VoxelMeshPass {
             render_bgl,
             meshlet_params_buf,
             palette_buf,
+            scene_material_fallback_buf,
             render_bind_group: None,
             render_bind_group_key: None,
             brick_meta_buf,
@@ -621,8 +729,15 @@ impl VoxelMeshPass {
             vertex_buf,
             index_buf,
             indirect_buf,
+            staging_indirect_buf,
+            material_map_buf,
             dirty_brick_buf,
             dirty_bricks: Vec::new(),
+            immediate_slots: Vec::new(),
+            promotion_slots: Vec::new(),
+            retired_slots: Vec::new(),
+            residency: VoxelResidency::new(VOXEL_MESH_MAX_BRICKS as usize),
+            residency_metrics: VoxelResidencyFrameMetrics::default(),
             active_bricks: ActiveBrickRange::new(VOXEL_MESH_MAX_BRICKS),
             normal_buf,
             surface_format,
@@ -650,7 +765,14 @@ impl VoxelMeshPass {
         voxel_size: f32,
         occupied: bool,
     ) {
-        self.mark_dirty_with_mode(brick_slot, volume_id, origin, voxel_size, occupied, VOXEL_MODE_SURFACE);
+        self.mark_dirty_with_mode(
+            brick_slot,
+            volume_id,
+            origin,
+            voxel_size,
+            occupied,
+            VOXEL_MODE_SURFACE,
+        );
     }
 
     /// Mark a brick with an explicit extraction mode. Cube mode emits exposed
@@ -671,19 +793,24 @@ impl VoxelMeshPass {
             );
             return;
         }
-
-        if self.dirty_bricks.len() < VOXEL_MESH_MAX_DIRTY as usize {
-            self.dirty_bricks.push(DirtyBrick {
-                brick_slot,
-                volume_id,
-                mode,
-                _pad: 0,
-                origin_size: [origin[0], origin[1], origin[2], voxel_size],
-            });
-            let _ = self.active_bricks.set(brick_slot, occupied);
-        } else {
+        if self.dirty_bricks.len() >= VOXEL_MESH_MAX_DIRTY as usize {
             log::warn!("VoxelMeshPass: dirty brick list overflow (dropping slot {brick_slot})");
+            return;
         }
+        if !self.residency.reserve_external(brick_slot) {
+            log::warn!("VoxelMeshPass: brick slot {brick_slot} is occupied by SceneDB residency");
+            return;
+        }
+
+        self.dirty_bricks.push(DirtyBrick {
+            brick_slot,
+            volume_id,
+            mode,
+            _pad: 0,
+            origin_size: [origin[0], origin[1], origin[2], voxel_size],
+        });
+        let _ = self.active_bricks.set(brick_slot, occupied);
+        self.immediate_slots.push(brick_slot);
     }
 
     /// Zero out the indirect draw for a brick slot so it stops being rendered.
@@ -698,6 +825,8 @@ impl VoxelMeshPass {
         }
         self.dirty_bricks
             .retain(|dirty| dirty.brick_slot != brick_slot);
+        self.immediate_slots.retain(|&slot| slot != brick_slot);
+        self.residency.release_external(brick_slot);
 
         const ZERO: DrawIndexedIndirectArgs = DrawIndexedIndirectArgs {
             index_count: 0,
@@ -725,6 +854,91 @@ impl RenderPass for VoxelMeshPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        const FRAME_BRICK_BUDGET: usize = 64;
+        for &slot in &self.immediate_slots {
+            ctx.write_buffer(
+                &self.material_map_buf,
+                slot as u64 * 256 * 4,
+                bytemuck::bytes_of(&0u32),
+            );
+        }
+        let available = (VOXEL_MESH_MAX_DIRTY as usize).saturating_sub(self.dirty_bricks.len());
+        let budgeted_bricks = FRAME_BRICK_BUDGET.min(available);
+        let work = if budgeted_bricks == 0 {
+            VoxelFrameWork {
+                deferred_bricks: self.residency.staging_bricks(),
+                ..Default::default()
+            }
+        } else {
+            self.residency
+                .take_frame(VoxelFrameBudget {
+                    max_bricks: budgeted_bricks,
+                    max_upload_bytes: budgeted_bricks * VoxelPreparedBrick::UPLOAD_BYTES,
+                })
+                .expect("the fixed voxel frame budget is valid")
+        };
+        for upload in work.uploads.iter() {
+            let slot = upload.slot;
+            let brick = &upload.brick;
+            let data_offset = slot as u64 * VOXEL_MESH_BRICK_VOXEL_WORDS * 4;
+            ctx.write_buffer(
+                &self.voxel_data_buf,
+                data_offset,
+                bytemuck::cast_slice(&brick.words),
+            );
+            let meta = GpuBrickMeta {
+                data_offset: slot * VOXEL_MESH_BRICK_VOXEL_WORDS as u32,
+                occupancy: 1,
+            };
+            ctx.write_buffer(
+                &self.brick_meta_buf,
+                slot as u64 * std::mem::size_of::<GpuBrickMeta>() as u64,
+                bytemuck::bytes_of(&meta),
+            );
+            let mut map = [0u32; 256];
+            map[0] = 1;
+            for (index, &material) in brick.material_ids.iter().enumerate() {
+                map[index + 1] = material;
+            }
+            ctx.write_buffer(
+                &self.material_map_buf,
+                slot as u64 * 256 * 4,
+                bytemuck::cast_slice(&map),
+            );
+            self.dirty_bricks.push(DirtyBrick {
+                brick_slot: slot,
+                volume_id: 0,
+                mode: brick.mode,
+                _pad: 0,
+                origin_size: [
+                    brick.origin[0],
+                    brick.origin[1],
+                    brick.origin[2],
+                    brick.voxel_size,
+                ],
+            });
+        }
+        for promotion in &work.promotions {
+            self.retired_slots.extend(&promotion.old_slots);
+            self.promotion_slots.extend(&promotion.new_slots);
+            for &slot in &promotion.old_slots {
+                let _ = self.active_bricks.set(slot, false);
+            }
+            for &slot in &promotion.new_slots {
+                let _ = self.active_bricks.set(slot, true);
+            }
+        }
+        self.residency_metrics = VoxelResidencyFrameMetrics {
+            upload_bytes: work.uploads.len() * VoxelPreparedBrick::UPLOAD_BYTES,
+            uploaded_bricks: work.uploads.len(),
+            deferred_bricks: work.deferred_bricks,
+            promoted_entries: work.promotions.len(),
+            resident_bricks: self.residency.resident_bricks(),
+            staging_bricks: self.residency.staging_bricks(),
+            evictions: self.residency.evictions,
+            rebuilds: self.residency.rebuilds,
+            stale_results: self.residency.stale_results,
+        };
         if !self.dirty_bricks.is_empty() {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
@@ -764,6 +978,26 @@ impl RenderPass for VoxelMeshPass {
             cpass.set_bind_group(0, &self.extract_bind_group, &[]);
             cpass.dispatch_workgroups(dirty_count, 1, 1);
         }
+        // Compute writes only the staging indirect buffer. Commit complete
+        // entry revisions after extraction, then render from the live buffer.
+        let compute_encoder = unsafe { &mut *ctx.compute_encoder_ptr };
+        let stride = std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+        for slot in self.retired_slots.drain(..) {
+            compute_encoder.clear_buffer(&self.indirect_buf, slot as u64 * stride, Some(stride));
+        }
+        for slot in self
+            .immediate_slots
+            .drain(..)
+            .chain(self.promotion_slots.drain(..))
+        {
+            compute_encoder.copy_buffer_to_buffer(
+                &self.staging_indirect_buf,
+                slot as u64 * stride,
+                &self.indirect_buf,
+                slot as u64 * stride,
+                stride,
+            );
+        }
 
         // A composited pass with no occupied bricks intentionally has no active
         // render pass. Dirty empty bricks still reach the compute step above so
@@ -786,10 +1020,17 @@ impl RenderPass for VoxelMeshPass {
             .get(helio_core::BufferKey::of("voxel_palette"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.palette_buf);
+        let scene_materials_buf = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("materials"))
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.scene_material_fallback_buf);
         let camera_ptr = ctx.camera as *const _ as usize;
         let lights_ptr = lights_buf as *const _ as usize;
         let palette_ptr = palette_buf as *const _ as usize;
-        if self.render_bind_group_key != Some((camera_ptr, lights_ptr, palette_ptr)) {
+        let materials_ptr = scene_materials_buf as *const _ as usize;
+        if self.render_bind_group_key != Some((camera_ptr, lights_ptr, palette_ptr, materials_ptr))
+        {
             self.render_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("VoxelMesh Render BG"),
@@ -811,9 +1052,17 @@ impl RenderPass for VoxelMeshPass {
                             binding: 3,
                             resource: palette_buf.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: scene_materials_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.material_map_buf.as_entire_binding(),
+                        },
                     ],
                 }));
-            self.render_bind_group_key = Some((camera_ptr, lights_ptr, palette_ptr));
+            self.render_bind_group_key = Some((camera_ptr, lights_ptr, palette_ptr, materials_ptr));
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };

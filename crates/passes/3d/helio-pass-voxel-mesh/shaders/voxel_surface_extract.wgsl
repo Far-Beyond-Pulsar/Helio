@@ -66,7 +66,6 @@ var<workgroup> wg_index_count: atomic<u32>;
 // Each case occupies two u32 words with one 4-bit edge index per nibble; 0xF
 // is the end-of-row sentinel.
 @group(0) @binding(8) var<storage, read> packed_tri_table: array<u32>;
-
 fn triangle_edge(words: vec2<u32>, slot: u32) -> u32 {
     let word = select(words.x, words.y, slot >= 8u);
     return (word >> ((slot % 8u) * 4u)) & 0xFu;
@@ -320,7 +319,7 @@ fn main(
             has_geom,
             brick_idx_offset,
             i32(brick_vert_offset),
-            0u,
+            brick_slot,
         );
     }
 }
