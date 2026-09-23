@@ -5,12 +5,17 @@
 //! dirty-brick list each frame.
 
 mod marching_cubes;
+mod chunk_codec;
 mod bounded_inbox;
 mod data_api;
 mod source_data;
 mod terrain;
 
 pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use chunk_codec::{
+    bake_padded_chunk, VoxelChunkCodecError, VoxelMaterialChunk, VOXEL_PADDED_EDGE,
+    VOXEL_PADDED_WORDS,
+};
 pub use bounded_inbox::{
     BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain,
     VoxelInboxDrainBudget, VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits,
@@ -23,6 +28,7 @@ pub use source_data::{
     VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
     MAX_VOXEL_BATCH_PAYLOAD_BYTES, MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, VOXEL_CHUNK_ENCODING_RAW,
     VOXEL_CHUNK_SCHEMA_VERSION,
+    VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES,
 };
 
 pub use terrain::{
