@@ -9,7 +9,10 @@
 use std::{
     collections::VecDeque,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{Arc, Condvar, Mutex, TryLockError},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex, TryLockError,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -528,6 +531,7 @@ impl VoxelPublicationTicket {
 pub struct VoxelPublicationWorker {
     inbox: BoundedVoxelInbox,
     state: Arc<Mutex<PublicationState>>,
+    retried_batches: AtomicU64,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -561,6 +565,7 @@ pub struct VoxelPublicationFailure {
 pub struct VoxelPublicationStatus {
     pub published_batches: u64,
     pub failed_batches: u64,
+    pub retried_batches: u64,
     pub last_receipt: Option<crate::VoxelBatchReceipt>,
     pub last_publication_time: Option<Duration>,
     pub failed: bool,
@@ -575,6 +580,7 @@ pub struct VoxelPublicationStatus {
 pub struct VoxelPublicationOutcome {
     pub published_batches: u64,
     pub failed_batches: u64,
+    pub retried_batches: u64,
     pub last_receipt: Option<crate::VoxelBatchReceipt>,
     pub last_publication_time: Option<Duration>,
     pub failure: Option<VoxelPublicationFailure>,
@@ -669,6 +675,7 @@ impl VoxelPublicationWorker {
         Ok(Self {
             inbox,
             state,
+            retried_batches: AtomicU64::new(0),
             thread: Some(thread),
         })
     }
@@ -687,12 +694,33 @@ impl VoxelPublicationWorker {
         Ok(ticket)
     }
 
+    /// Resubmit a retained failed/unprocessed batch after the caller has
+    /// reviewed and, if needed, rebased its public revision field. A failed
+    /// publisher is terminal; use a new worker bound to the same live store.
+    pub fn try_retry(
+        &self,
+        batch: &VoxelInboxBatch,
+    ) -> Result<VoxelPublicationTicket, VoxelInboxError> {
+        let payloads: Vec<_> = batch
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                VoxelInboxOp::Upsert { bytes, .. } => Some(Arc::clone(bytes)),
+                VoxelInboxOp::Delete { .. } => None,
+            })
+            .collect();
+        let ticket = batch.with_borrowed_batch(|borrowed| self.try_submit(borrowed, &payloads))?;
+        self.retried_batches.fetch_add(1, Ordering::Relaxed);
+        Ok(ticket)
+    }
+
     pub fn try_status(&self) -> Result<VoxelPublicationStatus, VoxelInboxError> {
         let (pending_batches, pending_ops, pending_payload_bytes) = self.inbox.try_pending()?;
         let state = self.state.try_lock().map_err(|_| VoxelInboxError::Busy)?;
         Ok(VoxelPublicationStatus {
             published_batches: state.published_batches,
             failed_batches: state.failed_batches,
+            retried_batches: self.retried_batches.load(Ordering::Relaxed),
             last_receipt: state.last_receipt,
             last_publication_time: state.last_publication_time,
             failed: state.failure.is_some() || state.terminal_inbox_error.is_some(),
@@ -718,6 +746,7 @@ impl VoxelPublicationWorker {
         VoxelPublicationOutcome {
             published_batches: state.published_batches,
             failed_batches: state.failed_batches,
+            retried_batches: self.retried_batches.load(Ordering::Relaxed),
             last_receipt: state.last_receipt,
             last_publication_time: state.last_publication_time,
             failure: state.failure.take(),
@@ -1095,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_worker_retains_failed_batch_and_later_queue() {
+    fn publication_worker_retains_failed_batch_and_later_queue_for_explicit_recovery() {
         let terrain = VoxelTerrainId(1);
         let source = VoxelSourceId(2);
         let store = Arc::new(std::sync::RwLock::new((0, HashMap::new())));
@@ -1144,6 +1173,32 @@ mod tests {
             tickets[1].try_state(),
             Ok(VoxelPublicationTicketState::Unprocessed(_))
         ));
+        let mut retry = failure.batch;
+        retry.revision = crate::VoxelBatchRevision {
+            expected: 0,
+            publish: 1,
+        };
+        let recovery = VoxelPublicationWorker::start(writer.clone(), inbox().limits).unwrap();
+        let retry_ticket = recovery.try_retry(&retry).unwrap();
+        let mut later = outcome.unprocessed.into_iter().next().unwrap();
+        later.revision = crate::VoxelBatchRevision {
+            expected: 1,
+            publish: 2,
+        };
+        let later_ticket = recovery.try_retry(&later).unwrap();
+        assert_eq!(recovery.try_status().unwrap().retried_batches, 2);
+        let recovered = recovery.finish(VoxelInboxClose::Drain);
+        assert_eq!(recovered.retried_batches, 2);
+        assert_eq!(recovered.published_batches, 2);
+        assert!(matches!(
+            retry_ticket.wait(),
+            VoxelPublicationTicketState::Published(_)
+        ));
+        assert!(matches!(
+            later_ticket.wait(),
+            VoxelPublicationTicketState::Published(_)
+        ));
+        assert_eq!(writer.revision().unwrap(), 2);
     }
 
     #[test]
