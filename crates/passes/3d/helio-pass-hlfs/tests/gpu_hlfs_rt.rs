@@ -922,6 +922,14 @@ fn benchmark_candidate_output_audit() {
 #[ignore = "explicit RT quality frontier; requires HLFS_RT_QUALITY_OUTPUT"]
 fn benchmark_rt_quality_frontier() {
     let directory = std::env::var("HLFS_RT_QUALITY_OUTPUT").expect("quality output directory");
+    // Match the shading resolution of the performance probe under review.
+    let sample_scale = std::env::var("HLFS_RT_QUALITY_SAMPLE_SCALE")
+        .map(|value| value.parse::<u32>().expect("quality sample scale"))
+        .unwrap_or(2);
+    assert!(
+        (1..=2).contains(&sample_scale),
+        "quality sample scale must be 1 or 2"
+    );
     let discovery = std::env::var("HLFS_RT_QUALITY_DISCOVERY")
         .map(|value| value.parse::<f32>().expect("quality discovery fraction"))
         .unwrap_or(0.2);
@@ -972,7 +980,7 @@ fn benchmark_rt_quality_frontier() {
         let checkpoints = [
             0u32, 1, 3, 7, 15, 31, 63, 64, 65, 67, 71, 79, 80, 81, 83, 87, 95,
         ];
-        let mut csv = String::from("seed,samples,candidates,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
+        let mut csv = String::from("seed,samples,candidates,sample_scale,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
         let mut final_failures = 0usize;
         // Fixed regression seeds. Both sets have now been exercised during
         // development; they are not an untouched holdout. Keep thresholds fixed.
@@ -1061,7 +1069,7 @@ fn benchmark_rt_quality_frontier() {
                     f.config(HlfsConfig {
                         mode: HlfsMode::RayTraced,
                         debug_mode: mode,
-                        sample_scale: 2,
+                        sample_scale,
                         samples_per_pixel: samples,
                         candidates_per_sample: candidates,
                         discovery_fraction: discovery,
@@ -1125,7 +1133,7 @@ fn benchmark_rt_quality_frontier() {
                                 final_failures += 1;
                                 eprintln!("QUALITY_FAIL seed={seed} frame={frame} mask={mask} signed_mean={} nrmse={nrmse}", (sum-ref_sum)/ref_sum.max(1e-12));
                             }
-                            csv.push_str(&format!("{seed},{samples},{candidates},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
+                            csv.push_str(&format!("{seed},{samples},{candidates},{sample_scale},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
                         }
                         if mode == HlfsDebugMode::Final && [63, 65, 95].contains(&frame) {
                             for (suffix, buffer) in [("sampled", &pixels), ("reference", reference)]
