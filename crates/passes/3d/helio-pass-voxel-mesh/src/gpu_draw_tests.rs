@@ -287,6 +287,112 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
         }
         drop(pixels);
         color_read.unmap();
+
+        // Exercise the production smooth extractor and render pipeline on the
+        // same canonical two-chunk data. Chunk 1 yields negative-X seam cells
+        // to chunk 0, so the smooth boundary has one owner.
+        for (slot, owner_mask) in [(0u32, 0xffu32), (1, 0x55)] {
+            dirty[slot as usize].mode = VOXEL_MODE_SURFACE;
+            dirty[slot as usize]._pad = owner_mask;
+        }
+        queue.write_buffer(&pass.dirty_brick_buf, 0, bytemuck::cast_slice(&dirty));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut compute = encoder.begin_compute_pass(&Default::default());
+            compute.set_pipeline(&pass.extract_pipeline);
+            compute.set_bind_group(0, &pass.extract_bind_group, &[]);
+            compute.dispatch_workgroups(2, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &pass.staging_indirect_buf,
+            0,
+            &pass.indirect_buf,
+            0,
+            2 * stride,
+        );
+        encoder.copy_buffer_to_buffer(&pass.staging_indirect_buf, 0, &indirect_read, 0, 2 * stride);
+        {
+            let color_view = color.create_view(&Default::default());
+            let depth_view = depth.create_view(&Default::default());
+            let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Voxel Smooth Test Render"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            render.set_pipeline(&pass.render_pipeline);
+            render.set_bind_group(0, &render_group, &[]);
+            render.set_vertex_buffer(0, pass.vertex_buf.slice(..));
+            render.set_vertex_buffer(1, pass.normal_buf.slice(..));
+            render.set_index_buffer(pass.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            for slot in 0..2u64 {
+                render.draw_indexed_indirect(&pass.indirect_buf, slot * stride);
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            color.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &color_read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(64),
+                },
+            },
+            color.size(),
+        );
+        queue.submit([encoder.finish()]);
+        let (tx, rx) = mpsc::channel();
+        indirect_read.slice(..).map_async(wgpu::MapMode::Read, {
+            let tx = tx.clone();
+            move |result| tx.send(result).unwrap()
+        });
+        color_read
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        rx.recv().unwrap().unwrap();
+        let indirect = indirect_read.slice(..).get_mapped_range().unwrap();
+        let smooth_args: &[DrawIndexedIndirectArgs] = bytemuck::cast_slice(&indirect);
+        assert!(
+            smooth_args[0].index_count > 0 && smooth_args[1].index_count > 0,
+            "smooth mode must extract both adjacent canonical chunks"
+        );
+        assert_eq!(smooth_args[1].first_instance, 1);
+        drop(indirect);
+        indirect_read.unmap();
+        let pixels = color_read.slice(..).get_mapped_range().unwrap();
+        let smooth_pixels = pixels
+            .chunks_exact(4)
+            .filter(|rgba| rgba[0] > 0 || rgba[1] > 0 || rgba[2] > 0)
+            .count();
+        assert!(
+            smooth_pixels > 100,
+            "smooth scene path must draw visible color; got {smooth_pixels} pixels"
+        );
+        if let Ok(path) = std::env::var("HELIO_VOXEL_CAPTURE_RAW") {
+            std::fs::write(format!("{path}.smooth"), &*pixels).expect("write smooth RGBA capture");
+        }
+        drop(pixels);
+        color_read.unmap();
         assert_eq!(
             pass.try_mark_dirty_with_mode(
                 VOXEL_MESH_MAX_BRICKS,
