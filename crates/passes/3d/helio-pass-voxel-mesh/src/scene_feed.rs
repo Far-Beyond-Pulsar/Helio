@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    bake_padded_chunk_with_policy, VoxelDomain, VoxelEntryId, VoxelMaterialChunk,
+    bake_padded_chunk_with_policy, VoxelChunkKey, VoxelDomain, VoxelEntryId, VoxelMaterialChunk,
     VoxelMissingChunkPolicy, VoxelPayloadStore, VoxelPreparedBrick, VoxelSourceId,
     VoxelSourceWriter, VoxelTerrainId, VOXEL_MESH_MAX_BRICKS, VOXEL_MODE_CUBES, VOXEL_MODE_SURFACE,
 };
@@ -309,6 +309,40 @@ fn hash_config(entry: &VoxelSceneEntry) -> u64 {
     hash.finish()
 }
 
+fn smooth_cell_owner_mask(key: VoxelChunkKey, selected: &HashSet<VoxelChunkKey>) -> u8 {
+    let mut owned = 0u8;
+    for negative in 0..8u8 {
+        let Some(base_x) = key.x.checked_sub(i64::from(negative & 1)) else {
+            continue;
+        };
+        let Some(base_y) = key.y.checked_sub(i64::from((negative >> 1) & 1)) else {
+            continue;
+        };
+        let Some(base_z) = key.z.checked_sub(i64::from((negative >> 2) & 1)) else {
+            continue;
+        };
+        let mut winner: Option<VoxelChunkKey> = None;
+        for subset in 0..8u8 {
+            if subset & !negative != 0 {
+                continue;
+            }
+            let candidate = VoxelChunkKey::new(
+                base_x + i64::from(subset & 1),
+                base_y + i64::from((subset >> 1) & 1),
+                base_z + i64::from((subset >> 2) & 1),
+                key.lod,
+            );
+            if selected.contains(&candidate) && winner.is_none_or(|current| candidate < current) {
+                winner = Some(candidate);
+            }
+        }
+        if winner == Some(key) {
+            owned |= 1 << negative;
+        }
+    }
+    owned
+}
+
 fn prepare_entry(request: PrepRequest) -> PrepResult {
     let id = request.entry.id;
     let tag = request.tag;
@@ -331,6 +365,7 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
         if selected.revision != tag.revision {
             return Err("voxel source revision changed during preparation".into());
         }
+        let center_set: HashSet<_> = selected.centers.iter().copied().collect();
         let mut bricks = Vec::with_capacity(selected.centers.len());
         for key in selected.centers {
             let center_bytes = selected.chunks.get(&key).expect("selected center exists");
@@ -370,6 +405,7 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
                 } else {
                     VOXEL_MODE_CUBES
                 },
+                owner_mask: smooth_cell_owner_mask(key, &center_set),
                 material_ids: entry.material_ids.clone(),
             });
         }
@@ -423,7 +459,17 @@ mod tests {
         });
         let bricks = result.bricks.unwrap();
         assert_eq!(bricks.len(), 1);
-        assert_eq!(bricks[0].words[0] & 0xff, 1);
+        assert_eq!((bricks[0].words[111 / 4] >> ((111 % 4) * 8)) & 0xff, 1);
         assert_eq!(bricks[0].material_ids, [42]);
+        assert_eq!(bricks[0].owner_mask, 0xff);
+    }
+
+    #[test]
+    fn adjacent_selected_chunks_have_one_smooth_boundary_owner() {
+        let a = VoxelChunkKey::new(-1, 0, 0, 0);
+        let b = VoxelChunkKey::new(0, 0, 0, 0);
+        let selected = HashSet::from([a, b]);
+        assert_eq!(smooth_cell_owner_mask(b, &selected) & 0b10, 0);
+        assert_ne!(smooth_cell_owner_mask(a, &selected) & 0b1, 0);
     }
 }

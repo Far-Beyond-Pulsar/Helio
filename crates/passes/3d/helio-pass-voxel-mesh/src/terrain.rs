@@ -20,13 +20,10 @@ pub const VOXEL_TERRAIN_GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
 /// Surface extraction modes exposed to host applications.
 pub const VOXEL_MODE_SURFACE: u32 = 0;
 pub const VOXEL_MODE_CUBES: u32 = 1;
-                                                                     // VoxelMeshPass's extract shader reads a padded 9x9x9 block per brick (one
-                                                                     // extra voxel of +X/+Y/+Z halo from the neighbor brick) so marching cubes can
-                                                                     // cover the boundary cell between adjacent bricks — without it every brick
-                                                                     // edge has a visible seam/gap. See voxel_surface_extract.wgsl::CELLS_PER_DIM.
-pub const PADDED_DIM: u32 = BRICK_DIM + 1; // 9
-pub const PADDED_VOXELS_PER_BRICK: usize = (PADDED_DIM * PADDED_DIM * PADDED_DIM) as usize; // 729
-pub const WORDS_PER_BRICK: usize = PADDED_VOXELS_PER_BRICK.div_ceil(4); // 183
+// Both-sided halo matches voxel_surface_extract.wgsl and the SceneDB codec.
+pub const PADDED_DIM: u32 = BRICK_DIM + 2; // 10
+pub const PADDED_VOXELS_PER_BRICK: usize = (PADDED_DIM * PADDED_DIM * PADDED_DIM) as usize; // 1000
+pub const WORDS_PER_BRICK: usize = PADDED_VOXELS_PER_BRICK.div_ceil(4); // 250
 
 // VoxelRayMarchPass indexes the raw (unpadded) 8x8x8 brick directly —
 // see voxel_raymarch.wgsl::read_voxel.
@@ -238,7 +235,8 @@ impl VoxelComponent {
         self.streaming[2] = chunk_z as u32;
         let world_x = chunk_x as f32 * self.dimensions[0] as f32 * self.voxel_size();
         let world_z = chunk_z as f32 * self.dimensions[2] as f32 * self.voxel_size();
-        self.local_to_world = glam::Mat4::from_translation(glam::vec3(world_x, 0.0, world_z)).to_cols_array();
+        self.local_to_world =
+            glam::Mat4::from_translation(glam::vec3(world_x, 0.0, world_z)).to_cols_array();
     }
 
     pub fn chunk_coord(&self) -> (i32, i32) {
@@ -347,14 +345,21 @@ impl VoxelTerrain {
     }
 
     fn merge_dirty_range(dirty: &mut Option<BrickRange>, position: [u32; 3]) {
-        let brick = [position[0] / BRICK_DIM, position[1] / BRICK_DIM, position[2] / BRICK_DIM];
+        let brick = [
+            position[0] / BRICK_DIM,
+            position[1] / BRICK_DIM,
+            position[2] / BRICK_DIM,
+        ];
         if let Some(range) = dirty {
             for axis in 0..3 {
                 range.min[axis] = range.min[axis].min(brick[axis]);
                 range.max[axis] = range.max[axis].max(brick[axis]);
             }
         } else {
-            *dirty = Some(BrickRange { min: brick, max: brick });
+            *dirty = Some(BrickRange {
+                min: brick,
+                max: brick,
+            });
         }
     }
 
@@ -422,7 +427,12 @@ impl VoxelTerrain {
                     if y == 0 {
                         self.set_material(x, y, z, MAT_BEDROCK);
                     } else if yf > terrain_height {
-                        self.set_material(x, y, z, if yf <= sea_level { MAT_WATER } else { MAT_AIR });
+                        self.set_material(
+                            x,
+                            y,
+                            z,
+                            if yf <= sea_level { MAT_WATER } else { MAT_AIR },
+                        );
                         continue;
                     }
 
@@ -475,7 +485,8 @@ impl VoxelTerrain {
                 if hash(wx, 91, wz, seed ^ 0x7E_2A) < 0.93 {
                     continue;
                 }
-                let h = (base_height + fbm2(wx as f32 * freq, wz as f32 * freq, seed, 4) * amplitude)
+                let h = (base_height
+                    + fbm2(wx as f32 * freq, wz as f32 * freq, seed, 4) * amplitude)
                     as i32;
                 if !(1..(self.dimensions[1] as i32 - 7)).contains(&h) {
                     continue;
@@ -512,7 +523,11 @@ impl VoxelTerrain {
         let r2 = radius * radius;
 
         let mut touched = false;
-        let mut min = [self.dimensions[0] as i32, self.dimensions[1] as i32, self.dimensions[2] as i32];
+        let mut min = [
+            self.dimensions[0] as i32,
+            self.dimensions[1] as i32,
+            self.dimensions[2] as i32,
+        ];
         let mut max = [-1i32; 3];
 
         for dz in -r..=r {
@@ -526,7 +541,12 @@ impl VoxelTerrain {
                     if !self.in_bounds(x, y, z) {
                         continue;
                     }
-                    self.set_material(x as u32, y as u32, z as u32, if add { material } else { MAT_AIR });
+                    self.set_material(
+                        x as u32,
+                        y as u32,
+                        z as u32,
+                        if add { material } else { MAT_AIR },
+                    );
                     touched = true;
                     min[0] = min[0].min(x);
                     min[1] = min[1].min(y);
@@ -555,23 +575,23 @@ impl VoxelTerrain {
         })
     }
 
-    /// Bakes a brick's padded 9x9x9 voxel block (see `PADDED_DIM`): local
-    /// indices 0..=7 are this brick's own voxels, index 8 on each axis reads
-    /// one voxel of halo from the +X/+Y/+Z neighbor brick (or air, past the
-    /// world edge) — matches voxel_surface_extract.wgsl::read_voxel exactly.
+    /// Bakes a 10³ brick input with local sample coordinates -1..=8.
     fn bake_brick(&self, bx: u32, by: u32, bz: u32, data_out: &mut [u32; WORDS_PER_BRICK]) -> bool {
         let mut occupied = false;
         for lz in 0..PADDED_DIM {
             for ly in 0..PADDED_DIM {
                 for lx in 0..PADDED_DIM {
-                    let gx = bx * BRICK_DIM + lx;
-                    let gy = by * BRICK_DIM + ly;
-                    let gz = bz * BRICK_DIM + lz;
-                    let mat = if gx < self.dimensions[0]
-                        && gy < self.dimensions[1]
-                        && gz < self.dimensions[2]
+                    let gx = (bx * BRICK_DIM) as i64 + lx as i64 - 1;
+                    let gy = (by * BRICK_DIM) as i64 + ly as i64 - 1;
+                    let gz = (bz * BRICK_DIM) as i64 + lz as i64 - 1;
+                    let mat = if gx >= 0
+                        && gy >= 0
+                        && gz >= 0
+                        && gx < i64::from(self.dimensions[0])
+                        && gy < i64::from(self.dimensions[1])
+                        && gz < i64::from(self.dimensions[2])
                     {
-                        self.materials[self.idx(gx, gy, gz)]
+                        self.materials[self.idx(gx as u32, gy as u32, gz as u32)]
                     } else {
                         MAT_AIR
                     };
@@ -592,7 +612,11 @@ impl VoxelTerrain {
     /// `VoxelMeshPass::mark_dirty` needs so its extract shader can place
     /// generated vertices in world space (see `voxel_surface_extract.wgsl`).
     fn brick_origin(&self, bx: u32, by: u32, bz: u32, voxel_size: f32) -> [f32; 3] {
-        let half = [self.dimensions[0] as f32, self.dimensions[1] as f32, self.dimensions[2] as f32];
+        let half = [
+            self.dimensions[0] as f32,
+            self.dimensions[1] as f32,
+            self.dimensions[2] as f32,
+        ];
         let gx = (bx * BRICK_DIM) as f32 - half[0] * 0.5;
         let gy = (by * BRICK_DIM) as f32 - half[1] * 0.5;
         let gz = (bz * BRICK_DIM) as f32 - half[2] * 0.5;
@@ -625,8 +649,7 @@ impl VoxelTerrain {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
                     let brick_dims = self.brick_dims();
-                    let brick_idx =
-                        bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
+                    let brick_idx = bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
                     let mut brick_words = [0u32; WORDS_PER_BRICK];
                     let occupied = self.bake_brick(bx, by, bz, &mut brick_words);
 
@@ -727,8 +750,7 @@ impl VoxelTerrain {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
                     let brick_dims = self.brick_dims();
-                    let brick_idx =
-                        bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
+                    let brick_idx = bz * brick_dims[0] * brick_dims[1] + by * brick_dims[0] + bx;
                     let mut brick_words = [0u32; RAYMARCH_WORDS_PER_BRICK];
                     let occupied = self.bake_brick_raymarch(bx, by, bz, &mut brick_words);
 

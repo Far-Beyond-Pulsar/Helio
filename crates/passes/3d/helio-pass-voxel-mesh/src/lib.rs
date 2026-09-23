@@ -8,6 +8,8 @@ mod bounded_inbox;
 mod chunk_codec;
 mod data_api;
 mod edits;
+#[cfg(test)]
+mod gpu_draw_tests;
 mod marching_cubes;
 mod residency;
 mod scene_feed;
@@ -62,12 +64,9 @@ use marching_cubes::PACKED_TRI_TABLE;
 // 512 bricks of.
 pub const VOXEL_MESH_MAX_BRICKS: u32 = 1024;
 pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
-// Each brick stores a padded 9x9x9 voxel block (729 voxels), not the raw 8x8x8
-// (512), so the extract shader's marching-cubes pass can read one extra voxel
-// of halo from the +X/+Y/+Z neighbor brick. Without it, no cell ever covers
-// the boundary between two bricks and the surface has a visible seam/gap at
-// every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
-pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
+// One sample of halo on both sides of each axis lets block faces cull across
+// negative boundaries and smooth cells cover the negative edge of a volume.
+pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 250; // ceil(10*10*10 / 4)
 pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 12288;
 pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 18432;
 
@@ -214,6 +213,9 @@ pub struct VoxelMeshPass {
     indirect_buf: wgpu::Buffer,
     staging_indirect_buf: wgpu::Buffer,
     material_map_buf: wgpu::Buffer,
+    render_origin_buf: wgpu::Buffer,
+    resident_origins: Vec<Option<[f64; 3]>>,
+    camera_position: [f64; 3],
     dirty_brick_buf: wgpu::Buffer,
 
     // CPU-side dirty list (uploaded each frame, cleared after compute dispatch)
@@ -232,6 +234,9 @@ pub struct VoxelMeshPass {
 }
 
 impl VoxelMeshPass {
+    pub fn set_camera_position(&mut self, camera: [f64; 3]) {
+        self.camera_position = camera;
+    }
     /// Reconcile live SceneDB voxel rows without copying payload bytes or
     /// waiting for generation. Call before the frame's render/idle decision.
     pub fn reconcile_scene_entries(
@@ -239,6 +244,7 @@ impl VoxelMeshPass {
         entries: impl IntoIterator<Item = VoxelSceneEntry>,
         camera: [f64; 3],
     ) -> bool {
+        self.set_camera_position(camera);
         let (feed, residency) = (&mut self.scene_feed, &self.residency);
         let removed = feed.reconcile(
             entries,
@@ -398,6 +404,12 @@ impl VoxelMeshPass {
             0,
             &vec![0u8; max_bricks as usize * 256 * 4],
         );
+        let render_origin_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Camera Relative Origins"),
+            size: max_bricks * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let dirty_brick_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VoxelMesh DirtyBricks"),
             size: max_dirty * std::mem::size_of::<DirtyBrick>() as u64,
@@ -599,7 +611,7 @@ impl VoxelMeshPass {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -649,6 +661,16 @@ impl VoxelMeshPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -779,6 +801,9 @@ impl VoxelMeshPass {
             indirect_buf,
             staging_indirect_buf,
             material_map_buf,
+            render_origin_buf,
+            resident_origins: vec![None; VOXEL_MESH_MAX_BRICKS as usize],
+            camera_position: [0.0; 3],
             dirty_brick_buf,
             dirty_bricks: Vec::new(),
             immediate_slots: Vec::new(),
@@ -855,7 +880,7 @@ impl VoxelMeshPass {
             brick_slot,
             volume_id,
             mode,
-            _pad: 0,
+            _pad: 1,
             origin_size: [origin[0], origin[1], origin[2], voxel_size],
         });
         let _ = self.active_bricks.set(brick_slot, occupied);
@@ -904,6 +929,9 @@ impl RenderPass for VoxelMeshPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         const FRAME_BRICK_BUDGET: usize = 64;
+        for &slot in &self.retired_slots {
+            self.resident_origins[slot as usize] = None;
+        }
         for &slot in &self.immediate_slots {
             ctx.write_buffer(
                 &self.material_map_buf,
@@ -929,6 +957,7 @@ impl RenderPass for VoxelMeshPass {
         for upload in work.uploads.iter() {
             let slot = upload.slot;
             let brick = &upload.brick;
+            self.resident_origins[slot as usize] = Some(brick.origin);
             let data_offset = slot as u64 * VOXEL_MESH_BRICK_VOXEL_WORDS * 4;
             ctx.write_buffer(
                 &self.voxel_data_buf,
@@ -958,16 +987,14 @@ impl RenderPass for VoxelMeshPass {
                 brick_slot: slot,
                 volume_id: 0,
                 mode: brick.mode,
-                _pad: 0,
-                origin_size: [
-                    brick.origin[0] as f32,
-                    brick.origin[1] as f32,
-                    brick.origin[2] as f32,
-                    brick.voxel_size,
-                ],
+                _pad: u32::from(brick.owner_mask),
+                origin_size: [0.0, 0.0, 0.0, brick.voxel_size],
             });
         }
         for promotion in &work.promotions {
+            for &slot in &promotion.old_slots {
+                self.resident_origins[slot as usize] = None;
+            }
             self.retired_slots.extend(&promotion.old_slots);
             self.promotion_slots.extend(&promotion.new_slots);
             for &slot in &promotion.old_slots {
@@ -988,6 +1015,24 @@ impl RenderPass for VoxelMeshPass {
             rebuilds: self.residency.rebuilds,
             stale_results: self.residency.stale_results,
         };
+        if self.resident_origins.iter().any(Option::is_some) {
+            let rows: Vec<[f32; 4]> = self
+                .resident_origins
+                .iter()
+                .map(|origin| {
+                    origin.map_or([0.0; 4], |origin| {
+                        [
+                            (origin[0] - self.camera_position[0]) as f32,
+                            (origin[1] - self.camera_position[1]) as f32,
+                            (origin[2] - self.camera_position[2]) as f32,
+                            0.0,
+                        ]
+                    })
+                })
+                .collect();
+            ctx.write_buffer(&self.render_origin_buf, 0, bytemuck::cast_slice(&rows));
+            self.residency_metrics.upload_bytes += rows.len() * 16;
+        }
         if !self.dirty_bricks.is_empty() {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
@@ -1108,6 +1153,10 @@ impl RenderPass for VoxelMeshPass {
                         wgpu::BindGroupEntry {
                             binding: 5,
                             resource: self.material_map_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.render_origin_buf.as_entire_binding(),
                         },
                     ],
                 }));

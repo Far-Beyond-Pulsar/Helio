@@ -18,6 +18,8 @@ pub struct VoxelPreparedBrick {
     pub origin: [f64; 3],
     pub voxel_size: f32,
     pub mode: u32,
+    /// Bit per negative-axis combination selecting unique smooth-cell owner.
+    pub owner_mask: u8,
     /// One-based local slots resolve to these SceneDB material record IDs.
     pub material_ids: Vec<u32>,
 }
@@ -373,6 +375,7 @@ mod tests {
             origin: [0.0; 3],
             voxel_size: 1.0,
             mode: 0,
+            owner_mask: 1,
             material_ids: vec![5],
         }
     }

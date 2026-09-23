@@ -82,16 +82,24 @@ struct GpuMaterial {
 }
 @group(0) @binding(4) var<storage, read> scene_materials: array<GpuMaterial>;
 @group(0) @binding(5) var<storage, read> brick_material_ids: array<u32>;
+@group(0) @binding(6) var<storage, read> brick_relative_origins: array<vec4<f32>>;
 
 @vertex
 fn vs_main(v: VertexInput, @builtin(instance_index) brick_slot: u32) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_pos = cameras[0].view_proj * vec4(v.data.xyz, 1.0);
     let local_slot = u32(v.data.w);
     let map_base = brick_slot * 256u;
     out.scene_material = brick_material_ids[map_base];
     out.material = select(local_slot, brick_material_ids[map_base + min(local_slot, 255u)], out.scene_material != 0u);
-    out.world_pos = v.data.xyz;
+    if out.scene_material != 0u {
+        let relative_position = brick_relative_origins[brick_slot].xyz + v.data.xyz;
+        let view_relative = cameras[0].view * vec4(relative_position, 0.0);
+        out.clip_pos = cameras[0].proj * vec4(view_relative.xyz, 1.0);
+        out.world_pos = relative_position;
+    } else {
+        out.clip_pos = cameras[0].view_proj * vec4(v.data.xyz, 1.0);
+        out.world_pos = v.data.xyz;
+    }
     out.world_normal = normalize(v.normal.xyz);
     return out;
 }
@@ -134,7 +142,7 @@ fn material_emissive(_index: u32) -> vec3<f32> {
 
 // Simple Lambertian contribution from a scene light (no PBR/specular/shadows —
 // this pass is a lightweight forward shader).
-fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>, scene_relative: bool) -> vec3<f32> {
     var l: vec3<f32>;
     var radiance: vec3<f32>;
 
@@ -142,7 +150,8 @@ fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) 
         l = normalize(-light.direction_outer.xyz);
         radiance = light.color_intensity.xyz * light.color_intensity.w;
     } else {
-        let to_light = light.position_range.xyz - world_pos;
+        let light_position = select(light.position_range.xyz, light.position_range.xyz - cameras[0].position_near.xyz, scene_relative);
+        let to_light = light_position - world_pos;
         let dist = length(to_light);
         if dist > light.position_range.w {
             return vec3<f32>(0.0);
@@ -171,7 +180,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0)
     let ambient = 0.2;
     var direct = vec3<f32>(0.0);
     for (var i = 0u; i < params.light_count; i++) {
-        direct += light_contribution(lights[i], in.world_pos, n);
+        direct += light_contribution(lights[i], in.world_pos, n, in.scene_material != 0u);
     }
     let lit = col * (ambient + direct) + emissive * 0.1;
 

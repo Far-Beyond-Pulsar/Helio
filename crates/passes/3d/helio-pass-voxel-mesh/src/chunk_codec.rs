@@ -2,7 +2,7 @@
 
 use crate::{VoxelChunkKey, VoxelDomain, VoxelUpdateError, VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES};
 
-pub const VOXEL_PADDED_EDGE: usize = VOXEL_CHUNK_EDGE + 1;
+pub const VOXEL_PADDED_EDGE: usize = VOXEL_CHUNK_EDGE + 2;
 pub const VOXEL_PADDED_WORDS: usize =
     (VOXEL_PADDED_EDGE * VOXEL_PADDED_EDGE * VOXEL_PADDED_EDGE).div_ceil(4);
 
@@ -89,7 +89,7 @@ impl VoxelMaterialChunk {
     }
 }
 
-/// Build the packed 9³ input expected by `voxel_surface_extract.wgsl`.
+/// Build the packed 10³ input expected by `voxel_surface_extract.wgsl`.
 /// Missing in-domain neighbors are unresolved, never silently treated as air.
 /// Only samples beyond a bounded domain are known air.
 pub fn bake_padded_chunk<'a>(
@@ -109,12 +109,13 @@ pub fn bake_padded_chunk_with_policy<'a>(
     domain
         .validate_key(center)
         .map_err(VoxelChunkCodecError::Domain)?;
-    let mut neighbors: [Option<VoxelMaterialChunk>; 8] = std::array::from_fn(|_| None);
-    for bits in 0..8usize {
+    let mut neighbors: [Option<VoxelMaterialChunk>; 27] = std::array::from_fn(|_| None);
+    for neighbor in 0..27usize {
+        let offsets = [neighbor % 3, (neighbor / 3) % 3, neighbor / 9];
         let next = [
-            center.x.checked_add((bits & 1) as i64),
-            center.y.checked_add(((bits >> 1) & 1) as i64),
-            center.z.checked_add(((bits >> 2) & 1) as i64),
+            center.x.checked_add(offsets[0] as i64 - 1),
+            center.y.checked_add(offsets[1] as i64 - 1),
+            center.z.checked_add(offsets[2] as i64 - 1),
         ];
         let [Some(x), Some(y), Some(z)] = next else {
             if matches!(domain, VoxelDomain::Bounded { .. }) {
@@ -126,7 +127,7 @@ pub fn bake_padded_chunk_with_policy<'a>(
         match domain.validate_key(key) {
             Ok(()) => {
                 if let Some(bytes) = lookup(key) {
-                    neighbors[bits] = Some(VoxelMaterialChunk::decode(bytes)?);
+                    neighbors[neighbor] = Some(VoxelMaterialChunk::decode(bytes)?);
                 } else if missing == VoxelMissingChunkPolicy::Defer {
                     return Err(VoxelChunkCodecError::MissingChunk(key));
                 }
@@ -140,13 +141,20 @@ pub fn bake_padded_chunk_with_policy<'a>(
     for z in 0..VOXEL_PADDED_EDGE {
         for y in 0..VOXEL_PADDED_EDGE {
             for x in 0..VOXEL_PADDED_EDGE {
-                let neighbor = usize::from(x == VOXEL_CHUNK_EDGE)
-                    | (usize::from(y == VOXEL_CHUNK_EDGE) << 1)
-                    | (usize::from(z == VOXEL_CHUNK_EDGE) << 2);
-                let sample = neighbors[neighbor]
-                    .as_ref()
-                    .map_or(0, |chunk| chunk.sample(x % 8, y % 8, z % 8));
-                let linear = z * 81 + y * 9 + x;
+                let axis = |v: usize| {
+                    if v == 0 {
+                        0
+                    } else if v == VOXEL_PADDED_EDGE - 1 {
+                        2
+                    } else {
+                        1
+                    }
+                };
+                let neighbor = axis(x) + axis(y) * 3 + axis(z) * 9;
+                let sample = neighbors[neighbor].as_ref().map_or(0, |chunk| {
+                    chunk.sample((x + 7) % 8, (y + 7) % 8, (z + 7) % 8)
+                });
+                let linear = z * VOXEL_PADDED_EDGE * VOXEL_PADDED_EDGE + y * VOXEL_PADDED_EDGE + x;
                 words[linear / 4] |= u32::from(sample) << ((linear % 4) * 8);
             }
         }
@@ -192,8 +200,13 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(words[0] & 0xff, 1);
-        let corner = 8 * 81 + 8 * 9 + 8;
+        assert_eq!(words[0] & 0xff, 0);
+        let center_first = 1 + 10 + 100;
+        assert_eq!(
+            (words[center_first / 4] >> ((center_first % 4) * 8)) & 0xff,
+            1
+        );
+        let corner = 9 * 100 + 9 * 10 + 9;
         assert_eq!((words[corner / 4] >> ((corner % 4) * 8)) & 0xff, 7);
         let boundary = VoxelDomain::Bounded {
             min: [0; 3],
