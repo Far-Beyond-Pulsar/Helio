@@ -1,5 +1,0 @@
-seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass
-11,1,8,true,0.03647364482393889,false
-29,1,8,true,0.03663587192302283,false
-47,1,8,true,0.03615783361007272,false
-71,1,8,true,0.03655090682498224,false
