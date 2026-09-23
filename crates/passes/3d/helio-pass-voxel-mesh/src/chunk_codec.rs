@@ -1,4 +1,4 @@
-//! Canonical material chunk and the existing mesh extractor's 9³ halo layout.
+//! Canonical material chunk and the mesh extractor's 10³ signed halo layout.
 
 use crate::{VoxelChunkKey, VoxelDomain, VoxelUpdateError, VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES};
 

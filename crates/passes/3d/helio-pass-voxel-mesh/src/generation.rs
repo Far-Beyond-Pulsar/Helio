@@ -274,4 +274,51 @@ mod tests {
             .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
             .is_err());
     }
+
+    #[test]
+    fn seed_and_version_are_part_of_reproducible_generator_identity() {
+        let registry = VoxelGeneratorRegistry::default();
+        let mut spec = descriptor(VOXEL_FLAT_GENERATOR, 0);
+        spec.amplitude = 4.0;
+        spec.wavelength = 3.0;
+        let key = VoxelChunkKey::new(0, 0, 0, 0);
+        let original = registry.generate(&spec, key).unwrap();
+        assert_eq!(original, registry.generate(&spec, key).unwrap());
+        spec.seed += 1;
+        assert_ne!(original, registry.generate(&spec, key).unwrap());
+        spec.version += 1;
+        assert!(registry.generate(&spec, key).is_err());
+    }
+
+    #[test]
+    fn external_adapter_is_registered_by_id_and_version() {
+        struct Solid;
+        impl VoxelChunkGenerator for Solid {
+            fn generate(
+                &self,
+                _descriptor: &VoxelGeneratorDescriptor,
+                _key: VoxelChunkKey,
+            ) -> Result<Option<[u8; VOXEL_CHUNK_SAMPLES]>, String> {
+                Ok(Some([1; VOXEL_CHUNK_SAMPLES]))
+            }
+        }
+        let mut registry = VoxelGeneratorRegistry::default();
+        registry
+            .register("example.solid", 1, Arc::new(Solid))
+            .unwrap();
+        assert!(registry
+            .register("example.solid", 1, Arc::new(Solid))
+            .is_err());
+        assert!(registry
+            .register(VOXEL_FLAT_GENERATOR, 1, Arc::new(Solid))
+            .is_err());
+        let spec = descriptor("example.solid", 0);
+        assert_eq!(
+            registry
+                .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
+                .unwrap()
+                .unwrap(),
+            [1; VOXEL_CHUNK_SAMPLES]
+        );
+    }
 }
