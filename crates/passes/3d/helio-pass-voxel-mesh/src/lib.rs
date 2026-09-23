@@ -44,7 +44,7 @@ pub use residency::{
     VoxelEntryId, VoxelFrameBudget, VoxelFrameWork, VoxelPreparedBrick, VoxelPromotion,
     VoxelResidency, VoxelResidencyError, VoxelUpload,
 };
-pub use scene_feed::{VoxelSceneEntry, VoxelSceneFeedStatus};
+pub use scene_feed::{VoxelCubeInit, VoxelSceneEntry, VoxelSceneFeedStatus};
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload,
     VoxelChunkUpdate, VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
