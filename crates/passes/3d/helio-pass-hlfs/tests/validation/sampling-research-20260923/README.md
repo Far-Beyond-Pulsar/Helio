@@ -8,7 +8,22 @@ I prototyped an opt-in same-frame spatial reservoir pass entirely on the GPU. It
 
 A second experiment widened the reactive temporal luminance clip from 5% to 10% in `temporal.wgsl`. Four development seeds passed the unchanged quality, motion, and grain gates. On the separate held-out seeds, seed 211 missed the motion gate (0.01057). This was also reverted, without tuning to the held-out result. The fixed seed lists and thresholds are in `gpu_hlfs_rt.rs`; development and held-out motion CSVs are preserved here. This is evidence that half-size sampling is close on the small planar fixture, **not** a visual acceptance of the full-resolution gallery or cathedral.
 
-No renderer or test code from these experiments was retained. PR #248 remains a draft.
+No renderer or test code from those two rejected experiments was retained. PR #248 remains a draft.
+
+## Small retained spatial-stage improvement
+
+The existing GPU spatial filter evaluates `exp(-distance²/radius²)` at every accepted neighbor. Its radius is 1 or 2, and its offsets are integer pixels, so the set of possible factors is finite. The shader now uses f32-rounded constant factors for those distances. It keeps the same filter footprint and geometry checks. This does not change the dense-light sampling algorithm.
+
+The same pre-change release binary and rebuilt candidate were captured in control/candidate/candidate/control order on the idle RTX 3060. Both used the full 1,024-static-light gallery, native 2560x1440 output and HLFS shading, 1 sample, 8 candidates, native TSR, and 100 camera-moving frames. The first 16 HLFS rows were excluded as warmup. These are GPU timestamps, not presentation FPS.
+
+| Run | Spatial p50 | Full graph p50 |
+| --- | ---: | ---: |
+| Control 1 | 1.683 ms | 23.729 ms |
+| Candidate 1 | 1.638 ms | 23.631 ms |
+| Candidate 2 | 1.642 ms | 23.690 ms |
+| Control 2 | 1.684 ms | 23.846 ms |
+
+Raw stage and graph CSVs are included here. Captured frame 0 was byte-identical between control and candidate; frame 99 and selected moving-camera checkpoints were visually inspected without finding a new shape, shadow, or reflection artifact. The pre-existing colored mottling remains. The reduced-resolution hardware-visibility and colored-transmission GPU regression tests pass. On the 96-frame dynamic-light fixture the pre-existing flicker gate remains red: control 0.01171, candidate 0.01179 against 0.01000. This change is a small stage-level speedup, not completion of the visual or overall performance target.
 
 ## Next implementation target
 

@@ -4,6 +4,11 @@
 var<workgroup> neighborhood_normal_depth: array<vec4<f32>,144>;
 var<workgroup> neighborhood_diffuse_age: array<vec4<f32>,144>;
 var<workgroup> neighborhood_specular: array<vec3<f32>,144>;
+const SPATIAL_WEIGHT_RADIUS_1 = array<f32, 9>(
+    1.0, 0.36787945, 0.13533528, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+const SPATIAL_WEIGHT_RADIUS_2 = array<f32, 9>(
+    1.0, 0.7788008, 0.60653067, 0.47236654, 0.36787945,
+    0.2865048, 0.22313017, 0.17377394, 0.13533528);
 @compute @workgroup_size(8,8)
 fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
     @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
@@ -51,8 +56,9 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
             let diffuse_age=neighborhood_diffuse_age[index];
             let alignment=dot(normal_depth.xyz,s.normal);
             if !(diffuse_age.w>0.0 && alignment>0.9 && abs(normal_depth.w-z)<max(0.02,abs(z)*0.01)) { continue; }
-            let offset=vec2<f32>(p)-sample_pos;
-            let spatial=exp(-dot(offset,offset)/f32(radius*radius));
+            let distance_squared=u32(x*x+y*y);
+            let spatial=select(SPATIAL_WEIGHT_RADIUS_1[distance_squared],
+                SPATIAL_WEIGHT_RADIUS_2[distance_squared],radius==2);
             let weight=spatial*normal_weight(alignment);
             let d=diffuse_age.xyz; let sp=neighborhood_specular[index];
             // Tonemapped accumulation for disocclusions suppresses sparse fireflies.
