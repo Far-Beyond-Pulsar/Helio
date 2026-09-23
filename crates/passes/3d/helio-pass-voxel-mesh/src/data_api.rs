@@ -60,16 +60,16 @@ impl VoxelSourceWriter {
         let truncated = state.1.len() > closest.len();
         let mut centers: Vec<_> = closest.into_iter().map(|(_, key)| key).collect();
         centers.sort_unstable();
-        let mut halo_keys = HashSet::with_capacity(centers.len().saturating_mul(8));
+        let mut halo_keys = HashSet::with_capacity(centers.len().saturating_mul(27));
         for center in &centers {
-            for bits in 0..8 {
-                let Some(x) = center.x.checked_add((bits & 1) as i64) else {
+            for neighbor in 0..27 {
+                let Some(x) = center.x.checked_add((neighbor % 3) as i64 - 1) else {
                     continue;
                 };
-                let Some(y) = center.y.checked_add(((bits >> 1) & 1) as i64) else {
+                let Some(y) = center.y.checked_add(((neighbor / 3) % 3) as i64 - 1) else {
                     continue;
                 };
-                let Some(z) = center.z.checked_add(((bits >> 2) & 1) as i64) else {
+                let Some(z) = center.z.checked_add((neighbor / 9) as i64 - 1) else {
                     continue;
                 };
                 halo_keys.insert(VoxelChunkKey::new(x, y, z, center.lod));

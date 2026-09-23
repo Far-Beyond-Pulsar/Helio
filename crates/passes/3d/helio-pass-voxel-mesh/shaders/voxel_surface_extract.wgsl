@@ -6,14 +6,12 @@
 // VoxelMeshPass surface budgets (vertex_buf/index_buf are sized from those).
 const MAX_VERTS: u32 = 12288u;
 const MAX_INDICES: u32 = 18432u;
-// Each brick's voxel data is padded to 9x9x9 (one extra voxel of +X/+Y/+Z
-// halo copied from the neighboring brick), so cells run 0..7 (8 per axis,
-// corners 0..8) instead of 0..6 — the extra cell at each brick's +face reads
-// the neighbor's first voxel via padding, which is what actually closes the
-// seam between adjacent bricks. See VOXEL_MESH_BRICK_VOXEL_WORDS.
-const CELLS_PER_DIM: u32 = 8u;
-const TOTAL_CELLS: u32 = 512u; // 8×8×8
-const PADDED_DIM: u32 = 9u;
+// Ten samples per axis cover -1..=8 around each 8³ center chunk.
+// Smooth cells are owned by their positive chunk and span -1..=7; block faces
+// read both negative and positive neighbor samples before emitting.
+const CELLS_PER_DIM: u32 = 9u;
+const TOTAL_CELLS: u32 = 729u;
+const PADDED_DIM: u32 = 10u;
 const WG_SIZE: u32 = 64u;
 const CELLS_PER_THREAD: u32 = (TOTAL_CELLS + WG_SIZE - 1u) / WG_SIZE;
 
@@ -89,33 +87,32 @@ fn edge_vertex(edge: u32) -> vec3<f32> {
     return edge_mid[edge];
 }
 
-// Brick data is a padded 9x9x9 block (indices 0..8 per axis) — see
+// Brick data is a padded 10x10x10 block (local coordinates -1..8) — see
 // VOXEL_MESH_BRICK_VOXEL_WORDS / CELLS_PER_DIM.
-fn read_voxel(data_offset: u32, x: u32, y: u32, z: u32) -> u32 {
-    let linear = z * (PADDED_DIM * PADDED_DIM) + y * PADDED_DIM + x;
+fn read_voxel(data_offset: u32, x: i32, y: i32, z: i32) -> u32 {
+    let px = u32(clamp(x + 1, 0, i32(PADDED_DIM) - 1));
+    let py = u32(clamp(y + 1, 0, i32(PADDED_DIM) - 1));
+    let pz = u32(clamp(z + 1, 0, i32(PADDED_DIM) - 1));
+    let linear = pz * (PADDED_DIM * PADDED_DIM) + py * PADDED_DIM + px;
     let word_idx = data_offset + linear / 4u;
     let byte_in_word = linear % 4u;
     return (voxel_data[word_idx] >> (byte_in_word * 8u)) & 0xFFu;
 }
 
-fn read_voxel_f32(data_offset: u32, x: u32, y: u32, z: u32) -> f32 {
+fn read_voxel_f32(data_offset: u32, x: i32, y: i32, z: i32) -> f32 {
     return select(-1.0, 1.0, read_voxel(data_offset, x, y, z) > 0u);
 }
 
 // Clamps a central-difference sample coordinate to the padded brick's valid
-// [0,8] range — without this, sampling at the extremes underflows/overflows
-// the u32 coordinate and reads garbage (wrapped-around or out-of-brick) data.
-fn clamped_voxel(v: i32) -> u32 {
-    return u32(clamp(v, 0, i32(PADDED_DIM) - 1));
+// [-1,8] range keeps normal samples within the both-sided halo.
+fn clamped_voxel(v: i32) -> i32 {
+    return clamp(v, -1, 8);
 }
 
-fn compute_normal(data_offset: u32, cx: u32, cy: u32, cz: u32) -> vec3<f32> {
-    let icx = i32(cx);
-    let icy = i32(cy);
-    let icz = i32(cz);
-    let sx = read_voxel_f32(data_offset, clamped_voxel(icx + 1), cy, cz) - read_voxel_f32(data_offset, clamped_voxel(icx - 1), cy, cz);
-    let sy = read_voxel_f32(data_offset, cx, clamped_voxel(icy + 1), cz) - read_voxel_f32(data_offset, cx, clamped_voxel(icy - 1), cz);
-    let sz = read_voxel_f32(data_offset, cx, cy, clamped_voxel(icz + 1)) - read_voxel_f32(data_offset, cx, cy, clamped_voxel(icz - 1));
+fn compute_normal(data_offset: u32, cx: i32, cy: i32, cz: i32) -> vec3<f32> {
+    let sx = read_voxel_f32(data_offset, clamped_voxel(cx + 1), cy, cz) - read_voxel_f32(data_offset, clamped_voxel(cx - 1), cy, cz);
+    let sy = read_voxel_f32(data_offset, cx, clamped_voxel(cy + 1), cz) - read_voxel_f32(data_offset, cx, clamped_voxel(cy - 1), cz);
+    let sz = read_voxel_f32(data_offset, cx, cy, clamped_voxel(cz + 1)) - read_voxel_f32(data_offset, cx, cy, clamped_voxel(cz - 1));
     let n = vec3<f32>(sx, sy, sz);
     let magnitude_squared = dot(n, n);
     let inverse_length = inverseSqrt(max(magnitude_squared, 0.000001));
@@ -142,15 +139,14 @@ fn cube_face_normal(face: u32) -> vec3<f32> {
     )[face];
 }
 
-fn neighbor_is_empty(data_offset: u32, cx: u32, cy: u32, cz: u32, face: u32) -> bool {
-    var p = vec3<i32>(i32(cx), i32(cy), i32(cz));
+fn neighbor_is_empty(data_offset: u32, cx: i32, cy: i32, cz: i32, face: u32) -> bool {
+    var p = vec3<i32>(cx, cy, cz);
     if face == 0u { p.x -= 1; }
     if face == 1u { p.x += 1; }
     if face == 2u { p.y -= 1; }
     if face == 3u { p.y += 1; }
     if face == 4u { p.z += 1; }
     if face == 5u { p.z -= 1; }
-    if p.x < 0 || p.y < 0 || p.z < 0 { return true; }
     return read_voxel(data_offset, clamped_voxel(p.x), clamped_voxel(p.y), clamped_voxel(p.z)) == 0u;
 }
 
@@ -179,11 +175,15 @@ fn main(
     let thread_last = min(thread_first + CELLS_PER_THREAD, TOTAL_CELLS);
 
     for (var cell_linear = thread_first; cell_linear < thread_last; cell_linear++) {
-        let cz = cell_linear / (CELLS_PER_DIM * CELLS_PER_DIM);
-        let cy = (cell_linear / CELLS_PER_DIM) % CELLS_PER_DIM;
-        let cx = cell_linear % CELLS_PER_DIM;
+        let cz = i32(cell_linear / (CELLS_PER_DIM * CELLS_PER_DIM)) - 1;
+        let cy = i32((cell_linear / CELLS_PER_DIM) % CELLS_PER_DIM) - 1;
+        let cx = i32(cell_linear % CELLS_PER_DIM) - 1;
+        let negative_mask = select(0u, 1u, cx < 0) |
+            (select(0u, 1u, cy < 0) << 1u) |
+            (select(0u, 1u, cz < 0) << 2u);
 
         if mode == 1u {
+            if cx < 0 || cy < 0 || cz < 0 { continue; }
             let material = read_voxel(data_offset, cx, cy, cz);
             if material == 0u { continue; }
             let cell_world = vec3<f32>(f32(cx), f32(cy), f32(cz)) * vs + origin;
@@ -209,6 +209,7 @@ fn main(
             }
             continue;
         }
+        if (brick._pad & (1u << negative_mask)) == 0u { continue; }
 
         var corner: array<u32, 8>;
         corner[0] = read_voxel(data_offset, cx,     cy,     cz);
@@ -281,9 +282,9 @@ fn main(
             // local_pos components are in {0.0, 0.5, 1.0} (edge_vertex midpoints);
             // round to the nearest corner voxel (0 or 1) — NOT scaled by the
             // brick size, which would read voxels far outside this brick.
-            let nx = u32(round(local_pos.x));
-            let ny = u32(round(local_pos.y));
-            let nz = u32(round(local_pos.z));
+            let nx = i32(round(local_pos.x));
+            let ny = i32(round(local_pos.y));
+            let nz = i32(round(local_pos.z));
             let n = compute_normal(data_offset, cx + nx, cy + ny, cz + nz);
             normal_buf[brick_vert_offset + vi] = vec4<f32>(n, 0.0);
         }
