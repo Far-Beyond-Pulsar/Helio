@@ -31,6 +31,17 @@ reduced static flicker to **0.00493 (PASS)** but failed ten checkpoint rows
 after the blocker entered; see the paired quality and motion CSVs in `motion/`.
 Neither setting clears both visual requirements. The flicker number is a
 screen for this static interval, not a substitute for viewing the moving frames.
+The additional exact/sampled pairs at frames 71 and 79 show that grain remains
+throughout the blocked interval, beyond its first frame.
+
+A temporary diagnostic made reactive history active only on the known blocker
+event frames 64 and 80. It passed the static flicker and checkpoint screens on
+the four fixed development seeds (11, 29, 47, 71); the measurements are in
+`motion/diagnostic-event-oracle-*.csv`. This was a hardcoded event oracle,
+not a scene-change detector, and the inspected frame-71/79 images still had
+visible residual grain against the exact reference. The diagnostic shader was
+reverted. The result points toward local change detection and better sampling;
+it does not clear the visual or performance gate.
 
 Reproduce the reactive sequence from the repository root with these PowerShell
 settings and the ignored GPU test. Change the output directory and remove

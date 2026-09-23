@@ -1204,7 +1204,7 @@ fn benchmark_rt_quality_frontier() {
                             csv.push_str(&format!("{seed},{samples},{candidates},{sample_scale},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
                         }
                         if mode == HlfsDebugMode::Final
-                            && [63, 64, 65, 80, 81, 95].contains(&frame)
+                            && [63, 64, 65, 71, 79, 80, 81, 95].contains(&frame)
                         {
                             for (suffix, buffer) in [("sampled", &pixels), ("reference", reference)]
                             {
