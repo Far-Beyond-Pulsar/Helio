@@ -76,6 +76,7 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
             );
             let mut map = [0u32; 256];
             map[0] = 1;
+            map[1] = slot;
             queue.write_buffer(
                 &pass.material_map_buf,
                 u64::from(slot) * 256 * 4,
@@ -115,6 +116,15 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
             contents: bytemuck::cast_slice(&[camera, camera]),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let mut red = helio_mats::GpuMaterial::zeroed();
+        red.base_color = [1.0, 0.0, 0.0, 1.0];
+        let mut green = helio_mats::GpuMaterial::zeroed();
+        green.base_color = [0.0, 1.0, 0.0, 1.0];
+        let scene_materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Voxel Test SceneDB Materials"),
+            contents: bytemuck::cast_slice(&[red, green]),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let render_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Voxel Test Render Group"),
             layout: &pass.render_bgl,
@@ -137,7 +147,7 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: pass.scene_material_fallback_buf.as_entire_binding(),
+                    resource: scene_materials_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -281,6 +291,18 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
         assert!(
             non_black > 100,
             "voxel scene path must draw visible color; got {non_black} pixels"
+        );
+        let red_pixels = pixels
+            .chunks_exact(4)
+            .filter(|rgba| u16::from(rgba[0]) > u16::from(rgba[1]) * 2 && rgba[0] > 16)
+            .count();
+        let green_pixels = pixels
+            .chunks_exact(4)
+            .filter(|rgba| u16::from(rgba[1]) > u16::from(rgba[0]) * 2 && rgba[1] > 16)
+            .count();
+        assert!(
+            red_pixels > 100 && green_pixels > 100,
+            "both SceneDB material records must appear; red={red_pixels}, green={green_pixels}"
         );
         if let Ok(path) = std::env::var("HELIO_VOXEL_CAPTURE_RAW") {
             std::fs::write(path, &*pixels).expect("write requested raw RGBA capture");
