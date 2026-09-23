@@ -27,6 +27,16 @@ fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
 }
 
+fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
+    // `Clone` must preserve component value semantics for SceneDB snapshots
+    // and transactions. Share immutable payload allocations, but copy the
+    // mutable index/revision so two cloned entries never alias future edits.
+    let state = store
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::new(RwLock::new((state.0, state.1.clone())))
+}
+
 /// Authoring component for a small deformable voxel object.
 ///
 /// A newly-created object describes a cubic 16³ voxel volume. Its editable
@@ -91,12 +101,13 @@ impl VoxelComponent {
     }
 }
 
-// Duplicating a component creates independent authoritative state. Callers
-// that intentionally need shared access can explicitly clone `payloads`.
+// Cloning a component preserves its live value while isolating future map
+// mutations. The immutable Arc payload allocations remain shared until one
+// entry replaces/deletes them.
 impl Clone for VoxelComponent {
     fn clone(&self) -> Self {
         Self {
-            payloads: empty_payload_store(),
+            payloads: clone_payload_store(&self.payloads),
             enabled: self.enabled,
             voxel_size: self.voxel_size,
             dimensions: self.dimensions,
@@ -183,12 +194,12 @@ pub struct VoxelTerrainComponent {
     /// Scheduling priority among terrain entries; this is not a residency cap.
     #[property(min = -1000000.0, max = 1000000.0, step = 1.0, category = "Streaming")]
     pub priority: i32,
-    /// Whether external callers may submit persistent edit/data batches.
+    /// Whether external callers may submit canonical live edit/data batches.
     #[property(category = "Editing")]
     pub editable: bool,
-    /// Service-managed source/configuration revision. It is serialized with the
-    /// component but deliberately omitted from the property editor; only the
-    /// voxel batch API may advance it.
+    /// Generator/configuration revision, separate from the runtime chunk-data
+    /// revision held with `payloads`. It is serialized with authored config
+    /// but omitted from the property editor.
     pub source_revision: u64,
 }
 
@@ -230,12 +241,12 @@ impl VoxelTerrainComponent {
     }
 }
 
-// Entity duplication copies authoring configuration but deliberately starts
-// with an empty payload store to prevent edits leaking between entities.
+// Clone keeps a value-preserving independent live chunk index for SceneDB
+// snapshots/transactions; immutable payload allocations remain shared.
 impl Clone for VoxelTerrainComponent {
     fn clone(&self) -> Self {
         Self {
-            payloads: empty_payload_store(),
+            payloads: clone_payload_store(&self.payloads),
             enabled: self.enabled,
             domain_mode: self.domain_mode,
             shape_mode: self.shape_mode,
@@ -283,39 +294,46 @@ mod tests {
     fn voxel_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]
     fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelTerrainComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]
-    fn cloned_component_gets_independent_store_and_payload_references_are_cheap() {
+    fn cloned_component_preserves_live_state_without_aliasing_future_mutations() {
         let original = VoxelTerrainComponent::default();
         let payload: Arc<[u8]> = Arc::from([1, 2, 3]);
-        original.payloads.write().unwrap().1.insert(
-            [u64::MAX, 0, 42, 7],
-            payload.clone(),
-        );
+        original
+            .payloads
+            .write()
+            .unwrap()
+            .1
+            .insert([u64::MAX, 0, 42, 7], payload.clone());
         let clone = original.clone();
 
         assert!(!Arc::ptr_eq(&original.payloads, &clone.payloads));
         assert_eq!(original.payloads.read().unwrap().1.len(), 1);
-        assert!(clone.payloads.read().unwrap().1.is_empty());
+        assert_eq!(clone.payloads.read().unwrap().1.len(), 1);
+        assert_eq!(clone.payloads.read().unwrap().0, 0);
+
+        clone
+            .payloads
+            .write()
+            .unwrap()
+            .1
+            .remove(&[u64::MAX, 0, 42, 7]);
+        assert_eq!(original.payloads.read().unwrap().1.len(), 1);
 
         // Shared snapshots are explicit and retain immutable bytes cheaply.
         let shared_handle = Arc::clone(&original.payloads);
