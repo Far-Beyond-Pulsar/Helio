@@ -2,8 +2,8 @@
 //!
 //! These are CPU-side request/validation types only. They do not own payload
 //! bytes, publish SceneDB state, schedule work, or imply GPU residency. The
-//! owning service must durably commit accepted data and revisions before
-//! notifying the render pass.
+//! owning service applies accepted data to live SceneDB component state before
+//! notifying the render pass. Persistence/exfiltration is caller-owned.
 
 use std::collections::HashSet;
 
@@ -15,6 +15,9 @@ pub const VOXEL_CHUNK_ENCODING_RAW: u16 = 1;
 pub const MAX_VOXEL_CHUNK_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// Upper bound on update descriptors in one validated batch.
 pub const MAX_VOXEL_BATCH_UPDATES: usize = 65_536;
+/// Default aggregate payload ceiling for one producer batch (256 MiB).
+/// Services may configure a lower limit to fit their queue/frame budget.
+pub const MAX_VOXEL_BATCH_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 
 /// Stable identity of one terrain component/source pair, assigned by its owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -97,6 +100,13 @@ pub struct VoxelChunkUpdate<'a> {
     pub payload: VoxelChunkPayload<'a>,
 }
 
+/// One canonical chunk-map operation. Deletes carry no payload bytes.
+#[derive(Clone, Copy, Debug)]
+pub enum VoxelChunkOp<'a> {
+    Upsert(VoxelChunkUpdate<'a>),
+    Delete { key: VoxelChunkKey },
+}
+
 /// Optimistic source revision transition. A batch is valid only when it moves
 /// exactly one revision forward from the currently committed revision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +124,7 @@ pub struct VoxelChunkBatch<'a> {
     pub source: VoxelSourceId,
     pub revision: VoxelBatchRevision,
     pub domain: VoxelDomain,
-    pub updates: &'a [VoxelChunkUpdate<'a>],
+    pub ops: &'a [VoxelChunkOp<'a>],
 }
 
 impl<'a> VoxelChunkBatch<'a> {
@@ -125,31 +135,49 @@ impl<'a> VoxelChunkBatch<'a> {
                 actual: committed_revision,
             });
         }
-        if self.revision.expected.checked_add(1) != Some(self.revision.publish) {
+        let expected_publish = if self.ops.is_empty() {
+            Some(self.revision.expected)
+        } else {
+            self.revision.expected.checked_add(1)
+        };
+        if expected_publish != Some(self.revision.publish) {
             return Err(VoxelUpdateError::NonSequentialRevision {
-                expected_next: self.revision.expected.checked_add(1),
+                expected_next: expected_publish,
                 publish: self.revision.publish,
             });
         }
-        if self.updates.len() > MAX_VOXEL_BATCH_UPDATES {
-            return Err(VoxelUpdateError::BatchTooLarge(self.updates.len()));
+        if self.ops.len() > MAX_VOXEL_BATCH_UPDATES {
+            return Err(VoxelUpdateError::BatchTooLarge(self.ops.len()));
         }
-        let mut keys = HashSet::with_capacity(self.updates.len());
-        for update in self.updates {
-            self.domain.validate_key(update.key)?;
-            let payload = update.payload;
-            if payload.encoding != VOXEL_CHUNK_ENCODING_RAW {
-                return Err(VoxelUpdateError::UnsupportedEncoding(payload.encoding));
+        let mut keys = HashSet::with_capacity(self.ops.len());
+        let mut payload_bytes = 0usize;
+        for op in self.ops {
+            let key = match op {
+                VoxelChunkOp::Upsert(update) => {
+                    let payload = update.payload;
+                    if payload.encoding != VOXEL_CHUNK_ENCODING_RAW {
+                        return Err(VoxelUpdateError::UnsupportedEncoding(payload.encoding));
+                    }
+                    if payload.schema_version != VOXEL_CHUNK_SCHEMA_VERSION {
+                        return Err(VoxelUpdateError::UnsupportedSchema(payload.schema_version));
+                    }
+                    if payload.bytes.is_empty() || payload.bytes.len() > MAX_VOXEL_CHUNK_PAYLOAD_BYTES {
+                        return Err(VoxelUpdateError::InvalidPayloadLength(payload.bytes.len()));
+                    }
+                    payload_bytes = payload_bytes
+                        .checked_add(payload.bytes.len())
+                        .ok_or(VoxelUpdateError::BatchPayloadTooLarge(usize::MAX))?;
+                    update.key
+                }
+                VoxelChunkOp::Delete { key } => *key,
+            };
+            self.domain.validate_key(key)?;
+            if !keys.insert(key) {
+                return Err(VoxelUpdateError::DuplicateChunk(key));
             }
-            if payload.schema_version != VOXEL_CHUNK_SCHEMA_VERSION {
-                return Err(VoxelUpdateError::UnsupportedSchema(payload.schema_version));
-            }
-            if payload.bytes.is_empty() || payload.bytes.len() > MAX_VOXEL_CHUNK_PAYLOAD_BYTES {
-                return Err(VoxelUpdateError::InvalidPayloadLength(payload.bytes.len()));
-            }
-            if !keys.insert(update.key) {
-                return Err(VoxelUpdateError::DuplicateChunk(update.key));
-            }
+        }
+        if payload_bytes > MAX_VOXEL_BATCH_PAYLOAD_BYTES {
+            return Err(VoxelUpdateError::BatchPayloadTooLarge(payload_bytes));
         }
         Ok(())
     }
@@ -176,24 +204,25 @@ pub enum VoxelUpdateError {
     UnsupportedEncoding(u16),
     UnsupportedSchema(u16),
     InvalidPayloadLength(usize),
+    BatchPayloadTooLarge(usize),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn update(key: VoxelChunkKey) -> VoxelChunkUpdate<'static> {
-        VoxelChunkUpdate {
+    fn update(key: VoxelChunkKey) -> VoxelChunkOp<'static> {
+        VoxelChunkOp::Upsert(VoxelChunkUpdate {
             key,
             payload: VoxelChunkPayload {
                 encoding: VOXEL_CHUNK_ENCODING_RAW,
                 schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
                 bytes: &[1, 2, 3],
             },
-        }
+        })
     }
 
-    fn batch<'a>(updates: &'a [VoxelChunkUpdate<'a>]) -> VoxelChunkBatch<'a> {
+    fn batch<'a>(ops: &'a [VoxelChunkOp<'a>]) -> VoxelChunkBatch<'a> {
         VoxelChunkBatch {
             terrain: VoxelTerrainId(7),
             source: VoxelSourceId(11),
@@ -206,7 +235,7 @@ mod tests {
                 max: [8, 8, 8],
                 max_lod: 4,
             },
-            updates,
+            ops,
         }
     }
 
@@ -228,8 +257,8 @@ mod tests {
 
     #[test]
     fn batch_accepts_valid_negative_coordinates_and_rejects_stale_revision() {
-        let updates = [update(VoxelChunkKey::new(-1, 0, 1, 2))];
-        let valid = batch(&updates);
+        let ops = [update(VoxelChunkKey::new(-1, 0, 1, 2))];
+        let valid = batch(&ops);
         assert_eq!(valid.validate(4), Ok(()));
         assert_eq!(
             valid.validate(5),
@@ -252,7 +281,7 @@ mod tests {
         let outside = [update(VoxelChunkKey::new(9, 0, 0, 0))];
         assert_eq!(
             batch(&outside).validate(4),
-            Err(VoxelUpdateError::ChunkOutOfDomain(outside[0].key))
+            Err(VoxelUpdateError::ChunkOutOfDomain(VoxelChunkKey::new(9, 0, 0, 0)))
         );
         let high_lod = [update(VoxelChunkKey::new(0, 0, 0, 5))];
         assert_eq!(
@@ -260,26 +289,26 @@ mod tests {
             Err(VoxelUpdateError::LodOutOfDomain { lod: 5, max_lod: 4 })
         );
 
-        let empty = [VoxelChunkUpdate {
+        let empty = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
             key,
             payload: VoxelChunkPayload {
                 encoding: VOXEL_CHUNK_ENCODING_RAW,
                 schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
                 bytes: &[],
             },
-        }];
+        })];
         assert_eq!(
             batch(&empty).validate(4),
             Err(VoxelUpdateError::InvalidPayloadLength(0))
         );
-        let wrong_encoding = [VoxelChunkUpdate {
+        let wrong_encoding = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
             key,
             payload: VoxelChunkPayload {
                 encoding: 99,
                 schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
                 bytes: &[1],
             },
-        }];
+        })];
         assert_eq!(
             batch(&wrong_encoding).validate(4),
             Err(VoxelUpdateError::UnsupportedEncoding(99))
@@ -297,8 +326,8 @@ mod tests {
             .validate_key(VoxelChunkKey::new(0, 0, 0, 0)),
             Err(VoxelUpdateError::InvalidDomainBounds)
         );
-        let empty: [VoxelChunkUpdate<'static>; 0] = [];
-        let mut b = batch(&empty);
+        let overflow: [VoxelChunkOp<'static>; 1] = [update(VoxelChunkKey::new(0, 0, 0, 0))];
+        let mut b = batch(&overflow);
         b.revision = VoxelBatchRevision {
             expected: u64::MAX,
             publish: 0,
@@ -310,5 +339,34 @@ mod tests {
                 publish: 0
             })
         );
+    }
+
+    #[test]
+    fn delete_is_revisioned_and_cannot_duplicate_an_upsert_key() {
+        let key = VoxelChunkKey::new(-4, 5, 0, 2);
+        let ops = [
+            update(key),
+            VoxelChunkOp::Delete { key },
+        ];
+        assert_eq!(
+            batch(&ops).validate(4),
+            Err(VoxelUpdateError::DuplicateChunk(key))
+        );
+
+        let delete = [VoxelChunkOp::Delete { key }];
+        assert_eq!(batch(&delete).validate(4), Ok(()));
+    }
+
+    #[test]
+    fn empty_batch_does_not_advance_revision() {
+        let empty: [VoxelChunkOp<'static>; 0] = [];
+        let mut b = batch(&empty);
+        b.revision.publish = b.revision.expected;
+        assert_eq!(b.validate(4), Ok(()));
+        b.revision.publish += 1;
+        assert!(matches!(
+            b.validate(4),
+            Err(VoxelUpdateError::NonSequentialRevision { .. })
+        ));
     }
 }
