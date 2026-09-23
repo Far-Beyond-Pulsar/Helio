@@ -9,6 +9,7 @@ mod reflection_capture_component;
 mod script_component;
 mod static_mesh_component;
 mod voxel_component;
+mod voxel_component_runtime;
 mod water_volume_component;
 
 pub use foliage_component::*;
@@ -22,4 +23,5 @@ pub use reflection_capture_component::*;
 pub use script_component::*;
 pub use static_mesh_component::*;
 pub use voxel_component::*;
+pub use voxel_component_runtime::*;
 pub use water_volume_component::*;
