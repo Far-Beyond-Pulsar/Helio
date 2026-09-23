@@ -70,6 +70,9 @@ fn stbn(pixel: vec2<u32>, dimension: u32) -> f32 {
     return (textureLoad(blue_noise, vec2<i32>(p), i32(z), 0).r * 255.0 + 0.5) / 256.0;
 }
 fn sample_pixel(p: vec2<u32>, frame: u32) -> vec2<u32> {
+    // Native shading has no four-rooks offset. Avoid phase and modulo work
+    // in the sampler and in every temporal neighborhood load.
+    if globals.sample_scale == 1u { return min(p, globals.screen_size - 1u); }
     // Four-rooks over the 2x2 block. Half resolution visits every full-res pixel.
     let phase = (frame + (p.x & 1u) + 2u * (p.y & 1u)) & 3u;
     let offset = vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;

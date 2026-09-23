@@ -1,0 +1,17 @@
+{
+  "output": [2560, 1440],
+  "internal": [2560, 1440],
+  "hlfs_sampling": [2560, 1440],
+  "render_scale": 1,
+  "sample_scale": 1,
+  "aa": "tsr_native",
+  "ssr": false,
+  "ray_traced_shadows": false,
+  "stone_textures": false,
+  "texture_set": "flat",
+  "transparency_reactivity": true,
+  "reference": false,
+  "lighting_setup": "scene_default",
+  "fixed_camera_parameter": null,
+  "fixed_delta_seconds": 0.016666666666666666
+}
