@@ -81,6 +81,7 @@ pub(crate) struct VoxelSceneFeed {
     prepared_entries: u64,
     selected_bricks: usize,
     truncated_entries: usize,
+    blocked_reads: usize,
     last_error: Option<String>,
 }
 
@@ -110,6 +111,7 @@ impl VoxelSceneFeed {
             prepared_entries: 0,
             selected_bricks: 0,
             truncated_entries: 0,
+            blocked_reads: 0,
             last_error: None,
         }
     }
@@ -124,13 +126,17 @@ impl VoxelSceneFeed {
         mut needs_rebuild: impl FnMut(VoxelEntryId) -> bool,
     ) -> Vec<VoxelEntryId> {
         self.tick = self.tick.saturating_add(1);
+        self.blocked_reads = 0;
         let mut seen = HashSet::new();
         for entry in entries {
             let id = entry.id;
             seen.insert(id);
             let revision = match entry.store.try_read() {
                 Ok(state) => state.0,
-                Err(_) => continue,
+                Err(_) => {
+                    self.blocked_reads += 1;
+                    continue;
+                }
             };
             let center = chunk_center(camera, entry.origin, entry.voxel_size);
             let config_hash = hash_config(&entry);
@@ -251,14 +257,19 @@ impl VoxelSceneFeed {
                 .values()
                 .filter(|entry| entry.in_flight.is_some())
                 .count(),
-            deferred_requests: self
-                .tracked
-                .iter()
-                .filter(|(id, entry)| {
-                    entry.in_flight.is_none()
-                        && !already_queued(**id, entry.desired.generation, entry.desired.revision)
-                })
-                .count(),
+            deferred_requests: self.blocked_reads
+                + self
+                    .tracked
+                    .iter()
+                    .filter(|(id, entry)| {
+                        entry.in_flight.is_none()
+                            && !already_queued(
+                                **id,
+                                entry.desired.generation,
+                                entry.desired.revision,
+                            )
+                    })
+                    .count(),
             failed_entries: self
                 .tracked
                 .values()
@@ -471,5 +482,33 @@ mod tests {
         let selected = HashSet::from([a, b]);
         assert_eq!(smooth_cell_owner_mask(b, &selected) & 0b10, 0);
         assert_ne!(smooth_cell_owner_mask(a, &selected) & 0b1, 0);
+    }
+
+    #[test]
+    fn contended_component_read_remains_deferred_until_reconciled() {
+        let entry = VoxelSceneEntry {
+            id: VoxelEntryId {
+                entity_bits: 11,
+                kind: 0,
+            },
+            store: Arc::new(RwLock::new((0, HashMap::new()))),
+            domain: VoxelDomain::Bounded {
+                min: [0; 3],
+                max: [0; 3],
+                max_lod: 0,
+            },
+            source_revision: 0,
+            origin: [0.0; 3],
+            voxel_size: 1.0,
+            material_ids: vec![0],
+            smooth_surface: false,
+        };
+        let mut feed = VoxelSceneFeed::new();
+        let held = entry.store.write().unwrap();
+        feed.reconcile([entry.clone()], [0.0; 3], |_, _, _| false, |_| false);
+        assert_eq!(feed.status(|_, _, _| false).deferred_requests, 1);
+        drop(held);
+        feed.reconcile([entry], [0.0; 3], |_, _, _| false, |_| false);
+        assert_eq!(feed.status(|_, _, _| false).in_flight_entries, 1);
     }
 }

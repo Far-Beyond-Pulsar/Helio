@@ -8,6 +8,8 @@ mod bounded_inbox;
 mod chunk_codec;
 mod data_api;
 mod edits;
+mod generation;
+mod generation_worker;
 #[cfg(test)]
 mod gpu_draw_tests;
 mod marching_cubes;
@@ -29,6 +31,15 @@ pub use chunk_codec::{
 };
 pub use data_api::{VoxelBatchReceipt, VoxelPayloadStore, VoxelSourceWriter, VoxelTerrainSnapshot};
 pub use edits::{VoxelEditError, VoxelSampleEdit};
+pub use generation::{
+    VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
+    VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR, VOXEL_PLANET_GENERATOR,
+};
+pub use generation_worker::{
+    VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationStatus,
+    VoxelGenerationTicket, VoxelGenerationTicketState, VoxelGenerationWorker,
+    VOXEL_GENERATION_MAX_CHUNKS_PER_JOB, VOXEL_GENERATION_PENDING_JOBS,
+};
 pub use residency::{
     VoxelEntryId, VoxelFrameBudget, VoxelFrameWork, VoxelPreparedBrick, VoxelPromotion,
     VoxelResidency, VoxelResidencyError, VoxelUpload,
@@ -274,6 +285,7 @@ impl VoxelMeshPass {
         }
         changed
             || self.scene_feed_status().in_flight_entries > 0
+            || self.scene_feed_status().deferred_requests > 0
             || self.residency.staging_bricks() > 0
             || !self.retired_slots.is_empty()
     }
