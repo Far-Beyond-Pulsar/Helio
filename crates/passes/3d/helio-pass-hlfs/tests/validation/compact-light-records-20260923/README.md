@@ -49,3 +49,16 @@ The extra copy costs a few tenths of a millisecond inside HLFS for a small light
 - Release screen-space GPU suite: 14 passed (`gpu_hlfs`, benchmark tests excluded).
 - All run CSVs and capture configurations named in the tables are included in this folder. The `compact-dynamic-*.log` files preserve the probe setup and printed summary.
 - The dense-gallery gain does not reach the native-1440p HLFS 3–4 ms target. The moving-light probe is still above 10 ms HLFS, the cathedral has no repeatable full-graph speedup, and the motion gate is red. This optimization is retained as a dense-light improvement, with no claim that PR #248 is ready for review.
+
+## Rejected follow-up
+
+I also tried skipping unused workgroup scratch initialization in the tile-presampled sampling shader. This keeps the sampling logic unchanged, but four alternating runs showed no repeatable HLFS gain:
+
+| Run | Sampling median | HLFS median | Full graph median |
+| --- | ---: | ---: | ---: |
+| Control A | 10.230 ms | 15.639 ms | 22.042 ms |
+| Candidate A | 10.014 ms | 15.612 ms | 21.924 ms |
+| Candidate B | 10.181 ms | 15.675 ms | 21.981 ms |
+| Control B | 10.191 ms | 15.745 ms | 22.035 ms |
+
+The same native 1440p static gallery and moving camera were used. Frame 0 matched across all four runs; later frames varied even between control runs. The raw timestamp CSVs are included. The shader experiment was reverted.
