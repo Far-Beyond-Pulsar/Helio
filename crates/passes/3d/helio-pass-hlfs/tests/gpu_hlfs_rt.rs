@@ -548,6 +548,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             .unwrap_or(0.2);
         assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
         let tile_presampling = std::env::var_os("HLFS_RT_PROBE_PRESAMPLE").is_some();
+        let shadowed = std::env::var_os("HLFS_RT_PROBE_UNSHADOWED").is_none();
         let reactive_history = std::env::var_os("HLFS_RT_PROBE_REACTIVE").is_some();
         let dense_geometry = std::env::var_os("HLFS_RT_PROBE_DENSE_GEOMETRY").is_some();
         let instance_count = if dense_geometry { 10_000u32 } else { 256 };
@@ -658,11 +659,12 @@ fn benchmark_rt_resolution_and_acceleration() {
                                 [1.0, 0.8, 0.5],
                                 if dominant && i == 0 { 8.0 } else { 16.0 / 1024.0 },
                             );
-                            light.set_ray_traced_shadows(true);
+                            light.set_ray_traced_shadows(shadowed);
                             light
                         })
                         .collect(),
                 );
+                let cpu_lights_ms = cpu.elapsed().as_secs_f64() * 1000.0;
                 let instances: Vec<_> = (0..instance_count)
                     .map(|i| TlasInstanceInput {
                         mesh_id: 1,
@@ -682,6 +684,7 @@ fn benchmark_rt_resolution_and_acceleration() {
                         ],
                     })
                     .collect();
+                let cpu_instances_ms = cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms;
                 let mut encoder = f.device.create_command_encoder(&Default::default());
                 encoder.write_timestamp(&query, 0);
                 f.scene
@@ -692,8 +695,11 @@ fn benchmark_rt_resolution_and_acceleration() {
                 encoder.resolve_query_set(&query, 0..2, &resolve, 0);
                 encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16);
                 f.queue.submit([encoder.finish()]);
+                let tlas_encode_submit_ms = cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms - cpu_instances_ms;
                 f.frame();
-                let cpu_ms = cpu.elapsed().as_secs_f64() * 1000.0;
+                // The fixture owns its device, so RenderGraph waits for GPU
+                // timestamp readback here. This is wall time, not CPU work.
+                let frame_wall_ms = cpu.elapsed().as_secs_f64() * 1000.0;
                 let stages = f.stage_milliseconds();
                 // compact_output replaces the outer graph timestamp markers.
                 // Its six internal stage intervals remain valid and cover HLFS.
@@ -714,15 +720,17 @@ fn benchmark_rt_resolution_and_acceleration() {
                 drop(bytes);
                 read.unmap();
                 if frame >= warmup {
-                    rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, cpu_ms, stages));
+                    rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, frame_wall_ms, stages,
+                        [cpu_lights_ms, cpu_instances_ms, tlas_encode_submit_ms,
+                         frame_wall_ms - cpu_lights_ms - cpu_instances_ms - tlas_encode_submit_ms]));
                 }
             }
             if let Ok(directory) = std::env::var("HLFS_RT_PROBE_OUTPUT") {
                 std::fs::create_dir_all(&directory).unwrap();
-                let mut csv=String::from("gpu_sum_ms,tlas_ms,hlfs_ms,cpu_submit_ms,coarse_ms,fine_ms,sample_ms,temporal_ms,spatial_ms,composite_ms\n");
+                let mut csv=String::from("gpu_sum_ms,tlas_ms,hlfs_ms,frame_wall_ms,coarse_ms,fine_ms,sample_ms,temporal_ms,spatial_ms,composite_ms,lights_update_ms,instances_prepare_ms,tlas_encode_submit_ms,graph_execute_wait_ms\n");
                 for row in &rows {
                     csv.push_str(&format!(
-                        "{},{},{},{},{},{},{},{},{},{}\n",
+                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                         row.0,
                         row.1,
                         row.2,
@@ -732,7 +740,11 @@ fn benchmark_rt_resolution_and_acceleration() {
                         row.4[2],
                         row.4[3],
                         row.4[4],
-                        row.4[5]
+                        row.4[5],
+                        row.5[0],
+                        row.5[1],
+                        row.5[2],
+                        row.5[3],
                     ));
                 }
                 std::fs::write(
@@ -751,7 +763,60 @@ fn benchmark_rt_resolution_and_acceleration() {
             totals.sort_by(f64::total_cmp);
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
-            eprintln!("RT_PROBE glossy={glossy} dominant={dominant} resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances={instance_count} unique_triangles={} instanced_triangles={} median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",caster_vertices.len()/9,instance_count as usize*caster_vertices.len()/9,totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+            let cpu_stages: [f64; 4] =
+                std::array::from_fn(|i| median(rows.iter().map(|r| r.5[i]).collect()));
+            eprintln!("RT_PROBE glossy={glossy} dominant={dominant} shadowed={shadowed} resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances={instance_count} unique_triangles={} instanced_triangles={} median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} frame_wall_median_ms={:.4} stages={stages:?} host_wall_stages={cpu_stages:?}",caster_vertices.len()/9,instance_count as usize*caster_vertices.len()/9,totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+        }
+    });
+}
+
+// Atomic light-grid append must not change final pixels between fresh GPU runs
+// with the same local lights, camera, and frame sequence.
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn local_light_grid_output_is_repeatable() {
+    pollster::block_on(async {
+        for mixed in [false, true] {
+            let mut baseline: Option<Vec<u32>> = None;
+            for run in 0..3 {
+                let mut f = Fixture::new_rt(65, 49).await;
+                f.config(HlfsConfig {
+                    mode: HlfsMode::RayTraced,
+                    sample_scale: 1,
+                    samples_per_pixel: 2,
+                    candidates_per_sample: 8,
+                    ..Default::default()
+                });
+                f.lights((0..48).map(|i| {
+                    let mut light = point(
+                        [(i % 32) as f32 * 0.25 - 4.0,
+                         (i / 32) as f32 * 0.25 - 4.0, 2.0],
+                        [1.0, 0.7, 0.4],
+                        if i % 13 == 0 { 0.0 } else { 4.0 },
+                    );
+                    if mixed && i % 7 == 0 {
+                        light.light_type = 0;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.0];
+                    } else if mixed && i % 5 == 0 {
+                        light.light_type = 2;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.5];
+                        light.inner_angle = 0.9;
+                    }
+                    light.set_ray_traced_shadows(true);
+                    light
+                }).collect());
+                empty_scene(&mut f);
+                let mut pixels = Vec::new();
+                for _ in 0..4 {
+                    f.frame();
+                    pixels.extend(f.read().iter().flat_map(|rgb| rgb.map(f32::to_bits)));
+                }
+                if let Some(expected) = &baseline {
+                    assert!(pixels == *expected, "mixed={mixed}, run={run}: identical local lights changed final output");
+                } else {
+                    baseline = Some(pixels);
+                }
+            }
         }
     });
 }

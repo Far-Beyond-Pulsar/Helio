@@ -16,6 +16,7 @@ var<workgroup> has_directional: atomic<u32>;
 var<workgroup> min_depth: atomic<u32>;
 var<workgroup> max_depth: atomic<u32>;
 var<workgroup> packed: array<u32, 256>;
+var<workgroup> sorted_fine: array<u32, 64>;
 
 fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi: f32) -> bool {
     // SceneDB buffers are sparse: unoccupied rows are zeroed, including
@@ -262,7 +263,31 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     workgroupBarrier();
     let count=atomicLoad(&accepted);
     if lane==0u { fine_grid[ti].count=count; }
+    if count>GRID_CAPACITY { return; }
+    // Atomic append gives the correct set but an execution-dependent order.
+    // Reservoir strata index this array, so stable IDs are needed for stable
+    // lighting when the same camera and lights are rendered twice.
+    if lane>=count { packed[lane]=INVALID_LIGHT; }
+    workgroupBarrier();
+    var sort_length=1u;
+    while sort_length<count { sort_length*=2u; }
+    var read_packed=true;
+    for(var width=2u;width<=sort_length;width*=2u) {
+        for(var stride=width/2u;stride>0u;stride/=2u) {
+            let partner=lane^stride;
+            var value=packed[lane]; var other=packed[partner];
+            if !read_packed { value=sorted_fine[lane]; other=sorted_fine[partner]; }
+            let lower=select(max(value,other),min(value,other),
+                ((lane&width)==0u)==((lane&stride)==0u));
+            if read_packed { sorted_fine[lane]=lower; }
+            else { packed[lane]=lower; }
+            workgroupBarrier();
+            read_packed=!read_packed;
+        }
+    }
     if lane<(min(count,GRID_CAPACITY)+1u)/2u {
-        fine_grid[ti].indices[lane]=packed[2u*lane]|(select(65535u,packed[2u*lane+1u],2u*lane+1u<count)<<16u);
+        var lo=packed[2u*lane]; var hi=packed[2u*lane+1u];
+        if !read_packed { lo=sorted_fine[2u*lane]; hi=sorted_fine[2u*lane+1u]; }
+        fine_grid[ti].indices[lane]=lo|(select(65535u,hi,2u*lane+1u<count)<<16u);
     }
 }
