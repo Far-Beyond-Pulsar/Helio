@@ -44,9 +44,18 @@ impl VoxelSourceWriter {
         let mut closest = BinaryHeap::<(u128, VoxelChunkKey)>::new();
         for &raw in state.1.keys() {
             let key = decode_payload_key(raw)?;
-            let distance = key.x.abs_diff(center[0]) as u128
-                + key.y.abs_diff(center[1]) as u128
-                + key.z.abs_diff(center[2]) as u128;
+            let distance = if key.lod > 16 {
+                u128::MAX
+            } else {
+                let scale = 1i128 << key.lod;
+                [key.x, key.y, key.z]
+                    .into_iter()
+                    .zip(center)
+                    .map(|(coordinate, camera)| {
+                        (i128::from(coordinate) * scale + scale / 2).abs_diff(i128::from(camera))
+                    })
+                    .fold(0u128, u128::saturating_add)
+            };
             if closest.len() < max_centers {
                 closest.push((distance, key));
             } else if closest

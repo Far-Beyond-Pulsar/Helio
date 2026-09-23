@@ -209,6 +209,12 @@ impl VoxelSceneFeed {
         for id in &removed {
             self.tracked.remove(id);
         }
+        if !removed.is_empty() {
+            for tracked in self.tracked.values_mut() {
+                tracked.last_error = None;
+                tracked.retry_at = 0;
+            }
+        }
         removed
     }
 
@@ -274,6 +280,8 @@ impl VoxelSceneFeed {
                     .iter()
                     .filter(|(id, entry)| {
                         entry.in_flight.is_none()
+                            && entry.last_error.is_none()
+                            && self.tick >= entry.retry_at
                             && !already_queued(
                                 **id,
                                 entry.desired.generation,
@@ -399,6 +407,21 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
             .map_err(|error| format!("voxel snapshot selection failed: {error:?}"))?;
         if selected.revision != tag.revision {
             return Err("voxel source revision changed during preparation".into());
+        }
+        if selected.centers.iter().any(|key| key.lod > 16) {
+            return Err("voxel LOD above 16 is unsupported by the GPU pass".into());
+        }
+        if selected
+            .centers
+            .iter()
+            .map(|key| key.lod)
+            .collect::<HashSet<_>>()
+            .len()
+            > 1
+        {
+            return Err(
+                "mixed voxel LOD chunks require transition geometry and are unsupported".into(),
+            );
         }
         let center_set: HashSet<_> = selected.centers.iter().copied().collect();
         let mut bricks = Vec::with_capacity(selected.centers.len());
@@ -700,5 +723,35 @@ mod tests {
             1
         );
         assert_eq!(feed.status(|_, _, _| true).tracked_entries, 0);
+    }
+
+    #[test]
+    fn mixed_lod_source_reports_explicit_error_instead_of_overlapping_surfaces() {
+        let mut chunks = HashMap::new();
+        chunks.insert([0, 0, 0, 0], Arc::<[u8]>::from([1]));
+        chunks.insert([1, 0, 0, 1], Arc::<[u8]>::from([1]));
+        let entry = VoxelSceneEntry {
+            id: VoxelEntryId {
+                entity_bits: 31,
+                kind: 1,
+            },
+            store: Arc::new(RwLock::new((1, chunks))),
+            domain: VoxelDomain::Unbounded { max_lod: 1 },
+            source_revision: 0,
+            origin: [0.0; 3],
+            voxel_size: 1.0,
+            material_ids: vec![0],
+            smooth_surface: false,
+            initial_cube: None,
+        };
+        let result = prepare_entry(PrepRequest {
+            entry,
+            tag: Tag {
+                generation: 1,
+                revision: 1,
+                center: [0; 3],
+            },
+        });
+        assert!(result.bricks.unwrap_err().contains("mixed voxel LOD"));
     }
 }

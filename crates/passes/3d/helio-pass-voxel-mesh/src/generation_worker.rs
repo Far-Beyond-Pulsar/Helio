@@ -386,4 +386,101 @@ mod tests {
         assert_eq!(status.published_jobs, 1);
         assert_eq!(status.failed_jobs, 1);
     }
+
+    #[test]
+    fn generation_admission_is_bounded_and_discard_reports_every_queued_job() {
+        struct Blocking {
+            entered: Mutex<Option<mpsc::Sender<()>>>,
+            gate: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl crate::VoxelChunkGenerator for Blocking {
+            fn generate(
+                &self,
+                _descriptor: &VoxelGeneratorDescriptor,
+                _key: VoxelChunkKey,
+            ) -> Result<Option<[u8; crate::VOXEL_CHUNK_SAMPLES]>, String> {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                }
+                let (lock, wake) = &*self.gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = wake.wait(open).unwrap();
+                }
+                Ok(Some([1; crate::VOXEL_CHUNK_SAMPLES]))
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut registry = VoxelGeneratorRegistry::default();
+        registry
+            .register(
+                "test.blocking",
+                1,
+                Arc::new(Blocking {
+                    entered: Mutex::new(Some(entered_tx)),
+                    gate: gate.clone(),
+                }),
+            )
+            .unwrap();
+        let store = Arc::new(RwLock::new((0, HashMap::new())));
+        let writer = VoxelSourceWriter::new(VoxelTerrainId(4), VoxelSourceId(3), store);
+        let worker = VoxelGenerationWorker::start(writer, registry).unwrap();
+        let job = VoxelGenerationJob {
+            terrain: VoxelTerrainId(4),
+            source: VoxelSourceId(3),
+            expected_revision: 0,
+            descriptor: VoxelGeneratorDescriptor {
+                id: "test.blocking".into(),
+                version: 1,
+                seed: 0,
+                shape_mode: 0,
+                domain: VoxelDomain::Unbounded { max_lod: 0 },
+                origin: [0.0; 3],
+                voxel_size: 1.0,
+                planet_radius: 1.0,
+                base_height: 0.0,
+                amplitude: 0.0,
+                wavelength: 16.0,
+                material_slot: 1,
+            },
+            keys: vec![VoxelChunkKey::new(0, 0, 0, 0)],
+        };
+        let active = worker.try_submit(job.clone()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let queued_a = worker.try_submit(job.clone()).unwrap();
+        let queued_b = worker.try_submit(job.clone()).unwrap();
+        assert!(matches!(
+            worker.try_submit(job),
+            Err(VoxelGenerationAdmissionError::Full)
+        ));
+        let discard = worker.discard.clone();
+        let finishing = thread::spawn(move || worker.finish(VoxelGenerationClose::Discard));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !discard.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(discard.load(Ordering::Acquire));
+        {
+            let (lock, wake) = &*gate;
+            *lock.lock().unwrap() = true;
+            wake.notify_all();
+        }
+        let (status, panicked) = finishing.join().unwrap();
+        assert!(!panicked);
+        assert!(matches!(
+            active.wait(),
+            VoxelGenerationTicketState::Published(_)
+        ));
+        assert!(matches!(
+            queued_a.wait(),
+            VoxelGenerationTicketState::Discarded
+        ));
+        assert!(matches!(
+            queued_b.wait(),
+            VoxelGenerationTicketState::Discarded
+        ));
+        assert_eq!(status.queued_jobs, 0);
+        assert_eq!(status.discarded_jobs, 2);
+    }
 }

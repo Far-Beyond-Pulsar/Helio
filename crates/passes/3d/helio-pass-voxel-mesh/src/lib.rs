@@ -7,6 +7,7 @@
 mod bounded_inbox;
 mod chunk_codec;
 mod data_api;
+mod edit_worker;
 mod edits;
 mod generation;
 mod generation_worker;
@@ -30,6 +31,11 @@ pub use chunk_codec::{
     VoxelMissingChunkPolicy, VOXEL_PADDED_EDGE, VOXEL_PADDED_WORDS,
 };
 pub use data_api::{VoxelBatchReceipt, VoxelPayloadStore, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use edit_worker::{
+    VoxelEditAdmissionError, VoxelEditClose, VoxelEditJob, VoxelEditTicket, VoxelEditTicketState,
+    VoxelEditWorker, VoxelEditWorkerStatus, VOXEL_EDIT_MAX_SAMPLES_PER_JOB,
+    VOXEL_EDIT_PENDING_JOBS,
+};
 pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use generation::{
     VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
@@ -202,6 +208,8 @@ pub struct VoxelResidencyFrameMetrics {
     pub staging_bricks: usize,
     pub staging_payload_bytes: usize,
     pub rejected_dirty_entries: u64,
+    /// IDs outside the current SceneDB material-record buffer in this upload.
+    pub invalid_material_ids: usize,
     pub evictions: u64,
     pub rebuilds: u64,
     pub stale_results: u64,
@@ -999,6 +1007,21 @@ impl RenderPass for VoxelMeshPass {
                 })
                 .expect("the fixed voxel frame budget is valid")
         };
+        let material_count = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_materials"))
+            .map_or(1, |buffer| {
+                buffer.buffer.size() / std::mem::size_of::<helio_mats::GpuMaterial>() as u64
+            });
+        let invalid_material_ids = work
+            .uploads
+            .iter()
+            .flat_map(|upload| upload.brick.material_ids.iter())
+            .filter(|&&id| u64::from(id) >= material_count)
+            .count();
+        if invalid_material_ids > 0 {
+            log::warn!("VoxelMeshPass: {invalid_material_ids} uploaded SceneDB material IDs are out of range; affected faces render magenta");
+        }
         for upload in work.uploads.iter() {
             let slot = upload.slot;
             let brick = &upload.brick;
@@ -1063,6 +1086,7 @@ impl RenderPass for VoxelMeshPass {
             staging_payload_bytes: self.residency.staging_bricks()
                 * VoxelPreparedBrick::UPLOAD_BYTES,
             rejected_dirty_entries: self.rejected_dirty_entries,
+            invalid_material_ids,
             evictions: self.residency.evictions,
             rebuilds: self.residency.rebuilds,
             stale_results: self.residency.stale_results,
