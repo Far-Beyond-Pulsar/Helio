@@ -185,6 +185,17 @@ impl<'a> VoxelChunkBatch<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VoxelUpdateError {
+    WrongTerrain {
+        expected: VoxelTerrainId,
+        actual: VoxelTerrainId,
+    },
+    WrongSource {
+        expected: VoxelSourceId,
+        actual: VoxelSourceId,
+    },
+    StoreLockPoisoned,
+    StoreCapacityExceeded,
+    InvalidStoredKey([u64; 4]),
     StaleRevision {
         expected: u64,
         actual: u64,
