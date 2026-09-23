@@ -70,6 +70,7 @@ pub struct TransparentPass {
     surface_format: wgpu::TextureFormat,
     pre_aa_target: bool,
     reactive_mask: bool,
+    timing_query: Option<wgpu::QuerySet>,
 }
 
 impl TransparentPass {
@@ -233,6 +234,7 @@ impl TransparentPass {
             surface_format,
             pre_aa_target: false,
             reactive_mask: false,
+            timing_query: None,
         }
     }
 
@@ -248,6 +250,23 @@ impl TransparentPass {
     pub fn with_reactive_mask(mut self) -> Self {
         self.reactive_mask = true;
         self
+    }
+
+    /// Optional GPU timestamps around the transparent render pass.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("Transparent pass timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
     }
 }
 
@@ -365,7 +384,11 @@ impl RenderPass for TransparentPass {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: self.timing_query.as_ref().map(|query| wgpu::RenderPassTimestampWrites {
+                query_set: query,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         })

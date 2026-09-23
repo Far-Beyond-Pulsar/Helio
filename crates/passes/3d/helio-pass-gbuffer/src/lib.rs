@@ -75,6 +75,7 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
+    timing_query: Option<wgpu::QuerySet>,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
@@ -272,6 +273,7 @@ impl GBufferPass {
         });
 
         Self {
+            timing_query: None,
             material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
@@ -302,6 +304,23 @@ impl GBufferPass {
     /// `find_pass`-based reach-in `Renderer` already uses for `PostProcessPass`.
     pub fn coordinate_spaces_buffer(&self) -> &wgpu::Buffer {
         &self.coordinate_spaces
+    }
+
+    /// Optional GPU timestamps around rasterizing the GBuffer.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("GBuffer timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
     }
 
     /// See [`Self::coordinate_spaces_buffer`].
@@ -536,7 +555,11 @@ impl RenderPass for GBufferPass {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: self.timing_query.as_ref().map(|query| wgpu::RenderPassTimestampWrites {
+                query_set: query,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         })

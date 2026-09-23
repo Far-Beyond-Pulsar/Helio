@@ -156,7 +156,7 @@ pub fn populate(world: &mut World) {
         let center = Vec3::new(0., 31., z);
         meshes[5].rod(center, Vec3::new(0., 42.4, z), 0.06, 10);
         for radius in [1.7, 1.2] {
-            meshes[5].ring(center, Vec3::X, Vec3::Z, radius, 0.06);
+            meshes[5].smooth_ring(center, Vec3::X, Vec3::Z, radius, 0.06);
         }
         for i in 0..16 {
             let a = i as f32 * std::f32::consts::TAU / 16.;
@@ -205,15 +205,33 @@ pub fn populate(world: &mut World) {
                     meshes[1].rod(Vec3::new(x, y0, zz),
                         Vec3::new(x, y1, zz), 0.09, 8);
                 }
-                meshes[1].smooth_arch(Vec3::new(x, y1 - 1.0, left - 0.2),
-                    Vec3::new(x, y1 - 1.0, left + width + 0.2), 1.4, 0.17);
+                // Stone spandrels turn the rectangular construction bay into
+                // a pointed lancet. Two faces make it opaque to exterior rays
+                // as well as to the interior camera.
+                let spring = y1 - 2.6;
+                let mid = left + width * 0.5;
+                for (face_x, inward) in [(x - side * 0.06, true), (x + side * 0.06, false)] {
+                    let at = |y, z| Vec3::new(face_x, y, z);
+                    let corners = [
+                        [at(y1, left), at(spring, left), at(y1, mid)],
+                        [at(y1, left + width), at(y1, mid), at(spring, left + width)],
+                    ];
+                    for [a, b, c] in corners {
+                        if (side > 0.) == inward { meshes[0].triangle(a, b, c); }
+                        else { meshes[0].triangle(c, b, a); }
+                    }
+                }
+                meshes[1].rod(Vec3::new(x, spring, left),
+                    Vec3::new(x, y1, mid), 0.15, 10);
+                meshes[1].rod(Vec3::new(x, y1, mid),
+                    Vec3::new(x, spring, left + width), 0.15, 10);
             }
         }
     }
     for z in [-71.55, 71.55] {
         let center = Vec3::new(0., 32., z);
-        for radius in [1.2, 4.0, 8.0] {
-            meshes[1].ring(center, Vec3::X, Vec3::Y, radius,
+        for radius in [1.2, 2.6, 4.2, 8.0] {
+            meshes[1].smooth_ring(center, Vec3::X, Vec3::Y, radius,
                 if radius > 7. { 0.30 } else { 0.14 });
         }
         for i in 0..72 {
@@ -221,14 +239,17 @@ pub fn populate(world: &mut World) {
             let b = (i+1) as f32 * std::f32::consts::TAU / 72.;
             let u = Vec3::new(a.cos(), a.sin(), 0.);
             let v = Vec3::new(b.cos(), b.sin(), 0.);
-            for (j, (r0, r1)) in [(0., 1.2), (1.2, 4.), (4., 8.)].into_iter().enumerate() {
-                let colour = (i / 6 + j) % 6;
+            for (j, (r0, r1)) in [(0., 1.2), (1.2, 2.6),
+                (2.6, 4.2), (4.2, 8.)].into_iter().enumerate() {
+                // Short color runs and stone petal tracery avoid broad flat
+                // sectors while preserving per-material RGB RT transmission.
+                let colour = ((i / 2 + j * 3 + (i / 12) * 2) % 6) as usize;
                 if r0 == 0. { panes[colour].triangle(center, center + u*r1, center + v*r1); }
                 else { panes[colour].quad(center + u*r0, center + u*r1,
                     center + v*r1, center + v*r0); }
-            }
-            if i % 6 == 0 {
-                meshes[1].rod(center + u*1.2, center + u*8., 0.13, 8);
+                if i % 3 == 0 && r0 > 0. {
+                    meshes[1].rod(center + u*r0, center + u*r1, 0.085, 8);
+                }
             }
             let edge_u = u * (8.25 / u.x.abs().max(u.y.abs()));
             let edge_v = v * (8.25 / v.x.abs().max(v.y.abs()));
@@ -236,6 +257,11 @@ pub fn populate(world: &mut World) {
                 center + edge_v, center + v*8.);
             meshes[0].quad(center + v*8., center + edge_v,
                 center + edge_u, center + u*8.);
+        }
+        for petal in 0..12 {
+            let angle = (petal as f32 + 0.5) * std::f32::consts::TAU / 12.;
+            let offset = Vec3::new(angle.cos() * 5.9, angle.sin() * 5.9, 0.);
+            meshes[1].smooth_ring(center + offset, Vec3::X, Vec3::Y, 1.25, 0.10);
         }
     }
 
@@ -249,6 +275,10 @@ pub fn populate(world: &mut World) {
             0 => {
                 world.insert(material, crate::hlfs_capture::architectural_materials::StoneMaterial);
                 mesh.world_space_uv(2.0);
+            }
+            1 => {
+                world.insert(material, crate::hlfs_capture::architectural_materials::CarvedStoneMaterial);
+                mesh.world_space_uv(1.5);
             }
             3 => {
                 world.insert(material, crate::hlfs_capture::architectural_materials::FloorMaterial);

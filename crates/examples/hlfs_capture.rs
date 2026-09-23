@@ -11,17 +11,15 @@ pub mod architectural_materials;
 pub fn warm_up_cathedral(
     scene_db: &SceneDb,
     renderer: &mut Renderer,
-    acceleration: Option<&mut helio_pass_hlfs::SceneDbRayTracing>,
+    acceleration: Option<&helio_pass_hlfs::SceneDbRayTracing>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     camera: &Camera,
     target: &wgpu::TextureView,
 ) {
-    let mut acceleration = acceleration;
     for _ in 0..4 {
         crate::v3_demo_common::flush_scene_db(scene_db, queue);
-        if let Some(acceleration) = acceleration.as_mut() {
-            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+        if let Some(acceleration) = acceleration {
             renderer.set_ray_tracing_frame_with_transmission(
                 acceleration.tlas(), acceleration.transmission());
         }
@@ -92,8 +90,11 @@ pub fn run_scene(
         t
     });
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        if std::env::var_os("HLFS_VULKAN_DEBUG_MARKERS").is_some() {
+            instance_desc.flags |= wgpu::InstanceFlags::DEBUG;
+        }
+        let instance = wgpu::Instance::new(instance_desc);
         let adapter = instance
             .request_adapter(&Default::default())
             .await
@@ -168,6 +169,7 @@ pub fn run_scene(
         }
         let mut renderer =
             RendererBuilder::new(config, scene_handle)
+                .with_external_device()
                 .with_editor_mode(false)
                 .with_pass_build_context(Box::new(move |ctx| {
                     if fxaa {
@@ -188,10 +190,18 @@ pub fn run_scene(
         if let Some(value) = tsr_reactivity {
             renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().expect("TSR pass").set_reactivity(value);
         }
-        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        renderer.set_ambient(if name.starts_with("cathedral") {
+            [0.10, 0.09, 0.085]
+        } else { [0.05, 0.05, 0.08] }, 1.0);
         // Camera motion advances by frame index. Temporal filters and animated
         // passes must use the same fixed clock, independent of capture readback.
         renderer.set_frame_delta_override(Some(1.0 / 60.0));
+        // These capture scenes author geometry once. Keep the prepared BLAS
+        // and TLAS while the camera moves; only per-frame lights change.
+        if ray_traced {
+            crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
+            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+        }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cathedral capture"),
             size: wgpu::Extent3d {
@@ -229,9 +239,15 @@ pub fn run_scene(
         if name.starts_with("cathedral") {
             let camera = camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32);
             warm_up_cathedral(&scene_db, &mut renderer,
-                ray_traced.then_some(&mut acceleration), &device, &queue, &camera, &view);
+                ray_traced.then_some(&acceleration), &device, &queue, &camera, &view);
         }
         let mut frame_times = Vec::new();
+        let graph_timings = std::env::var_os("HLFS_GRAPH_TIMINGS").is_some();
+        // The graph's outer timestamp spans compute and graphics. Individual
+        // pass markers are not reliable for graphics on the split encoders.
+        let mut graph_csv = String::from("gpu_frame,graph_gpu_ms\n");
+        let mut stage_csv = String::from("frame,scene_flush_ms,rt_prepare_ms,renderer_call_ms,gpu_wait_ms,serialized_ms\n");
+        let mut last_gpu_frame = None;
         let timing = std::env::var_os("HLFS_CAPTURE_TIMINGS").map(|_| {
             let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
             assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
@@ -266,6 +282,91 @@ pub fn run_scene(
             (query, resolve, read)
         });
         let mut fog_timing_csv = String::from("frame,classify_ms,inject_ms,integrate_ms,fog_ms\n");
+        let tsr_timing = std::env::var_os("HLFS_TSR_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().expect("TSR pass");
+            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
+            let query = pass.timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TSR timestamps"), size: 32,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TSR timing readback"), size: 32,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut tsr_timing_csv = String::from("frame,resolve_ms,copies_ms,blit_ms,tsr_ms\n");
+        let postprocess_timing = std::env::var_os("HLFS_POSTPROCESS_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>().expect("postprocess pass");
+            assert!(pass.enable_uber_timing(&device), "GPU timestamps unavailable");
+            let query = pass.uber_timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess timestamps"), size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess timing readback"), size: 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut postprocess_timing_csv = String::from("frame,uber_ms\n");
+        let postprocess_compute_timing = std::env::var_os("HLFS_POSTPROCESS_COMPUTE_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>().expect("postprocess pass");
+            assert!(pass.enable_compute_timing(&device), "GPU timestamps unavailable");
+            let query = pass.compute_timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess compute timestamps"), size: 24,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess compute timing readback"), size: 24,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut postprocess_compute_timing_csv = String::from("frame,exposure_ms,bloom_ms,postprocess_compute_ms\n");
+        let transparent_timing = std::env::var_os("HLFS_TRANSPARENT_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_transparent::TransparentPass>().expect("transparent pass");
+            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
+            let query = pass.timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Transparent timestamps"), size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Transparent timing readback"), size: 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut transparent_timing_csv = String::from("frame,transparent_ms\n");
+        let gbuffer_timing = std::env::var_os("HLFS_GBUFFER_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_gbuffer::GBufferPass>().expect("GBuffer pass");
+            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
+            let query = pass.timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GBuffer timestamps"), size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GBuffer timing readback"), size: 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut gbuffer_timing_csv = String::from("frame,gbuffer_ms\n");
         for frame in 0..capture_frames {
             if texture_lifecycle {
                 let mut store=diagnostic_texture_store.as_ref().unwrap().write().unwrap();
@@ -277,13 +378,26 @@ pub fn run_scene(
             let camera = camera_path(t, width as f32 / height as f32);
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
+            let after_flush = std::time::Instant::now();
             if ray_traced {
-                acceleration
-                    .prepare(&scene_db.world)
-                    .expect("SceneDB RT geometry");
                 renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
             }
+            let after_rt = std::time::Instant::now();
             renderer.render(&camera, &view).expect("cathedral frame");
+            let after_render = std::time::Instant::now();
+            if graph_timings {
+                let snapshot = renderer.timing_snapshot();
+                if let Some(gpu_frame) = snapshot.gpu_frame_index {
+                    if last_gpu_frame != Some(gpu_frame) {
+                        last_gpu_frame = Some(gpu_frame);
+                        if gpu_frame >= 16 {
+                            if let Some(graph_ms) = renderer.gpu_frame_ms() {
+                                graph_csv.push_str(&format!("{gpu_frame},{graph_ms}\n"));
+                            }
+                        }
+                    }
+                }
+            }
             if frame == 0 {
                 let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
                 let size = pass.output_texture().size();
@@ -293,6 +407,8 @@ pub fn run_scene(
                 let sample_width = size.width.div_ceil(sample_scale);
                 let sample_height = size.height.div_ceil(sample_scale);
                 let aa = if fxaa { "fxaa" } else if std::env::var_os("HLFS_TSR_NATIVE").is_some() { "tsr_native" } else { "none" };
+                let ssr = std::env::var_os("HLFS_SSR").is_some();
+                let ray_traced_shadows = ray_traced && std::env::var_os("HLFS_UNSHADOWED").is_none();
                 let transparency_reactivity = aa == "tsr_native" && std::env::var_os("HLFS_NO_TRANSPARENCY_REACTIVITY").is_none();
                 let lighting_setup = if name.starts_with("cathedral") && ray_traced {
                     if std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_some() { "window_emitters" } else { "daylight_sun" }
@@ -302,14 +418,21 @@ pub fn run_scene(
                     else { "architectural" };
                 let camera_parameter = fixed_camera.map(|t| t.to_string()).unwrap_or_else(|| "null".into());
                 let metadata = format!(
-                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"stone_textures\": {has_architectural_textures},\n  \"texture_set\": \"{texture_set}\",\n  \"transparency_reactivity\": {transparency_reactivity},\n  \"reference\": {reference},\n  \"lighting_setup\": \"{lighting_setup}\",\n  \"fixed_camera_parameter\": {camera_parameter},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
+                    "{{\n  \"output\": [{width}, {height}],\n  \"internal\": [{}, {}],\n  \"hlfs_sampling\": [{sample_width}, {sample_height}],\n  \"render_scale\": {render_scale},\n  \"sample_scale\": {sample_scale},\n  \"aa\": \"{aa}\",\n  \"ssr\": {ssr},\n  \"ray_traced_shadows\": {ray_traced_shadows},\n  \"stone_textures\": {has_architectural_textures},\n  \"texture_set\": \"{texture_set}\",\n  \"transparency_reactivity\": {transparency_reactivity},\n  \"reference\": {reference},\n  \"lighting_setup\": \"{lighting_setup}\",\n  \"fixed_camera_parameter\": {camera_parameter},\n  \"fixed_delta_seconds\": 0.016666666666666666\n}}\n",
                     size.width, size.height);
                 eprintln!("Capture dimensions: {metadata}");
                 std::fs::write(std::path::Path::new(directory).join("capture-config.json"), metadata).unwrap();
             }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let after_wait = std::time::Instant::now();
+            if graph_timings {
+                let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
+                stage_csv.push_str(&format!("{frame},{},{},{},{},{}\n",
+                    ms(start, after_flush), ms(after_flush, after_rt),
+                    ms(after_rt, after_render), ms(after_render, after_wait), ms(start, after_wait)));
+            }
             if frame >= 16 {
-                frame_times.push(start.elapsed().as_secs_f64() * 1000.0);
+                frame_times.push((after_wait - start).as_secs_f64() * 1000.0);
             }
             // Resolve outside the serialized-frame interval. This measures only
             // HLFS's six GPU stages: it does not include SceneDB or TLAS work.
@@ -345,6 +468,88 @@ pub fn run_scene(
                 let stages: [f64; 3] = std::array::from_fn(|i|
                     (ticks[i + 1] - ticks[i]) as f64 * queue.get_timestamp_period() as f64 / 1e6);
                 fog_timing_csv.push_str(&format!("{frame},{},{},{},{}\n", stages[0], stages[1], stages[2], stages.iter().sum::<f64>()));
+                drop(bytes);
+                read.unmap();
+            }
+            if let Some((query, resolve, read)) = &tsr_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..4, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 32);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let stages: [f64; 3] = std::array::from_fn(|i|
+                    (ticks[i + 1] - ticks[i]) as f64 * queue.get_timestamp_period() as f64 / 1e6);
+                tsr_timing_csv.push_str(&format!("{frame},{},{},{},{}\n", stages[0], stages[1], stages[2], stages.iter().sum::<f64>()));
+                drop(bytes);
+                read.unmap();
+            }
+            if let Some((query, resolve, read)) = &postprocess_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..2, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 16);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let ms = (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                postprocess_timing_csv.push_str(&format!("{frame},{ms}\n"));
+                drop(bytes);
+                read.unmap();
+            }
+            if let Some((query, resolve, read)) = &postprocess_compute_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..3, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 24);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let exposure = (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                let bloom = (ticks[2] - ticks[1]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                postprocess_compute_timing_csv.push_str(&format!("{frame},{exposure},{bloom},{}\n", exposure + bloom));
+                drop(bytes);
+                read.unmap();
+            }
+            if let Some((query, resolve, read)) = &transparent_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..2, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 16);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let ms = (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                transparent_timing_csv.push_str(&format!("{frame},{ms}\n"));
+                drop(bytes);
+                read.unmap();
+            }
+            if let Some((query, resolve, read)) = &gbuffer_timing {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.resolve_query_set(query, 0..2, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 16);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = read.slice(..).get_mapped_range().unwrap();
+                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+                let ms = (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                gbuffer_timing_csv.push_str(&format!("{frame},{ms}\n"));
                 drop(bytes);
                 read.unmap();
             }
@@ -404,6 +609,25 @@ pub fn run_scene(
         }
         if fog_timing.is_some() {
             std::fs::write(std::path::Path::new(directory).join("fog-gpu-timings.csv"), fog_timing_csv).unwrap();
+        }
+        if tsr_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("tsr-gpu-timings.csv"), tsr_timing_csv).unwrap();
+        }
+        if postprocess_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("postprocess-gpu-timings.csv"), postprocess_timing_csv).unwrap();
+        }
+        if postprocess_compute_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("postprocess-compute-gpu-timings.csv"), postprocess_compute_timing_csv).unwrap();
+        }
+        if transparent_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("transparent-gpu-timings.csv"), transparent_timing_csv).unwrap();
+        }
+        if gbuffer_timing.is_some() {
+            std::fs::write(std::path::Path::new(directory).join("gbuffer-gpu-timings.csv"), gbuffer_timing_csv).unwrap();
+        }
+        if graph_timings {
+            std::fs::write(std::path::Path::new(directory).join("graph-frame-timings.csv"), graph_csv).unwrap();
+            std::fs::write(std::path::Path::new(directory).join("frame-stage-timings.csv"), stage_csv).unwrap();
         }
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });

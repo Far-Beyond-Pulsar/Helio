@@ -250,6 +250,7 @@ impl ApplicationHandler for App {
         let has_stone = stone_store.is_some();
         if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
         let mut renderer = RendererBuilder::new(config, scene_handle)
+            .with_external_device()
             .with_editor_mode(false)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
@@ -268,7 +269,7 @@ impl ApplicationHandler for App {
                 renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
             Some(helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone()))
         } else { None };
-        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let warmup_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -289,7 +290,11 @@ impl ApplicationHandler for App {
                 pos + glam::Vec3::new(0.0, 0.065_f32.sin(), -0.065_f32.cos()),
                 glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0)
         };
-        hlfs_capture::warm_up_cathedral(&scene_db, &mut renderer, acceleration.as_mut(),
+        if let Some(acceleration) = acceleration.as_mut() {
+            v3_demo_common::flush_scene_db(&scene_db, &queue);
+            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+        }
+        hlfs_capture::warm_up_cathedral(&scene_db, &mut renderer, acceleration.as_ref(),
             &device, &queue, &warmup_camera, &warmup_view);
 
         let renderer = Arc::new(Mutex::new(renderer));
@@ -637,8 +642,7 @@ impl AppState {
         let view = output.texture.create_view(&Default::default());
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
-        if let Some(acceleration) = &mut self.acceleration {
-            acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
+        if let Some(acceleration) = &self.acceleration {
             renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
         }
         if let Err(e) = renderer.render(&camera, &view) {

@@ -6,6 +6,8 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Copy)]
 pub struct StoneMaterial;
 #[derive(Clone, Copy)]
+pub struct CarvedStoneMaterial;
+#[derive(Clone, Copy)]
 pub struct FloorMaterial;
 #[derive(Clone, Copy)]
 pub struct WoodMaterial;
@@ -41,14 +43,18 @@ pub fn load(
         .query::<(&FloorMaterial,)>()
         .map(|(entity, _)| entity)
         .collect();
+    let carved_stone: Vec<_> = world
+        .query::<(&CarvedStoneMaterial,)>()
+        .map(|(entity, _)| entity)
+        .collect();
     let wood: Vec<_> = world
         .query::<(&WoodMaterial,)>()
         .map(|(entity, _)| entity)
         .collect();
-    if stone.is_empty() && floor.is_empty() && wood.is_empty() {
+    if stone.is_empty() && carved_stone.is_empty() && floor.is_empty() && wood.is_empty() {
         return None;
     }
-    let mut store = TextureStore::new(9);
+    let mut store = TextureStore::new(12);
     if !stone.is_empty() {
         let base = upload(
             device,
@@ -80,6 +86,16 @@ pub fn load(
             std::env::var_os("HLFS_NO_STONE_NORMALS").is_none(),
             1.0,
         );
+    }
+
+    if !carved_stone.is_empty() {
+        let base = upload(device, queue, &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_diff_2k.jpg"), true);
+        let normal = upload(device, queue, &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_nor_gl_2k.jpg"), false);
+        let arm = upload(device, queue, &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_arm_2k.jpg"), false);
+        apply_material(world, carved_stone, base, normal, arm, true, 1.0);
     }
 
     if !floor.is_empty() {

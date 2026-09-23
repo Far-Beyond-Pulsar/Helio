@@ -1057,6 +1057,7 @@ dependencies = [
  "helio-pass-sprite-batch",
  "helio-pass-sprite-cull",
  "helio-pass-sprite-simulate",
+ "helio-pass-transparent",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
@@ -1860,6 +1861,7 @@ dependencies = [
  "naga",
  "pollster 0.4.0",
  "pulsar_scenedb",
+ "twox-hash",
  "wgpu",
 ]
 
@@ -1978,6 +1980,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
