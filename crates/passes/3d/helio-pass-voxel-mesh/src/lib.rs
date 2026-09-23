@@ -5,7 +5,15 @@
 //! dirty-brick list each frame.
 
 mod marching_cubes;
+mod source_data;
 mod terrain;
+
+pub use source_data::{
+    VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkPayload, VoxelChunkUpdate,
+    VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
+    MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, VOXEL_CHUNK_ENCODING_RAW,
+    VOXEL_CHUNK_SCHEMA_VERSION,
+};
 
 pub use terrain::{
     BrickRange, VoxelAreaUpdate, VoxelBlockUpdate, VoxelComponent, VoxelTerrain,

@@ -804,7 +804,7 @@ mod tests {
     fn sphere_edits_update_the_dense_material_grid() {
         let mut terrain = VoxelTerrain::empty();
         let center = [32.0, 32.0, 32.0];
-        let center_index = VoxelTerrain::idx(32, 32, 32);
+        let center_index = terrain.idx(32, 32, 32);
 
         assert!(terrain.paint_sphere(center, 2.0, MAT_ORE, true).is_some());
         assert_eq!(terrain.materials[center_index], MAT_ORE);
