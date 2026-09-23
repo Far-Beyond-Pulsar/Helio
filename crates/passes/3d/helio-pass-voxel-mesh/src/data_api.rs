@@ -169,6 +169,57 @@ impl VoxelSourceWriter {
         chunks.sort_unstable_by_key(|(key, _)| *key);
         Ok(VoxelTerrainSnapshot { revision, chunks })
     }
+
+    /// Replace this component's complete live chunk map from a caller-owned
+    /// snapshot. This is an in-memory import/replay primitive only: callers
+    /// choose their own serialization, durable storage, and scheduling policy.
+    /// The replacement is one validated revision transition and must run on a
+    /// worker/script thread for large snapshots.
+    pub fn replace_from_snapshot(
+        &self,
+        snapshot: &VoxelTerrainSnapshot,
+        domain: crate::VoxelDomain,
+    ) -> Result<VoxelBatchReceipt, VoxelUpdateError> {
+        let current = self.snapshot()?;
+        let mut ops = Vec::with_capacity(current.len().saturating_add(snapshot.len()));
+        for (key, _) in current.iter() {
+            if snapshot.get(key).is_none() {
+                ops.push(VoxelChunkOp::Delete { key });
+            }
+        }
+        for (key, bytes) in snapshot.iter() {
+            ops.push(VoxelChunkOp::Upsert(crate::VoxelChunkUpdate {
+                key,
+                payload: crate::VoxelChunkPayload {
+                    encoding: crate::VOXEL_CHUNK_ENCODING_RAW,
+                    schema_version: crate::VOXEL_CHUNK_SCHEMA_VERSION,
+                    bytes,
+                },
+            }));
+        }
+        let revision = current.revision();
+        let publish = if ops.is_empty() {
+            revision
+        } else {
+            revision
+                .checked_add(1)
+                .ok_or(VoxelUpdateError::NonSequentialRevision {
+                    expected_next: None,
+                    publish: revision,
+                })?
+        };
+        let batch = crate::VoxelChunkBatch {
+            terrain: self.terrain,
+            source: self.source,
+            revision: crate::VoxelBatchRevision {
+                expected: revision,
+                publish,
+            },
+            domain,
+            ops: &ops,
+        };
+        self.publish_batch(&batch)
+    }
 }
 
 /// Summary of one live SceneDB publication.
