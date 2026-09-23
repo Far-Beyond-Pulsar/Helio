@@ -9,9 +9,9 @@ mod source_data;
 mod terrain;
 
 pub use source_data::{
-    VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkPayload, VoxelChunkUpdate,
+    VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload, VoxelChunkUpdate,
     VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
-    MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, VOXEL_CHUNK_ENCODING_RAW,
+    MAX_VOXEL_BATCH_PAYLOAD_BYTES, MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, VOXEL_CHUNK_ENCODING_RAW,
     VOXEL_CHUNK_SCHEMA_VERSION,
 };
 
