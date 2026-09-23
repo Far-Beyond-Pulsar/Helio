@@ -140,6 +140,7 @@ impl InternalBindings {
 pub(crate) struct Inputs<'a> {
     pub camera: &'a wgpu::Buffer,
     pub lights: &'a wgpu::Buffer,
+    pub compact_lights: &'a wgpu::Buffer,
     pub shadow_matrices: &'a wgpu::Buffer,
     pub shadow_atlas: &'a wgpu::TextureView,
     pub shadow_sampler: &'a wgpu::Sampler,
@@ -155,7 +156,7 @@ struct CommonKey {
 impl CommonKey {
     fn matches(&self, i: &Inputs<'_>) -> bool {
         &self.buffers[0] == i.camera
-            && &self.buffers[1] == i.lights
+            && &self.buffers[1] == i.compact_lights
             && &self.buffers[2] == i.shadow_matrices
             && &self.shadow == i.shadow_atlas
             && &self.sampler == i.shadow_sampler
@@ -176,6 +177,8 @@ impl GBufferKey {
 }
 #[derive(Default)]
 pub(crate) struct ExternalBindings {
+    pub compact: Option<wgpu::BindGroup>,
+    compact_key: Option<(wgpu::Buffer, wgpu::Buffer)>,
     pub ray: Option<wgpu::BindGroup>,
     pub transmission: bool,
     ray_key: Option<(wgpu::Tlas, wgpu::Buffer)>,
@@ -215,6 +218,22 @@ impl ExternalBindings {
         shadows: &wgpu::Buffer,
         i: &Inputs<'_>,
     ) {
+        if !self
+            .compact_key
+            .as_ref()
+            .is_some_and(|(source, dest)| source == i.lights && dest == i.compact_lights)
+        {
+            self.compact = Some(bind_group(
+                device,
+                "HLFS compact light copy",
+                &p.compact_bgl,
+                &[
+                    i.lights.as_entire_binding(),
+                    i.compact_lights.as_entire_binding(),
+                ],
+            ));
+            self.compact_key = Some((i.lights.clone(), i.compact_lights.clone()));
+        }
         // Compare actual wgpu handles. Wrapper addresses can remain unchanged when
         // a growable SceneDB buffer reallocates and must never be cache keys.
         if !self.common_key.as_ref().is_some_and(|k| k.matches(i)) {
@@ -225,7 +244,7 @@ impl ExternalBindings {
                 &[
                     globals.as_entire_binding(),
                     i.camera.as_entire_binding(),
-                    i.lights.as_entire_binding(),
+                    i.compact_lights.as_entire_binding(),
                     shadows.as_entire_binding(),
                     view(i.shadow_atlas),
                     wgpu::BindingResource::Sampler(i.shadow_sampler),
@@ -236,7 +255,7 @@ impl ExternalBindings {
             self.common_key = Some(CommonKey {
                 buffers: [
                     i.camera.clone(),
-                    i.lights.clone(),
+                    i.compact_lights.clone(),
                     i.shadow_matrices.clone(),
                 ],
                 shadow: i.shadow_atlas.clone(),

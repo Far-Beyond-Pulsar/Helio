@@ -1,0 +1,17 @@
+{
+  "output": [3840, 2160],
+  "internal": [3840, 2160],
+  "hlfs_sampling": [3840, 2160],
+  "render_scale": 1,
+  "sample_scale": 1,
+  "aa": "tsr_native",
+  "ssr": false,
+  "ray_traced_shadows": true,
+  "stone_textures": true,
+  "texture_set": "stone_marble_wood",
+  "transparency_reactivity": true,
+  "reference": false,
+  "lighting_setup": "daylight_sun",
+  "fixed_camera_parameter": null,
+  "fixed_delta_seconds": 0.016666666666666666
+}

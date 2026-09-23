@@ -250,6 +250,7 @@ impl VisibilityPipelines {
 }
 
 pub(crate) struct Pipelines {
+    pub compact_bgl: wgpu::BindGroupLayout,
     pub common_bgl: wgpu::BindGroupLayout,
     pub gbuffer_bgl: wgpu::BindGroupLayout,
     pub depth_bgl: wgpu::BindGroupLayout,
@@ -258,6 +259,7 @@ pub(crate) struct Pipelines {
     pub temporal_bgl: wgpu::BindGroupLayout,
     pub spatial_bgl: wgpu::BindGroupLayout,
     pub composite_bgl: wgpu::BindGroupLayout,
+    pub compact: wgpu::ComputePipeline,
     pub depth_reduce: wgpu::ComputePipeline,
     pub coarse: wgpu::ComputePipeline,
     pub select_key: wgpu::ComputePipeline,
@@ -306,6 +308,30 @@ impl Pipelines {
     ) -> Self {
         use wgpu::{ShaderStages as S, TextureFormat as F, TextureViewDimension as D};
         let all = S::COMPUTE | S::FRAGMENT;
+        let compact_bgl = bgl(
+            device,
+            "HLFS light compaction layout",
+            &[
+                entry(0, storage(true), S::COMPUTE),
+                entry(1, storage(false), S::COMPUTE),
+            ],
+        );
+        let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HLFS light compaction"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_lights.wgsl").into()),
+        });
+        let compact_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("HLFS light compaction"),
+            bind_group_layouts: &[Some(&compact_bgl)],
+            immediate_size: 0,
+        });
+        let compact = compute(
+            device,
+            "HLFS light compaction",
+            &compact_shader,
+            "compact",
+            &compact_layout,
+        );
         let rt_bgl = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
@@ -509,6 +535,8 @@ impl Pipelines {
             false,
         );
         Self {
+            compact_bgl,
+            compact,
             transmission_visibility: (mode == HlfsMode::RayTraced).then(|| VisibilityPipelines::new(device, mode, presampled, &common_bgl, &gbuffer_bgl, &sample_bgl, rt_bgl.as_ref(), true)),
             transmission_composite: (mode == HlfsMode::RayTraced).then(|| composite_pipeline(device, output_format, mode, presampled, &common_bgl, &gbuffer_bgl, &composite_bgl, rt_bgl.as_ref(), true)),
             common_bgl,
