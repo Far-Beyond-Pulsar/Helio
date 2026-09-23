@@ -170,10 +170,8 @@ impl Clone for VoxelComponent {
 
 /// General-purpose voxel terrain authoring configuration.
 ///
-/// `domain_mode` and `shape_mode` are stable primitive discriminants so this
-/// component crate does not define voxel-specific helper enums. Their values
-/// are interpreted and validated by the voxel source service. The intended initial
-/// values are domain 0 = bounded, 1 = unbounded and shape 0 = plane, 1 = sphere.
+/// `domain_mode` describes the chunk-key domain. Generation behavior is
+/// identified by an opaque source ID and parameters, not by a built-in shape.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
@@ -191,10 +189,6 @@ pub struct VoxelTerrainComponent {
     /// Domain discriminant: 0 bounded, 1 unbounded.
     #[property(category = "Domain")]
     pub domain_mode: u32,
-    /// Shape discriminant: 0 plane, 1 sphere/planet; other values are
-    /// reserved for registered source kinds.
-    #[property(category = "Domain")]
-    pub shape_mode: u32,
     /// Finite-domain minimum and maximum on each axis. Ignored for unbounded domains.
     #[property(category = "Domain")]
     pub bounds_min_x: f64,
@@ -208,9 +202,6 @@ pub struct VoxelTerrainComponent {
     pub bounds_max_y: f64,
     #[property(category = "Domain")]
     pub bounds_max_z: f64,
-    /// Sphere radius in world units; used when `shape_mode` selects a sphere.
-    #[property(min = 0.0, max = 1.0e15, step = 1.0, category = "Domain")]
-    pub planet_radius: f64,
     /// Edge length of a base-resolution voxel in world units.
     #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Generation")]
     pub voxel_size: f64,
@@ -247,16 +238,14 @@ impl Default for VoxelTerrainComponent {
             payloads: empty_payload_store(),
             enabled: true,
             domain_mode: 1,
-            shape_mode: 0,
             bounds_min_x: 0.0,
             bounds_min_y: 0.0,
             bounds_min_z: 0.0,
             bounds_max_x: 0.0,
             bounds_max_y: 0.0,
             bounds_max_z: 0.0,
-            planet_radius: 1.0,
             voxel_size: 1.0,
-            generator_id: "helio.flat".into(),
+            generator_id: String::new(),
             generator_version: 1,
             seed: 0,
             generator_parameters: String::new(),
@@ -285,14 +274,12 @@ impl Clone for VoxelTerrainComponent {
             payloads: clone_payload_store(&self.payloads),
             enabled: self.enabled,
             domain_mode: self.domain_mode,
-            shape_mode: self.shape_mode,
             bounds_min_x: self.bounds_min_x,
             bounds_min_y: self.bounds_min_y,
             bounds_min_z: self.bounds_min_z,
             bounds_max_x: self.bounds_max_x,
             bounds_max_y: self.bounds_max_y,
             bounds_max_z: self.bounds_max_z,
-            planet_radius: self.planet_radius,
             voxel_size: self.voxel_size,
             generator_id: self.generator_id.clone(),
             generator_version: self.generator_version,
