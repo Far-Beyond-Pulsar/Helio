@@ -47,3 +47,9 @@ The 1,024-**static**-light gallery was captured at 2560x1440 output with 1280x72
 | Control 2 | 3.320 ms | 6.238 ms | 12.376 ms |
 
 Raw GPU timestamp CSVs and the motion result are included here; the full image sequences remain under `target/validation/split-*-half-1440/` and `target/validation/moving-split-seed11/` on the validation host. The split implementation was removed. A broader, more specialized selection and traversal architecture may still help, but the simple extra-pass version did not. This experiment cannot support a claim about native-resolution performance or 1,000 dynamic lights.
+
+## Rejected deterministic prefix lookup
+
+The coarse GPU light proposal uses atomic appends while building its alias table. That makes its slot order a possible source of run-to-run changes in the noisy moving fixture. I replaced the alias construction with an eight-step parallel prefix table and selected strata by binary search. This was a GPU-only prototype with the same proposal weights and uniform discovery component. It made the coarse stage faster but added random proposal-table reads to every dense-light sample.
+
+In the 1,024-**static**-light gallery at native 2560 × 1440 output/shading, one sample, eight candidates, and the unchanged moving camera, the control/candidate GPU medians were coarse 0.252/0.213 ms, sampling 12.108/13.001 ms, HLFS 17.565/18.366 ms, and full graph 23.788/24.700 ms. These are one release-binary pair after 16 warmup frames, with raw CSVs here. Frame 99 was inspected and retained the visible colored mottling. Since the whole graph regressed by about 0.9 ms, the code was removed without spending more runs on the prototype. This does not prove atomic order is the only cause of the moving fixture's run-to-run variance.
