@@ -2,8 +2,8 @@
 //!
 //! These are CPU-side request/validation types only. They do not own payload
 //! bytes, publish SceneDB state, schedule work, or imply GPU residency. The
-//! owning service applies accepted data to live SceneDB component state before
-//! notifying the render pass. Persistence/exfiltration is caller-owned.
+//! owning service applies accepted data to live SceneDB component state.
+//! Persistence/exfiltration is caller-owned.
 
 use std::collections::HashSet;
 

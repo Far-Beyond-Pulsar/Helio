@@ -1,7 +1,7 @@
 //! SceneDB World registration for voxel authoring components.
 //!
 //! These behaviors intentionally do not invoke rendering or generation. A
-//! future voxel-pass service can observe the typed SceneDB rows and consume
+//! future voxel backend can observe the typed SceneDB rows and consume
 //! revisioned external updates without coupling component hydration to a pass.
 
 use engine_class_derive::{register_runtime_behavior, register_world_component};
@@ -35,7 +35,7 @@ impl ComponentRuntimeBehavior for VoxelTerrainComponent {
         _component: &Self,
         _context: &mut dyn ComponentRuntimeContext,
     ) {
-        // A future voxel-pass service will consume terrain configuration and
+        // A future voxel backend will consume terrain configuration and
         // external revisioned data batches independently of scene hydration.
     }
 }

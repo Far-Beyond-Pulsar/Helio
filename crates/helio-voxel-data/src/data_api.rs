@@ -6,7 +6,7 @@
 //! and does not provide persistence settings or policy.
 
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock},
 };
 
@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Layout-compatible handle exposed by VoxelComponent and VoxelTerrainComponent.
-/// This duplicate alias keeps the pass independent from helio-component (which
+/// This duplicate alias keeps the data API independent from helio-component (which
 /// owns editor/UI dependencies); no terrain semantics enter central Helio.
 type VoxelPayloadKey = [u64; 4];
 pub type VoxelPayloadStore = Arc<RwLock<(u64, HashMap<VoxelPayloadKey, Arc<[u8]>>)>>;
@@ -29,77 +29,6 @@ pub struct VoxelSourceWriter {
 }
 
 impl VoxelSourceWriter {
-    /// Worker-only bounded snapshot selection. Scans the canonical index but
-    /// retains at most `max_centers` center handles and their positive halo.
-    /// This avoids copying an arbitrarily large terrain map on a frame thread.
-    pub(crate) fn select_nearest_with_halo(
-        &self,
-        center: [i64; 3],
-        max_centers: usize,
-    ) -> Result<VoxelSelectedSnapshot, VoxelUpdateError> {
-        let state = self
-            .store
-            .read()
-            .map_err(|_| VoxelUpdateError::StoreLockPoisoned)?;
-        let mut closest = BinaryHeap::<(u128, VoxelChunkKey)>::new();
-        for &raw in state.1.keys() {
-            let key = decode_payload_key(raw)?;
-            let distance = if key.lod > 16 {
-                u128::MAX
-            } else {
-                let scale = 1i128 << key.lod;
-                [key.x, key.y, key.z]
-                    .into_iter()
-                    .zip(center)
-                    .map(|(coordinate, camera)| {
-                        (i128::from(coordinate) * scale + scale / 2).abs_diff(i128::from(camera))
-                    })
-                    .fold(0u128, u128::saturating_add)
-            };
-            if closest.len() < max_centers {
-                closest.push((distance, key));
-            } else if closest
-                .peek()
-                .is_some_and(|&(furthest, _)| distance < furthest)
-            {
-                closest.pop();
-                closest.push((distance, key));
-            }
-        }
-        let truncated = state.1.len() > closest.len();
-        let mut centers: Vec<_> = closest.into_iter().map(|(_, key)| key).collect();
-        centers.sort_unstable();
-        let mut halo_keys = HashSet::with_capacity(centers.len().saturating_mul(27));
-        for center in &centers {
-            for neighbor in 0..27 {
-                let Some(x) = center.x.checked_add((neighbor % 3) as i64 - 1) else {
-                    continue;
-                };
-                let Some(y) = center.y.checked_add(((neighbor / 3) % 3) as i64 - 1) else {
-                    continue;
-                };
-                let Some(z) = center.z.checked_add((neighbor / 9) as i64 - 1) else {
-                    continue;
-                };
-                halo_keys.insert(VoxelChunkKey::new(x, y, z, center.lod));
-            }
-        }
-        let chunks = halo_keys
-            .into_iter()
-            .filter_map(|key| {
-                state
-                    .1
-                    .get(&payload_key(key))
-                    .map(|bytes| (key, Arc::clone(bytes)))
-            })
-            .collect();
-        Ok(VoxelSelectedSnapshot {
-            revision: state.0,
-            centers,
-            chunks,
-            truncated,
-        })
-    }
     pub(crate) fn terrain_id(&self) -> VoxelTerrainId {
         self.terrain
     }
@@ -316,13 +245,6 @@ impl VoxelSourceWriter {
         };
         self.publish_batch(&batch)
     }
-}
-
-pub(crate) struct VoxelSelectedSnapshot {
-    pub revision: u64,
-    pub centers: Vec<VoxelChunkKey>,
-    pub chunks: HashMap<VoxelChunkKey, Arc<[u8]>>,
-    pub truncated: bool,
 }
 
 pub(crate) struct VoxelKeySnapshot {

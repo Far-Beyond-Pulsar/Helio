@@ -1,0 +1,5 @@
+[package]
+name = "helio-voxel-data"
+version = "0.1.0"
+edition = "2021"
+description = "Renderer-independent voxel data and SceneDB publication contract"

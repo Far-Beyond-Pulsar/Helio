@@ -4,7 +4,7 @@
 //! demonstrates one thing the renderer does — so walking its length is a tour
 //! of the engine: PBR materials, spot lights, lens flare + volumetric fog,
 //! water simulation, GPU particles, virtual geometry, emissive/HDR colour,
-//! voxel meshes and post-process colour grading.
+//! and post-process colour grading.
 //!
 //! # Why it is built the way it is
 //!
@@ -34,10 +34,9 @@
 use glam::{Mat4, Quat, Vec3};
 use helio::{GpuLight, LightType, MeshUpload, Renderer};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
-use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
-use helio_pass_water_sim::WaterSimPass;
 use helio_pass_corona::CoronaEmitterDescriptor;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_water_sim::WaterSimPass;
 use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
@@ -54,7 +53,7 @@ pub const HALL_HEIGHT: f32 = 3.0;
 /// Length of one bay along −Z.
 pub const BAY_LENGTH: f32 = 8.0;
 /// Number of bays; the corridor spans z = 0 to z = -BAY_COUNT * BAY_LENGTH.
-pub const BAY_COUNT: usize = 9;
+pub const BAY_COUNT: usize = 8;
 
 /// Objects the demo animates each frame.
 ///
@@ -560,7 +559,13 @@ fn load_container(world: &mut World) -> Option<(Entity, Entity, Vec3, Vec3)> {
 
 /// Bay 6 — emissive/HDR colour targets plus a grid of hue-cycling lights, a
 /// condensed take on the HDR/colour-grading and light-benchmark demos.
-fn bay_emissive_colour(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+fn bay_emissive_colour(
+    world: &mut World,
+    z: f32,
+    meshes: &Meshes,
+    mats: &Mats,
+    anim: &mut Animated,
+) {
     let targets = [
         (
             make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0),
@@ -600,33 +605,7 @@ fn bay_emissive_colour(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, 
     );
 }
 
-/// Bay 7 — a voxel sculpture rendered as real triangles through `VoxelMeshPass`.
-fn bay_voxel(renderer: &mut Renderer, z: f32) {
-    const VOXEL_SIZE: f32 = 0.22;
-
-    // Sculpt an abstract piece around the volume's local origin. Grid coordinates:
-    // local = (grid - GRID_DIM/2) * voxel_size, so the origin sits at grid centre and
-    // the sculpture rises from the floor at the bay centre.
-    let half = VOXEL_TERRAIN_GRID_DIM as f32 / 2.0;
-    let mut world = VoxelTerrain::empty();
-    world.paint_sphere([half, half, half], 6.0, 1, true);
-    world.paint_sphere([half, half + 6.0, half], 4.5, 2, true);
-    world.paint_sphere([half, half + 11.0, half], 3.0, 3, true);
-    world.paint_sphere([half, half, half + 7.0], 3.5, 2, true);
-    world.paint_sphere([half, half + 4.0, half + 7.0], 2.5, 3, true);
-
-    let queue = renderer.queue().clone();
-    let pass = renderer
-        .find_pass_mut::<VoxelMeshPass>()
-        .expect("VoxelMeshPass present in the forward-opaque graph");
-    let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-    let touched = world.upload_all_mesh(&queue, &meta_buf, &data_buf, VOXEL_SIZE);
-    for (brick_idx, origin, occupied) in touched {
-        pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
-    }
-}
-
-/// Bay 8 — post-process colour grading: a warm vignette + saturation + bloom
+/// Bay 7 — post-process colour grading: a warm vignette + saturation + bloom
 /// volume over the whole bay, anchored on a blindingly bright emissive sun.
 fn bay_colour_grade(world: &mut World, z: f32, meshes: &Meshes) {
     spawn_post_process_volume(
@@ -803,8 +782,7 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
             4 => bay_corona(world, z, &meshes, &mats, &mut anim),
             5 => bay_instancing(world, z, &mats),
             6 => bay_emissive_colour(world, z, &meshes, &mats, &mut anim),
-            7 => bay_voxel(renderer, z),
-            8 => bay_colour_grade(world, z, &meshes),
+            7 => bay_colour_grade(world, z, &meshes),
             _ => unreachable!(),
         }
     }
@@ -814,8 +792,7 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
     // corridor. Rotating about Y maps the FBX's long (X) axis onto the
     // corridor's Z axis; the height axis is unchanged so the bottom sits on
     // the floor.
-    if let Some((container_mesh, container_mat, local_centre, local_size)) = load_container(world)
-    {
+    if let Some((container_mesh, container_mat, local_centre, local_size)) = load_container(world) {
         let z = bay_centre_z(5);
         let centre = Vec3::new(
             -HALL_HALF_WIDTH + local_size.z * 0.5 + 0.03,
@@ -902,7 +879,11 @@ pub fn animate(world: &mut World, renderer: &mut Renderer, animated: &mut Animat
     for (index, (id, position, _colour, base)) in animated.colour_lights.iter().enumerate() {
         let hue = (time * 0.4 + index as f32 / count as f32) % 1.0;
         let colour = hsv_to_rgb(hue, 0.8, 1.0);
-        update_light(world, *id, point_light((*position).into(), colour, *base, 6.0));
+        update_light(
+            world,
+            *id,
+            point_light((*position).into(), colour, *base, 6.0),
+        );
     }
 
     // Corona emitter: drift the source on a slow orbit so the particles visibly follow.

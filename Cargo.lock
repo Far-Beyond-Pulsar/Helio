@@ -1059,8 +1059,6 @@ dependencies = [
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
- "helio-pass-voxel-mesh",
- "helio-pass-voxel-raymarch",
  "helio-pass-water-sim",
  "helio-xr",
  "image",
@@ -1637,7 +1635,6 @@ dependencies = [
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
- "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
  "image",
  "pollster 0.4.0",
@@ -2203,33 +2200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-voxel-mesh"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-mats",
- "helio-pass-object-batch",
- "log",
- "pollster 0.4.0",
- "pulsar_scenedb",
- "pulsar_scenedb_derive",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-voxel-raymarch"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "log",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-water-caustics"
 version = "0.1.0"
 dependencies = [
@@ -2285,6 +2255,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-voxel-data"
+version = "0.1.0"
+
+[[package]]
 name = "helio-wasm"
 version = "0.1.0"
 dependencies = [
@@ -2326,7 +2300,6 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-postprocess",
  "helio-pass-sdf",
- "helio-pass-voxel-mesh",
  "helio-wasm",
  "log",
  "pulsar_scenedb",

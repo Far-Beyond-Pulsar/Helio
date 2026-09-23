@@ -188,18 +188,6 @@ name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 
 [[bin]]
-name = "voxel_demo"
-path = "voxel/mesh_demo.rs"
-
-[[bin]]
-name = "minecraft_demo"
-path = "minecraft_demo/main.rs"
-
-[[bin]]
-name = "voxel_demo_raymarch"
-path = "voxel/raymarch_demo.rs"
-
-[[bin]]
 name = "radiant_demo"
 path = "radiant_demo.rs"
 
@@ -264,8 +252,6 @@ helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
-helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
-helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }

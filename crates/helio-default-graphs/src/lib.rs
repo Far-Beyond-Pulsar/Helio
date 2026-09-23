@@ -41,7 +41,6 @@ use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
-use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
@@ -711,15 +710,6 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
-
-    // Voxel mesh pass — real triangles with depth testing, composited over
-    // deferred lighting. When no voxel volumes are present the pass is a no-op
-    // (extract pass has zero dirty bricks → no geometry emitted).
-    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
-        device,
-        queue,
-        config.surface_format,
-    )));
 
     add_late_passes(
         &mut graph,
@@ -1622,14 +1612,6 @@ fn build_forward_graph_internal(
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
     add_forward_geometry_passes(&mut graph, device, camera_buf, &config, &perf, true);
-
-    // Voxel mesh pass — real triangles with depth testing, composited over
-    // the forward-lit output.
-    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
-        device,
-        queue,
-        config.surface_format,
-    )));
 
     add_late_passes(
         &mut graph,

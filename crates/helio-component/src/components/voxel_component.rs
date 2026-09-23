@@ -1,9 +1,9 @@
 //! Reflected, SceneDB-owned authoring components for voxel objects and terrain.
 //!
 //! These structs contain reflected configuration and runtime-only live data.
-//! Voxel encodings, edit batches, generation behavior, and GPU/cache
-//! representations belong to the dedicated voxel pass and its SceneDB-facing
-//! data API. No persistence behavior is implied by the runtime data fields.
+//! Voxel encodings, edit batches, and generation behavior belong to the
+//! renderer-independent data API. No persistence behavior is implied by the
+//! runtime data fields.
 
 use engine_class_derive::engine_class;
 use std::{
@@ -14,12 +14,12 @@ use std::{
 /// Generic live payload storage owned by a voxel component row.
 ///
 /// Keys are intentionally opaque to this crate; voxel chunk/key semantics are
-/// defined by the voxel pass. The tuple contains the live data revision and
+/// defined by the voxel data contract. The tuple contains the live data revision and
 /// payload map so a batch can publish both under one lock. Values are immutable
 /// so readers can retain a cheap snapshot while a writer replaces one entry.
 /// Component clones create fresh stores; callers can explicitly clone the
 /// `Arc` when shared access is intended. Four opaque words allow collision-free
-/// pass-defined keys (for example signed XYZ bit patterns plus an LOD word).
+/// chunk keys (for example signed XYZ bit patterns plus an LOD word).
 pub type VoxelPayloadKey = [u64; 4];
 pub type VoxelPayloadStore = Arc<RwLock<(u64, HashMap<VoxelPayloadKey, Arc<[u8]>>)>>;
 
@@ -78,7 +78,6 @@ fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
 #[category("Volume", category_color = "#8F8F8F")]
 #[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
-#[category("Surface", category_color = "#2FA88A")]
 pub struct VoxelComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
     /// property, serialized configuration, or GPU-mirrored field. Component
@@ -103,10 +102,6 @@ pub struct VoxelComponent {
     /// Whether external callers may submit deformation/edit batches.
     #[property(category = "Editing")]
     pub editable: bool,
-    /// Selects blocky (0) or smooth (1) surface presentation. Interpretation
-    /// and validation are owned by the voxel pass.
-    #[property(category = "Surface")]
-    pub smooth_surface: bool,
 }
 
 impl Default for VoxelComponent {
@@ -119,7 +114,6 @@ impl Default for VoxelComponent {
             material_ids: vec![0],
             default_material_slot: 1,
             editable: true,
-            smooth_surface: false,
         }
     }
 }
@@ -146,12 +140,11 @@ impl VoxelComponent {
             material_ids,
             default_material_slot: u32::from(slot),
             editable: true,
-            smooth_surface: false,
         })
     }
-    /// Low-level live SceneDB data capability used by the voxel pass. Normal
+    /// Low-level live SceneDB data capability. Normal
     /// producers should mutate through `VoxelSourceWriter` so validation and
-    /// revision checks are preserved; scripts should export via pass snapshots.
+    /// revision checks are preserved; scripts should export via data snapshots.
     /// This handle carries no persistence policy.
     pub fn payload_store(&self) -> VoxelPayloadStore {
         Arc::clone(&self.payloads)
@@ -171,7 +164,6 @@ impl Clone for VoxelComponent {
             material_ids: self.material_ids.clone(),
             default_material_slot: self.default_material_slot,
             editable: self.editable,
-            smooth_surface: self.smooth_surface,
         }
     }
 }
@@ -180,15 +172,12 @@ impl Clone for VoxelComponent {
 ///
 /// `domain_mode` and `shape_mode` are stable primitive discriminants so this
 /// component crate does not define voxel-specific helper enums. Their values
-/// are interpreted and validated by the voxel pass. The intended initial
+/// are interpreted and validated by the voxel source service. The intended initial
 /// values are domain 0 = bounded, 1 = unbounded and shape 0 = plane, 1 = sphere.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
 #[category("Materials", category_color = "#D1A73F")]
-#[category("Surface", category_color = "#2FA88A")]
-#[category("LOD", category_color = "#7C6FD1")]
-#[category("Streaming", category_color = "#3AA0FF")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
@@ -203,7 +192,7 @@ pub struct VoxelTerrainComponent {
     #[property(category = "Domain")]
     pub domain_mode: u32,
     /// Shape discriminant: 0 plane, 1 sphere/planet; other values are
-    /// reserved for pass-registered/custom source kinds.
+    /// reserved for registered source kinds.
     #[property(category = "Domain")]
     pub shape_mode: u32,
     /// Finite-domain minimum and maximum on each axis. Ignored for unbounded domains.
@@ -243,19 +232,6 @@ pub struct VoxelTerrainComponent {
     /// Palette of IDs into Helio's existing SceneDB material records.
     #[property(category = "Materials")]
     pub material_ids: Vec<u32>,
-    /// Select smooth rather than blocky surface extraction when supported.
-    #[property(category = "Surface")]
-    pub smooth_surface: bool,
-    /// Screen-space target error used by terrain LOD selection.
-    #[property(min = 0.1, max = 64.0, step = 0.1, category = "LOD")]
-    pub target_error_pixels: f32,
-    /// Preferred detail distance in world units; zero leaves selection to the
-    /// pass's view-driven policy.
-    #[property(min = 0.0, max = 1.0e15, step = 1.0, category = "LOD")]
-    pub detail_distance: f64,
-    /// Scheduling priority among terrain entries; this is not a residency cap.
-    #[property(min = -1000000.0, max = 1000000.0, step = 1.0, category = "Streaming")]
-    pub priority: i32,
     /// Whether external callers may submit canonical live edit/data batches.
     #[property(category = "Editing")]
     pub editable: bool,
@@ -285,10 +261,6 @@ impl Default for VoxelTerrainComponent {
             seed: 0,
             generator_parameters: String::new(),
             material_ids: vec![0],
-            smooth_surface: false,
-            target_error_pixels: 1.0,
-            detail_distance: 0.0,
-            priority: 0,
             editable: true,
             source_revision: 0,
         }
@@ -296,9 +268,9 @@ impl Default for VoxelTerrainComponent {
 }
 
 impl VoxelTerrainComponent {
-    /// Low-level live SceneDB data capability used by the voxel pass. Normal
+    /// Low-level live SceneDB data capability. Normal
     /// producers should mutate through `VoxelSourceWriter` so validation and
-    /// revision checks are preserved; scripts should export via pass snapshots.
+    /// revision checks are preserved; scripts should export via data snapshots.
     /// This handle carries no persistence policy.
     pub fn payload_store(&self) -> VoxelPayloadStore {
         Arc::clone(&self.payloads)
@@ -327,10 +299,6 @@ impl Clone for VoxelTerrainComponent {
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
             material_ids: self.material_ids.clone(),
-            smooth_surface: self.smooth_surface,
-            target_error_pixels: self.target_error_pixels,
-            detail_distance: self.detail_distance,
-            priority: self.priority,
             editable: self.editable,
             source_revision: self.source_revision,
         }
@@ -361,21 +329,17 @@ mod tests {
         let store = component.payload_store();
         let state = store.read().unwrap();
         assert_eq!(state.1.len(), 8);
-        assert!(
-            state
-                .1
-                .values()
-                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
-        );
+        assert!(state
+            .1
+            .values()
+            .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1)));
         drop(state);
         let serialized = serde_json::to_value(&component).unwrap();
         assert!(serialized.get("payloads").is_none());
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]
@@ -397,12 +361,10 @@ mod tests {
     fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelTerrainComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]

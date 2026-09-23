@@ -105,7 +105,7 @@ impl HelioWasmApp for Demo {
 fn main() { launch::<Demo>(); }
 ```
 
-Everything else on the trait has a default, so you only override what you care about. You can set the window title, choose an internal render scale (it defaults to three-quarters resolution and upscales, which you would set back to `1.0` for a pipeline that has no temporal upscale step), adjust the mouse-look capture behaviour, react to resizes, and, most powerfully, return a completely custom render graph from `build_graph`. That last one is how the voxel and VHS demos plug their own pipelines in while still running on both targets; returning `None` just uses the standard deferred graph. The `InputState` you get each frame carries the held keys, the mouse delta, whether the cursor is grabbed, a one-frame left-click edge, the cursor position, the viewport size, and an `aspect_ratio()` helper.
+Everything else on the trait has a default, so you only override what you care about. You can set the window title, choose an internal render scale (it defaults to three-quarters resolution and upscales, which you would set back to `1.0` for a pipeline that has no temporal upscale step), adjust the mouse-look capture behaviour, react to resizes, and, most powerfully, return a completely custom render graph from `build_graph`. That last one is how the VHS demo plugs in its own pipeline while still running on both targets; returning `None` just uses the standard deferred graph. The `InputState` you get each frame carries the held keys, the mouse delta, whether the cursor is grabbed, a one-frame left-click edge, the cursor position, the viewport size, and an `aspect_ratio()` helper.
 
 Building the web version is its own small tool rather than a shell script. Running `cargo run --bin web` opens a terminal UI that builds every demo to WebAssembly and then serves the lot on a local port, and `cargo run --bin web -- --headless` does the same thing without the UI, writes the finished site out, and exits with a failure code if any demo did not build. Headless mode is what continuous integration runs. Under the hood it invokes `wasm-pack` per demo and writes each landing page plus a master index. The one prerequisite is a wasm-capable `clang` for the C dependencies, which means installing LLVM (`brew install llvm` on macOS, or your distribution's `clang` package on Linux).
 
@@ -113,18 +113,7 @@ Building the web version is its own small tool rather than a shell script. Runni
 
 A render graph is an ordered set of passes, each declaring the named resources it reads and produces, and the graph validates that dependency structure, manages the transient textures and barriers between passes, and rebuilds itself when the window changes size. Most of the time you never construct one directly, because a builder does it: `build_default_graph` gives you the full deferred pipeline, and `build_default_graph_with_user_effects` gives you the same thing with a slot for injected post-process WGSL.
 
-When you do want something bespoke, you build the graph yourself, and it reads exactly the same whether it ends up on a desktop or in a browser. This snippet, for instance, is the entire voxel pipeline, a mesh-extraction pass feeding an FXAA pass:
-
-```rust
-use helio::RenderGraph;
-use helio_pass_voxel_mesh::VoxelMeshPass;
-use helio_pass_fxaa::FxaaPass;
-
-let mut graph = RenderGraph::new(device, queue);
-graph.add_pass(Box::new(VoxelMeshPass::new(device, queue, config.surface_format)));
-graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
-graph.lock(config.width, config.height);
-```
+When you do want something bespoke, you build the graph yourself, and it reads the same whether it ends up on a desktop or in a browser.
 
 Passes talk to each other through resource names like `"gbuffer"` and `"pre_aa"`; a pass says what it reads and what it writes, and the graph connects the wires. Once a graph is running you can reach back into it and grab any pass by its type with `renderer.find_pass_mut::<FxaaPass>()`, which is how you tweak a pass's settings or feed it per-frame data.
 
@@ -143,7 +132,7 @@ let object   = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
 let light    = scene.insert_actor(helio::SceneActor::light(GpuLight { /* ... */ }));
 ```
 
-There is more under the surface when you need it. Every object carries a sixty-four-bit group mask, so you can hide, show, or transform whole groups of objects in one call. Meshes can be split into sections, one vertex buffer with several index ranges, which is the Unreal-style way of putting several materials on one model. Voxel volumes are authored by the owning voxel pass through explicit bounded volume, brick, and edit uploads; meshing and ray-marching no longer share a renderer Scene/GpuScene voxel authority. Whole-scene knobs like ambient light, the clear color, editor mode, and temporal jitter live on the renderer as `set_ambient`, `set_clear_color`, `set_editor_mode`, and `set_jitter_enabled`, and `scene.clear()` wipes the slate.
+There is more under the surface when you need it. Every object carries a sixty-four-bit group mask, so you can hide, show, or transform whole groups of objects in one call. Meshes can be split into sections, one vertex buffer with several index ranges, which is the Unreal-style way of putting several materials on one model. SceneDB voxel components own canonical chunk payloads through `helio-voxel-data`; a rendering backend can consume those snapshots independently. Whole-scene knobs like ambient light, the clear color, editor mode, and temporal jitter live on the renderer as `set_ambient`, `set_clear_color`, `set_editor_mode`, and `set_jitter_enabled`, and `scene.clear()` wipes the slate.
 
 ## Writing your own material shaders
 
@@ -290,11 +279,11 @@ Helio has an immediate-mode debug drawing API right on the renderer. Turn on edi
 
 ## What the passes give you
 
-The full pipeline is assembled out of the pass crates, and it is worth knowing roughly what is in the box. Geometry goes through an early depth prepass and a GPU-driven G-buffer fill that also evaluates Radiant materials, with meshlet-level virtual geometry culling and a hierarchical-Z occlusion system keeping hidden triangles off the GPU. Lighting is deferred, using a Cook-Torrance BRDF with tile and cluster light culling so hundreds of lights stay cheap, cascaded shadow maps with soft filtering, screen-space ambient occlusion, and a Radiance Cascades global illumination pass for multi-bounce indirect light. The sky is a Hillaire atmospheric model with volumetric clouds. Anti-aliasing comes in temporal and spatial flavours (TAA, FXAA, SMAA), and the post-process pass handles exposure, bloom, tonemapping, and the user WGSL described above. On top of all that there are specialised passes for voxel terrain (both a meshing path and a per-pixel ray-marching path), water simulation and surface rendering with caustics and an underwater look, sorted forward transparency, and the debug and performance overlays. Every one of these is an independent crate, and you compose only the ones a given pipeline needs.
+The full pipeline is assembled out of the pass crates, and it is worth knowing roughly what is in the box. Geometry goes through an early depth prepass and a GPU-driven G-buffer fill that also evaluates Radiant materials, with meshlet-level virtual geometry culling and a hierarchical-Z occlusion system keeping hidden triangles off the GPU. Lighting is deferred, using a Cook-Torrance BRDF with tile and cluster light culling so hundreds of lights stay cheap, cascaded shadow maps with soft filtering, screen-space ambient occlusion, and a Radiance Cascades global illumination pass for multi-bounce indirect light. The sky is a Hillaire atmospheric model with volumetric clouds. Anti-aliasing comes in temporal and spatial flavours (TAA, FXAA, SMAA), and the post-process pass handles exposure, bloom, tonemapping, and the user WGSL described above. On top of that there are specialised passes for water simulation and surface rendering with caustics and an underwater look, sorted forward transparency, and the debug and performance overlays. Every one of these is an independent crate, and you compose only the ones a given pipeline needs.
 
 ## Examples and demos
 
-The `crates/examples` directory has the native binaries, and the very same demos run in the browser through `helio-web-demos`. There is an indoor cathedral lit by Radiance Cascades global illumination and shafts of stained-glass light, a dense night city, a desert canyon where Q and E rotate the sun, an orbital space station, a six-degree-of-freedom ship flying through an asteroid field, the VHS backrooms with its injected post-process shader, editable voxel terrain rendered through a custom mesh-plus-FXAA graph, the debug shapes gallery, an interactive editor that picks and moves objects, a drop-in FBX/glTF/OBJ/USD viewer, a benchmark pushing a hundred and twenty-eight animated point lights, and a bare-bones fly-camera scene to start from. Run any of them natively with `cargo run -p examples --bin <name> --release`, or run `cargo run --bin web` to build them all for the browser at once.
+The `crates/examples` directory has the native binaries, and the very same demos run in the browser through `helio-web-demos`. There is an indoor cathedral lit by Radiance Cascades global illumination and shafts of stained-glass light, a dense night city, a desert canyon where Q and E rotate the sun, an orbital space station, a six-degree-of-freedom ship flying through an asteroid field, the VHS backrooms with its injected post-process shader, the debug shapes gallery, an interactive editor that picks and moves objects, a drop-in FBX/glTF/OBJ/USD viewer, a benchmark pushing a hundred and twenty-eight animated point lights, and a bare-bones fly-camera scene to start from. Run any of them natively with `cargo run -p examples --bin <name> --release`, or run `cargo run --bin web` to build them all for the browser at once.
 
 ## Assets
 

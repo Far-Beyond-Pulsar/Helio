@@ -107,7 +107,7 @@ impl VoxelInboxBatch {
     /// Apply this queued batch to the canonical component store. The caller
     /// keeps ownership of the queued batch on error and may retry or discard
     /// it explicitly. Publication is CPU-side SceneDB state only; GPU upload
-    /// is a separate transient pass responsibility.
+    /// is a separate responsibility of the consuming backend.
     pub fn publish_into(
         &self,
         writer: &crate::VoxelSourceWriter,

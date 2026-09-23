@@ -122,10 +122,6 @@ mod outdoor_rocks;
 #[path = "../examples-wasm/editor_demo.rs"]
 mod editor_demo;
 
-#[cfg(feature = "voxel_mesh_demo")]
-#[path = "../examples-wasm/voxel_mesh_demo.rs"]
-mod voxel_mesh_demo;
-
 #[cfg(feature = "vhs_backrooms")]
 #[path = "../examples-wasm/vhs_backrooms.rs"]
 mod vhs_backrooms;
@@ -244,11 +240,6 @@ pub fn start() {
     #[cfg(feature = "editor_demo")]
     {
         helio_wasm::launch::<editor_demo::Demo>();
-        return;
-    }
-    #[cfg(feature = "voxel_mesh_demo")]
-    {
-        helio_wasm::launch::<voxel_mesh_demo::Demo>();
         return;
     }
     #[cfg(feature = "vhs_backrooms")]
@@ -385,11 +376,6 @@ pub fn main() {
     #[cfg(feature = "editor_demo")]
     {
         helio_wasm::launch::<editor_demo::Demo>();
-        return;
-    }
-    #[cfg(feature = "voxel_mesh_demo")]
-    {
-        helio_wasm::launch::<voxel_mesh_demo::Demo>();
         return;
     }
     #[cfg(feature = "vhs_backrooms")]

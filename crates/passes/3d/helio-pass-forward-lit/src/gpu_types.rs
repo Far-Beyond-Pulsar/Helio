@@ -57,8 +57,6 @@ pub enum LightType {
 /// - `helio-pass-hlfs/shaders/hlfs_shade.wgsl`
 /// - `helio-pass-hlfs/shaders/hlfs_importance.wgsl`
 /// - `helio-pass-shadow-matrix/shaders/shadow_matrices.wgsl`
-/// - `helio-pass-voxel-mesh/shaders/voxel_meshlet.wgsl`
-/// - `helio-pass-voxel-raymarch/shaders/voxel_raymarch.wgsl`
 ///
 /// `helio-pass-radiance-cascades/shaders/rc_trace.wgsl` also declares a `GpuLight`,
 /// but it is dormant (bundled via `include_str!`, never compiled — it needs
