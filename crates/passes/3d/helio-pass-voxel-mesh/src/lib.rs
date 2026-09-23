@@ -5,11 +5,16 @@
 //! dirty-brick list each frame.
 
 mod marching_cubes;
+mod bounded_inbox;
 mod data_api;
 mod source_data;
 mod terrain;
 
 pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use bounded_inbox::{
+    BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain,
+    VoxelInboxDrainBudget, VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits,
+};
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload, VoxelChunkUpdate,
     VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,

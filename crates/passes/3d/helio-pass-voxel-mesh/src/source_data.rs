@@ -115,7 +115,7 @@ pub struct VoxelBatchRevision {
     pub publish: u64,
 }
 
-/// Borrowed batch validated before handing it to the durable SceneDB-facing
+/// Borrowed batch validated before handing it to the canonical live-state
 /// owner. Validation rejects duplicate chunk keys instead of making ordering
 /// determine the result.
 #[derive(Clone, Copy, Debug)]
@@ -161,7 +161,9 @@ impl<'a> VoxelChunkBatch<'a> {
                     if payload.schema_version != VOXEL_CHUNK_SCHEMA_VERSION {
                         return Err(VoxelUpdateError::UnsupportedSchema(payload.schema_version));
                     }
-                    if payload.bytes.is_empty() || payload.bytes.len() > MAX_VOXEL_CHUNK_PAYLOAD_BYTES {
+                    if payload.bytes.is_empty()
+                        || payload.bytes.len() > MAX_VOXEL_CHUNK_PAYLOAD_BYTES
+                    {
                         return Err(VoxelUpdateError::InvalidPayloadLength(payload.bytes.len()));
                     }
                     payload_bytes = payload_bytes
@@ -292,7 +294,9 @@ mod tests {
         let outside = [update(VoxelChunkKey::new(9, 0, 0, 0))];
         assert_eq!(
             batch(&outside).validate(4),
-            Err(VoxelUpdateError::ChunkOutOfDomain(VoxelChunkKey::new(9, 0, 0, 0)))
+            Err(VoxelUpdateError::ChunkOutOfDomain(VoxelChunkKey::new(
+                9, 0, 0, 0
+            )))
         );
         let high_lod = [update(VoxelChunkKey::new(0, 0, 0, 5))];
         assert_eq!(
@@ -355,10 +359,7 @@ mod tests {
     #[test]
     fn delete_is_revisioned_and_cannot_duplicate_an_upsert_key() {
         let key = VoxelChunkKey::new(-4, 5, 0, 2);
-        let ops = [
-            update(key),
-            VoxelChunkOp::Delete { key },
-        ];
+        let ops = [update(key), VoxelChunkOp::Delete { key }];
         assert_eq!(
             batch(&ops).validate(4),
             Err(VoxelUpdateError::DuplicateChunk(key))

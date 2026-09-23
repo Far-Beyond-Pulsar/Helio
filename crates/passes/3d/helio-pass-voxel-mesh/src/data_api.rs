@@ -11,8 +11,7 @@ use std::{
 };
 
 use crate::{
-    VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelSourceId,
-    VoxelTerrainId, VoxelUpdateError,
+    VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
 };
 
 /// Layout-compatible handle exposed by VoxelComponent and VoxelTerrainComponent.
@@ -33,12 +32,12 @@ impl VoxelSourceWriter {
     /// Bind a producer to the store obtained from one SceneDB component.
     /// Higher layers should resolve/authorize `terrain` and `source` before
     /// constructing this handle.
-    pub fn new(
-        terrain: VoxelTerrainId,
-        source: VoxelSourceId,
-        store: VoxelPayloadStore,
-    ) -> Self {
-        Self { terrain, source, store }
+    pub fn new(terrain: VoxelTerrainId, source: VoxelSourceId, store: VoxelPayloadStore) -> Self {
+        Self {
+            terrain,
+            source,
+            store,
+        }
     }
 
     /// Current live data revision for this component's chunk map.
@@ -88,9 +87,10 @@ impl VoxelSourceWriter {
             .ops
             .iter()
             .map(|op| match op {
-                VoxelChunkOp::Upsert(update) => {
-                    Some((payload_key(update.key), Arc::<[u8]>::from(update.payload.bytes)))
-                }
+                VoxelChunkOp::Upsert(update) => Some((
+                    payload_key(update.key),
+                    Arc::<[u8]>::from(update.payload.bytes),
+                )),
                 VoxelChunkOp::Delete { .. } => None,
             })
             .collect();
@@ -164,11 +164,10 @@ impl VoxelSourceWriter {
         for (key, payload) in &state.1 {
             chunks.push((decode_payload_key(*key)?, Arc::clone(payload)));
         }
+        let revision = state.0;
+        drop(state);
         chunks.sort_unstable_by_key(|(key, _)| *key);
-        Ok(VoxelTerrainSnapshot {
-            revision: state.0,
-            chunks,
-        })
+        Ok(VoxelTerrainSnapshot { revision, chunks })
     }
 }
 
@@ -276,7 +275,10 @@ mod tests {
         let batch = batch(
             terrain,
             source,
-            VoxelBatchRevision { expected: 0, publish: 1 },
+            VoxelBatchRevision {
+                expected: 0,
+                publish: 1,
+            },
             &ops,
         );
 
@@ -300,18 +302,27 @@ mod tests {
         let stale = batch(
             terrain,
             source,
-            VoxelBatchRevision { expected: 1, publish: 2 },
+            VoxelBatchRevision {
+                expected: 1,
+                publish: 2,
+            },
             &stale_ops,
         );
         assert_eq!(
             writer.publish_batch(&stale),
-            Err(VoxelUpdateError::StaleRevision { expected: 1, actual: 0 })
+            Err(VoxelUpdateError::StaleRevision {
+                expected: 1,
+                actual: 0
+            })
         );
 
         let wrong_terrain = batch(
             VoxelTerrainId(101),
             source,
-            VoxelBatchRevision { expected: 0, publish: 1 },
+            VoxelBatchRevision {
+                expected: 0,
+                publish: 1,
+            },
             &stale_ops,
         );
         assert!(matches!(
@@ -339,7 +350,10 @@ mod tests {
             writer.publish_batch(&batch(
                 terrain,
                 source,
-                VoxelBatchRevision { expected: 0, publish: 1 },
+                VoxelBatchRevision {
+                    expected: 0,
+                    publish: 1
+                },
                 &ops,
             )),
             Err(VoxelUpdateError::DuplicateChunk(_))
@@ -350,7 +364,10 @@ mod tests {
             .publish_batch(&batch(
                 terrain,
                 source,
-                VoxelBatchRevision { expected: 0, publish: 1 },
+                VoxelBatchRevision {
+                    expected: 0,
+                    publish: 1,
+                },
                 &initial,
             ))
             .unwrap();
@@ -359,7 +376,10 @@ mod tests {
             .publish_batch(&batch(
                 terrain,
                 source,
-                VoxelBatchRevision { expected: 1, publish: 2 },
+                VoxelBatchRevision {
+                    expected: 1,
+                    publish: 2,
+                },
                 &delete,
             ))
             .unwrap();
@@ -368,7 +388,10 @@ mod tests {
             .publish_batch(&batch(
                 terrain,
                 source,
-                VoxelBatchRevision { expected: 2, publish: 3 },
+                VoxelBatchRevision {
+                    expected: 2,
+                    publish: 3,
+                },
                 &delete,
             ))
             .unwrap();
