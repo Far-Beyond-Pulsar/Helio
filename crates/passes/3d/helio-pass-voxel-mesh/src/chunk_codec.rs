@@ -44,6 +44,10 @@ impl VoxelMaterialChunk {
         &self.samples
     }
 
+    pub(crate) fn samples_mut(&mut self) -> &mut [u8; VOXEL_CHUNK_SAMPLES] {
+        &mut self.samples
+    }
+
     pub fn sample(&self, x: usize, y: usize, z: usize) -> u8 {
         self.samples[z * 64 + y * 8 + x]
     }

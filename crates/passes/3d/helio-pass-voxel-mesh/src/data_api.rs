@@ -6,7 +6,7 @@
 //! and does not provide persistence settings or policy.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock},
 };
 
@@ -29,6 +29,31 @@ pub struct VoxelSourceWriter {
 }
 
 impl VoxelSourceWriter {
+    pub(crate) fn terrain_id(&self) -> VoxelTerrainId {
+        self.terrain
+    }
+    pub(crate) fn source_id(&self) -> VoxelSourceId {
+        self.source
+    }
+
+    /// Copy only requested immutable payload handles under the component lock.
+    pub(crate) fn snapshot_keys(
+        &self,
+        keys: impl IntoIterator<Item = VoxelChunkKey>,
+    ) -> Result<VoxelKeySnapshot, VoxelUpdateError> {
+        let state = self
+            .store
+            .read()
+            .map_err(|_| VoxelUpdateError::StoreLockPoisoned)?;
+        let chunks = keys
+            .into_iter()
+            .map(|key| (key, state.1.get(&payload_key(key)).cloned()))
+            .collect();
+        Ok(VoxelKeySnapshot {
+            revision: state.0,
+            chunks,
+        })
+    }
     /// Bind a producer to the store obtained from one SceneDB component.
     /// Higher layers should resolve/authorize `terrain` and `source` before
     /// constructing this handle.
@@ -219,6 +244,17 @@ impl VoxelSourceWriter {
             ops: &ops,
         };
         self.publish_batch(&batch)
+    }
+}
+
+pub(crate) struct VoxelKeySnapshot {
+    pub revision: u64,
+    pub chunks: BTreeMap<VoxelChunkKey, Option<Arc<[u8]>>>,
+}
+
+impl VoxelKeySnapshot {
+    pub fn get(&self, key: &VoxelChunkKey) -> Option<Option<&[u8]>> {
+        self.chunks.get(key).map(|entry| entry.as_deref())
     }
 }
 

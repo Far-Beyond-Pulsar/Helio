@@ -18,6 +18,7 @@ struct VertexOutput {
     @location(0) @interpolate(flat) material: u32,
     @location(1) world_pos: vec3<f32>,
     @location(2) world_normal: vec3<f32>,
+    @location(3) @interpolate(flat) scene_material: u32,
 }
 
 struct VertexInput {
@@ -65,12 +66,31 @@ struct MeshletParams {
 @group(0) @binding(1) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(2) var<uniform> params: MeshletParams;
 @group(0) @binding(3) var<storage, read> material_palette: array<vec4<f32>>;
+struct GpuMaterial {
+    base_color: vec4<f32>,
+    emissive: vec4<f32>,
+    roughness_metallic: vec4<f32>,
+    tex_base_color: u32,
+    tex_normal: u32,
+    tex_roughness: u32,
+    tex_emissive: u32,
+    tex_occlusion: u32,
+    workflow: u32,
+    flags: u32,
+    material_class: u32,
+    class_params: vec4<f32>,
+}
+@group(0) @binding(4) var<storage, read> scene_materials: array<GpuMaterial>;
+@group(0) @binding(5) var<storage, read> brick_material_ids: array<u32>;
 
 @vertex
-fn vs_main(v: VertexInput) -> VertexOutput {
+fn vs_main(v: VertexInput, @builtin(instance_index) brick_slot: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_pos = cameras[0].view_proj * vec4(v.data.xyz, 1.0);
-    out.material = u32(v.data.w);
+    let local_slot = u32(v.data.w);
+    let map_base = brick_slot * 256u;
+    out.scene_material = brick_material_ids[map_base];
+    out.material = select(local_slot, brick_material_ids[map_base + min(local_slot, 255u)], out.scene_material != 0u);
     out.world_pos = v.data.xyz;
     out.world_normal = normalize(v.normal.xyz);
     return out;
@@ -78,14 +98,26 @@ fn vs_main(v: VertexInput) -> VertexOutput {
 
 // ── Fragment shader: G-buffer output ──────────────────────────────────────
 
-fn material_color(index: u32) -> vec3<f32> {
+fn material_color(index: u32, is_scene: bool) -> vec3<f32> {
+    if is_scene {
+        if index < arrayLength(&scene_materials) {
+            return scene_materials[index].base_color.rgb;
+        }
+        return vec3<f32>(1.0, 0.0, 1.0);
+    }
     if index < arrayLength(&material_palette) {
         return material_palette[index].rgb;
     }
     return vec3<f32>(0.72, 0.72, 0.72);
 }
 
-fn material_roughness(index: u32) -> f32 {
+fn material_roughness(index: u32, is_scene: bool) -> f32 {
+    if is_scene {
+        if index < arrayLength(&scene_materials) {
+            return clamp(scene_materials[index].roughness_metallic.x, 0.02, 1.0);
+        }
+        return 0.8;
+    }
     if index < arrayLength(&material_palette) {
         return clamp(material_palette[index].a, 0.02, 1.0);
     }
@@ -133,7 +165,7 @@ fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) 
 @fragment
 fn fs_main(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal) * select(-1.0, 1.0, front);
-    let col = material_color(in.material);
+    let col = material_color(in.material, in.scene_material != 0u);
     let emissive = material_emissive(in.material);
 
     let ambient = 0.2;

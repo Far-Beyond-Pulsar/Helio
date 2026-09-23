@@ -2224,6 +2224,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-object-batch",
  "log",
  "pollster 0.4.0",
