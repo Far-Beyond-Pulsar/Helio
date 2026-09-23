@@ -5,6 +5,7 @@ pub(crate) const COARSE_TILE_SIZE: u32 = 64;
 pub(crate) const GRID_CAPACITY: u64 = 64;
 pub(crate) const COARSE_CAPACITY: u64 = 256;
 pub(crate) const VISIBLE_CAPACITY: u64 = 16;
+pub(crate) const PROPOSAL_BYTES: u64 = 40;
 
 pub(crate) struct Image {
     pub texture: wgpu::Texture,
@@ -159,9 +160,9 @@ impl Targets {
                 device,
                 "HLFS tile proposals",
                 if config.tile_presampling {
-                    (tile_count(width, height, COARSE_TILE_SIZE) * 256 + 1) * 24
+                    (tile_count(width, height, COARSE_TILE_SIZE) * 256 + 1) * PROPOSAL_BYTES
                 } else {
-                    24
+                    PROPOSAL_BYTES
                 },
             ),
             grid: buffer(

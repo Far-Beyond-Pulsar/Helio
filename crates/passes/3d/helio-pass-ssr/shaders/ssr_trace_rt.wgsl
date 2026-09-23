@@ -262,7 +262,10 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
     var final_confidence=0.0;
     if hiz_hit {
         let hit_uv=tr.xy;
-        let hit_px=vec2<i32>(hit_uv*vec2<f32>(dims));
+        // The trace target is half resolution; depth and normals are full
+        // resolution. Validate the hit against the same screen coordinate.
+        let hit_px=clamp(vec2<i32>(hit_uv*vec2<f32>(source_dims)),
+            vec2<i32>(0),vec2<i32>(source_dims)-vec2<i32>(1));
         let ray_z=linearize_depth(tr.z);
         let scene_z=linearize_depth(textureLoad(gbuf_depth,hit_px,0));
         if abs(ray_z-scene_z)<=max(0.02,scene_z*THICKNESS) {

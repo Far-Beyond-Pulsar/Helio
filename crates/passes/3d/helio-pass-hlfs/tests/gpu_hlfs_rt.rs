@@ -548,6 +548,7 @@ fn benchmark_rt_resolution_and_acceleration() {
             .unwrap_or(0.2);
         assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
         let tile_presampling = std::env::var_os("HLFS_RT_PROBE_PRESAMPLE").is_some();
+        let shadowed = std::env::var_os("HLFS_RT_PROBE_UNSHADOWED").is_none();
         let reactive_history = std::env::var_os("HLFS_RT_PROBE_REACTIVE").is_some();
         let dense_geometry = std::env::var_os("HLFS_RT_PROBE_DENSE_GEOMETRY").is_some();
         let instance_count = if dense_geometry { 10_000u32 } else { 256 };
@@ -658,11 +659,12 @@ fn benchmark_rt_resolution_and_acceleration() {
                                 [1.0, 0.8, 0.5],
                                 if dominant && i == 0 { 8.0 } else { 16.0 / 1024.0 },
                             );
-                            light.set_ray_traced_shadows(true);
+                            light.set_ray_traced_shadows(shadowed);
                             light
                         })
                         .collect(),
                 );
+                let cpu_lights_ms = cpu.elapsed().as_secs_f64() * 1000.0;
                 let instances: Vec<_> = (0..instance_count)
                     .map(|i| TlasInstanceInput {
                         mesh_id: 1,
@@ -682,6 +684,7 @@ fn benchmark_rt_resolution_and_acceleration() {
                         ],
                     })
                     .collect();
+                let cpu_instances_ms = cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms;
                 let mut encoder = f.device.create_command_encoder(&Default::default());
                 encoder.write_timestamp(&query, 0);
                 f.scene
@@ -692,8 +695,11 @@ fn benchmark_rt_resolution_and_acceleration() {
                 encoder.resolve_query_set(&query, 0..2, &resolve, 0);
                 encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16);
                 f.queue.submit([encoder.finish()]);
+                let tlas_encode_submit_ms = cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms - cpu_instances_ms;
                 f.frame();
-                let cpu_ms = cpu.elapsed().as_secs_f64() * 1000.0;
+                // The fixture owns its device, so RenderGraph waits for GPU
+                // timestamp readback here. This is wall time, not CPU work.
+                let frame_wall_ms = cpu.elapsed().as_secs_f64() * 1000.0;
                 let stages = f.stage_milliseconds();
                 // compact_output replaces the outer graph timestamp markers.
                 // Its six internal stage intervals remain valid and cover HLFS.
@@ -702,6 +708,28 @@ fn benchmark_rt_resolution_and_acceleration() {
                     graph_ms.is_finite() && graph_ms > 0.0,
                     "missing HLFS stage timestamps"
                 );
+                if std::env::var_os("HLFS_RT_PROBE_CAPTURE").is_some()
+                    && frame >= warmup
+                    && [63, 64, 65, 80, 81, 95].contains(&(frame - warmup))
+                {
+                    let directory = std::env::var("HLFS_RT_PROBE_OUTPUT")
+                        .expect("capture requires HLFS_RT_PROBE_OUTPUT");
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let pixels = f.read();
+                    let mut image = image::RgbImage::new(width, height);
+                    for (out, pixel) in image.pixels_mut().zip(pixels) {
+                        *out = image::Rgb(pixel.map(|value| {
+                            ((value.max(0.0) / (1.0 + value.max(0.0))).powf(1.0 / 2.2) * 255.0)
+                                as u8
+                        }));
+                    }
+                    image
+                        .save(std::path::Path::new(&directory).join(format!(
+                            "{width}x{height}-scale{scale}-spp{samples}-c{candidates}-frame{:03}.png",
+                            frame - warmup
+                        )))
+                        .unwrap();
+                }
                 let (tx, rx) = std::sync::mpsc::channel();
                 read.slice(..)
                     .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
@@ -714,15 +742,17 @@ fn benchmark_rt_resolution_and_acceleration() {
                 drop(bytes);
                 read.unmap();
                 if frame >= warmup {
-                    rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, cpu_ms, stages));
+                    rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, frame_wall_ms, stages,
+                        [cpu_lights_ms, cpu_instances_ms, tlas_encode_submit_ms,
+                         frame_wall_ms - cpu_lights_ms - cpu_instances_ms - tlas_encode_submit_ms]));
                 }
             }
             if let Ok(directory) = std::env::var("HLFS_RT_PROBE_OUTPUT") {
                 std::fs::create_dir_all(&directory).unwrap();
-                let mut csv=String::from("gpu_sum_ms,tlas_ms,hlfs_ms,cpu_submit_ms,coarse_ms,fine_ms,sample_ms,temporal_ms,spatial_ms,composite_ms\n");
+                let mut csv=String::from("gpu_sum_ms,tlas_ms,hlfs_ms,frame_wall_ms,coarse_ms,fine_ms,sample_ms,temporal_ms,spatial_ms,composite_ms,lights_update_ms,instances_prepare_ms,tlas_encode_submit_ms,graph_execute_wait_ms\n");
                 for row in &rows {
                     csv.push_str(&format!(
-                        "{},{},{},{},{},{},{},{},{},{}\n",
+                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                         row.0,
                         row.1,
                         row.2,
@@ -732,7 +762,11 @@ fn benchmark_rt_resolution_and_acceleration() {
                         row.4[2],
                         row.4[3],
                         row.4[4],
-                        row.4[5]
+                        row.4[5],
+                        row.5[0],
+                        row.5[1],
+                        row.5[2],
+                        row.5[3],
                     ));
                 }
                 std::fs::write(
@@ -751,7 +785,60 @@ fn benchmark_rt_resolution_and_acceleration() {
             totals.sort_by(f64::total_cmp);
             let stages: [f64; 6] =
                 std::array::from_fn(|i| median(rows.iter().map(|r| r.4[i]).collect()));
-            eprintln!("RT_PROBE glossy={glossy} dominant={dominant} resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances={instance_count} unique_triangles={} instanced_triangles={} median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} cpu_submit_median_ms={:.4} stages={stages:?}",caster_vertices.len()/9,instance_count as usize*caster_vertices.len()/9,totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+            let cpu_stages: [f64; 4] =
+                std::array::from_fn(|i| median(rows.iter().map(|r| r.5[i]).collect()));
+            eprintln!("RT_PROBE glossy={glossy} dominant={dominant} shadowed={shadowed} resolution={width}x{height} scale={scale} spp={samples} candidates={candidates} discovery={discovery} presample={tile_presampling} reactive={reactive_history} warmup={warmup} measured={measured} lights=1024 moving_instances={instance_count} unique_triangles={} instanced_triangles={} median_gpu_ms={:.4} p95_gpu_ms={:.4} tlas_median_ms={:.4} hlfs_median_ms={:.4} frame_wall_median_ms={:.4} stages={stages:?} host_wall_stages={cpu_stages:?}",caster_vertices.len()/9,instance_count as usize*caster_vertices.len()/9,totals[totals.len()/2],totals[totals.len()*95/100],median(rows.iter().map(|r|r.1).collect()),median(rows.iter().map(|r|r.2).collect()),median(rows.iter().map(|r|r.3).collect()));
+        }
+    });
+}
+
+// Atomic light-grid append must not change final pixels between fresh GPU runs
+// with the same local lights, camera, and frame sequence.
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
+fn local_light_grid_output_is_repeatable() {
+    pollster::block_on(async {
+        for mixed in [false, true] {
+            let mut baseline: Option<Vec<u32>> = None;
+            for run in 0..3 {
+                let mut f = Fixture::new_rt(65, 49).await;
+                f.config(HlfsConfig {
+                    mode: HlfsMode::RayTraced,
+                    sample_scale: 1,
+                    samples_per_pixel: 2,
+                    candidates_per_sample: 8,
+                    ..Default::default()
+                });
+                f.lights((0..48).map(|i| {
+                    let mut light = point(
+                        [(i % 32) as f32 * 0.25 - 4.0,
+                         (i / 32) as f32 * 0.25 - 4.0, 2.0],
+                        [1.0, 0.7, 0.4],
+                        if i % 13 == 0 { 0.0 } else { 4.0 },
+                    );
+                    if mixed && i % 7 == 0 {
+                        light.light_type = 0;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.0];
+                    } else if mixed && i % 5 == 0 {
+                        light.light_type = 2;
+                        light.direction_outer = [0.0, 0.0, -1.0, 0.5];
+                        light.inner_angle = 0.9;
+                    }
+                    light.set_ray_traced_shadows(true);
+                    light
+                }).collect());
+                empty_scene(&mut f);
+                let mut pixels = Vec::new();
+                for _ in 0..4 {
+                    f.frame();
+                    pixels.extend(f.read().iter().flat_map(|rgb| rgb.map(f32::to_bits)));
+                }
+                if let Some(expected) = &baseline {
+                    assert!(pixels == *expected, "mixed={mixed}, run={run}: identical local lights changed final output");
+                } else {
+                    baseline = Some(pixels);
+                }
+            }
         }
     });
 }
@@ -766,6 +853,11 @@ fn benchmark_candidate_output_audit() {
         .map(|value| value.parse::<u32>().expect("audit sample count"))
         .unwrap_or(2);
     assert!((1..=4).contains(&samples), "audit samples must be 1..=4");
+    let selected_case = std::env::var("HLFS_RT_AUDIT_CASE").ok();
+    // Presampled output can differ between fresh runs due to atomic alias
+    // ordering. Compare unchanged controls before using it for cross-build QA.
+    let tile_presampling = std::env::var_os("HLFS_RT_AUDIT_PRESAMPLE").is_some();
+    let reactive_history = std::env::var_os("HLFS_RT_AUDIT_REACTIVE").is_some();
     std::fs::create_dir_all(&directory).unwrap();
     pollster::block_on(async {
         for (case, count, mixed, scale, candidates) in [
@@ -776,6 +868,9 @@ fn benchmark_candidate_output_audit() {
             ("packed-id-overflow", 65536, true, 2, 8),
             ("hdr-material-overflow", 1024, false, 2, 8),
         ] {
+            if selected_case.as_deref().is_some_and(|selected| selected != case) {
+                continue;
+            }
             let mut f = Fixture::new_rt(65, 49).await;
             if case == "hdr-material-overflow" {
                 f.material([2.0, 0.5, 1.4, 1.0], [1.0, 0.7, 0.5, 1.0]);
@@ -785,6 +880,8 @@ fn benchmark_candidate_output_audit() {
                 sample_scale: scale,
                 samples_per_pixel: samples,
                 candidates_per_sample: candidates,
+                tile_presampling,
+                reactive_history,
                 ..Default::default()
             });
             let lights = (0..count)
@@ -851,19 +948,75 @@ fn benchmark_candidate_output_audit() {
     });
 }
 
+// Remove the reference's legitimate shadow edges before measuring residual
+// pixel-scale variation in the display-space result.
+fn display_residual_highpass_rms(
+    sampled: &[[f32; 3]],
+    reference: &[[f32; 3]],
+    width: u32,
+    height: u32,
+) -> f64 {
+    assert_eq!(sampled.len(), (width * height) as usize);
+    assert_eq!(sampled.len(), reference.len());
+    let encode = |v: f32| ((v.max(0.0) / (1.0 + v.max(0.0))).powf(1.0 / 2.2) * 255.0) as u8;
+    let residual: Vec<[f32; 3]> = sampled
+        .iter()
+        .zip(reference)
+        .map(|(a, b)| {
+            std::array::from_fn(|channel| {
+                (f32::from(encode(a[channel])) - f32::from(encode(b[channel]))) / 255.0
+            })
+        })
+        .collect();
+    let (width, height) = (width as i32, height as i32);
+    let mut squared = 0.0f64;
+    for y in 0..height {
+        for x in 0..width {
+            let mut local = [0.0f32; 3];
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let qx = (x + dx).clamp(0, width - 1);
+                    let qy = (y + dy).clamp(0, height - 1);
+                    let neighbor = residual[(qy * width + qx) as usize];
+                    for channel in 0..3 {
+                        local[channel] += neighbor[channel];
+                    }
+                }
+            }
+            let center = residual[(y * width + x) as usize];
+            for channel in 0..3 {
+                let high = f64::from(center[channel] - local[channel] / 9.0);
+                squared += high * high;
+            }
+        }
+    }
+    (squared / (width as f64 * height as f64 * 3.0)).sqrt()
+}
+
 // Development frontier only: a small receiver/occluder scene, not the frozen
 // million-triangle primary tier. Failed quality rows remain in the output.
 #[test]
 #[ignore = "explicit RT quality frontier; requires HLFS_RT_QUALITY_OUTPUT"]
 fn benchmark_rt_quality_frontier() {
     let directory = std::env::var("HLFS_RT_QUALITY_OUTPUT").expect("quality output directory");
+    // Match the shading resolution of the performance probe under review.
+    let sample_scale = std::env::var("HLFS_RT_QUALITY_SAMPLE_SCALE")
+        .map(|value| value.parse::<u32>().expect("quality sample scale"))
+        .unwrap_or(2);
+    assert!(
+        (1..=2).contains(&sample_scale),
+        "quality sample scale must be 1 or 2"
+    );
     let discovery = std::env::var("HLFS_RT_QUALITY_DISCOVERY")
         .map(|value| value.parse::<f32>().expect("quality discovery fraction"))
         .unwrap_or(0.2);
     assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
     let tile_presampling = std::env::var_os("HLFS_RT_QUALITY_PRESAMPLE").is_some();
     let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
+    let capture_motion = std::env::var_os("HLFS_RT_QUALITY_CAPTURE_MOTION").is_some();
     let glossy_motion = std::env::var_os("HLFS_RT_QUALITY_GLOSSY_MOTION").is_some();
+    let camera_motion = glossy_motion
+        || std::env::var_os("HLFS_RT_QUALITY_CAMERA_MOTION").is_some();
     // Freeze an additional validation fixture; do not replace the original.
     // Constant-depth plane stays geometrically valid under lateral camera motion.
     let camera_at = |frame: u32| {
@@ -877,7 +1030,7 @@ fn benchmark_rt_quality_frontier() {
         (eye, view)
     };
     let update_camera = |f: &mut Fixture, frame: u32| {
-        if !glossy_motion {
+        if !camera_motion {
             return;
         }
         let (eye, view) = camera_at(frame);
@@ -907,8 +1060,12 @@ fn benchmark_rt_quality_frontier() {
         let checkpoints = [
             0u32, 1, 3, 7, 15, 31, 63, 64, 65, 67, 71, 79, 80, 81, 83, 87, 95,
         ];
-        let mut csv = String::from("seed,samples,candidates,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
+        let mut csv = String::from("seed,samples,candidates,sample_scale,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
         let mut final_failures = 0usize;
+        let mut motion_csv = String::from("seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass\n");
+        let mut motion_failures = 0usize;
+        let mut grain_csv = String::from("seed,samples,candidates,frame,display_residual_highpass_rms,grain_pass\n");
+        let mut grain_failures = 0usize;
         // Fixed regression seeds. Both sets have now been exercised during
         // development; they are not an untouched holdout. Keep thresholds fixed.
         let seeds = if std::env::var_os("HLFS_RT_QUALITY_REVIEW_SEEDS").is_some() {
@@ -956,7 +1113,7 @@ fn benchmark_rt_quality_frontier() {
                 Ok("1440p") => (2560, 1440),
                 Ok("4k") => (3840, 2160),
                 Ok(other) => panic!("unknown quality resolution: {other}"),
-                Err(_) => if glossy_motion { (257, 145) } else { (129, 73) },
+                Err(_) => if camera_motion { (257, 145) } else { (129, 73) },
             };
             let mut oracle = Fixture::new_rt(width, height).await;
             if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { oracle.ambient = [0.0; 3]; }
@@ -996,7 +1153,7 @@ fn benchmark_rt_quality_frontier() {
                     f.config(HlfsConfig {
                         mode: HlfsMode::RayTraced,
                         debug_mode: mode,
-                        sample_scale: 2,
+                        sample_scale,
                         samples_per_pixel: samples,
                         candidates_per_sample: candidates,
                         discovery_fraction: discovery,
@@ -1007,6 +1164,9 @@ fn benchmark_rt_quality_frontier() {
                     });
                     f.scene.frame_count = 0;
                     empty_scene(&mut f);
+                    let mut previous_static_display: Option<Vec<u8>> = None;
+                    let mut static_delta_squared = 0.0f64;
+                    let mut static_delta_count = 0u64;
                     for frame in 0..96u32 {
                         update_camera(&mut f, frame);
                         f.lights(lights_at(frame));
@@ -1017,14 +1177,57 @@ fn benchmark_rt_quality_frontier() {
                             empty_scene(&mut f);
                         }
                         f.frame();
+                        let motion_pixels = if capture_motion && mode == HlfsDebugMode::Final {
+                            let pixels = f.read();
+                            let mut image = image::RgbImage::new(f.width, f.height);
+                            for (out, pixel) in image.pixels_mut().zip(&pixels) {
+                                *out = image::Rgb(pixel.map(|v| {
+                                    ((v.max(0.0) / (1.0 + v.max(0.0))).powf(1.0 / 2.2) * 255.0)
+                                        as u8
+                                }));
+                            }
+                            // Frames 32..63 have fixed camera, lights and TLAS.
+                            // Display-space frame changes here are renderer flicker.
+                            if (32..64).contains(&frame) {
+                                if let Some(previous) = &previous_static_display {
+                                    for (&a, &b) in image.as_raw().iter().zip(previous) {
+                                        let delta = (f64::from(a) - f64::from(b)) / 255.0;
+                                        static_delta_squared += delta * delta;
+                                        static_delta_count += 1;
+                                    }
+                                }
+                                previous_static_display = Some(image.as_raw().clone());
+                            }
+                            image.save(std::path::Path::new(&directory).join(format!(
+                                "motion-seed{seed}-spp{samples}-c{candidates}-f{frame:03}.png"
+                            ))).unwrap();
+                            Some(pixels)
+                        } else { None };
                         let Some(reference_index) =
                             checkpoints.iter().position(|&value| value == frame)
                         else {
                             continue;
                         };
                         let reference = &references[reference_index];
-                        let pixels = f.read();
+                        let pixels = motion_pixels.unwrap_or_else(|| f.read());
                         assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+                        if capture_motion && mode == HlfsDebugMode::Final
+                            && [63, 64, 65, 71, 79, 80, 81, 95].contains(&frame)
+                        {
+                            let rms = display_residual_highpass_rms(
+                                &pixels, reference, f.width, f.height,
+                            );
+                            // A smooth exact receiver should not gain visible
+                            // color texture from the stochastic lighting pass.
+                            let pass = rms < 0.005;
+                            grain_csv.push_str(&format!(
+                                "{seed},{samples},{candidates},{frame},{rms},{pass}\n"
+                            ));
+                            if !pass {
+                                grain_failures += 1;
+                                eprintln!("SPATIAL_GRAIN_FAIL seed={seed} spp={samples} candidates={candidates} frame={frame} rms={rms}");
+                            }
+                        }
                         for mask in ["all", "changed", "glossy"] {
                             if mask == "glossy" && !glossy_motion {
                                 continue;
@@ -1055,14 +1258,18 @@ fn benchmark_rt_quality_frontier() {
                             let mean_error =
                                 (sum - ref_sum).abs() / ref_sum.abs().max(1e-6 * count as f64);
                             let nrmse = (squared / ref_squared.max(1e-12 * count as f64)).sqrt();
+                            // This numeric screen does not replace inspection
+                            // of noise and shadow stability during motion.
                             let pass = mean_error < 0.08 && nrmse < 0.20;
                             if mode == HlfsDebugMode::Final && !pass {
                                 final_failures += 1;
                                 eprintln!("QUALITY_FAIL seed={seed} frame={frame} mask={mask} signed_mean={} nrmse={nrmse}", (sum-ref_sum)/ref_sum.max(1e-12));
                             }
-                            csv.push_str(&format!("{seed},{samples},{candidates},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
+                            csv.push_str(&format!("{seed},{samples},{candidates},{sample_scale},{discovery},{tile_presampling},{reactive_history},{mode:?},{frame},{mask},{count},{mean_error},{nrmse},{pass}\n"));
                         }
-                        if mode == HlfsDebugMode::Final && [63, 65, 95].contains(&frame) {
+                        if mode == HlfsDebugMode::Final
+                            && [63, 64, 65, 71, 79, 80, 81, 95].contains(&frame)
+                        {
                             for (suffix, buffer) in [("sampled", &pixels), ("reference", reference)]
                             {
                                 let mut image = image::RgbImage::new(f.width, f.height);
@@ -1076,19 +1283,39 @@ fn benchmark_rt_quality_frontier() {
                             }
                         }
                     }
+                    if capture_motion && mode == HlfsDebugMode::Final {
+                        assert!(static_delta_count > 0);
+                        let rms = (static_delta_squared / static_delta_count as f64).sqrt();
+                        // Below roughly three display levels RMS on this static
+                        // receiver; visual inspection is still required.
+                        let pass = rms < 0.01;
+                        motion_csv.push_str(&format!(
+                            "{seed},{samples},{candidates},{reactive_history},{rms},{pass}\n"
+                        ));
+                        if !pass {
+                            motion_failures += 1;
+                            eprintln!("MOTION_FLICKER_FAIL seed={seed} spp={samples} candidates={candidates} rms={rms}");
+                        }
+                    }
                 }
             }
             eprintln!("RT_QUALITY completed seed={seed}");
         }
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
+        if capture_motion {
+            std::fs::write(std::path::Path::new(&directory).join("motion-metrics.csv"), motion_csv).unwrap();
+            std::fs::write(std::path::Path::new(&directory).join("grain-metrics.csv"), grain_csv).unwrap();
+        }
         // Write all failures before returning a failing gate, never a misleading
         // successful test exit for the new review-acceptance fixture.
-        if glossy_motion || selected_setting.is_some() {
+        if camera_motion || selected_setting.is_some() {
             assert_eq!(
                 final_failures, 0,
                 "final-output quality gate failed; see quality.csv"
             );
         }
+        assert_eq!(motion_failures, 0, "moving visual flicker gate failed; see motion-metrics.csv and captured frames");
+        assert_eq!(grain_failures, 0, "spatial grain gate failed; see grain-metrics.csv and captured frames");
     });
 }
 

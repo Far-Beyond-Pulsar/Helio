@@ -1,4 +1,0 @@
-    Finished `release` profile [optimized] target(s) in 15.14s
-running 1 test
-test texture_consumers_validate_with_scene_owned_slot_defaults ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

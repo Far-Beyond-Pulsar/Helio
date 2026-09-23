@@ -31,6 +31,11 @@ const DISOCCLUSION_THRESHOLD:   f32 = 0.05;  // normalised depth difference
 const SHIMMER_VAR_THRESHOLD:    f32 = 0.03;
 const EDGE_DEPTH_THRESHOLD:     f32 = 0.02;
 const CAS_SHARPNESS:            f32 = 0.45;
+// Manhattan distances in the 5x5 footprint are integers from 0 to 4.
+// Avoid evaluating the same exponential for every tap of every output pixel.
+const NEIGHBOUR_WEIGHTS: array<f32, 5> = array<f32, 5>(
+    1.0, 0.60653066, 0.36787945, 0.22313017, 0.13533528,
+);
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
 
@@ -156,9 +161,10 @@ fn gather_neighbourhood(
     tex: texture_2d<f32>,
     depth: texture_depth_2d,
     uv: vec2<f32>,
-    texel: vec2<f32>,
     tap_radius: i32,
 ) -> Neighbourhood {
+    let dims = vec2<i32>(textureDimensions(tex));
+    let center = vec2<i32>(floor(uv * vec2<f32>(dims)));
     var aabb_min = vec3<f32>(C_POS_INFTY);
     var aabb_max = vec3<f32>(C_NEG_INFTY);
     var w_sum   = 0.0;
@@ -169,12 +175,12 @@ fn gather_neighbourhood(
 
     for (var y = -tap_radius; y <= tap_radius; y++) {
         for (var x = -tap_radius; x <= tap_radius; x++) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel;
-            let s  = textureSampleLevel(tex, point_sampler, uv + offset, 0.0).rgb;
+            let p = clamp(center + vec2<i32>(x, y), vec2<i32>(0), dims - 1);
+            let s = textureLoad(tex, p, 0).rgb;
             let q  = rgb_to_ycocg(tonemap(s));
             // Distance-based weight (centre-heavy)
-            let dist = abs(f32(x)) + abs(f32(y));
-            let w  = exp(-0.5 * dist);
+            let dist = u32(abs(x) + abs(y));
+            let w = NEIGHBOUR_WEIGHTS[dist];
 
             aabb_min = min(aabb_min, q);
             aabb_max = max(aabb_max, q);
@@ -182,7 +188,7 @@ fn gather_neighbourhood(
             l1      += w * q;
             l2      += w * q * q;
 
-            let d = textureSample(depth, point_sampler, uv + offset);
+            let d = textureLoad(depth, p, 0);
             d_min = min(d_min, d);
             d_max = max(d_max, d);
         }
@@ -335,7 +341,6 @@ fn history_depth_matches(expected: f32, stored: f32, tolerance: f32) -> bool {
 fn fs_main(in: VertexOutput) -> TsrOutput {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
     let out_dims = vec2<f32>(textureDimensions(history_frame));
-    let in_texel = 1.0 / in_dims;
 
     // ── Jitter correction ─────────────────────────────────────────────────────
     let jitter_uv = tsr.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
@@ -397,7 +402,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     // ── Neighbourhood statistics ───────────────────────────────────────────────
     let tap_radius = i32(tsr.tap_radius);
-    let n = gather_neighbourhood(current_frame, depth_tex, cur_uv, in_texel, tap_radius);
+    let n = gather_neighbourhood(current_frame, depth_tex, cur_uv, tap_radius);
 
     // ── Screen-space velocity (UV-space) ──────────────────────────────────────
     let velocity = history_uv - in.uv;

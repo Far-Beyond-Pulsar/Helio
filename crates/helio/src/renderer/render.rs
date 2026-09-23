@@ -196,7 +196,8 @@ impl Renderer {
             (glam::Mat4::IDENTITY, 0.0, 0.0)
         };
         let jittered_m = jitter_mat * camera.proj * camera.view;
-        let col = jittered_m.to_cols_array();
+        // Output-resolution editor handles must align with unjittered pointer rays.
+        let col = (camera.proj * camera.view).to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {
             view_proj: [
                 [col[0], col[1], col[2], col[3]],

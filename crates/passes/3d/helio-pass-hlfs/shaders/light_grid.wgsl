@@ -11,11 +11,13 @@ var<workgroup> large_aliases: array<u32,512>;
 var<workgroup> alias_counts: array<atomic<u32>,4>;
 var<workgroup> proposal_total: f32;
 var<workgroup> key_light: u32;
+var<workgroup> active_emitters: u32;
 var<workgroup> accepted: atomic<u32>;
 var<workgroup> has_directional: atomic<u32>;
 var<workgroup> min_depth: atomic<u32>;
 var<workgroup> max_depth: atomic<u32>;
 var<workgroup> packed: array<u32, 256>;
+var<workgroup> sorted_fine: array<u32, 64>;
 
 fn sphere_in_tile(light: GpuLight, lo: vec2<u32>, hi: vec2<u32>, zlo: f32, zhi: f32) -> bool {
     // SceneDB buffers are sparse: unoccupied rows are zeroed, including
@@ -48,39 +50,49 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
     // Split one globally dominant emitter from the stochastic residual. The
     // same identity is used by every tile so filtering never crosses different
     // decompositions. Composition evaluates this emitter exactly at full size.
-    if lane==0u { key_light=INVALID_LIGHT; }
-    // A small outdoor population still benefits from a full-resolution sun:
-    // denoising its hard visibility edge blurs architectural reliefs. Keep
-    // point/spot residuals on the normal sampling path, and use one stable
-    // directional identity for the whole frame.
-    if lane==0u && presample && globals.debug_mode!=1u && globals.light_count<=GRID_CAPACITY {
-        var peak=0.0;
-        for(var i=0u;i<globals.light_count;i++) {
-            if lights[i].light_type!=0u { continue; }
-            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
-            if power>peak { peak=power; key_light=i; }
-        }
-    }
-    if presample && globals.debug_mode!=1u && globals.light_count>GRID_CAPACITY && globals.light_count<=65535u {
+    if lane==0u { key_light=INVALID_LIGHT; active_emitters=0u; }
+    // Population means active emitters, not allocated SceneDB entity slots.
+    // Keep the same decomposition for equivalent dense and sparse light sets.
+    if presample && globals.debug_mode!=1u && globals.light_count<=65535u {
         var power_sum=0.0; var maximum=0.0; var best=INVALID_LIGHT;
+        var active_count=0u; var sun_power=0.0; var sun=INVALID_LIGHT;
         for(var i=lane;i<globals.light_count;i+=256u) {
-            let power=luminance(max(lights[i].color_intensity.rgb*lights[i].color_intensity.w,vec3<f32>(0.0)));
+            let light=lights[i];
+            if light.color_intensity.w<=0.0 || all(light.color_intensity.rgb<=vec3<f32>(0.0)) { continue; }
+            if light.light_type!=0u && light.position_range.w<=0.0 { continue; }
+            let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
+            if !(power>0.0) { continue; }
+            active_count+=1u;
             power_sum+=power;
             if power>maximum { maximum=power; best=i; }
+            if light.light_type==0u && power>sun_power { sun_power=power; sun=i; }
         }
         proposal_weights[lane]=power_sum;
         alias_probabilities[lane]=maximum;
         alias_indices[lane]=best;
+        packed[lane]=active_count;
+        small_aliases[lane]=sun;
+        large_aliases[lane]=bitcast<u32>(sun_power);
         workgroupBarrier();
         if lane==0u {
             var total=0.0; var peak=0.0; var id=INVALID_LIGHT;
+            var population=0u; var directional_power=0.0; var directional=INVALID_LIGHT;
             for(var i=0u;i<256u;i++) {
                 total+=proposal_weights[i];
+                population+=packed[i];
                 if alias_probabilities[i]>peak || (alias_probabilities[i]==peak && alias_indices[i]<id) {
                     peak=alias_probabilities[i]; id=alias_indices[i];
                 }
+                let power=bitcast<f32>(large_aliases[i]);
+                if power>directional_power || (power==directional_power && small_aliases[i]<directional) {
+                    directional_power=power; directional=small_aliases[i];
+                }
             }
-            if peak>16.0*total/f32(globals.light_count) { key_light=id; }
+            // Small outdoor sets retain a full-resolution sun. Larger sets
+            // split only a globally dominant emitter from their residual.
+            active_emitters=population;
+            if population<=GRID_CAPACITY { key_light=directional; }
+            else if peak>16.0*total/f32(population) { key_light=id; }
         }
     }
     workgroupBarrier();
@@ -110,7 +122,7 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
             for(var i=0u;i<256u;i++) { stamp0^=packed[i]; stamp1+=small_aliases[i]; }
         }
     }
-    if lane==0u { tile_proposals[arrayLength(&tile_proposals)-1u]=LightProposal(stamp0,0.0,stamp1,0.0,0.0,key_light); }
+    if lane==0u { tile_proposals[arrayLength(&tile_proposals)-1u]=LightProposal(stamp0,f32(active_emitters),stamp1,0.0,0.0,key_light,array<f32,4>(0.0,0.0,0.0,0.0)); }
 }
 @compute @workgroup_size(256)
 fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
@@ -129,18 +141,29 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     }
     let proposal_index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
     let presample=(globals.surface_flags&4u)!=0u;
-    if lane==0u { key_light=INVALID_LIGHT; if presample { key_light=tile_proposals[arrayLength(&tile_proposals)-1u].key_light; } }
+    if lane==0u {
+        key_light=INVALID_LIGHT; active_emitters=0u;
+        if presample {
+            let stamp=tile_proposals[arrayLength(&tile_proposals)-1u];
+            key_light=stamp.key_light; active_emitters=u32(stamp.inverse_probability);
+        }
+    }
     workgroupBarrier();
+    // Sparse SceneDB slots are not active lights. Small active sets take the
+    // exact shading path and never read the coarse alias table.
+    let build_proposals=presample && active_emitters>32u;
     let center=min(lo+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
     var center_position=vec3<f32>(0.0);
-    if presample { center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0)); }
+    if build_proposals { center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0)); }
     var selected=INVALID_LIGHT; var selected_weight=0.0; var weight_sum=0.0;
+    var stratum_weights=array<f32,4>(0.0,0.0,0.0,0.0);
     var rng=hash_u32(proposal_index*256u+lane+globals.frame*0x9e3779b9u);
     for (var i=lane; i<globals.light_count; i+=256u) {
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
-            if presample && i!=key_light {
+            if build_proposals && i!=key_light {
                 let weight=proposal_weight(lights[i],center_position);
                 if weight>0.0 {
+                    if globals.light_count<=1024u { stratum_weights[(i-lane)/256u]=weight; }
                     weight_sum+=weight;
                     if random(&rng)*weight_sum<weight { selected=i; selected_weight=weight; }
                 }
@@ -155,7 +178,7 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
             }
         }
     }
-    if presample {
+    if build_proposals {
         proposal_weights[lane]=weight_sum;
         workgroupBarrier();
         if lane==0u {
@@ -204,7 +227,9 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
             }
         }
         workgroupBarrier();
-        tile_proposals[proposal_index*256u+lane]=LightProposal(selected,proposal_total/max(selected_weight,1e-20),alias_indices[lane],alias_probabilities[lane],proposal_total,key_light);
+        tile_proposals[proposal_index*256u+lane]=LightProposal(selected,proposal_total/max(selected_weight,1e-20),alias_indices[lane],alias_probabilities[lane],proposal_total,key_light,stratum_weights);
+    } else if presample && lane==0u {
+        tile_proposals[proposal_index*256u]=LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,key_light,array<f32,4>(0.0,0.0,0.0,0.0));
     }
     workgroupBarrier();
     let index=group.y*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+group.x;
@@ -253,7 +278,31 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     workgroupBarrier();
     let count=atomicLoad(&accepted);
     if lane==0u { fine_grid[ti].count=count; }
+    if count>GRID_CAPACITY { return; }
+    // Atomic append gives the correct set but an execution-dependent order.
+    // Reservoir strata index this array, so stable IDs are needed for stable
+    // lighting when the same camera and lights are rendered twice.
+    if lane>=count { packed[lane]=INVALID_LIGHT; }
+    workgroupBarrier();
+    var sort_length=1u;
+    while sort_length<count { sort_length*=2u; }
+    var read_packed=true;
+    for(var width=2u;width<=sort_length;width*=2u) {
+        for(var stride=width/2u;stride>0u;stride/=2u) {
+            let partner=lane^stride;
+            var value=packed[lane]; var other=packed[partner];
+            if !read_packed { value=sorted_fine[lane]; other=sorted_fine[partner]; }
+            let lower=select(max(value,other),min(value,other),
+                ((lane&width)==0u)==((lane&stride)==0u));
+            if read_packed { sorted_fine[lane]=lower; }
+            else { packed[lane]=lower; }
+            workgroupBarrier();
+            read_packed=!read_packed;
+        }
+    }
     if lane<(min(count,GRID_CAPACITY)+1u)/2u {
-        fine_grid[ti].indices[lane]=packed[2u*lane]|(select(65535u,packed[2u*lane+1u],2u*lane+1u<count)<<16u);
+        var lo=packed[2u*lane]; var hi=packed[2u*lane+1u];
+        if !read_packed { lo=sorted_fine[2u*lane]; hi=sorted_fine[2u*lane+1u]; }
+        fine_grid[ti].indices[lane]=lo|(select(65535u,hi,2u*lane+1u<count)<<16u);
     }
 }

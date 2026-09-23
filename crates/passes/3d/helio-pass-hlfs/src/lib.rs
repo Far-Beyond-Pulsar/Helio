@@ -228,6 +228,7 @@ pub struct HlfsPass {
     fallbacks: Fallbacks,
     internal: InternalBindings,
     external: ExternalBindings,
+    compact_lights: wgpu::Buffer,
     globals: wgpu::Buffer,
     shadows: wgpu::Buffer,
     config: HlfsConfig,
@@ -236,6 +237,7 @@ pub struct HlfsPass {
     write_history: usize,
     history_valid: bool,
     previous_camera: Option<helio_core::GpuCameraUniforms>,
+    current_light_count: u32,
     previous_light_count: Option<u32>,
     previous_light_generation: Option<u64>,
     previous_frame: Option<u64>,
@@ -322,6 +324,12 @@ impl HlfsPass {
             fallbacks: Fallbacks::new(device, queue),
             internal,
             external: ExternalBindings::default(),
+            compact_lights: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS compact light rows"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             globals,
             shadows,
             config,
@@ -330,6 +338,7 @@ impl HlfsPass {
             write_history: 0,
             history_valid: false,
             previous_camera: None,
+            current_light_count: 0,
             previous_light_count: None,
             previous_light_generation: None,
             previous_frame: None,
@@ -419,6 +428,11 @@ impl HlfsPass {
     pub fn output_texture(&self) -> &wgpu::Texture {
         &self.targets.output.texture
     }
+    /// Read-only GPU grids for opt-in capture diagnostics. Both buffers have
+    /// COPY_SRC usage; each row begins with its accepted-light count.
+    pub fn diagnostic_light_grids(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.targets.coarse, &self.targets.grid)
+    }
     /// Enable seven frame-boundary timestamps: coarse, fine, sampling, temporal,
     /// spatial, composite and completion. Resolve after the frame submission completes.
     pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
@@ -453,6 +467,7 @@ impl HlfsPass {
                 })
                 .sum::<u64>()
             + output
+            + self.compact_lights.size()
             + t.coarse.size()
             + t.grid.size()
             + t.proposals.size()
@@ -496,6 +511,19 @@ impl HlfsPass {
             pass.dispatch_workgroups(x, y, 1);
         };
         timestamp(encoder, 0);
+        if self.current_light_count > 0 {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("HLFS compact lights"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.compact);
+            pass.set_bind_group(
+                0,
+                self.external.compact.as_ref().expect("HLFS light copy bound"),
+                &[],
+            );
+            pass.dispatch_workgroups(self.current_light_count.div_ceil(256), 1, 1);
+        }
         if self.config.tile_presampling {
             dispatch(encoder, "HLFS dominant light", &p.select_key, &self.internal.grid, 1, 1, None);
         }
@@ -655,6 +683,16 @@ impl RenderPass for HlfsPass {
         // SceneDB rows are sparse. Include every allocated row (vacant rows are
         // zeroed), never a fixed limit or a truncated live-light population.
         let light_count = scene_lights.map_or(0, |l| (l.buffer.size() / 128) as u32);
+        self.current_light_count = light_count;
+        let required_size = u64::from(light_count.max(1)) * 64;
+        if self.compact_lights.size() < required_size {
+            self.compact_lights = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS compact light rows"),
+                size: required_size.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+        }
 
         let continuity = self
             .previous_frame
@@ -771,6 +809,7 @@ impl RenderPass for HlfsPass {
         let inputs = Inputs {
             camera: ctx.camera,
             lights: lights_buf,
+            compact_lights: &self.compact_lights,
             shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx
                 .registry
@@ -835,6 +874,9 @@ impl RenderPass for HlfsPass {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod key_selection_tests;
 
 #[cfg(test)]
 mod tests {

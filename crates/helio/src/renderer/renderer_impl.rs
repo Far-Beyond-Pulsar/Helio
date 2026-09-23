@@ -26,6 +26,9 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
+/// Reapplies application-owned pass settings after a resize rebuilds the graph.
+pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
+
 use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 use crate::camera::Camera;
 
@@ -142,6 +145,7 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+    pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
     /// Frontend-owned SceneDB GPU projection. The CPU SceneDB remains outside
     /// Helio and is flushed by its owner at the frame boundary.
     pub(crate) scene_db: SceneDbHandle,
@@ -410,6 +414,17 @@ impl Renderer {
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// Configure passes in the current graph and every graph created by resize.
+    /// Use this for settings applied directly to passes, which a fresh graph
+    /// would otherwise reset to defaults.
+    pub fn set_graph_rebuild_hook(
+        &mut self,
+        hook: impl Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync + 'static,
+    ) {
+        hook(&mut self.graph, &self.device);
+        self.graph_rebuild_hook = Some(Arc::new(hook));
     }
 
     /// Forward portal/sublevel coordinate spaces through the generic graph

@@ -92,6 +92,9 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            if let Some(hook) = &self.graph_rebuild_hook {
+                hook(&mut self.graph, &self.device);
+            }
         } else {
             self.graph.set_render_size(internal_w, internal_h);
         }

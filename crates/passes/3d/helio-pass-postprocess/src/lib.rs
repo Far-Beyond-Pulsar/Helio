@@ -5,7 +5,7 @@
 //! `VolumetricFogPass`) see the blended values rather than the camera defaults.
 //!
 //! Sub-stages (execution order in `execute()`):
-//!   1. `cs_exposure`           — luminance histogram → avg luminance (compute)
+//!   1. `cs_exposure`/`cs_exposure_reduce` — sampled log luminance reduction (compute)
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
 //!   4. `fs_uber`               — tonemap, color grade, vignette, CA, grain (render)
@@ -34,12 +34,29 @@ pub use volume_blend::PostProcessVolumeBlendPass;
 mod lut_builder;
 pub use lut_builder::LutBuilder;
 
+#[cfg(test)]
+mod exposure_tests;
+
 const BASE_SHADER_SRC: &str = include_str!("../shaders/postprocess.wgsl");
 
 const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
 const WG_EXPOSURE_X: u32 = 16;
 const WG_EXPOSURE_Y: u32 = 16;
+const EXPOSURE_STRIDE: u32 = 4;
+fn exposure_groups(width: u32, height: u32) -> (u32, u32) {
+    (width.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_X),
+     height.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_Y))
+}
+fn exposure_partial_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
+    let (gx, gy) = exposure_groups(width, height);
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("PostProcess Exposure Partials"),
+        size: u64::from(gx) * u64::from(gy) * 8,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    })
+}
 /// Maximum active volumes blended per frame. SceneDB buffers can be larger:
 /// rows are addressed by sparse entity index, so shaders scan the full buffer
 /// before compacting into this fixed active-volume budget.
@@ -68,9 +85,13 @@ pub struct UserEffectEntry {
 
 pub struct PostProcessPass {
     color_input: &'static str,
+    uber_timing_query: Option<wgpu::QuerySet>,
+    compute_timing_query: Option<wgpu::QuerySet>,
     avg_luminance_buf: wgpu::Buffer,
+    exposure_partials_buf: wgpu::Buffer,
 
     exposure_pipeline: wgpu::ComputePipeline,
+    exposure_reduce_pipeline: wgpu::ComputePipeline,
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
     uber_pipeline: wgpu::RenderPipeline,
@@ -149,6 +170,40 @@ impl PostProcessPass {
         self
     }
 
+    /// Optional GPU timestamps around the full-screen tonemap and effects pass.
+    pub fn enable_uber_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return false;
+        }
+        self.uber_timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("Postprocess uber timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        }));
+        true
+    }
+
+    pub fn uber_timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.uber_timing_query.as_ref()
+    }
+
+    /// Optional GPU timestamps around exposure and bloom compute work.
+    pub fn enable_compute_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return false;
+        }
+        self.compute_timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("Postprocess compute timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 3,
+        }));
+        true
+    }
+
+    pub fn compute_timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.compute_timing_query.as_ref()
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -194,6 +249,7 @@ impl PostProcessPass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let exposure_partials_buf = exposure_partial_buffer(device, width, height);
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PostProcess Linear Sampler"),
@@ -279,7 +335,7 @@ impl PostProcessPass {
         let fv = wgpu::ShaderStages::FRAGMENT;
         let cfv = wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT;
 
-        // ── compute_main_bgl: b0-b16 (uses storage for b15-b16) ─────────────
+        // ── compute_main_bgl: exposure partials and shared postprocess inputs ──
         let compute_main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PostProcess Compute Main BGL"),
             entries: &[
@@ -290,6 +346,7 @@ impl PostProcessPass {
                 sampler_entry(4, cfv, true),
                 sampler_entry(5, fv, false),
                 storage_buf_entry(11, cfv),
+                storage_buf_entry(15, cv),
                 sampled_tex_entry(12, cfv, false),
                 sampler_entry(13, cfv, false),
                 storage_ro_entry(14, cfv),
@@ -415,6 +472,7 @@ impl PostProcessPass {
         };
 
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
+        let exposure_reduce_pipeline = mk_compute("PostProcess Exposure Reduce", "cs_exposure_reduce", &exposure_pl);
         let bloom_extract_pipeline = mk_compute(
             "PostProcess Bloom Extract",
             "cs_bloom_down_extract",
@@ -643,8 +701,12 @@ impl PostProcessPass {
 
         Self {
             color_input: "pre_aa",
+            uber_timing_query: None,
+            compute_timing_query: None,
             avg_luminance_buf,
+            exposure_partials_buf,
             exposure_pipeline,
+            exposure_reduce_pipeline,
             bloom_extract_pipeline,
             bloom_down_pipeline,
             uber_pipeline,
@@ -961,6 +1023,10 @@ impl PostProcessPass {
                     resource: self.avg_luminance_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self.exposure_partials_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(&self.noise_view),
                 },
@@ -1103,6 +1169,7 @@ impl RenderPass for PostProcessPass {
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        self.exposure_partials_buf = exposure_partial_buffer(device, width, height);
         let (textures, sampled_views, storage_views) =
             Self::create_bloom_mips(device, width, height);
         self.bloom_textures = textures;
@@ -1251,14 +1318,21 @@ impl RenderPass for PostProcessPass {
         let compute_bg = self.compute_main_bg.as_ref().unwrap();
         let render_bg = self.render_main_bg.as_ref().unwrap();
         let extract_bg = &self.bloom_extract_bg.as_ref().unwrap().1;
-        let ce = ctx.compute_encoder_ptr;
+        // Exposure and bloom read this frame's HDR input. GBuffer, HLFS and
+        // TSR record to the graphics encoder, so these dependent dispatches
+        // must follow them on that same encoder.
+        let ce = ctx.encoder_ptr;
 
         // 0. Volume blending now runs in PostProcessVolumeBlendPass, scheduled
         //    ahead of this pass — see volume_blend.rs. It cannot happen here:
         //    VolumetricFogPass reads the blended fog config earlier in the graph,
         //    and would silently get the unblended camera defaults instead.
 
-        // 1. Auto-exposure histogram
+        // 1. Sampled log luminance: one sample per 4x4 block, then one final
+        // workgroup reduction. Each partial has a unique writer.
+        if let Some(query) = &self.compute_timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 0);
+        }
         {
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure"),
@@ -1266,9 +1340,20 @@ impl RenderPass for PostProcessPass {
             });
             cpass.set_pipeline(&self.exposure_pipeline);
             cpass.set_bind_group(0, compute_bg, &[]);
-            let gx = (self.width / (4 * WG_EXPOSURE_X)).max(1);
-            let gy = (self.height / (4 * WG_EXPOSURE_Y)).max(1);
+            let (gx, gy) = exposure_groups(self.width, self.height);
             cpass.dispatch_workgroups(gx, gy, 1);
+        }
+        {
+            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PostProcess Exposure Reduce"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.exposure_reduce_pipeline);
+            cpass.set_bind_group(0, compute_bg, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        if let Some(query) = &self.compute_timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 1);
         }
 
         // 2. Bloom (only when active)
@@ -1316,6 +1401,12 @@ impl RenderPass for PostProcessPass {
         } else {
             ctx.target
         };
+        if let Some(query) = &self.uber_timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 0);
+        }
+        if let Some(query) = &self.compute_timing_query {
+            unsafe { &mut *ce }.write_timestamp(query, 2);
+        }
         {
             let mut pass =
                 unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1337,6 +1428,9 @@ impl RenderPass for PostProcessPass {
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);
+        }
+        if let Some(query) = &self.uber_timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 1);
         }
 
         Ok(())

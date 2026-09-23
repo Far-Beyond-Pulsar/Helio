@@ -1,4 +1,5 @@
-// Shared layouts. Keep Camera/GpuLight byte-compatible with libhelio.
+// Camera follows the renderer layout. GpuLight is the GPU-derived 64-byte
+// prefix of SceneDB's 128-byte light row; no other light fields are read here.
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>, position_near: vec4<f32>, forward_far: vec4<f32>,
@@ -7,10 +8,6 @@ struct Camera {
 struct GpuLight {
     position_range: vec4<f32>, direction_outer: vec4<f32>, color_intensity: vec4<f32>,
     shadow_index: u32, light_type: u32, inner_angle: f32, _pad: u32,
-    god_rays_enabled: u32, god_rays_density: f32, god_rays_weight: f32, god_rays_decay: f32,
-    god_rays_exposure: f32, flare_enabled: u32, flare_type: u32, flare_intensity: f32,
-    flare_scale: f32, flare_tint_r: f32, flare_tint_g: f32, flare_tint_b: f32,
-    ies_profile_index: i32, light_function_index: i32, ies_angle_scale: f32, ies_angle_offset: f32,
 }
 struct Globals {
     frame: u32, sample_count: u32, light_count: u32, history_valid: u32,
@@ -73,6 +70,9 @@ fn stbn(pixel: vec2<u32>, dimension: u32) -> f32 {
     return (textureLoad(blue_noise, vec2<i32>(p), i32(z), 0).r * 255.0 + 0.5) / 256.0;
 }
 fn sample_pixel(p: vec2<u32>, frame: u32) -> vec2<u32> {
+    // Native shading has no four-rooks offset. Avoid phase and modulo work
+    // in the sampler and in every temporal neighborhood load.
+    if globals.sample_scale == 1u { return min(p, globals.screen_size - 1u); }
     // Four-rooks over the 2x2 block. Half resolution visits every full-res pixel.
     let phase = (frame + (p.x & 1u) + 2u * (p.y & 1u)) & 3u;
     let offset = vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;
@@ -196,7 +196,16 @@ fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
 }
 
-struct LightProposal { id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32, total_weight: f32, key_light: u32, }
+struct LightProposal {
+    id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32,
+    total_weight: f32, key_light: u32,
+    // The final array element is a control record. There, id and alias_index
+    // are the light-set stamp and inverse_probability stores active light count.
+    // Exact weights for the four IDs in this 256-wide stratum when the light
+    // population is at most 1,024. The alias table selects a stratum, then
+    // sampling chooses one of its IDs with its actual conditional probability.
+    weights: array<f32,4>,
+}
 fn proposal_weight(light: GpuLight, center: vec3<f32>) -> f32 {
     let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
     if power<=0.0 { return 0.0; }

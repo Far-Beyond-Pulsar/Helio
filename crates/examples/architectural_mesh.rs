@@ -142,6 +142,38 @@ impl Mesh {
             );
         }
     }
+    /// A connected tube around a ring, without the hidden cylinder caps at
+    /// every segment. Used for small-scale tracery and suspended metalwork.
+    pub(crate) fn smooth_ring(&mut self, center: Vec3, u: Vec3, v: Vec3,
+        radius: f32, thickness: f32) {
+        const SEGMENTS: usize = 48;
+        const SIDES: usize = 8;
+        let u = u.normalize();
+        let v = v.normalize();
+        let axis = u.cross(v).normalize();
+        let base = self.vertices.len() as u32;
+        for i in 0..=SEGMENTS {
+            let angle = (i % SEGMENTS) as f32 * std::f32::consts::TAU / SEGMENTS as f32;
+            let radial = u * angle.cos() + v * angle.sin();
+            let tangent = -u * angle.sin() + v * angle.cos();
+            for side in 0..=SIDES {
+                let around = (side % SIDES) as f32 * std::f32::consts::TAU / SIDES as f32;
+                let normal = radial * around.cos() + axis * around.sin();
+                self.vertices.push(PackedVertex::from_components(
+                    (center + radial * radius + normal * thickness).to_array(),
+                    normal.to_array(), [i as f32 / SEGMENTS as f32, side as f32 / SIDES as f32],
+                    tangent.to_array(), 1.0,
+                ));
+            }
+        }
+        for i in 0..SEGMENTS {
+            for side in 0..SIDES {
+                let a = base + (i * (SIDES + 1) + side) as u32;
+                let b = a + (SIDES + 1) as u32;
+                self.indices.extend_from_slice(&[a, b + 1, a + 1, a, b, b + 1]);
+            }
+        }
+    }
     pub(crate) fn arch(&mut self, a: Vec3, b: Vec3, rise: f32, radius: f32) {
         // Two curved halves meet at a pointed crown.
         let mid = (a + b) * 0.5 + Vec3::Y * rise;
@@ -214,6 +246,27 @@ impl Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_ring_faces_outward() {
+        let mut mesh = Mesh::default();
+        mesh.smooth_ring(Vec3::ZERO, Vec3::X, Vec3::Y, 2.0, 0.1);
+        let mut checked = 0;
+        for triangle in mesh.indices.chunks_exact(3) {
+            let [a, b, c] = [
+                Vec3::from_array(mesh.vertices[triangle[0] as usize].position),
+                Vec3::from_array(mesh.vertices[triangle[1] as usize].position),
+                Vec3::from_array(mesh.vertices[triangle[2] as usize].position),
+            ];
+            let surface = (b - a).cross(c - a);
+            let expected = (a + b + c) / 3.0 - Vec3::new(2.0, 0.0, 0.0);
+            if a.x > 2.0 && b.x > 2.0 && c.x > 2.0 {
+                assert!(surface.dot(expected) > 0.0);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
 
     #[test]
     fn smooth_arch_is_closed_without_segment_caps_or_cracks() {

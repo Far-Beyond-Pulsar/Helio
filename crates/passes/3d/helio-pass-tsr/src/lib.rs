@@ -149,6 +149,7 @@ struct TsrUniform {
 /// By default it also blits to `ctx.target`.
 pub struct TsrPass {
     intermediate_output: bool,
+    timing_query: Option<wgpu::QuerySet>,
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
@@ -168,7 +169,7 @@ pub struct TsrPass {
     /// Previous frame's TSR output at display resolution.
     pub history_texture: wgpu::Texture,
     pub history_view: wgpu::TextureView,
-    /// Current frame's TSR output (rendered to, then copied → history).
+    /// Current frame's TSR output (rendered to, then copied to history).
     pub output_texture: wgpu::Texture,
     pub output_view: wgpu::TextureView,
     history_depth: wgpu::Texture,
@@ -379,6 +380,7 @@ impl TsrPass {
 
         Self {
             intermediate_output: false,
+            timing_query: None,
             pipeline,
             bgl,
             bind_group: None,
@@ -417,6 +419,23 @@ impl TsrPass {
     /// change where stale history would cause visible ghosting.
     pub fn reset_history(&mut self) {
         self.first_frame = true;
+    }
+
+    /// Optional GPU timestamps around resolve, history copies and final blit.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("TSR timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 4,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
     }
 
     /// Enable coverage history for a graph providing `transparency_reactivity`.
@@ -711,6 +730,9 @@ impl RenderPass for TsrPass {
         }
 
         // ── 2. TSR resolve → output_view ──────────────────────────────────────
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 0);
+        }
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &self.output_view,
@@ -737,8 +759,11 @@ impl RenderPass for TsrPass {
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 1);
+        }
 
-        // ── 3. Copy output → history ───────────────────────────────────────────
+        // ── 3. Copy output to history ─────────────────────────────────────────
         unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
@@ -753,6 +778,9 @@ impl RenderPass for TsrPass {
             self.output_depth.as_image_copy(), self.history_depth.as_image_copy(),
             wgpu::Extent3d {width:self.output_width,height:self.output_height,depth_or_array_layers:1},
         );
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 2);
+        }
 
         // ── 4. Blit output_view → ctx.target ──────────────────────────────────
         if !self.intermediate_output {
@@ -777,6 +805,10 @@ impl RenderPass for TsrPass {
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 3);
         }
 
         Ok(())

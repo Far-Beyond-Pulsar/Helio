@@ -7,7 +7,7 @@ use helio_pass_gbuffer::{
 use pulsar_scenedb::World;
 use std::{
     collections::{HashMap, HashSet},
-    hash::{DefaultHasher, Hasher},
+    hash::Hasher,
     sync::Arc,
 };
 
@@ -185,7 +185,9 @@ impl SceneDbRayTracing {
                         "mesh mirror is not current; flush SceneDB before RT preparation",
                     ));
                 }
-                let mut hash = DefaultHasher::new();
+                // Keep content-based invalidation for in-place edits, but use
+                // the streaming hash's vectorized bulk path for large meshes.
+                let mut hash = twox_hash::XxHash3_64::default();
                 hash.write(bytemuck::cast_slice(&mesh.vertices));
                 hash.write(bytemuck::cast_slice(&mesh.indices));
                 self.blas

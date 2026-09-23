@@ -1,8 +1,0 @@
---- a/crates\passes\3d\helio-pass-hlfs\shaders\composite.wgsl
-+++ b/crates\passes\3d\helio-pass-hlfs\shaders\composite.wgsl
-@@ -122 +122,4 @@
--    if key!=INVALID_LIGHT {
-+    // Reject a guaranteed-zero key contribution before its full-resolution
-+    // shadow query. Back-facing/out-of-range/zero-intensity lights cannot
-+    // contribute even through transmitting sheets.
-+    if key!=INVALID_LIGHT && can_illuminate(key,s) {

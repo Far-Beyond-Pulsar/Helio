@@ -1,8 +1,0 @@
---- a/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
-+++ b/crates/passes/3d/helio-pass-hlfs/shaders/composite.wgsl
-@@ -34,2 +34,3 @@
--        let weights=select(1.0-fraction,fraction,offset==vec2<i32>(1));
--        let weight=weights.x*weights.y*normal_weight(dot(oct_decode(geo.xy),s.normal));
-+        let source_pixel=vec2<f32>(sample_pixel(vec2<u32>(p),globals.frame))+0.5;
-+        let weights=max(vec2<f32>(0.0),1.0-abs(fragment.xy-source_pixel)/f32(globals.sample_scale));
-+        let weight=max(weights.x*weights.y,0.0001)*normal_weight(dot(oct_decode(geo.xy),s.normal));
