@@ -97,7 +97,6 @@ helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
-helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
 helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }

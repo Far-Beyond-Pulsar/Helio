@@ -65,13 +65,11 @@ tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
 helio-asset-compat = { workspace = true }
-helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
 helio-pass-postprocess = { workspace = true }
 helio-pass-water-sim = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-pass-deferred-light = { workspace = true }
-pulsar_terrain.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
 gpui-ce.workspace = true
