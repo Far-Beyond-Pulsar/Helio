@@ -33,7 +33,6 @@ helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
 helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
-helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-shadow = { path = "../passes/3d/helio-pass-shadow" }
 helio-pass-shadow-cull = { path = "../passes/3d/helio-pass-shadow-cull" }

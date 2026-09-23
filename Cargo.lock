@@ -1049,7 +1049,6 @@ dependencies = [
  "helio-pass-hlfs",
  "helio-pass-object-batch",
  "helio-pass-perf-overlay",
- "helio-pass-planetary-voxel",
  "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades-2d",
@@ -1623,7 +1622,6 @@ dependencies = [
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
- "helio-pass-planetary-voxel",
  "helio-pass-portal-cull",
  "helio-pass-portal-instances",
  "helio-pass-postprocess",
@@ -1927,19 +1925,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "log",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-planetary-voxel"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "log",
- "pollster 0.4.0",
- "thiserror 2.0.20",
  "wgpu",
 ]
 

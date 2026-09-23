@@ -200,10 +200,6 @@ name = "voxel_demo_raymarch"
 path = "voxel/raymarch_demo.rs"
 
 [[bin]]
-name = "planet_voxel_demo"
-path = "planet_voxel_demo.rs"
-
-[[bin]]
 name = "radiant_demo"
 path = "radiant_demo.rs"
 
@@ -270,7 +266,6 @@ helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
 helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
-helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
