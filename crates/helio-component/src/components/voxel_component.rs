@@ -50,9 +50,9 @@ fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
 pub struct VoxelComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
     /// property, serialized configuration, or GPU-mirrored field. Component
-    /// clones start with an independent empty store.
+    /// clones copy the index/revision and share immutable payload allocations.
     #[serde(skip)]
-    pub payloads: VoxelPayloadStore,
+    payloads: VoxelPayloadStore,
     /// Whether the object participates in voxel rendering and queries.
     #[property]
     pub enabled: bool,
@@ -93,9 +93,10 @@ impl Default for VoxelComponent {
 }
 
 impl VoxelComponent {
-    /// Clone the live SceneDB-owned data handle for batch access or
-    /// caller-controlled snapshot/exfiltration. The returned handle contains
-    /// no persistence policy.
+    /// Low-level live SceneDB data capability used by the voxel pass. Normal
+    /// producers should mutate through `VoxelSourceWriter` so validation and
+    /// revision checks are preserved; scripts should export via pass snapshots.
+    /// This handle carries no persistence policy.
     pub fn payload_store(&self) -> VoxelPayloadStore {
         Arc::clone(&self.payloads)
     }
@@ -136,9 +137,9 @@ impl Clone for VoxelComponent {
 pub struct VoxelTerrainComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
     /// property, serialized configuration, or GPU-mirrored field. Component
-    /// clones start with an independent empty store.
+    /// clones copy the index/revision and share immutable payload allocations.
     #[serde(skip)]
-    pub payloads: VoxelPayloadStore,
+    payloads: VoxelPayloadStore,
     /// Whether this terrain source participates in rendering and queries.
     #[property]
     pub enabled: bool,
@@ -233,9 +234,10 @@ impl Default for VoxelTerrainComponent {
 }
 
 impl VoxelTerrainComponent {
-    /// Clone the live SceneDB-owned data handle for batch access or
-    /// caller-controlled snapshot/exfiltration. The returned handle contains
-    /// no persistence policy.
+    /// Low-level live SceneDB data capability used by the voxel pass. Normal
+    /// producers should mutate through `VoxelSourceWriter` so validation and
+    /// revision checks are preserved; scripts should export via pass snapshots.
+    /// This handle carries no persistence policy.
     pub fn payload_store(&self) -> VoxelPayloadStore {
         Arc::clone(&self.payloads)
     }
