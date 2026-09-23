@@ -34,6 +34,7 @@ timing CSVs for every row are in this directory.
 | Hidden-only reservoir specialization with unchanged proposals | 9.750 | 15.092 | 21.302 | Rejected: no measured gain |
 | Linear-congruential proposal RNG | 9.457 | 14.733 | 20.970 | Rejected: negligible single-run difference |
 | Presampled scratch-initialization guard | 9.532 | 14.934 | 21.178 | Rejected: no measured gain |
+| Four sample streams in GPU lanes | 17.734 | 22.916 | 29.415 | Rejected: substantially slower |
 
 The shared-proposal experiment scored each light once for four stratified
 reservoirs, using 32 proposals total in place of four independent sets of 16.
@@ -58,6 +59,14 @@ benefit. The RNG and scratch variants had no material timing gain, so no broader
 visual claim is made for them. A separate direct-BRDF algebra experiment also
 slowed the gallery in A/B/B/A captures and was removed before this report.
 
+The four-lane prototype ran the four glossy streams in separate lanes of one
+8 × 8 × 4 workgroup, retained all 16 proposals per stream, and reduced their
+lighting into the same output pixel. It compiled and rendered, but sampling
+rose to 17.734 ms in the single native gallery pilot. Frame zero matched the
+control; later stochastic gallery frames differed, as they also do between
+control runs. The decisive performance regression stopped this experiment
+before the moving visual fixture. Its shader and pipeline switch were removed.
+
 ## Research direction
 
 The [RTXDI integration guide](https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/Integration.md)
@@ -67,15 +76,17 @@ reduce boiling in distributed-light scenes. Its [application bridge](https://git
 allows an approximate target but warns that a poor target becomes noisy.
 That is consistent with rejecting the shared-proposal speedup on motion
 evidence. The accessible [Unreal Lumen stochastic direct-light shader](https://github.com/EpicGames/UnrealEngine/blob/release/Engine/Shaders/Private/Lumen/LumenSceneDirectLightingStochastic.usf)
-generates samples with one thread per sample before later shadow work. It is
-a useful scheduling idea, not a directly comparable benchmark: Lumen shades
-surface-cache cards while this fixture shades the native screen.
+generates samples with one thread per sample before later shadow work. Its
+card-based workload is not directly comparable with native-screen HLFS; the
+straightforward lane split above was slower here. This does not measure the
+performance of a separate per-sample dispatch or a compacted glossy-pixel
+queue.
 
-A next architectural experiment should split the four glossy sample streams
-across GPU lanes and fuse their output per pixel, keeping each stream's 16
-proposals, BRDF target and light visibility unchanged. Its first gate is exact
-or bounded-equivalent captured lighting and the same moving fixture; only then
-should full-graph native 1440p and 4K performance be compared. Better GPU
-proposal distributions and local temporal change detection remain separate
-quality investigations. None of the experiments here meet the native 3–4 ms
-HLFS target or clear the moving visual gate.
+The next substantial speed candidate needs a better GPU proposal distribution
+that keeps glossy moving-light support while scoring fewer candidates, or a
+sampling schedule that avoids duplicated surface loads and workgroup barriers.
+Freeze the visual gates before reducing candidate work: an attractive native
+gallery timing alone already hid a motion regression in this experiment. Local
+temporal change detection remains a separate quality investigation. None of
+the experiments here meet the native 3–4 ms HLFS target or clear the moving
+visual gate.
