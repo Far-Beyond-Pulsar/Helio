@@ -831,6 +831,11 @@ fn benchmark_candidate_output_audit() {
         .map(|value| value.parse::<u32>().expect("audit sample count"))
         .unwrap_or(2);
     assert!((1..=4).contains(&samples), "audit samples must be 1..=4");
+    let selected_case = std::env::var("HLFS_RT_AUDIT_CASE").ok();
+    // Presampled output can differ between fresh runs due to atomic alias
+    // ordering. Compare unchanged controls before using it for cross-build QA.
+    let tile_presampling = std::env::var_os("HLFS_RT_AUDIT_PRESAMPLE").is_some();
+    let reactive_history = std::env::var_os("HLFS_RT_AUDIT_REACTIVE").is_some();
     std::fs::create_dir_all(&directory).unwrap();
     pollster::block_on(async {
         for (case, count, mixed, scale, candidates) in [
@@ -841,6 +846,9 @@ fn benchmark_candidate_output_audit() {
             ("packed-id-overflow", 65536, true, 2, 8),
             ("hdr-material-overflow", 1024, false, 2, 8),
         ] {
+            if selected_case.as_deref().is_some_and(|selected| selected != case) {
+                continue;
+            }
             let mut f = Fixture::new_rt(65, 49).await;
             if case == "hdr-material-overflow" {
                 f.material([2.0, 0.5, 1.4, 1.0], [1.0, 0.7, 0.5, 1.0]);
@@ -850,6 +858,8 @@ fn benchmark_candidate_output_audit() {
                 sample_scale: scale,
                 samples_per_pixel: samples,
                 candidates_per_sample: candidates,
+                tile_presampling,
+                reactive_history,
                 ..Default::default()
             });
             let lights = (0..count)
