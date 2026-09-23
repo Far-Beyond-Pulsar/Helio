@@ -28,6 +28,25 @@ Disabling tile presampling reduced the gallery graph median to 21.585 ms and HLF
 
 ![Matched moving-light checkpoints, presampled above and rejected non-presampled below](moving-presample-comparison.png)
 
-The existing half-resolution option is faster, but its gallery capture has visible colored mottling; a still image or pass-only timestamp does not clear the motion gate. The current native temporal and spatial filters alone consume roughly the requested 3–4 ms HLFS budget. Reaching that budget with the full 1,024 moving-light workload requires a different sampling/reuse design, not another small candidate-count or geometry reduction. [NVIDIA RTXDI's noise guidance](https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/NoiseAndBias.md) specifically identifies spatial reservoir resampling after temporal reuse, disocclusion handling, and target-PDF quality as important to reducing blotches and boiling. That is a research direction, not a validated Helio result.
+## Cathedral rerun after the GPU became idle
+
+The release build at `345e0ed0` was recaptured over 100 camera-moving frames, again excluding frames 0–15 from medians. Both cathedral runs used two samples, two candidates, presampled RT, native internal rendering and native TSR output. **HLFS shading used `sample_scale=2`**, so the 1440p output was shaded at 1280×720 and the 4K output at 1920×1080. The 4K run enabled SSR; the 1440p run did not. These are the smaller realistic cathedral lights, not the 1,024 moving-light target.
+
+| Output | Full graph GPU median | HLFS-only GPU median | GPU-equivalent frame rate |
+| --- | ---: | ---: | ---: |
+| 2560×1440 | 12.284 ms | 3.868 ms | about 81/s |
+| 3840×2160 + SSR | 26.834 ms | 8.645 ms | about 37/s |
+
+This differs by less than a few tenths of a millisecond from the earlier idle repeats; removing competing GPU work did not reveal a large hidden speedup. GPU-equivalent rate is `1000 / graph GPU ms`, not measured interactive or display FPS. CSVs, capture configurations, and serialized timing scopes are retained under the `cathedral-1440-` and `cathedral-4k-` prefixes.
+
+Frames 68–99 of the 1440p camera path were captured consecutively. Nine checkpoints were inspected in the contact sheet, and frame 99 was inspected separately at source resolution; the path shows coherent movement through the nave without an obvious whole-object pop in those checkpoints. This inspection does not clear fine temporal noise or the separate moving-light fixture, which remains red. The small WebP is a review clip, not a substitute for an interactive viewer pass.
+
+![Cathedral camera-motion contact sheet](cathedral-motion-contact.png)
+
+![Cathedral movement frames 68 through 99](cathedral-motion-68-99.webp)
+
+![Native-pixel 4K cathedral crop](cathedral-4k-native-crop.png)
+
+For the 1,024-light gallery, the existing half-resolution option is faster, but its capture has visible colored mottling; a still image or pass-only timestamp does not clear the motion gate. At full HLFS shading resolution, the temporal and spatial filters alone consume roughly the requested 3–4 ms HLFS budget. Reaching that budget with the full 1,024 moving-light workload requires a different sampling/reuse design, not another small candidate-count or geometry reduction. [NVIDIA RTXDI's noise guidance](https://github.com/NVIDIA-RTX/RTXDI/blob/main/Doc/NoiseAndBias.md) specifically identifies spatial reservoir resampling after temporal reuse, disocclusion handling, and target-PDF quality as important to reducing blotches and boiling. That is a research direction, not a validated Helio result.
 
 The PR remains draft. The next implementation must compare exact-reference frames, motion sequences, full-graph timestamps, 4K stress, and the separate moving-light/geometry workload before any performance or visual acceptance claim.
