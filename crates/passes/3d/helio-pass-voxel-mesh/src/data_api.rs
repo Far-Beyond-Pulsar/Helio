@@ -6,7 +6,7 @@
 //! and does not provide persistence settings or policy.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
@@ -18,7 +18,7 @@ use crate::{
 /// This duplicate alias keeps the pass independent from helio-component (which
 /// owns editor/UI dependencies); no terrain semantics enter central Helio.
 type VoxelPayloadKey = [u64; 4];
-type VoxelPayloadStore = Arc<RwLock<(u64, HashMap<VoxelPayloadKey, Arc<[u8]>>)>>;
+pub type VoxelPayloadStore = Arc<RwLock<(u64, HashMap<VoxelPayloadKey, Arc<[u8]>>)>>;
 
 /// Producer capability bound to one terrain's live component payload store.
 #[derive(Clone)]
@@ -29,6 +29,68 @@ pub struct VoxelSourceWriter {
 }
 
 impl VoxelSourceWriter {
+    /// Worker-only bounded snapshot selection. Scans the canonical index but
+    /// retains at most `max_centers` center handles and their positive halo.
+    /// This avoids copying an arbitrarily large terrain map on a frame thread.
+    pub(crate) fn select_nearest_with_halo(
+        &self,
+        center: [i64; 3],
+        max_centers: usize,
+    ) -> Result<VoxelSelectedSnapshot, VoxelUpdateError> {
+        let state = self
+            .store
+            .read()
+            .map_err(|_| VoxelUpdateError::StoreLockPoisoned)?;
+        let mut closest = BinaryHeap::<(u128, VoxelChunkKey)>::new();
+        for &raw in state.1.keys() {
+            let key = decode_payload_key(raw)?;
+            let distance = key.x.abs_diff(center[0]) as u128
+                + key.y.abs_diff(center[1]) as u128
+                + key.z.abs_diff(center[2]) as u128;
+            if closest.len() < max_centers {
+                closest.push((distance, key));
+            } else if closest
+                .peek()
+                .is_some_and(|&(furthest, _)| distance < furthest)
+            {
+                closest.pop();
+                closest.push((distance, key));
+            }
+        }
+        let truncated = state.1.len() > closest.len();
+        let mut centers: Vec<_> = closest.into_iter().map(|(_, key)| key).collect();
+        centers.sort_unstable();
+        let mut halo_keys = HashSet::with_capacity(centers.len().saturating_mul(8));
+        for center in &centers {
+            for bits in 0..8 {
+                let Some(x) = center.x.checked_add((bits & 1) as i64) else {
+                    continue;
+                };
+                let Some(y) = center.y.checked_add(((bits >> 1) & 1) as i64) else {
+                    continue;
+                };
+                let Some(z) = center.z.checked_add(((bits >> 2) & 1) as i64) else {
+                    continue;
+                };
+                halo_keys.insert(VoxelChunkKey::new(x, y, z, center.lod));
+            }
+        }
+        let chunks = halo_keys
+            .into_iter()
+            .filter_map(|key| {
+                state
+                    .1
+                    .get(&payload_key(key))
+                    .map(|bytes| (key, Arc::clone(bytes)))
+            })
+            .collect();
+        Ok(VoxelSelectedSnapshot {
+            revision: state.0,
+            centers,
+            chunks,
+            truncated,
+        })
+    }
     pub(crate) fn terrain_id(&self) -> VoxelTerrainId {
         self.terrain
     }
@@ -245,6 +307,13 @@ impl VoxelSourceWriter {
         };
         self.publish_batch(&batch)
     }
+}
+
+pub(crate) struct VoxelSelectedSnapshot {
+    pub revision: u64,
+    pub centers: Vec<VoxelChunkKey>,
+    pub chunks: HashMap<VoxelChunkKey, Arc<[u8]>>,
+    pub truncated: bool,
 }
 
 pub(crate) struct VoxelKeySnapshot {

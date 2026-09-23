@@ -16,6 +16,15 @@ pub enum VoxelChunkCodecError {
     MissingChunk(VoxelChunkKey),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoxelMissingChunkPolicy {
+    /// The source is still generating this neighborhood; retain old output.
+    Defer,
+    /// The published canonical map is complete for this revision; absent
+    /// chunks are known air, including in an unbounded sparse domain.
+    KnownAir,
+}
+
 /// One canonical 8³ chunk. `x` is the fastest-moving coordinate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoxelMaterialChunk {
@@ -86,6 +95,15 @@ impl VoxelMaterialChunk {
 pub fn bake_padded_chunk<'a>(
     center: VoxelChunkKey,
     domain: VoxelDomain,
+    lookup: impl FnMut(VoxelChunkKey) -> Option<&'a [u8]>,
+) -> Result<[u32; VOXEL_PADDED_WORDS], VoxelChunkCodecError> {
+    bake_padded_chunk_with_policy(center, domain, VoxelMissingChunkPolicy::Defer, lookup)
+}
+
+pub fn bake_padded_chunk_with_policy<'a>(
+    center: VoxelChunkKey,
+    domain: VoxelDomain,
+    missing: VoxelMissingChunkPolicy,
     mut lookup: impl FnMut(VoxelChunkKey) -> Option<&'a [u8]>,
 ) -> Result<[u32; VOXEL_PADDED_WORDS], VoxelChunkCodecError> {
     domain
@@ -107,8 +125,11 @@ pub fn bake_padded_chunk<'a>(
         let key = VoxelChunkKey::new(x, y, z, center.lod);
         match domain.validate_key(key) {
             Ok(()) => {
-                let bytes = lookup(key).ok_or(VoxelChunkCodecError::MissingChunk(key))?;
-                neighbors[bits] = Some(VoxelMaterialChunk::decode(bytes)?);
+                if let Some(bytes) = lookup(key) {
+                    neighbors[bits] = Some(VoxelMaterialChunk::decode(bytes)?);
+                } else if missing == VoxelMissingChunkPolicy::Defer {
+                    return Err(VoxelChunkCodecError::MissingChunk(key));
+                }
             }
             Err(VoxelUpdateError::ChunkOutOfDomain(_)) => {}
             Err(error) => return Err(VoxelChunkCodecError::Domain(error)),
