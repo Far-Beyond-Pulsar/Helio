@@ -22,6 +22,20 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
             compilation_options: Default::default(),
             cache: None,
         });
+        let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("production light compaction"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/compact_lights.wgsl").into(),
+            ),
+        });
+        let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("production light compaction"),
+            layout: None,
+            module: &compact_shader,
+            entry_point: Some("compact"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let proposals = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 24,
@@ -101,6 +115,26 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                     contents: bytemuck::cast_slice(&lights),
                     usage: wgpu::BufferUsages::STORAGE,
                 });
+                let compact = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("compact light rows for key selection"),
+                    size: (capacity * 64) as u64,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                let compact_input = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &compact_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: compact.as_entire_binding(),
+                        },
+                    ],
+                });
                 let input = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &pipeline.get_bind_group_layout(0),
@@ -111,11 +145,17 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: lights.as_entire_binding(),
+                            resource: compact.as_entire_binding(),
                         },
                     ],
                 });
                 let mut encoder = device.create_command_encoder(&Default::default());
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&compact_pipeline);
+                    pass.set_bind_group(0, &compact_input, &[]);
+                    pass.dispatch_workgroups((capacity as u32).div_ceil(256), 1, 1);
+                }
                 {
                     let mut pass = encoder.begin_compute_pass(&Default::default());
                     pass.set_pipeline(&pipeline);

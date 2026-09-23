@@ -428,6 +428,11 @@ impl HlfsPass {
     pub fn output_texture(&self) -> &wgpu::Texture {
         &self.targets.output.texture
     }
+    /// Read-only GPU grids for opt-in capture diagnostics. Both buffers have
+    /// COPY_SRC usage; each row begins with its accepted-light count.
+    pub fn diagnostic_light_grids(&self) -> (&wgpu::Buffer, &wgpu::Buffer) {
+        (&self.targets.coarse, &self.targets.grid)
+    }
     /// Enable seven frame-boundary timestamps: coarse, fine, sampling, temporal,
     /// spatial, composite and completion. Resolve after the frame submission completes.
     pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {

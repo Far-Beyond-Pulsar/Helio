@@ -249,6 +249,8 @@ pub fn run_scene(
         }
         let mut frame_times = Vec::new();
         let graph_timings = std::env::var_os("HLFS_GRAPH_TIMINGS").is_some();
+        let grid_diagnostic = std::env::var_os("HLFS_GRID_DIAGNOSTIC").is_some();
+        let mut grid_histogram = String::from("frame,grid,accepted_lights,tile_count\n");
         // The graph's outer timestamp spans compute and graphics. Individual
         // pass markers are not reliable for graphics on the split encoders.
         let mut graph_csv = String::from("gpu_frame,graph_gpu_ms\n");
@@ -431,6 +433,42 @@ pub fn run_scene(
             }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             let after_wait = std::time::Instant::now();
+            if grid_diagnostic && [0, 31, 63, 99].contains(&frame) {
+                let pass = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass");
+                let (coarse, fine) = pass.diagnostic_light_grids();
+                let grids = [
+                    ("coarse", coarse.clone(), internal_size.0.div_ceil(64) * internal_size.1.div_ceil(64)),
+                    ("fine", fine.clone(), internal_size.0.div_ceil(8) * internal_size.1.div_ceil(8)),
+                ];
+                for (name, grid, tiles) in grids {
+                    let row_bytes = grid.size() / u64::from(tiles);
+                    assert_eq!(grid.size() % u64::from(tiles), 0);
+                    let read = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("HLFS grid diagnostic readback"),
+                        size: grid.size(),
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    });
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    encoder.copy_buffer_to_buffer(&grid, 0, &read, 0, grid.size());
+                    queue.submit([encoder.finish()]);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    read.slice(..).map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    rx.recv().unwrap().unwrap();
+                    let bytes = read.slice(..).get_mapped_range().unwrap();
+                    let mut counts = std::collections::BTreeMap::<u32, u32>::new();
+                    for row in bytes.chunks_exact(row_bytes as usize) {
+                        let count = u32::from_le_bytes(row[..4].try_into().unwrap());
+                        *counts.entry(count).or_default() += 1;
+                    }
+                    for (accepted, tile_count) in counts {
+                        grid_histogram.push_str(&format!("{frame},{name},{accepted},{tile_count}\n"));
+                    }
+                    drop(bytes);
+                    read.unmap();
+                }
+            }
             if graph_timings {
                 let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
                 stage_csv.push_str(&format!("{frame},{},{},{},{},{}\n",
@@ -634,6 +672,9 @@ pub fn run_scene(
         if graph_timings {
             std::fs::write(std::path::Path::new(directory).join("graph-frame-timings.csv"), graph_csv).unwrap();
             std::fs::write(std::path::Path::new(directory).join("frame-stage-timings.csv"), stage_csv).unwrap();
+        }
+        if grid_diagnostic {
+            std::fs::write(std::path::Path::new(directory).join("grid-histogram.csv"), grid_histogram).unwrap();
         }
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });
