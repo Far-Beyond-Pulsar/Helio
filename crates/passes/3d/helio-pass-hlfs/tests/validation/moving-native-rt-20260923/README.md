@@ -13,6 +13,44 @@ thresholds, but the sampled transition images have visible color speckle
 against the smooth reference. **Visual acceptance fails.** The numeric test is
 only a screening gate.
 
+The `motion/` directory contains 96 consecutive rendered frames for seed 11
+as animations: [reactive history](motion/reactive-seed11-96frames.gif) and
+[nonreactive history](motion/nonreactive-seed11-96frames.gif). Frames 0–63 keep
+the camera, lights and geometry fixed. From frame 64, the camera and lights
+move and the blocker enters; at frame 80 the blocker leaves and the dominant
+emitter changes. Each animation displays one engine frame for 80 ms so the
+flicker and transition can be inspected. The source captures were 257x145
+tone-mapped PNGs; the GIFs are visual aids, not timing measurements.
+
+With `HLFS_RT_QUALITY_CAPTURE_MOTION=1`, the fixture now saves every Final
+frame and writes `motion-metrics.csv`. It computes the RMS display-RGB change
+between consecutive frames 32–63, normalized to 0–1, and screens at 0.01.
+The unchanged reactive shader scored **0.03668 (FAIL)** on seed 11 despite
+passing the checkpoint mean-error/NRMSE screen. Disabling reactive history
+reduced static flicker to **0.00493 (PASS)** but failed ten checkpoint rows
+after the blocker entered; see the paired quality and motion CSVs in `motion/`.
+Neither setting clears both visual requirements. The flicker number is a
+screen for this static interval, not a substitute for viewing the moving frames.
+
+Reproduce the reactive sequence from the repository root with these PowerShell
+settings and the ignored GPU test. Change the output directory and remove
+`HLFS_RT_QUALITY_REACTIVE` for the nonreactive control. Both runs intentionally
+return a failed visual/quality gate after writing the captures and CSVs.
+
+```powershell
+$env:HLFS_RT_QUALITY_OUTPUT = 'target/validation/moving-native-sequence'
+$env:HLFS_RT_QUALITY_SEED = '11'
+$env:HLFS_RT_QUALITY_SETTING = '1:8'
+$env:HLFS_RT_QUALITY_SAMPLE_SCALE = '1'
+$env:HLFS_RT_QUALITY_PRESAMPLE = '1'
+$env:HLFS_RT_QUALITY_REACTIVE = '1'
+$env:HLFS_RT_QUALITY_CAMERA_MOTION = '1'
+$env:HLFS_RT_QUALITY_DIRECT_ONLY = '1'
+$env:HLFS_RT_QUALITY_SWITCH_KEY = '1'
+$env:HLFS_RT_QUALITY_CAPTURE_MOTION = '1'
+cargo test --release -p helio-pass-hlfs --test gpu_hlfs_rt benchmark_rt_quality_frontier -- --ignored --nocapture
+```
+
 `2560x1440-scale1-spp1-c8-frame064.png` is a separate native 1440p stress
 capture after 120 warmup frames: 1,024 moving lights, 10,000 moving instances,
 and one million instanced triangles from a shared 100-triangle mesh. The flat

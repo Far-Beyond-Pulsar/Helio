@@ -968,6 +968,7 @@ fn benchmark_rt_quality_frontier() {
     assert!(discovery.is_finite() && (0.05..=1.0).contains(&discovery));
     let tile_presampling = std::env::var_os("HLFS_RT_QUALITY_PRESAMPLE").is_some();
     let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
+    let capture_motion = std::env::var_os("HLFS_RT_QUALITY_CAPTURE_MOTION").is_some();
     let glossy_motion = std::env::var_os("HLFS_RT_QUALITY_GLOSSY_MOTION").is_some();
     let camera_motion = glossy_motion
         || std::env::var_os("HLFS_RT_QUALITY_CAMERA_MOTION").is_some();
@@ -1016,6 +1017,8 @@ fn benchmark_rt_quality_frontier() {
         ];
         let mut csv = String::from("seed,samples,candidates,sample_scale,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
         let mut final_failures = 0usize;
+        let mut motion_csv = String::from("seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass\n");
+        let mut motion_failures = 0usize;
         // Fixed regression seeds. Both sets have now been exercised during
         // development; they are not an untouched holdout. Keep thresholds fixed.
         let seeds = if std::env::var_os("HLFS_RT_QUALITY_REVIEW_SEEDS").is_some() {
@@ -1114,6 +1117,9 @@ fn benchmark_rt_quality_frontier() {
                     });
                     f.scene.frame_count = 0;
                     empty_scene(&mut f);
+                    let mut previous_static_display: Option<Vec<u8>> = None;
+                    let mut static_delta_squared = 0.0f64;
+                    let mut static_delta_count = 0u64;
                     for frame in 0..96u32 {
                         update_camera(&mut f, frame);
                         f.lights(lights_at(frame));
@@ -1124,13 +1130,39 @@ fn benchmark_rt_quality_frontier() {
                             empty_scene(&mut f);
                         }
                         f.frame();
+                        let motion_pixels = if capture_motion && mode == HlfsDebugMode::Final {
+                            let pixels = f.read();
+                            let mut image = image::RgbImage::new(f.width, f.height);
+                            for (out, pixel) in image.pixels_mut().zip(&pixels) {
+                                *out = image::Rgb(pixel.map(|v| {
+                                    ((v.max(0.0) / (1.0 + v.max(0.0))).powf(1.0 / 2.2) * 255.0)
+                                        as u8
+                                }));
+                            }
+                            // Frames 32..63 have fixed camera, lights and TLAS.
+                            // Display-space frame changes here are renderer flicker.
+                            if (32..64).contains(&frame) {
+                                if let Some(previous) = &previous_static_display {
+                                    for (&a, &b) in image.as_raw().iter().zip(previous) {
+                                        let delta = (f64::from(a) - f64::from(b)) / 255.0;
+                                        static_delta_squared += delta * delta;
+                                        static_delta_count += 1;
+                                    }
+                                }
+                                previous_static_display = Some(image.as_raw().clone());
+                            }
+                            image.save(std::path::Path::new(&directory).join(format!(
+                                "motion-seed{seed}-spp{samples}-c{candidates}-f{frame:03}.png"
+                            ))).unwrap();
+                            Some(pixels)
+                        } else { None };
                         let Some(reference_index) =
                             checkpoints.iter().position(|&value| value == frame)
                         else {
                             continue;
                         };
                         let reference = &references[reference_index];
-                        let pixels = f.read();
+                        let pixels = motion_pixels.unwrap_or_else(|| f.read());
                         assert!(pixels.iter().flatten().all(|v| v.is_finite()));
                         for mask in ["all", "changed", "glossy"] {
                             if mask == "glossy" && !glossy_motion {
@@ -1187,11 +1219,28 @@ fn benchmark_rt_quality_frontier() {
                             }
                         }
                     }
+                    if capture_motion && mode == HlfsDebugMode::Final {
+                        assert!(static_delta_count > 0);
+                        let rms = (static_delta_squared / static_delta_count as f64).sqrt();
+                        // Below roughly three display levels RMS on this static
+                        // receiver; visual inspection is still required.
+                        let pass = rms < 0.01;
+                        motion_csv.push_str(&format!(
+                            "{seed},{samples},{candidates},{reactive_history},{rms},{pass}\n"
+                        ));
+                        if !pass {
+                            motion_failures += 1;
+                            eprintln!("MOTION_FLICKER_FAIL seed={seed} spp={samples} candidates={candidates} rms={rms}");
+                        }
+                    }
                 }
             }
             eprintln!("RT_QUALITY completed seed={seed}");
         }
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
+        if capture_motion {
+            std::fs::write(std::path::Path::new(&directory).join("motion-metrics.csv"), motion_csv).unwrap();
+        }
         // Write all failures before returning a failing gate, never a misleading
         // successful test exit for the new review-acceptance fixture.
         if camera_motion || selected_setting.is_some() {
@@ -1200,6 +1249,7 @@ fn benchmark_rt_quality_frontier() {
                 "final-output quality gate failed; see quality.csv"
             );
         }
+        assert_eq!(motion_failures, 0, "moving visual flicker gate failed; see motion-metrics.csv and captured frames");
     });
 }
 
