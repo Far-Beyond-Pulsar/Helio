@@ -948,6 +948,51 @@ fn benchmark_candidate_output_audit() {
     });
 }
 
+// Remove the reference's legitimate shadow edges before measuring residual
+// pixel-scale variation in the display-space result.
+fn display_residual_highpass_rms(
+    sampled: &[[f32; 3]],
+    reference: &[[f32; 3]],
+    width: u32,
+    height: u32,
+) -> f64 {
+    assert_eq!(sampled.len(), (width * height) as usize);
+    assert_eq!(sampled.len(), reference.len());
+    let encode = |v: f32| ((v.max(0.0) / (1.0 + v.max(0.0))).powf(1.0 / 2.2) * 255.0) as u8;
+    let residual: Vec<[f32; 3]> = sampled
+        .iter()
+        .zip(reference)
+        .map(|(a, b)| {
+            std::array::from_fn(|channel| {
+                (f32::from(encode(a[channel])) - f32::from(encode(b[channel]))) / 255.0
+            })
+        })
+        .collect();
+    let (width, height) = (width as i32, height as i32);
+    let mut squared = 0.0f64;
+    for y in 0..height {
+        for x in 0..width {
+            let mut local = [0.0f32; 3];
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let qx = (x + dx).clamp(0, width - 1);
+                    let qy = (y + dy).clamp(0, height - 1);
+                    let neighbor = residual[(qy * width + qx) as usize];
+                    for channel in 0..3 {
+                        local[channel] += neighbor[channel];
+                    }
+                }
+            }
+            let center = residual[(y * width + x) as usize];
+            for channel in 0..3 {
+                let high = f64::from(center[channel] - local[channel] / 9.0);
+                squared += high * high;
+            }
+        }
+    }
+    (squared / (width as f64 * height as f64 * 3.0)).sqrt()
+}
+
 // Development frontier only: a small receiver/occluder scene, not the frozen
 // million-triangle primary tier. Failed quality rows remain in the output.
 #[test]
@@ -1019,6 +1064,8 @@ fn benchmark_rt_quality_frontier() {
         let mut final_failures = 0usize;
         let mut motion_csv = String::from("seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass\n");
         let mut motion_failures = 0usize;
+        let mut grain_csv = String::from("seed,samples,candidates,frame,display_residual_highpass_rms,grain_pass\n");
+        let mut grain_failures = 0usize;
         // Fixed regression seeds. Both sets have now been exercised during
         // development; they are not an untouched holdout. Keep thresholds fixed.
         let seeds = if std::env::var_os("HLFS_RT_QUALITY_REVIEW_SEEDS").is_some() {
@@ -1164,6 +1211,23 @@ fn benchmark_rt_quality_frontier() {
                         let reference = &references[reference_index];
                         let pixels = motion_pixels.unwrap_or_else(|| f.read());
                         assert!(pixels.iter().flatten().all(|v| v.is_finite()));
+                        if capture_motion && mode == HlfsDebugMode::Final
+                            && [63, 64, 65, 71, 79, 80, 81, 95].contains(&frame)
+                        {
+                            let rms = display_residual_highpass_rms(
+                                &pixels, reference, f.width, f.height,
+                            );
+                            // A smooth exact receiver should not gain visible
+                            // color texture from the stochastic lighting pass.
+                            let pass = rms < 0.005;
+                            grain_csv.push_str(&format!(
+                                "{seed},{samples},{candidates},{frame},{rms},{pass}\n"
+                            ));
+                            if !pass {
+                                grain_failures += 1;
+                                eprintln!("SPATIAL_GRAIN_FAIL seed={seed} spp={samples} candidates={candidates} frame={frame} rms={rms}");
+                            }
+                        }
                         for mask in ["all", "changed", "glossy"] {
                             if mask == "glossy" && !glossy_motion {
                                 continue;
@@ -1240,6 +1304,7 @@ fn benchmark_rt_quality_frontier() {
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
         if capture_motion {
             std::fs::write(std::path::Path::new(&directory).join("motion-metrics.csv"), motion_csv).unwrap();
+            std::fs::write(std::path::Path::new(&directory).join("grain-metrics.csv"), grain_csv).unwrap();
         }
         // Write all failures before returning a failing gate, never a misleading
         // successful test exit for the new review-acceptance fixture.
@@ -1250,6 +1315,7 @@ fn benchmark_rt_quality_frontier() {
             );
         }
         assert_eq!(motion_failures, 0, "moving visual flicker gate failed; see motion-metrics.csv and captured frames");
+        assert_eq!(grain_failures, 0, "spatial grain gate failed; see grain-metrics.csv and captured frames");
     });
 }
 

@@ -34,6 +34,21 @@ screen for this static interval, not a substitute for viewing the moving frames.
 The additional exact/sampled pairs at frames 71 and 79 show that grain remains
 throughout the blocked interval, beyond its first frame.
 
+The optional capture also writes `grain-metrics.csv`: it converts the sampled
+and exact images to display RGB, subtracts them, removes each residual pixel's
+3x3 neighborhood mean, and reports the remaining RMS variation. The 0.005
+screen is specific to this smooth-receiver fixture. On seed 11 the current
+reactive path measured **0.00869** at steady frame 63, **0.00781** at blocked
+frame 71, and **0.00807** at blocked frame 79 (all FAIL); the paired CSVs are
+in `motion/`. Nonreactive history measured **0.00391** at frame 63 (PASS) but
+still ghosts during the blocker change. This additional screen catches spatial
+speckle that the mean-error and static flicker screens can miss. The frames
+remain the final visual authority.
+Across the four already-used development seeds, the current reactive path
+failed the spatial screen on all 32 saved frames and the static flicker screen
+on all four sequences; see `reactive-development-*.csv` in `motion/`. These are
+regression seeds, not untouched holdouts.
+
 A temporary diagnostic made reactive history active only on the known blocker
 event frames 64 and 80. It passed the static flicker and checkpoint screens on
 the four fixed development seeds (11, 29, 47, 71); the measurements are in
