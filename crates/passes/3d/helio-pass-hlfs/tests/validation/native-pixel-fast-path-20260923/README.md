@@ -41,3 +41,9 @@ The 96-frame native-shading seed-11 moving-camera/light/blocker fixture remains 
 One same-binary moving-camera gallery sweep at native 1440p isolated the sampling cost. With two, four, eight, and sixteen candidates, sampling medians were 9.339, 9.768, 10.415, and 11.324 ms. Removing shadow policy at two and eight candidates measured 8.825 and 9.961 ms. Thus the large residual sampling cost is not explained by candidate count or shadow traversal alone. These are diagnostic single runs; they do not justify reducing the accepted candidate or shadow settings. Raw CSVs and capture configurations are included.
 
 The current source passed 17 release Vulkan hardware RT tests and 14 release screen-space GPU tests. The native gallery improvement repeats at full-graph scope. The retained change does **not** meet the 3–4 ms native-1440p HLFS goal, does not fix moving-light flicker, and does not make PR #248 ready for review.
+
+## Rejected exact-coordinate follow-ups
+
+I tried keeping the temporal filter's halo positions in view space to avoid transforming every neighbor to world space. The native 1440p gallery A/B/B/A full-graph medians were control 21.206, candidate 21.251, candidate 21.251, control 21.207 ms. Temporal-stage medians changed by only about 0.02 ms. No whole-graph win appeared, so the change was removed.
+
+I also tested an explicit native branch in `sample_position_from_uv` that skips division by one. Gallery full-graph medians were control 21.351, candidate 21.260, candidate 21.255, control 21.371 ms, but the large cathedral was control 14.403, candidate 14.379, candidate 14.452, control 14.428 ms, with candidate HLFS medians about 0.25 ms higher. That is not a convincing cross-scene gain; this branch was removed too. The raw GPU CSVs and configurations for both experiments are in this folder. Neither rejected shader change is in the PR.
