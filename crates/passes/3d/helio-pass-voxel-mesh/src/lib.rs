@@ -14,6 +14,9 @@ pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
 pub use bounded_inbox::{
     BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain,
     VoxelInboxDrainBudget, VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits,
+    VoxelPublicationFailure, VoxelPublicationFailureReason, VoxelPublicationOutcome,
+    VoxelPublicationStartError, VoxelPublicationStatus, VoxelPublicationWorker,
+    VoxelPublicationTicket, VoxelPublicationTicketState,
 };
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload, VoxelChunkUpdate,
