@@ -38,7 +38,7 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
         });
         let proposals = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 24,
+            size: resources::PROPOSAL_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -172,8 +172,12 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 rx.recv().unwrap().unwrap();
                 let bytes = read.slice(..).get_mapped_range().unwrap();
-                let key = bytemuck::cast_slice::<u8, u32>(&bytes)[5];
+                let words = bytemuck::cast_slice::<u8, u32>(&bytes);
+                let key = words[5];
                 assert_eq!(key,expected,"count={count} capacity={capacity} sun={sun} dominant={dominant} invalid_sun={invalid_sun} flags={flags}");
+                let active_count = count - usize::from(sun && invalid_sun);
+                assert_eq!(f32::from_bits(words[1]), active_count as f32,
+                    "active emitter count must ignore sparse allocation and invalid lights");
                 drop(bytes);
                 read.unmap();
             }

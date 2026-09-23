@@ -57,8 +57,14 @@ fn guided(tile: u32, count: u32, id: u32) -> bool {
     return lo<count && previous_visible[tile].indices[lo]==id;
 }
 
-// Each lane's coarse reservoir represents a disjoint stratum of lights.
-// A power-weighted alias table cancels the within-stratum normalization.
+fn sampled_proposal(id: u32, inverse_probability: f32) -> LightProposal {
+    return LightProposal(id,inverse_probability,0u,0.0,0.0,INVALID_LIGHT,
+        array<f32,4>(0.0,0.0,0.0,0.0));
+}
+
+// For at most 1,024 allocated lights, each coarse lane stores the exact
+// weights of its four-light stratum. The alias table chooses a stratum, then
+// a conditional draw chooses a light. Larger sets use the lane reservoir.
 fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bool,
     candidate: u32, candidate_count: u32, rng: ptr<function,u32>, use_tile: bool) -> LightProposal {
     // Score a compact local population exhaustively before spending the fixed
@@ -67,8 +73,8 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
     if USE_TILE_PRESAMPLING && population<=32u {
         var id=candidate;
         if !overflow { id=(grid[tile].indices[candidate/2u]>>(16u*(candidate&1u)))&65535u; }
-        if id==tile_proposals[0].key_light { return LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,INVALID_LIGHT); }
-        return LightProposal(id,f32(population),0u,0.0,0.0,INVALID_LIGHT);
+        if id==tile_proposals[0].key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
+        return sampled_proposal(id,f32(population));
     }
     // Narrow glossy lobes bypass the shared reservoir pool: independent
     // per-pixel discovery prevents tile-wide errors when a bright light moves.
@@ -81,21 +87,41 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
         let uniform_pdf=uniform_fraction/f32(globals.light_count);
         if roll<uniform_fraction {
             let id=min(u32(roll/uniform_fraction*f32(globals.light_count)),globals.light_count-1u);
-            if id==tile_proposals[coarse*256u].key_light { return LightProposal(INVALID_LIGHT,0.0,0u,0.0,0.0,INVALID_LIGHT); }
+            if id==tile_proposals[coarse*256u].key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
             let total=tile_proposals[coarse*256u].total_weight;
-            let center=min((pixel/COARSE_TILE_SIZE)*COARSE_TILE_SIZE+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
-            let center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0));
-            let pdf=(1.0-uniform_fraction)*proposal_weight(lights[id],center_position)/max(total,1e-20)+uniform_pdf;
-            return LightProposal(id,1.0/pdf,0u,0.0,0.0,INVALID_LIGHT);
+            var weight=0.0;
+            if globals.light_count<=1024u {
+                weight=tile_proposals[coarse*256u+id%256u].weights[id/256u];
+            } else {
+                let center=min((pixel/COARSE_TILE_SIZE)*COARSE_TILE_SIZE+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
+                let center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0));
+                weight=proposal_weight(lights[id],center_position);
+            }
+            let pdf=(1.0-uniform_fraction)*weight/max(total,1e-20)+uniform_pdf;
+            return sampled_proposal(id,1.0/pdf);
         }
         let scaled=(roll-uniform_fraction)/(1.0-uniform_fraction)*256.0;
         let slot=min(u32(scaled),255u);
         let entry=tile_proposals[coarse*256u+slot];
         let index=select(slot,entry.alias_index,fract(scaled)>=entry.alias_probability);
         let proposal=tile_proposals[coarse*256u+index];
+        if globals.light_count<=1024u {
+            let weights=proposal.weights;
+            let group_weight=weights[0]+weights[1]+weights[2]+weights[3];
+            if group_weight<=0.0 { return sampled_proposal(INVALID_LIGHT,0.0); }
+            let roll_in_group=random(rng)*group_weight;
+            var member=0u;
+            if roll_in_group>=weights[0] { member=1u; }
+            if roll_in_group>=weights[0]+weights[1] { member=2u; }
+            if roll_in_group>=weights[0]+weights[1]+weights[2] { member=3u; }
+            let id=index+256u*member;
+            if id>=globals.light_count || id==proposal.key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
+            let pdf=(1.0-uniform_fraction)*weights[member]/max(proposal.total_weight,1e-20)+uniform_pdf;
+            return sampled_proposal(id,1.0/pdf);
+        }
         if proposal.id==INVALID_LIGHT { return proposal; }
         let pdf=(1.0-uniform_fraction)/proposal.inverse_probability+uniform_pdf;
-        return LightProposal(proposal.id,1.0/pdf,0u,0.0,0.0,INVALID_LIGHT);
+        return sampled_proposal(proposal.id,1.0/pdf);
     }
     let pick=min(u32((f32(candidate)+random(rng))*(f32(population)/f32(candidate_count))),population-1u);
     var id=pick;
@@ -103,7 +129,7 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
     if USE_TILE_PRESAMPLING && globals.light_count<=65535u {
         if id==tile_proposals[0].key_light { id=INVALID_LIGHT; }
     }
-    return LightProposal(id,f32(population),0u,0.0,0.0,INVALID_LIGHT);
+    return sampled_proposal(id,f32(population));
 }
 
 @compute @workgroup_size(8,8)
@@ -168,7 +194,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                 var guide_count=0u;
                 if globals.history_valid!=0u && !USE_TILE_PRESAMPLING { guide_count=min(previous_visible[guide_tile].count,VISIBLE_CAPACITY); }
                 let hidden_fraction=select(0.5,globals.discovery_fraction,valid_history);
-                let surface_candidates=select(globals.candidate_count,max(globals.candidate_count,16u),USE_TILE_PRESAMPLING && s.roughness<0.2);
+                let surface_candidates=select(globals.candidate_count,max(globals.candidate_count,8u),USE_TILE_PRESAMPLING && s.roughness<0.2);
                 let candidate_count=select(select(min(surface_candidates*2u,16u),surface_candidates,valid_history),population,USE_TILE_PRESAMPLING && population<=32u);
                 var rng=hash_u32(pixel.x+pixel.y*globals.screen_size.x+globals.frame*0x9e3779b9u);
                 var guide_energy=0.0;
@@ -221,7 +247,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     // through the reservoir scan below when this scan is skipped.
                     if grid[tile].has_directional!=0u || guided_directional_weight>0.0 {
                         for(var candidate=0u;candidate<candidate_count;candidate++) {
-                            let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&rng,s.roughness>=0.2);
+                            let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&rng,true);
                             let id=proposal.id;
                             if id==INVALID_LIGHT { continue; }
                             let inverse_proposal=proposal.inverse_probability/f32(candidate_count);
@@ -248,7 +274,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
                     }
                     var replay=candidate_seed;
                     for(var candidate=0u;candidate<candidate_count;candidate++) {
-                        let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&replay,s.roughness>=0.2);
+                        let proposal=discovery_proposal(pixel,tile,population,overflow,candidate,candidate_count,&replay,true);
                         let id=proposal.id;
                         if id==INVALID_LIGHT { continue; }
                         let inverse_proposal=proposal.inverse_probability/f32(candidate_count);

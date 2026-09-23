@@ -1,0 +1,111 @@
+warning: unused variable: `writer`
+   --> crates\helio-core\src\registry.rs:304:9
+    |
+304 |         writer: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_writer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reader`
+   --> crates\helio-core\src\registry.rs:332:9
+    |
+332 |         reader: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `target`
+   --> crates\helio-core\src\traits.rs:482:9
+    |
+482 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `depth`
+   --> crates\helio-core\src\traits.rs:483:9
+    |
+483 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\helio-core\src\traits.rs:484:9
+    |
+484 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
+warning: multiple fields are never read
+   --> crates\passes\3d\helio-pass-sky\src\lib.rs:272:5
+    |
+268 | pub struct SkyPass {
+    |            ------- fields in this struct
+...
+272 |     sim_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^
+273 |     render_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^
+...
+276 |     sampler: wgpu::Sampler,
+    |     ^^^^^^^
+277 |     volumes: [wgpu::Texture; 2],
+    |     ^^^^^^^
+...
+282 |     dummy_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+...
+289 |     raymarch_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+290 |     reproject_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^^
+291 |     upsample_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+292 |     raymarch_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+293 |     reproject_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+294 |     upsample_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+295 |     linear_sampler: wgpu::Sampler,
+296 |     nearest_sampler: wgpu::Sampler,
+    |     ^^^^^^^^^^^^^^^
+...
+328 |     sky_lut_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+...
+337 |     sky_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-sky` (lib) generated 1 warning
+warning: field `last_template_keys` is never read
+  --> crates\passes\3d\helio-pass-gbuffer\src\lib.rs:88:5
+   |
+77 | pub struct GBufferPass {
+   |            ----------- field in this struct
+...
+88 |     last_template_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-gbuffer` (lib) generated 1 warning
+warning: field `last_shared_keys` is never read
+  --> crates\passes\3d\helio-pass-forward-lit\src\lib.rs:53:5
+   |
+43 | pub struct ForwardLitPass {
+   |            -------------- field in this struct
+...
+53 |     last_shared_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-forward-lit` (lib) generated 1 warning
+   Compiling helio-pass-hlfs v0.1.0 (C:\Users\thiag\.codex\worktrees\c416\Helio\crates\passes\3d\helio-pass-hlfs)
+    Finished `release` profile [optimized] target(s) in 5.35s
+     Running unittests src\lib.rs (target\release\deps\helio_pass_hlfs-473939d1d182a78b.exe)
+
+running 3 tests
+test tests::quality_and_reference_settings_retain_screen_space_mode ... ok
+test tests::all_wgsl_stages_validate ... ok
+test key_selection_tests::key_selection_depends_on_active_lights_not_sparse_allocation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s

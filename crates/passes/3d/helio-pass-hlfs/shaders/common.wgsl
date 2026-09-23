@@ -196,7 +196,16 @@ fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
 }
 
-struct LightProposal { id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32, total_weight: f32, key_light: u32, }
+struct LightProposal {
+    id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32,
+    total_weight: f32, key_light: u32,
+    // The final array element is a control record. There, id and alias_index
+    // are the light-set stamp and inverse_probability stores active light count.
+    // Exact weights for the four IDs in this 256-wide stratum when the light
+    // population is at most 1,024. The alias table selects a stratum, then
+    // sampling chooses one of its IDs with its actual conditional probability.
+    weights: array<f32,4>,
+}
 fn proposal_weight(light: GpuLight, center: vec3<f32>) -> f32 {
     let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
     if power<=0.0 { return 0.0; }
