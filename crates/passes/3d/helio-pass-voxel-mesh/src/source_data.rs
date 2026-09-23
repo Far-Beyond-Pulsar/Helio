@@ -9,10 +9,15 @@ use std::collections::HashSet;
 
 /// Current version of the canonical raw chunk payload schema.
 pub const VOXEL_CHUNK_SCHEMA_VERSION: u16 = 1;
-/// Stable encoding tag for a producer-defined packed raw voxel byte stream.
+/// Stable encoding tag for 8 x 8 x 8 material samples in X-major order.
+/// Zero is air; nonzero bytes are one-based indices into the owning
+/// component's SceneDB material-ID palette. A short payload has an implicit
+/// all-air tail, so scripts can send compact mostly-empty chunks.
 pub const VOXEL_CHUNK_ENCODING_RAW: u16 = 1;
-/// Defensive per-update validation ceiling (16 MiB); policy may impose a lower limit.
-pub const MAX_VOXEL_CHUNK_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const VOXEL_CHUNK_EDGE: usize = 8;
+pub const VOXEL_CHUNK_SAMPLES: usize = VOXEL_CHUNK_EDGE * VOXEL_CHUNK_EDGE * VOXEL_CHUNK_EDGE;
+/// One byte per sample. Larger producer tiles must be split on a worker.
+pub const MAX_VOXEL_CHUNK_PAYLOAD_BYTES: usize = VOXEL_CHUNK_SAMPLES;
 /// Upper bound on update descriptors in one validated batch.
 pub const MAX_VOXEL_BATCH_UPDATES: usize = 65_536;
 /// Default aggregate payload ceiling for one producer batch (256 MiB).
@@ -85,8 +90,10 @@ impl VoxelDomain {
     }
 }
 
-/// Opaque, borrowed payload view. Bytes are carried by the producer/service;
-/// this type makes no copy and must not be retained as renderer state.
+/// Borrowed material chunk payload. Samples use
+/// `linear = z * 64 + y * 8 + x`; zero is air, 1..=255 index the
+/// component's existing SceneDB material-ID palette. Missing tail samples are
+/// air. This type makes no copy and must not be retained as renderer state.
 #[derive(Clone, Copy, Debug)]
 pub struct VoxelChunkPayload<'a> {
     pub encoding: u16,
@@ -380,5 +387,27 @@ mod tests {
             b.validate(4),
             Err(VoxelUpdateError::NonSequentialRevision { .. })
         ));
+    }
+
+    #[test]
+    fn canonical_raw_chunk_rejects_more_than_eight_cubed_samples() {
+        let too_large = vec![1u8; VOXEL_CHUNK_SAMPLES + 1];
+        let ops = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
+            key: VoxelChunkKey::new(0, 0, 0, 0),
+            payload: VoxelChunkPayload {
+                encoding: VOXEL_CHUNK_ENCODING_RAW,
+                schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
+                bytes: &too_large,
+            },
+        })];
+        let mut b = batch(&ops);
+        b.revision.expected = 0;
+        b.revision.publish = 1;
+        assert_eq!(
+            b.validate(0),
+            Err(VoxelUpdateError::InvalidPayloadLength(
+                VOXEL_CHUNK_SAMPLES + 1
+            ))
+        );
     }
 }
