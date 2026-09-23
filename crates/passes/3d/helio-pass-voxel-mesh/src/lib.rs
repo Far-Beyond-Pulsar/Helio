@@ -10,6 +10,7 @@ mod data_api;
 mod edits;
 mod marching_cubes;
 mod residency;
+mod scene_feed;
 mod source_data;
 mod terrain;
 
@@ -21,15 +22,16 @@ pub use bounded_inbox::{
     VoxelPublicationWorker,
 };
 pub use chunk_codec::{
-    bake_padded_chunk, VoxelChunkCodecError, VoxelMaterialChunk, VOXEL_PADDED_EDGE,
-    VOXEL_PADDED_WORDS,
+    bake_padded_chunk, bake_padded_chunk_with_policy, VoxelChunkCodecError, VoxelMaterialChunk,
+    VoxelMissingChunkPolicy, VOXEL_PADDED_EDGE, VOXEL_PADDED_WORDS,
 };
-pub use data_api::{VoxelBatchReceipt, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use data_api::{VoxelBatchReceipt, VoxelPayloadStore, VoxelSourceWriter, VoxelTerrainSnapshot};
 pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use residency::{
     VoxelEntryId, VoxelFrameBudget, VoxelFrameWork, VoxelPreparedBrick, VoxelPromotion,
     VoxelResidency, VoxelResidencyError, VoxelUpload,
 };
+pub use scene_feed::{VoxelSceneEntry, VoxelSceneFeedStatus};
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload,
     VoxelChunkUpdate, VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
@@ -220,6 +222,7 @@ pub struct VoxelMeshPass {
     promotion_slots: Vec<u32>,
     retired_slots: Vec<u32>,
     residency: VoxelResidency,
+    scene_feed: scene_feed::VoxelSceneFeed,
     residency_metrics: VoxelResidencyFrameMetrics,
     active_bricks: ActiveBrickRange,
 
@@ -229,6 +232,51 @@ pub struct VoxelMeshPass {
 }
 
 impl VoxelMeshPass {
+    /// Reconcile live SceneDB voxel rows without copying payload bytes or
+    /// waiting for generation. Call before the frame's render/idle decision.
+    pub fn reconcile_scene_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = VoxelSceneEntry>,
+        camera: [f64; 3],
+    ) -> bool {
+        let (feed, residency) = (&mut self.scene_feed, &self.residency);
+        let removed = feed.reconcile(
+            entries,
+            camera,
+            |id, generation, revision| residency.queued_tag(id) == Some((generation, revision)),
+            |id| residency.needs_rebuild(id),
+        );
+        let mut changed = !removed.is_empty();
+        for id in removed {
+            self.remove_entry(id);
+        }
+        for result in self.scene_feed.drain_ready() {
+            match result.bricks {
+                Ok(bricks) => match self.queue_prepared_entry(
+                    result.id,
+                    result.tag.generation,
+                    result.tag.revision,
+                    bricks,
+                ) {
+                    Ok(()) => changed = true,
+                    Err(error) => self
+                        .scene_feed
+                        .record_residency_error(result.id, format!("voxel residency: {error:?}")),
+                },
+                Err(_) => {}
+            }
+        }
+        changed
+            || self.scene_feed_status().in_flight_entries > 0
+            || self.residency.staging_bricks() > 0
+            || !self.retired_slots.is_empty()
+    }
+
+    pub fn scene_feed_status(&self) -> VoxelSceneFeedStatus {
+        self.scene_feed.status(|id, generation, revision| {
+            self.residency.queued_tag(id) == Some((generation, revision))
+        })
+    }
     /// Queue one complete CPU-prepared entry result. The result stays hidden
     /// until all bricks fit through budgeted frames; capacity failure retains
     /// the previous complete output. Preparation belongs on a worker thread.
@@ -737,6 +785,7 @@ impl VoxelMeshPass {
             promotion_slots: Vec::new(),
             retired_slots: Vec::new(),
             residency: VoxelResidency::new(VOXEL_MESH_MAX_BRICKS as usize),
+            scene_feed: scene_feed::VoxelSceneFeed::new(),
             residency_metrics: VoxelResidencyFrameMetrics::default(),
             active_bricks: ActiveBrickRange::new(VOXEL_MESH_MAX_BRICKS),
             normal_buf,
@@ -911,9 +960,9 @@ impl RenderPass for VoxelMeshPass {
                 mode: brick.mode,
                 _pad: 0,
                 origin_size: [
-                    brick.origin[0],
-                    brick.origin[1],
-                    brick.origin[2],
+                    brick.origin[0] as f32,
+                    brick.origin[1] as f32,
+                    brick.origin[2] as f32,
                     brick.voxel_size,
                 ],
             });

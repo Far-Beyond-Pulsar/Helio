@@ -15,7 +15,7 @@ pub struct VoxelEntryId {
 pub struct VoxelPreparedBrick {
     pub key: VoxelChunkKey,
     pub words: [u32; VOXEL_PADDED_WORDS],
-    pub origin: [f32; 3],
+    pub origin: [f64; 3],
     pub voxel_size: f32,
     pub mode: u32,
     /// One-based local slots resolve to these SceneDB material record IDs.
@@ -142,6 +142,9 @@ impl VoxelResidency {
     }
     pub fn active_tag(&self, id: VoxelEntryId) -> Option<(u64, u64)> {
         self.entries.get(&id).and_then(|entry| entry.active_tag)
+    }
+    pub fn queued_tag(&self, id: VoxelEntryId) -> Option<(u64, u64)> {
+        self.entries.get(&id).and_then(|entry| entry.desired_tag)
     }
 
     /// Queue a complete prepared result. All slots are reserved up front so
