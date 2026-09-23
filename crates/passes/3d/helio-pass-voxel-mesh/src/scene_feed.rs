@@ -11,9 +11,11 @@ use std::{
 };
 
 use crate::{
-    bake_padded_chunk_with_policy, VoxelChunkKey, VoxelDomain, VoxelEntryId, VoxelMaterialChunk,
-    VoxelMissingChunkPolicy, VoxelPayloadStore, VoxelPreparedBrick, VoxelSourceId,
-    VoxelSourceWriter, VoxelTerrainId, VOXEL_MESH_MAX_BRICKS, VOXEL_MODE_CUBES, VOXEL_MODE_SURFACE,
+    bake_padded_chunk_with_policy, VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey,
+    VoxelChunkOp, VoxelChunkPayload, VoxelChunkUpdate, VoxelDomain, VoxelEntryId,
+    VoxelMaterialChunk, VoxelMissingChunkPolicy, VoxelPayloadStore, VoxelPreparedBrick,
+    VoxelSourceId, VoxelSourceWriter, VoxelTerrainId, VOXEL_CHUNK_ENCODING_RAW,
+    VOXEL_CHUNK_SCHEMA_VERSION, VOXEL_MESH_MAX_BRICKS, VOXEL_MODE_CUBES, VOXEL_MODE_SURFACE,
 };
 
 /// A short-lived description collected from one live SceneDB component row.
@@ -28,6 +30,15 @@ pub struct VoxelSceneEntry {
     pub voxel_size: f64,
     pub material_ids: Vec<u32>,
     pub smooth_surface: bool,
+    /// A deserialized object has no runtime payloads; the CPU worker fills
+    /// its authored dimensions once before preparing GPU output.
+    pub initial_cube: Option<VoxelCubeInit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoxelCubeInit {
+    pub dimensions: [u32; 3],
+    pub material_slot: u8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -305,6 +316,7 @@ fn hash_config(entry: &VoxelSceneEntry) -> u64 {
     entry.origin.map(f64::to_bits).hash(&mut hash);
     entry.material_ids.hash(&mut hash);
     entry.smooth_surface.hash(&mut hash);
+    entry.initial_cube.hash(&mut hash);
     match entry.domain {
         VoxelDomain::Unbounded { max_lod } => {
             1u8.hash(&mut hash);
@@ -365,11 +377,23 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
         if entry.material_ids.len() > 255 {
             return Err("voxel material palette exceeds 255 IDs".into());
         }
+        let init_store = entry.store.clone();
         let writer = VoxelSourceWriter::new(
             VoxelTerrainId(u128::from(id.entity_bits)),
             VoxelSourceId(0),
             entry.store,
         );
+        if let Some(init) = entry.initial_cube {
+            let state = init_store
+                .read()
+                .map_err(|_| "voxel store lock poisoned".to_string())?;
+            let uninitialized = state.0 == 0 && state.1.is_empty();
+            drop(state);
+            if uninitialized {
+                publish_initial_cube(&writer, id, entry.domain, init, &entry.material_ids)?;
+                return Err("initial cube published; waiting for its canonical revision".into());
+            }
+        }
         let selected = writer
             .select_nearest_with_halo(tag.center, VOXEL_MESH_MAX_BRICKS as usize)
             .map_err(|error| format!("voxel snapshot selection failed: {error:?}"))?;
@@ -438,6 +462,71 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
     }
 }
 
+fn publish_initial_cube(
+    writer: &VoxelSourceWriter,
+    id: VoxelEntryId,
+    domain: VoxelDomain,
+    init: VoxelCubeInit,
+    material_ids: &[u32],
+) -> Result<(), String> {
+    if init.dimensions.iter().any(|&size| size == 0 || size > 256)
+        || init.material_slot == 0
+        || usize::from(init.material_slot) > material_ids.len()
+    {
+        return Err("initial cube dimensions or material slot are invalid".into());
+    }
+    let mut chunks = Vec::new();
+    for z in 0..init.dimensions[2].div_ceil(8) {
+        for y in 0..init.dimensions[1].div_ceil(8) {
+            for x in 0..init.dimensions[0].div_ceil(8) {
+                let mut samples = [0u8; 512];
+                for lz in 0..8 {
+                    for ly in 0..8 {
+                        for lx in 0..8 {
+                            if x * 8 + lx < init.dimensions[0]
+                                && y * 8 + ly < init.dimensions[1]
+                                && z * 8 + lz < init.dimensions[2]
+                            {
+                                samples[(lz * 64 + ly * 8 + lx) as usize] = init.material_slot;
+                            }
+                        }
+                    }
+                }
+                chunks.push((
+                    VoxelChunkKey::new(i64::from(x), i64::from(y), i64::from(z), 0),
+                    samples,
+                ));
+            }
+        }
+    }
+    let ops: Vec<_> = chunks
+        .iter()
+        .map(|(key, samples)| {
+            VoxelChunkOp::Upsert(VoxelChunkUpdate {
+                key: *key,
+                payload: VoxelChunkPayload {
+                    encoding: VOXEL_CHUNK_ENCODING_RAW,
+                    schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
+                    bytes: samples,
+                },
+            })
+        })
+        .collect();
+    writer
+        .publish_batch(&VoxelChunkBatch {
+            terrain: VoxelTerrainId(u128::from(id.entity_bits)),
+            source: VoxelSourceId(0),
+            revision: VoxelBatchRevision {
+                expected: 0,
+                publish: 1,
+            },
+            domain,
+            ops: &ops,
+        })
+        .map_err(|error| format!("initial cube publication failed: {error:?}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +548,7 @@ mod tests {
             voxel_size: 1.0,
             material_ids: vec![42],
             smooth_surface: false,
+            initial_cube: None,
         };
         let result = prepare_entry(PrepRequest {
             entry,
@@ -502,6 +592,7 @@ mod tests {
             voxel_size: 1.0,
             material_ids: vec![0],
             smooth_surface: false,
+            initial_cube: None,
         };
         let mut feed = VoxelSceneFeed::new();
         let held = entry.store.write().unwrap();
@@ -510,5 +601,51 @@ mod tests {
         drop(held);
         feed.reconcile([entry], [0.0; 3], |_, _, _| false, |_| false);
         assert_eq!(feed.status(|_, _, _| false).in_flight_entries, 1);
+    }
+
+    #[test]
+    fn deserialized_cube_is_filled_on_worker_before_gpu_preparation() {
+        let store = Arc::new(RwLock::new((0, HashMap::new())));
+        let entry = VoxelSceneEntry {
+            id: VoxelEntryId {
+                entity_bits: 21,
+                kind: 0,
+            },
+            store: store.clone(),
+            domain: VoxelDomain::Bounded {
+                min: [0; 3],
+                max: [1, 0, 0],
+                max_lod: 0,
+            },
+            source_revision: 0,
+            origin: [0.0; 3],
+            voxel_size: 1.0,
+            material_ids: vec![7],
+            smooth_surface: false,
+            initial_cube: Some(VoxelCubeInit {
+                dimensions: [9, 1, 1],
+                material_slot: 1,
+            }),
+        };
+        let first = prepare_entry(PrepRequest {
+            entry: entry.clone(),
+            tag: Tag {
+                generation: 1,
+                revision: 0,
+                center: [0; 3],
+            },
+        });
+        assert!(first.bricks.is_err());
+        assert_eq!(store.read().unwrap().0, 1);
+        assert_eq!(store.read().unwrap().1.len(), 2);
+        let second = prepare_entry(PrepRequest {
+            entry,
+            tag: Tag {
+                generation: 1,
+                revision: 1,
+                center: [0; 3],
+            },
+        });
+        assert_eq!(second.bricks.unwrap().len(), 2);
     }
 }
