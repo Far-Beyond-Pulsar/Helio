@@ -385,23 +385,14 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
         if entry.material_ids.len() > 255 {
             return Err("voxel material palette exceeds 255 IDs".into());
         }
-        let init_store = entry.store.clone();
+        if initialize_empty_cube(&entry)? {
+            return Err("initial cube published; waiting for its canonical revision".into());
+        }
         let writer = VoxelSourceWriter::new(
             VoxelTerrainId(u128::from(id.entity_bits)),
             VoxelSourceId(0),
             entry.store,
         );
-        if let Some(init) = entry.initial_cube {
-            let state = init_store
-                .read()
-                .map_err(|_| "voxel store lock poisoned".to_string())?;
-            let uninitialized = state.0 == 0 && state.1.is_empty();
-            drop(state);
-            if uninitialized {
-                publish_initial_cube(&writer, id, entry.domain, init, &entry.material_ids)?;
-                return Err("initial cube published; waiting for its canonical revision".into());
-            }
-        }
         let selected = writer
             .select_nearest_with_halo(tag.center, VOXEL_MESH_MAX_BRICKS as usize)
             .map_err(|error| format!("voxel snapshot selection failed: {error:?}"))?;
@@ -482,6 +473,43 @@ fn prepare_entry(request: PrepRequest) -> PrepResult {
             bricks: Err(error),
             truncated: false,
         },
+    }
+}
+
+/// Fill a new or deserialized cube before the first edit or GPU preparation.
+/// Call from a management thread or the CPU scene worker, never a frame callback.
+pub fn initialize_empty_cube(entry: &VoxelSceneEntry) -> Result<bool, String> {
+    let Some(init) = entry.initial_cube else {
+        return Ok(false);
+    };
+    let state = entry
+        .store
+        .read()
+        .map_err(|_| "voxel store lock poisoned".to_string())?;
+    let uninitialized = state.0 == 0 && state.1.is_empty();
+    drop(state);
+    if !uninitialized {
+        return Ok(false);
+    }
+    let writer = VoxelSourceWriter::new(
+        VoxelTerrainId(u128::from(entry.id.entity_bits)),
+        VoxelSourceId(0),
+        entry.store.clone(),
+    );
+    match publish_initial_cube(&writer, entry.id, entry.domain, init, &entry.material_ids) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            // A concurrent initializer may have won the revision-zero race.
+            let state = entry
+                .store
+                .read()
+                .map_err(|_| "voxel store lock poisoned".to_string())?;
+            if state.0 > 0 || !state.1.is_empty() {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
     }
 }
 
