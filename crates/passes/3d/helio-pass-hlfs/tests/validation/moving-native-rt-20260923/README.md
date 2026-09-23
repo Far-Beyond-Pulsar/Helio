@@ -83,6 +83,20 @@ and one million instanced triangles from a shared 100-triangle mesh. The flat
 receiver shows persistent fine grain. This capture has no full-resolution
 reference and does not measure the complete game renderer. The accompanying
 600-frame stress run measured TLAS plus HLFS GPU p50/p95 of 11.43/12.55 ms.
+An idle-GPU repeat with the matching release test binary measured 11.51/12.62
+ms; its 600 timing rows are in `release-idle-repeat-600-frames.csv`. A debug
+build of the same workload measured substantially slower and is not comparable
+to this release benchmark. These timings exclude the rest of the renderer.
+With the native-resolution composite fast path, another matching release
+600-frame run measured 11.15/12.32 ms (p50/p95), saved in
+`composite-fastpath-release-600-frames.csv`. The composite stage p50 fell from
+0.827 to 0.569 ms. The change does not alter sampling or scene content.
+The seed-11 moving visual gate still failed: static flicker RMS was 0.03656
+against a 0.01 limit, with visible grain at motion checkpoints. Its metrics
+are in `motion/composite-fastpath-*-metrics.csv`. Frames 63, 64, 80 and 95
+from this run are saved as `motion/composite-fastpath-f*.png` to inspect the
+start of camera/blocker motion and the later light change. This speedup does
+not make the moving image acceptable.
 
 The moving cathedral is a separate workload with 12 animated local lights.
 Its motion captures do not clear this 1,024-light visual gate.

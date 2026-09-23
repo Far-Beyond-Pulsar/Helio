@@ -25,28 +25,39 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let fraction=fract(sample_pos);
     var diffuse=vec3<f32>(0.0); var specular=vec3<f32>(0.0); var weight_sum=0.0;
     var selected=vec2<i32>(-1);
-    var neighbor_weights: array<f32,4>;
-    // Reject unrelated surfaces before reconstructing the valid neighbours.
-    for(var i=0u;i<4u;i++) {
-        let offset=vec2<i32>(vec2<u32>(i&1u,i>>1u)); let p=base+offset;
-        if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
-        let geo=load_geometry(filtered_geometry,p);
-        if !geometry_matches(geo,s.normal,z) { continue; }
-        let weights=select(1.0-fraction,fraction,offset==vec2<i32>(1));
-        let weight=weights.x*weights.y*normal_weight(dot(oct_decode(geo.xy),s.normal));
-        weight_sum+=weight;
-        neighbor_weights[i]=weight;
-        if weight>0.0 { selected=p; }
-        if USE_TILE_PRESAMPLING && weight>0.0 {
-            diffuse+=load_radiance(filtered_lighting,p,0u)*weight;
-            specular+=load_radiance(filtered_lighting,p,1u)*weight;
+    if globals.sample_scale==1u && geometry_matches(load_geometry(filtered_geometry,pixel),s.normal,z) {
+        // At native shading resolution the bilinear footprint is one texel.
+        // Keep the reconstruction path below for geometry/history mismatches.
+        selected=pixel;
+        weight_sum=1.0;
+        if USE_TILE_PRESAMPLING {
+            diffuse=load_radiance(filtered_lighting,pixel,0u);
+            specular=load_radiance(filtered_lighting,pixel,1u);
         }
-    }
-    if !USE_TILE_PRESAMPLING || globals.debug_mode==3u {
-        var remaining=stbn(vec2<u32>(pixel),21u)*weight_sum;
+    } else {
+        var neighbor_weights: array<f32,4>;
+        // Reject unrelated surfaces before reconstructing the valid neighbours.
         for(var i=0u;i<4u;i++) {
-            if neighbor_weights[i]>0.0 && remaining<neighbor_weights[i] { selected=base+vec2<i32>(vec2<u32>(i&1u,i>>1u)); break; }
-            remaining-=neighbor_weights[i];
+            let offset=vec2<i32>(vec2<u32>(i&1u,i>>1u)); let p=base+offset;
+            if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
+            let geo=load_geometry(filtered_geometry,p);
+            if !geometry_matches(geo,s.normal,z) { continue; }
+            let weights=select(1.0-fraction,fraction,offset==vec2<i32>(1));
+            let weight=weights.x*weights.y*normal_weight(dot(oct_decode(geo.xy),s.normal));
+            weight_sum+=weight;
+            neighbor_weights[i]=weight;
+            if weight>0.0 { selected=p; }
+            if USE_TILE_PRESAMPLING && weight>0.0 {
+                diffuse+=load_radiance(filtered_lighting,p,0u)*weight;
+                specular+=load_radiance(filtered_lighting,p,1u)*weight;
+            }
+        }
+        if !USE_TILE_PRESAMPLING || globals.debug_mode==3u {
+            var remaining=stbn(vec2<u32>(pixel),21u)*weight_sum;
+            for(var i=0u;i<4u;i++) {
+                if neighbor_weights[i]>0.0 && remaining<neighbor_weights[i] { selected=base+vec2<i32>(vec2<u32>(i&1u,i>>1u)); break; }
+                remaining-=neighbor_weights[i];
+            }
         }
     }
     if selected.x>=0 {

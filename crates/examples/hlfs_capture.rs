@@ -84,6 +84,11 @@ pub fn run_scene(
     let candidate_count = std::env::var("HLFS_CANDIDATE_COUNT").ok().map(|value| {
         value.parse::<u32>().expect("HLFS_CANDIDATE_COUNT must be an integer")
     });
+    let sample_scale = std::env::var("HLFS_SAMPLE_SCALE").ok().map(|value| {
+        let scale = value.parse::<u32>().expect("HLFS_SAMPLE_SCALE must be an integer");
+        assert!((1..=2).contains(&scale), "HLFS_SAMPLE_SCALE must be 1 or 2");
+        scale
+    });
     let fixed_camera = std::env::var("HLFS_FIXED_CAMERA").ok().map(|value| {
         let t = value.parse::<f32>().expect("HLFS_FIXED_CAMERA must be a number in [0, 1]");
         assert!(t.is_finite() && (0.0..=1.0).contains(&t), "invalid fixed camera position");
@@ -218,7 +223,7 @@ pub fn run_scene(
         });
         let view = texture.create_view(&Default::default());
         std::fs::create_dir_all(directory).unwrap();
-        if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() {
+        if ray_traced || reference || performance || presampled || sample_count.is_some() || candidate_count.is_some() || sample_scale.is_some() {
             renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                 .expect("HLFS pass")
                 .set_config(&device, helio_pass_hlfs::HlfsConfig {
@@ -228,6 +233,7 @@ pub fn run_scene(
                         else { helio_pass_hlfs::HlfsDebugMode::Final },
                     temporal_resampling,
                     candidates_per_sample: candidate_count.unwrap_or(if presampled { 2 } else { 8 }),
+                    sample_scale: sample_scale.unwrap_or(if presampled || performance { 2 } else { 1 }),
                     samples_per_pixel: sample_count.unwrap_or(if presampled {
                         helio_pass_hlfs::HlfsConfig::ray_traced_presampled().samples_per_pixel
                     } else if performance { 4 } else { 2 }),
