@@ -27,6 +27,10 @@ fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
 }
 
+fn default_voxel_generator_version() -> u32 {
+    1
+}
+
 fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStore {
     let mut chunks = HashMap::new();
     for z in 0..dimensions[2].div_ceil(8) {
@@ -227,6 +231,7 @@ pub struct VoxelTerrainComponent {
     pub generator_id: String,
     /// Stable implementation version. Changing it invalidates generated
     /// output without serializing executable generator code.
+    #[serde(default = "default_voxel_generator_version")]
     #[property(category = "Generation")]
     pub generator_version: u32,
     /// Seed supplied to the registered generator.
@@ -398,6 +403,14 @@ mod tests {
                 .iter()
                 .any(|property| property.name == "payloads")
         );
+    }
+
+    #[test]
+    fn older_terrain_config_defaults_generator_version() {
+        let mut value = serde_json::to_value(VoxelTerrainComponent::default()).unwrap();
+        value.as_object_mut().unwrap().remove("generator_version");
+        let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.generator_version, 1);
     }
 
     #[test]

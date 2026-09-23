@@ -648,4 +648,57 @@ mod tests {
         });
         assert_eq!(second.bricks.unwrap().len(), 2);
     }
+
+    #[test]
+    fn two_scene_entries_prepare_independently_and_removal_retires_tracking() {
+        let make_entry = |entity_bits| {
+            let mut chunks = HashMap::new();
+            chunks.insert([0, 0, 0, 0], Arc::<[u8]>::from([1]));
+            VoxelSceneEntry {
+                id: VoxelEntryId {
+                    entity_bits,
+                    kind: 0,
+                },
+                store: Arc::new(RwLock::new((1, chunks))),
+                domain: VoxelDomain::Bounded {
+                    min: [0; 3],
+                    max: [0; 3],
+                    max_lod: 0,
+                },
+                source_revision: 0,
+                origin: [entity_bits as f64 * 16.0, 0.0, 0.0],
+                voxel_size: 1.0,
+                material_ids: vec![entity_bits as u32],
+                smooth_surface: false,
+                initial_cube: None,
+            }
+        };
+        let a = make_entry(1);
+        let b = make_entry(2);
+        let mut feed = VoxelSceneFeed::new();
+        feed.reconcile([a.clone(), b.clone()], [0.0; 3], |_, _, _| false, |_| false);
+        let mut results = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while results.len() < 2 && std::time::Instant::now() < deadline {
+            results.extend(feed.drain_ready());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            let bricks = result.bricks.as_ref().unwrap();
+            assert_eq!(bricks.len(), 1);
+            assert_eq!(bricks[0].material_ids, [result.id.entity_bits as u32]);
+        }
+        assert_eq!(
+            feed.reconcile([b], [0.0; 3], |_, _, _| true, |_| false),
+            [a.id]
+        );
+        assert_eq!(feed.status(|_, _, _| true).tracked_entries, 1);
+        assert_eq!(
+            feed.reconcile([], [0.0; 3], |_, _, _| true, |_| false)
+                .len(),
+            1
+        );
+        assert_eq!(feed.status(|_, _, _| true).tracked_entries, 0);
+    }
 }

@@ -191,14 +191,27 @@ fn needs_render_pass(attachment_mode: AttachmentMode, draw_count: u32) -> bool {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VoxelResidencyFrameMetrics {
     pub upload_bytes: usize,
+    /// CPU time spent staging this frame's uploads, not a GPU transfer time.
+    pub upload_cpu_time: std::time::Duration,
     pub uploaded_bricks: usize,
     pub deferred_bricks: usize,
+    pub deferred_jobs: usize,
     pub promoted_entries: usize,
     pub resident_bricks: usize,
+    pub resident_payload_bytes: usize,
     pub staging_bricks: usize,
+    pub staging_payload_bytes: usize,
+    pub rejected_dirty_entries: u64,
     pub evictions: u64,
     pub rebuilds: u64,
     pub stale_results: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoxelDirtyError {
+    SlotOutOfRange(u32),
+    DirtyListFull,
+    SlotOwnedByScene(u32),
 }
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
@@ -237,6 +250,7 @@ pub struct VoxelMeshPass {
     residency: VoxelResidency,
     scene_feed: scene_feed::VoxelSceneFeed,
     residency_metrics: VoxelResidencyFrameMetrics,
+    rejected_dirty_entries: u64,
     active_bricks: ActiveBrickRange,
 
     normal_buf: wgpu::Buffer,
@@ -824,6 +838,7 @@ impl VoxelMeshPass {
             residency: VoxelResidency::new(VOXEL_MESH_MAX_BRICKS as usize),
             scene_feed: scene_feed::VoxelSceneFeed::new(),
             residency_metrics: VoxelResidencyFrameMetrics::default(),
+            rejected_dirty_entries: 0,
             active_bricks: ActiveBrickRange::new(VOXEL_MESH_MAX_BRICKS),
             normal_buf,
             surface_format,
@@ -872,20 +887,36 @@ impl VoxelMeshPass {
         occupied: bool,
         mode: u32,
     ) {
-        if brick_slot >= VOXEL_MESH_MAX_BRICKS {
-            log::warn!(
-                "VoxelMeshPass: brick slot {brick_slot} exceeds capacity {}",
-                VOXEL_MESH_MAX_BRICKS
-            );
-            return;
+        if let Err(error) =
+            self.try_mark_dirty_with_mode(brick_slot, volume_id, origin, voxel_size, occupied, mode)
+        {
+            log::warn!("VoxelMeshPass: rejected dirty brick {brick_slot}: {error:?}");
         }
-        if self.dirty_bricks.len() >= VOXEL_MESH_MAX_DIRTY as usize {
-            log::warn!("VoxelMeshPass: dirty brick list overflow (dropping slot {brick_slot})");
-            return;
-        }
-        if !self.residency.reserve_external(brick_slot) {
-            log::warn!("VoxelMeshPass: brick slot {brick_slot} is occupied by SceneDB residency");
-            return;
+    }
+
+    /// Observable admission for the legacy explicit-slot path. New SceneDB
+    /// work is retained by residency when the per-frame dirty budget is full.
+    pub fn try_mark_dirty_with_mode(
+        &mut self,
+        brick_slot: u32,
+        volume_id: u32,
+        origin: [f32; 3],
+        voxel_size: f32,
+        occupied: bool,
+        mode: u32,
+    ) -> Result<(), VoxelDirtyError> {
+        let error = if brick_slot >= VOXEL_MESH_MAX_BRICKS {
+            Some(VoxelDirtyError::SlotOutOfRange(brick_slot))
+        } else if self.dirty_bricks.len() >= VOXEL_MESH_MAX_DIRTY as usize {
+            Some(VoxelDirtyError::DirtyListFull)
+        } else if !self.residency.reserve_external(brick_slot) {
+            Some(VoxelDirtyError::SlotOwnedByScene(brick_slot))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.rejected_dirty_entries = self.rejected_dirty_entries.saturating_add(1);
+            return Err(error);
         }
 
         self.dirty_bricks.push(DirtyBrick {
@@ -897,6 +928,7 @@ impl VoxelMeshPass {
         });
         let _ = self.active_bricks.set(brick_slot, occupied);
         self.immediate_slots.push(brick_slot);
+        Ok(())
     }
 
     /// Zero out the indirect draw for a brick slot so it stops being rendered.
@@ -940,6 +972,7 @@ impl RenderPass for VoxelMeshPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let upload_started = std::time::Instant::now();
         const FRAME_BRICK_BUDGET: usize = 64;
         for &slot in &self.retired_slots {
             self.resident_origins[slot as usize] = None;
@@ -1018,11 +1051,18 @@ impl RenderPass for VoxelMeshPass {
         }
         self.residency_metrics = VoxelResidencyFrameMetrics {
             upload_bytes: work.uploads.len() * VoxelPreparedBrick::UPLOAD_BYTES,
+            upload_cpu_time: std::time::Duration::ZERO,
             uploaded_bricks: work.uploads.len(),
             deferred_bricks: work.deferred_bricks,
+            deferred_jobs: self.scene_feed_status().deferred_requests,
             promoted_entries: work.promotions.len(),
             resident_bricks: self.residency.resident_bricks(),
+            resident_payload_bytes: self.residency.resident_bricks()
+                * VoxelPreparedBrick::UPLOAD_BYTES,
             staging_bricks: self.residency.staging_bricks(),
+            staging_payload_bytes: self.residency.staging_bricks()
+                * VoxelPreparedBrick::UPLOAD_BYTES,
+            rejected_dirty_entries: self.rejected_dirty_entries,
             evictions: self.residency.evictions,
             rebuilds: self.residency.rebuilds,
             stale_results: self.residency.stale_results,
@@ -1050,6 +1090,7 @@ impl RenderPass for VoxelMeshPass {
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
             log::debug!("VoxelMeshPass: {} dirty bricks", self.dirty_bricks.len());
         }
+        self.residency_metrics.upload_cpu_time = upload_started.elapsed();
         if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
             return Ok(());
         }
