@@ -9,13 +9,13 @@ mod resize;
 mod setup;
 
 pub use builder::{
-    GraphBuilderFn, PassBuildContext, PassGraphBuilderFn, RendererBuilder, SceneDbHandle,
+    PassBuildContext, PassGraphBuilderFn, RendererBuilder, SceneDbHandle,
 };
 pub use config::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, GiConfig,
     PerfOverlayMode, RenderMode, RendererConfig,
 };
-pub use debug::{DebugDrawPass, DebugDrawState};
+pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};
 pub use renderer_impl::{
-    BillboardInstance, DebugBatch, DebugCameraUniform, DebugVertex, GraphRebuilder, Renderer,
+    BillboardInstance, GraphRebuilder, Renderer,
 };

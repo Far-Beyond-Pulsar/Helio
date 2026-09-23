@@ -45,7 +45,23 @@ fn incident(light: GpuLight, position: vec3<f32>) -> Incident {
     }
     return Incident(direction,max(light.color_intensity.rgb*light.color_intensity.w*attenuation,vec3<f32>(0.0)));
 }
+// Necessary support test for direct illumination, without evaluating the BRDF.
+// Exact light loops only need to reject guaranteed zero contribution here.
+fn can_illuminate(id: u32, s: Surface) -> bool {
+    let inc=incident(lights[id],s.position);
+    return dot(s.normal,inc.direction)>0.0 && any(inc.radiance>vec3<f32>(0.0)) && globals.exposure>0.0;
+}
+
 fn importance(id: u32, s: Surface) -> f32 {
+    if USE_TILE_PRESAMPLING {
+        // Current-frame RIS uses the actual unshadowed luminance target.
+        // Absolute color retains support for the existing HDR-albedo range.
+        let light=evaluate_light(id,s,Visibility(1.0));
+        let target_weight=luminance(abs(light.diffuse*s.albedo+light.specular*s.specular_factor));
+        // Positive support is needed when a reused sample moves from an unlit
+        // surface to one this light can illuminate. Uniform discovery covers IDs.
+        return max(target_weight,select(0.0,1e-8,(globals.surface_flags&8u)!=0u));
+    }
     let inc=incident(lights[id],s.position);
     let ndl=max(dot(s.normal,inc.direction),0.0);
     // Cheap, positive proxy. The PDF correction below does not require an exact BRDF.
@@ -55,15 +71,14 @@ fn importance(id: u32, s: Surface) -> f32 {
         // Only a tiny proxy pays for the exact unshadowed bound. Dividing the
         // exposure-space error budget by population bounds aggregate loss even
         // when a scene contains thousands of individually dim lights.
-        let bound=evaluate_light(id,s,1.0);
+        let bound=evaluate_light(id,s,Visibility(1.0));
         let color=bound.diffuse*s.albedo+bound.specular*s.specular_factor;
         let budget=0.00001*min(globals.exposure,1.0);
         if max(color.r,max(color.g,color.b))*f32(globals.light_count)<budget { return 0.0; }
     }
     return proxy;
 }
-fn evaluate_light(id: u32, s: Surface, visibility: f32) -> Lighting {
-    let inc=incident(lights[id],s.position);
+fn evaluate_incident(s: Surface, inc: Incident, visibility: Visibility) -> Lighting {
     let ndl=max(dot(s.normal,inc.direction),0.0);
     let ndv=max(dot(s.normal,s.view),0.0);
     let h=safe_normalize(s.view+inc.direction);
@@ -78,4 +93,7 @@ fn evaluate_light(id: u32, s: Surface, visibility: f32) -> Lighting {
     // Demodulate before filtering; material response returns at full resolution.
     return Lighting((1.0-f)*(1.0-s.metallic)*energy/PI,
         d*g*f*energy/((4.0*ndv*ndl+0.0001)*s.specular_factor));
+}
+fn evaluate_light(id: u32, s: Surface, visibility: Visibility) -> Lighting {
+    return evaluate_incident(s,incident(lights[id],s.position),visibility);
 }

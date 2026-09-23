@@ -26,7 +26,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
     Camera, HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_pass_tsr::TsrQuality;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -237,9 +237,7 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_editor_mode(true)
-            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
-                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
-            }))
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
 
         let mat = spawn_material(

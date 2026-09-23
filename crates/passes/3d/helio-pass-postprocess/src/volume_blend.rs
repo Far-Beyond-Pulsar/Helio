@@ -30,7 +30,7 @@ pub struct PostProcessVolumeBlendPass {
     /// `execute()` below means this is never actually dispatched against.
     fallback_pp_volumes: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 3]>,
 }
 
 impl PostProcessVolumeBlendPass {
@@ -159,7 +159,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             return Ok(());
         }
 
-        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.resources.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
+        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };
         let pp_volumes_buf = ctx
@@ -169,12 +169,10 @@ impl RenderPass for PostProcessVolumeBlendPass {
             .unwrap_or(&self.fallback_pp_volumes);
         let camera_buf = ctx.camera;
 
-        let key = (
-            postprocess_buf as *const _ as usize,
-            camera_buf as *const _ as usize,
-            pp_volumes_buf as *const _ as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        // Buffer identities, not addresses of frame-local handle wrappers:
+        // SceneDB may replace a buffer when sparse entity indices make it grow.
+        let key = [postprocess_buf.clone(), camera_buf.clone(), pp_volumes_buf.clone()];
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PostProcess Volume Blend BG"),
                 layout: &self.bgl,

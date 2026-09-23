@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, Renderer};
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use crate::common::{
     box_mesh, directional_light, insert_object, make_material, plane_mesh, point_light,
@@ -16,7 +17,7 @@ const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 14.0;
 
 pub struct Demo {
-    window_ids: Vec<LightId>,
+    window_ids: Vec<Entity>,
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -29,47 +30,49 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let road_m = renderer.scene().insert_material(make_material(
+        let world = &mut scene_db.world;
+        let road_m = crate::common::spawn_material(world, make_material(
             [0.11, 0.11, 0.12, 1.0],
             0.9,
             0.1,
             [0.0; 3],
             0.0,
         ));
-        let concrete_m = renderer.scene().insert_material(make_material(
+        let concrete_m = crate::common::spawn_material(world, make_material(
             [0.55, 0.55, 0.56, 1.0],
             0.8,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let glass_m = renderer.scene().insert_material(make_material(
+        let glass_m = crate::common::spawn_material(world, make_material(
             [0.1, 0.12, 0.2, 1.0],
             0.1,
             0.9,
             [0.08, 0.1, 0.15],
             0.5,
         ));
-        let lit_window_m = renderer.scene().insert_material(make_material(
+        let lit_window_m = crate::common::spawn_material(world, make_material(
             [0.6, 0.55, 0.35, 1.0],
             0.5,
             0.0,
             [0.9, 0.8, 0.5],
             4.0,
         ));
-        let street_pole_m = renderer.scene().insert_material(make_material(
+        let street_pole_m = crate::common::spawn_material(world, make_material(
             [0.3, 0.3, 0.3, 1.0],
             0.4,
             0.4,
             [0.0; 3],
             0.0,
         ));
-        let lamp_m = renderer.scene().insert_material(make_material(
+        let lamp_m = crate::common::spawn_material(world, make_material(
             [0.9, 0.85, 0.7, 1.0],
             0.2,
             0.0,
@@ -78,10 +81,8 @@ impl HelioWasmApp for Demo {
         ));
 
         // City ground plane
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 100.0)));
-        insert_object(renderer, ground, road_m, glam::Mat4::IDENTITY, 100.0).unwrap();
+        let ground = crate::common::spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 100.0));
+        insert_object(world, ground, road_m, glam::Mat4::IDENTITY, 100.0).unwrap();
 
         // Buildings on a grid: 7x7 blocks
         let building_data: &[(f32, f32, [f32; 3], f32)] = &[
@@ -114,30 +115,24 @@ impl HelioWasmApp for Demo {
 
         for (bx, bz, half, rad) in building_data.iter() {
             let h = half[1];
-            let bm = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let bm = crate::common::spawn_mesh(world, box_mesh(
                     [*bx, h / 2.0, *bz],
                     *half,
-                )));
-            insert_object(renderer, bm, concrete_m, glam::Mat4::IDENTITY, *rad).unwrap();
+                ));
+            insert_object(world, bm, concrete_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Glass facade panels
-            let gm = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let gm = crate::common::spawn_mesh(world, box_mesh(
                     [*bx, h / 2.0, *bz],
                     [half[0] - 0.1, h - 0.2, half[2] - 0.1],
-                )));
-            insert_object(renderer, gm, glass_m, glam::Mat4::IDENTITY, *rad).unwrap();
+                ));
+            insert_object(world, gm, glass_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Random lit windows strip
-            let wm = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let wm = crate::common::spawn_mesh(world, box_mesh(
                     [*bx, h * 0.6, *bz],
                     [half[0] - 0.15, h * 0.25, half[2] - 0.05],
-                )));
+                ));
             insert_object(
-                renderer,
+                world,
                 wm,
                 lit_window_m,
                 glam::Mat4::IDENTITY,
@@ -152,65 +147,49 @@ impl HelioWasmApp for Demo {
         let mut window_ids = Vec::new();
         for &lx in lamp_xs {
             for &lz in lamp_zs {
-                let pole = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                let pole = crate::common::spawn_mesh(world, box_mesh(
                         [lx, 5.0, lz],
                         [0.08, 5.0, 0.08],
-                    )));
-                insert_object(renderer, pole, street_pole_m, glam::Mat4::IDENTITY, 5.0).unwrap();
-                let arm = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                    ));
+                insert_object(world, pole, street_pole_m, glam::Mat4::IDENTITY, 5.0).unwrap();
+                let arm = crate::common::spawn_mesh(world, box_mesh(
                         [lx + 0.5, 9.8, lz],
                         [0.5, 0.06, 0.06],
-                    )));
-                insert_object(renderer, arm, street_pole_m, glam::Mat4::IDENTITY, 0.5).unwrap();
-                let lamp = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(box_mesh(
+                    ));
+                insert_object(world, arm, street_pole_m, glam::Mat4::IDENTITY, 0.5).unwrap();
+                let lamp = crate::common::spawn_mesh(world, box_mesh(
                         [lx + 0.9, 9.75, lz],
                         [0.12, 0.12, 0.12],
-                    )));
-                insert_object(renderer, lamp, lamp_m, glam::Mat4::IDENTITY, 0.12).unwrap();
-                let id = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::light(point_light(
+                    ));
+                insert_object(world, lamp, lamp_m, glam::Mat4::IDENTITY, 0.12).unwrap();
+                let id = crate::common::spawn_light(world, point_light(
                         [lx + 0.9, 9.5, lz],
                         [1.0, 0.92, 0.72],
                         80.0,
                         18.0,
-                    )))
-                    .as_light()
-                    .unwrap();
+                    ));
                 window_ids.push(id);
             }
         }
 
         // Rooftop lights on tallest buildings
         for (bx, bz, _, _) in building_data.iter().filter(|(_, _, h, _)| h[1] > 35.0) {
-            let id = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
+            let id = crate::common::spawn_light(world, point_light(
                     [*bx, 0.0 /* set dynamically */ + 2.0, *bz],
                     [1.0, 0.1, 0.05],
                     5.0,
                     8.0,
-                )))
-                .as_light()
-                .unwrap();
+                ));
             window_ids.push(id);
         }
 
         // Moonlight
         let moon = Vec3::new(-0.3, -0.8, 0.5).normalize();
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+        crate::common::spawn_light(world, directional_light(
                 [moon.x, moon.y, moon.z],
                 [0.4, 0.5, 0.9],
                 0.003,
-            )));
+            ));
         renderer.set_ambient([0.1, 0.12, 0.2], 0.02);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 

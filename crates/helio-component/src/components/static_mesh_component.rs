@@ -401,16 +401,71 @@ impl ScenePropsProjector for StaticMeshComponent {
     }
 }
 
+/// Load `mesh_asset`'s vertex/index data and local bounding sphere from
+/// disk, or the "no mesh" defaults ([`local_bounding_sphere`]'s own empty
+/// fallback) if the path is empty, unresolvable, or fails to load.
+///
+/// Shared by [`hydrate_static_mesh_component`] (first attach) and
+/// [`refresh_static_mesh_gpu_mirror`] (a live `mesh_asset` edit made
+/// *after* attach, via the properties panel) -- both need the exact same
+/// disk-load behavior, just triggered at different times. Resolves the
+/// project-relative path via `engine_state::get_project_path()` -- a
+/// global, context-free accessor, since neither caller's fixed signature
+/// (`&mut World, Entity, &Value` / `&mut World, Entity`) carries a
+/// `ComponentRuntimeContext` to pull a project root from the way
+/// `sync_component` does.
+fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], Vec<PackedVertex>, Vec<u32>) {
+    let mesh_asset = mesh_asset.trim();
+    // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
+    // the safety-net minimum the old transform-scale heuristic used
+    // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
+    let mut bounds_local = [0.0, 0.0, 0.0, 0.5];
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    if !mesh_asset.is_empty() {
+        match engine_state::get_project_path() {
+            Some(project_root) => {
+                let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
+                match load_mesh_upload(&abs_path) {
+                    Some(upload) => {
+                        tracing::info!(
+                            "StaticMeshComponent: loaded '{}' ({} vertices, {} indices)",
+                            abs_path.display(),
+                            upload.vertices.len(),
+                            upload.indices.len()
+                        );
+                        bounds_local = local_bounding_sphere(&upload.vertices);
+                        vertices = upload.vertices;
+                        indices = upload.indices;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "StaticMeshComponent: failed to load mesh '{}' ({})",
+                            mesh_asset,
+                            abs_path.display()
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "StaticMeshComponent: no project path available, cannot resolve mesh_asset '{}'",
+                    mesh_asset
+                );
+            }
+        }
+    }
+
+    (bounds_local, vertices, indices)
+}
+
 /// Custom hydrate for `#[register_world_component(hydrate = ...)]`
 /// (Pulsar-Native#561 Phase D). Loads `mesh_asset`'s actual vertex/index
 /// data, once, right here at hydrate time -- not per render frame, and not
 /// through any Helio-specific code (`sync_component`'s dispatch only ever
 /// gets `&World`, deliberately, so it structurally can't do disk I/O; this
-/// is the one call site that already has `&mut World`). Resolves the
-/// project-relative path via `engine_state::get_project_path()` -- a
-/// global, context-free accessor, since the fixed hydrate signature
-/// (`&mut World, Entity, &Value`) has no `ComponentRuntimeContext` to pull
-/// a project root from the way `sync_component` does.
+/// is the one call site that already has `&mut World`).
 ///
 /// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
 /// `sync_component`'s existing "no mesh_asset" tolerance -- the component
@@ -424,48 +479,38 @@ fn hydrate_static_mesh_component(
 ) -> Result<(), String> {
     let mut parsed: StaticMeshComponent =
         serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
-    // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
-    // the safety-net minimum the old transform-scale heuristic used
-    // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
-    parsed.bounds_local = [0.0, 0.0, 0.0, 0.5];
-
-    let mesh_asset = parsed.mesh_asset.as_str().trim();
-    if !mesh_asset.is_empty() {
-        match engine_state::get_project_path() {
-            Some(project_root) => {
-                let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
-                match load_mesh_upload(&abs_path) {
-                    Some(upload) => {
-                        tracing::info!(
-                            "StaticMeshComponent hydrate: loaded '{}' ({} vertices, {} indices)",
-                            abs_path.display(),
-                            upload.vertices.len(),
-                            upload.indices.len()
-                        );
-                        parsed.bounds_local = local_bounding_sphere(&upload.vertices);
-                        parsed.vertices = upload.vertices;
-                        parsed.indices = upload.indices;
-                    }
-                    None => {
-                        tracing::warn!(
-                            "StaticMeshComponent hydrate: failed to load mesh '{}' ({})",
-                            mesh_asset,
-                            abs_path.display()
-                        );
-                    }
-                }
-            }
-            None => {
-                tracing::warn!(
-                    "StaticMeshComponent hydrate: no project path available, cannot resolve mesh_asset '{}'",
-                    mesh_asset
-                );
-            }
-        }
-    }
+    let (bounds_local, vertices, indices) = load_mesh_geometry(parsed.mesh_asset.as_str());
+    parsed.bounds_local = bounds_local;
+    parsed.vertices = vertices;
+    parsed.indices = indices;
 
     world.insert(entity, parsed);
     Ok(())
+}
+
+/// `refresh_gpu_mirror` override (mirrors `LightComponent`'s Pulsar-Native#561
+/// fix -- see that component's `refresh_light_gpu_mirror` for the same shape).
+///
+/// The properties panel's live-edit path (`update_live_component_property`,
+/// `ui_level_editor`) sets `mesh_asset` straight onto the live component via
+/// its reflected setter and never re-hydrates, so a mesh picked *after* the
+/// component was first attached never reloaded `vertices`/`indices` -- those
+/// fields are `#[serde(skip)]` and only ever populated by
+/// [`hydrate_static_mesh_component`]'s disk load. This re-runs that same
+/// load from the CURRENT live `mesh_asset` whenever the generic refresh hook
+/// fires for this class.
+fn refresh_static_mesh_gpu_mirror(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+) {
+    let Some(mut component) = world.get::<StaticMeshComponent>(entity).cloned() else {
+        return;
+    };
+    let (bounds_local, vertices, indices) = load_mesh_geometry(component.mesh_asset.as_str());
+    component.bounds_local = bounds_local;
+    component.vertices = vertices;
+    component.indices = indices;
+    world.insert(entity, component);
 }
 
 /// Local-space bounding sphere (xyz = center, w = radius) from a mesh's
@@ -500,7 +545,10 @@ fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
 // rolls it out to the rest. `#[register_world_component]` must be written
 // above `#[register_runtime_behavior]` (see that macro's own doc for why:
 // only the bottom attribute in the stack re-emits the impl block).
-#[register_world_component(hydrate = hydrate_static_mesh_component)]
+#[register_world_component(
+    hydrate = hydrate_static_mesh_component,
+    refresh_gpu_mirror = refresh_static_mesh_gpu_mirror
+)]
 #[register_runtime_behavior]
 impl ComponentRuntimeBehavior for StaticMeshComponent {
     const CLASS_NAME: &'static str = "StaticMeshComponent";

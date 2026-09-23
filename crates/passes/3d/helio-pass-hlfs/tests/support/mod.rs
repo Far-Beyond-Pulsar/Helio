@@ -1,12 +1,19 @@
 use glam::{Mat4, Vec3};
-use helio_core::{GpuScene, RenderGraph};
+use helio_core::RenderGraph;
+mod scene;
 use helio_pass_hlfs::{HlfsConfig, HlfsPass};
+use scene::TestScene;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
 
 pub struct Fixture {
+    pub ambient: [f32; 3],
+    pub publish_ray_frame: bool,
+    pub transmission: Option<wgpu::Buffer>,
+    pub ray_frame: helio_core::FrameAcceleration,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
-    pub scene: GpuScene,
+    pub scene: TestScene,
     pub graph: RenderGraph,
     pub width: u32,
     pub height: u32,
@@ -15,12 +22,22 @@ pub struct Fixture {
     target: wgpu::TextureView,
     timestamps: Option<wgpu::QuerySet>,
     shadow: Option<wgpu::TextureView>,
+    velocity: Option<wgpu::TextureView>,
 }
 
 impl Fixture {
     pub async fn new(width: u32, height: u32) -> Self {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        Self::new_with_ray_queries(width, height, false).await
+    }
+    pub async fn new_rt(width: u32, height: u32) -> Self {
+        Self::new_with_ray_queries(width, height, true).await
+    }
+    async fn new_with_ray_queries(width: u32, height: u32, rt: bool) -> Self {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        if rt {
+            descriptor.backends = wgpu::Backends::VULKAN;
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -37,14 +54,25 @@ impl Fixture {
                 } else {
                     wgpu::Features::empty()
                 } | (adapter.features()
-                    & wgpu::Features::RG11B10UFLOAT_RENDERABLE),
+                    & wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+                    | if rt {
+                        wgpu::Features::EXPERIMENTAL_RAY_QUERY
+                    } else {
+                        wgpu::Features::empty()
+                    },
+                experimental_features: if rt {
+                    // Explicit GPU tests acknowledge the experimental ray API.
+                    unsafe { wgpu::ExperimentalFeatures::enabled() }
+                } else {
+                    wgpu::ExperimentalFeatures::disabled()
+                },
                 ..Default::default()
             })
             .await
             .unwrap();
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let mut scene = GpuScene::new(device.clone(), queue.clone());
+        let mut scene = TestScene::new(device.clone(), queue.clone());
         scene.width = width;
         scene.height = height;
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
@@ -161,6 +189,10 @@ impl Fixture {
         }
         graph.lock(width, height);
         Self {
+            ambient: [0.03; 3],
+            publish_ray_frame: true,
+            transmission: None,
+            ray_frame: Default::default(),
             device,
             queue,
             scene,
@@ -172,6 +204,42 @@ impl Fixture {
             target,
             timestamps,
             shadow: None,
+            velocity: None,
+        }
+    }
+    pub fn material(&mut self, albedo: [f32; 4], orm: [f32; 4]) {
+        for (index, color) in [(0, albedo), (2, orm)] {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("HLFS audit material"),
+                size: wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let values: Vec<u16> = color
+                .into_iter()
+                .map(|value| half::f16::from_f32(value).to_bits())
+                .cycle()
+                .take((self.width * self.height * 4) as usize)
+                .collect();
+            self.queue.write_texture(
+                texture.as_image_copy(),
+                bytemuck::cast_slice(&values),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.width * 8),
+                    rows_per_image: Some(self.height),
+                },
+                texture.size(),
+            );
+            self.views[index] = texture.create_view(&Default::default());
         }
     }
     pub fn config(&mut self, config: HlfsConfig) {
@@ -186,20 +254,70 @@ impl Fixture {
         self.scene.lights.set_data(lights);
     }
     pub fn frame(&mut self) {
+        self.try_frame().unwrap();
+    }
+    pub fn try_frame(&mut self) -> helio_core::Result<()> {
         self.scene.flush();
+        if self.publish_ray_frame {
+            self.ray_frame
+                .publish_with_transmission(self.scene.frame_count, self.scene.tlas_manager.tlas(), self.transmission.as_ref());
+        }
         let mut resources = helio_core::ResourceRegistry::empty();
-        resources.write(helio_core::ResourceKey::new("gbuffer"), 
-            helio_core::ViewGroup::<4> { views: [&self.views[0], &self.views[1], &self.views[2], &self.views[3]] },
+        resources.write(
+            helio_core::resource_keys::render_environment(),
+            helio_core::RenderEnvironment {
+                clear_color: [0.0; 4],
+                ambient_color: self.ambient,
+                ambient_intensity: 1.0,
+                tlas: self.ray_frame.tlas(self.scene.frame_count),
+            },
             "Fixture",
         );
-        resources.write(helio_core::ResourceKey::new("pre_aa"), &self.views[4], "Fixture");
+        if let Some(buffer) = self.ray_frame.transmission(self.scene.frame_count) {
+            resources.write(helio_core::ResourceKey::new("ray_transmission"), buffer, "Fixture");
+        }
+        resources.write(
+            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ViewGroup::<4> {
+                views: [
+                    &self.views[0],
+                    &self.views[1],
+                    &self.views[2],
+                    &self.views[3],
+                ],
+            },
+            "Fixture",
+        );
+        resources.write(
+            helio_core::ResourceKey::new("pre_aa"),
+            &self.views[4],
+            "Fixture",
+        );
+        resources.write(
+            helio_core::resource_keys::shadow_matrices(),
+            helio_pass_shadow_matrix::ShadowMatricesFrameData {
+                shadow_matrices: &self.scene.shadow_matrices.buffer,
+                shadow_count: 6,
+                per_caster_dirty_gen: [0; 42],
+                movable_objects_generation: 0,
+            },
+            "Fixture",
+        );
         if let Some(shadow) = &self.shadow {
-            resources.write(helio_core::ResourceKey::new("shadow_atlas"), shadow, "Fixture");
+            resources.write(
+                helio_core::ResourceKey::new("shadow_atlas"),
+                shadow,
+                "Fixture",
+            );
+        }
+        if let Some(velocity) = &self.velocity {
+            resources.write(helio_core::ResourceKey::new("gbuffer_velocity"), velocity, "Fixture");
         }
         self.graph
-            .execute_with_registry(&self.scene, &self.target, &self.depth, &resources)
-            .unwrap();
+            .execute_with_registry(&self.scene, &self.target, &self.depth, &mut resources)?;
+
         self.scene.frame_count += 1;
+        Ok(())
     }
     pub fn compact_output(&mut self) {
         let mut pass = HlfsPass::new(
@@ -393,6 +511,77 @@ impl Fixture {
             6
         ]);
     }
+    /// Rasterize a real world-space plane instead of supplying ideal CPU depth.
+    /// This includes vertex arithmetic, clipping and hardware interpolation.
+    pub fn raster_plane_depth(&mut self, view: glam::Mat4, proj: glam::Mat4, z: f32) {
+        let source = r#"
+            struct Camera { view:mat4x4<f32>, proj:mat4x4<f32> }
+            @group(0) @binding(0) var<uniform> camera:Camera;
+            struct Vertex { @invariant @builtin(position) position:vec4<f32>, @location(0) view_z:f32 }
+            @vertex fn vs(@builtin(vertex_index) i:u32)->Vertex {
+                let p=array<vec2<f32>,3>(vec2<f32>(-500.0,-500.0),vec2<f32>(500.0,-500.0),vec2<f32>(0.0,500.0));
+                let view=camera.view*vec4<f32>(p[i],PLANE_Z,1.0);
+                return Vertex(camera.proj*view,view.z);
+            }
+            @fragment fn fs(v:Vertex)->@location(0) vec4<f32> {
+                let reconstructed=camera.proj[3].z/(camera.proj[2].w*v.position.z-camera.proj[2].z);
+                return vec4<f32>(0.0,0.0,v.view_z-reconstructed,2.0);
+            }
+        "#.replace("PLANE_Z", &format!("{z:.9}"));
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Rasterized receiver depth"), source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[view.to_cols_array(), proj.to_cols_array()]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Rasterized receiver depth"), layout: None,
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs"), compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default(),
+            }),
+            multisample: Default::default(), multiview_mask: None, cache: None,
+        });
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        let correction = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Raster depth residual"),
+            size: wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        }).create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &correction, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.velocity = Some(correction);
+    }
+
     pub fn depth_values(&mut self, values: &[f32]) {
         assert_eq!(values.len(), (self.width * self.height) as usize);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -538,7 +727,11 @@ impl helio_core::RenderPass for Timestamp {
     }
 }
 
-pub fn point(position: [f32; 3], color: [f32; 3], intensity: f32) -> helio_pass_forward_lit::GpuLight {
+pub fn point(
+    position: [f32; 3],
+    color: [f32; 3],
+    intensity: f32,
+) -> helio_pass_forward_lit::GpuLight {
     helio_pass_forward_lit::GpuLight {
         position_range: [position[0], position[1], position[2], 20.0],
         color_intensity: [color[0], color[1], color[2], intensity],

@@ -3,6 +3,9 @@
 HLFS shades the deferred GBuffer using visibility-guided light sampling. Its
 output is linear HDR; the render graph supplies tone mapping and antialiasing.
 
+Current RT measurements, quality gates, cathedral captures, and reproduction commands
+are in the [review validation report](tests/validation/review-20260919/README.md).
+
 ## Visibility mode
 
 `HlfsConfig::mode` defaults to `HlfsMode::ScreenSpace`. Both `HlfsPass::new`
@@ -26,18 +29,50 @@ A TLAS or ray-query-capable device never changes the selected mode automatically
 Its execution time depends on tracing and reservoir settings; it does not promise
 a strict gameplay frame budget.
 
-The public enum is non-exhaustive and currently exposes only the implemented
-`ScreenSpace` backend. A future `RayTraced` mode will replace visibility evaluation
-and add spatial/temporal candidate pruning before hardware queries. The internal
-`VisibilityPipelines` selection in `pipelines.rs` is the extension point; the
-single `HlfsPass` continues owning common grids, reservoir bindings, demodulated
-histories and spatial filtering. Mode changes replace only the visibility pipelines and
-invalidate history, retaining common resources and bindings. No second lighting pass or duplicate denoiser is needed.
+`HlfsMode::RayTraced` uses Vulkan hardware ray queries over the current opaque
+triangle TLAS. Unsupported devices and missing/stale acceleration data are errors;
+it does not silently fall back to ScreenSpace. The shared pass still owns grids,
+reservoirs, history, spatial filtering and composition. Masked materials and the
+larger production acceptance suite remain outside the validated RT scope.
 
-RayTraced implementation and post-merge tracking are follow-up work. The retained
-ray-query WGSL prototype is shader-validated but is not a selectable backend or a
-runtime fallback. The proposed sub-3-4 ms gameplay budget is a future validation
-target, not a guarantee of this ScreenSpace implementation.
+`HlfsConfig::ray_traced_presampled()` explicitly opts into the experimental
+two-sample/two-candidate tier, shading at half the output width and height.
+It builds 256 current-frame weighted proposals per coarse tile, samples a weighted
+alias table mixed with uniform discovery, and uses reactive history clipping.
+Glossy surfaces use four samples with sixteen independent candidates each.
+They bypass shared tile proposals to avoid coherent errors on narrow highlights. A globally dominant emitter is split out and evaluated with
+an additional full-resolution visibility query; this is extra work, not part of
+the base two-sample budget. Reconstruction blends valid bilinear neighbours.
+This changes the estimator and denoising; it is not an exact-output replacement
+for `compact()`. The regular presets and defaults retain the original sampler.
+Changing the proposal mode specializes the visibility pipelines and resets history.
+
+See [retained validation evidence](https://github.com/Far-Beyond-Pulsar/Helio/blob/4d56b104a442382449f7f2563773313621511d8f/docs/validation/hlfs/rt-control/scenedb/report.md)
+for historical synthetic 1440p measurements of the previous one-sample tier,
+not measurements of the current candidate. These are direct-lighting GPU
+costs, including per-frame TLAS work, not whole-frame or general-scene guarantees.
+The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this preset.
+
+## SceneDB RT integration
+
+The frontend owns `SceneDbRayTracing`. After flushing the World's GPU mirror,
+call `acceleration.prepare(&world)` and publish its TLAS with
+`renderer.set_ray_tracing_frame(Some(tlas))` before each render. The renderer
+provides it through `RenderEnvironment`; publication expires after that frame.
+The helper supports opaque, indexed, world-space `StaticObjectComponent` casters,
+including off-screen objects. Material and mesh generations are validated.
+Masked/custom materials and known unsupported geometry buffers are rejected.
+Other geometry producers require an explicit acceleration projection.
+
+The current helper scans objects and hashes each referenced mesh once per frame
+to detect in-place edits. This CPU cost is excluded from GPU pass timings. Light
+sampling covers allocated SceneDB rows, including zeroed vacant slots, rather
+than truncating the population at 256. Allocation epochs do not track in-place
+light edits, so composite repair history reuse is conservatively disabled;
+the regular temporal lighting filter still runs.
+
+The workspace profiler is pinned to a published `Pulsar-Native` Git revision.
+No profiler checkout outside this repository is required.
 
 ## ScreenSpace frame stages
 
@@ -115,7 +150,8 @@ Set `HLFS_PERFORMANCE=1` to capture the reduced-resolution preset.
 Set `HLFS_SAMPLE_COUNT=2` together with `HLFS_PERFORMANCE=1` to reproduce the
 two-sample compact capture. This override is for capture tools only.
 Set `HLFS_FXAA=1` to exercise the FXAA graph variant.
-Measured results and retained images are in `docs/validation/hlfs/README.md`.
+Measured results and images remain available in the
+[validation archive](https://github.com/Far-Beyond-Pulsar/Helio/tree/4d56b104a442382449f7f2563773313621511d8f/docs/validation/hlfs).
 
 ## Platform choices
 
@@ -165,3 +201,12 @@ The embedded scalar spatiotemporal blue-noise ranks are independently generated
 by `scripts/generate_hlfs_noise.py`. NumPy is only needed to regenerate the asset;
 the renderer has no runtime Python dependency and includes no third-party
 noise texture.
+
+
+## Experimental weighted temporal reuse
+
+`HlfsConfig::temporal_resampling` is opt-in and requires presampled RayTraced mode with `sample_scale=2`. It retains one 16-byte weighted light reservoir per configured base sample and shading pixel in each of two history textures. At 1440p and two base samples these textures total 56.25 MiB. Glossy samples above the base count remain fresh. All selected lights still receive current-frame visibility queries, including RGB transmission; old shadow results are not reused.
+
+The effective history count is capped at seven prior estimates plus one fresh estimate. Geometry reprojection and a two-word light-data/key fingerprint reject incompatible history. Any detected change to light position, direction, intensity, color, range, type, cone or shadow policy resets these proposals globally. This conservative version therefore does not claim a reuse benefit for continuously animated light sets. A small positive target floor retains proposal support across receiver changes; difficult disocclusion and extreme light distributions still need broader validation.
+
+For the capture harness, add `HLFS_TEMPORAL_RIS=1` alongside `HLFS_RT=1` and `HLFS_PRESAMPLED=1`. Defaults and presets remain unchanged. [Measured results and limitations](tests/validation/technology-20260919/README.md) show modest noise reduction, with the overall visual and performance acceptance gates still incomplete.

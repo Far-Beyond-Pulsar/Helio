@@ -5,8 +5,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use bytemuck::{Pod, Zeroable};
-use helio_core::{RenderGraph, RenderPass};
+use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
 use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::builder::SceneDbHandle;
@@ -27,38 +26,28 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
+/// Reapplies application-owned pass settings after a resize rebuilds the graph.
+pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
+
 use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 use crate::camera::Camera;
 
 use super::config::GiConfig;
 use super::debug::DebugDrawState;
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct DebugCameraUniform {
-    pub view_proj: [[f32; 4]; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct DebugVertex {
-    pub position: [f32; 3],
-    pub _pad: f32,
-    pub color: [f32; 4],
-}
-
 /// Backend-only fallback bindings for the material sampling contract.
 ///
 /// Material parameters and texture references are authored in SceneDB. The
 /// renderer keeps only the descriptor objects required by the passes to bind
-/// that data. Until a frontend publishes texture components, the arrays point
-/// at one white texture so untextured material rows remain valid.
+/// that data. SceneDB texture-store slots supply cached views; vacant slots use the white
+/// fallback. Frontends must clear material slot references before freeing them.
 pub(crate) struct MaterialBindingResources {
     pub(crate) _fallback_texture: wgpu::Texture,
     pub(crate) fallback_view: wgpu::TextureView,
     pub(crate) fallback_sampler: wgpu::Sampler,
     pub(crate) texture_count: usize,
     pub(crate) version: u64,
+    pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
 }
 
 pub use helio_pass_billboard::BillboardInstance;
@@ -77,6 +66,7 @@ pub struct Renderer {
     pub(crate) camera_data: helio_core::GpuCameraUniforms,
     pub(crate) camera_generation: u64,
     pub(crate) frame_count: u64,
+    pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
@@ -109,6 +99,14 @@ pub struct Renderer {
     /// Mirrors `RendererConfig::enable_portals` — same "persist for resize
     /// rebuild" reasoning as `enable_foliage` above.
     pub(crate) enable_portals: bool,
+    /// Coordinate-space transforms supplied by the frontend for portal and
+    /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
+    /// the G-buffer's table back to identity.
+    pub(crate) coordinate_spaces: Vec<glam::Mat4>,
+    /// Active dense portal projection counts supplied by the resolver bridge.
+    /// Growable SceneDB buffers are capacity-sized, so passes must not infer
+    /// active rows from their allocation size.
+    pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
@@ -147,18 +145,10 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+    pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
     /// Frontend-owned SceneDB GPU projection. The CPU SceneDB remains outside
     /// Helio and is flushed by its owner at the frame boundary.
     pub(crate) scene_db: SceneDbHandle,
-
-    /// Whether the graph was built with the sky passes present.
-    ///
-    /// `SkyLutPass`/`SkyPass` are added conditionally on `Scene::sky_context().has_sky` at
-    /// graph *build* time, but the natural call order is renderer construction followed by
-    /// only then populate the scene — so a scene that gains a sky afterwards has a graph
-    /// that will never draw it. Tracking what the graph was built with is what lets
-    /// `rebuild_graph_if_sky_changed` notice.
-    pub(crate) graph_has_sky: bool,
 
     /// Engine-world transform of the headset's stage origin — the locomotion hook.
     ///
@@ -228,179 +218,24 @@ pub struct Renderer {
     pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
 }
 
-pub struct DebugBatch<'a> {
-    pub(crate) state: &'a mut DebugDrawState,
-    pub(crate) lines_changed: bool,
-    pub(crate) tris_changed: bool,
-}
-
-impl<'a> DebugBatch<'a> {
-    pub fn line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
-        self.state.user_lines.push(DebugVertex {
-            position: from,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_lines.push(DebugVertex {
-            position: to,
-            _pad: 0.0,
-            color,
-        });
-        self.lines_changed = true;
-    }
-
-    pub fn tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
-        self.state.user_tris.push(DebugVertex {
-            position: v0,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v1,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v2,
-            _pad: 0.0,
-            color,
-        });
-        self.tris_changed = true;
-    }
-
-    pub fn sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 {
-            return;
-        }
-        for plane in 0..3 {
-            let mut prev = glam::Vec3::ZERO;
-            for i in 0..=segments {
-                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-                let pos = match plane {
-                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
-                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
-                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
-                } + glam::Vec3::from(center);
-                if i > 0 {
-                    self.line(prev.to_array(), pos.to_array(), color);
-                }
-                prev = pos;
-            }
-        }
-    }
-
-    pub fn cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.line(prev.to_array(), cur.to_array(), color);
-            self.line(cur.to_array(), apex_v.to_array(), color);
-            prev = cur;
-        }
-    }
-
-    pub fn filled_cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
-            self.tri(base.to_array(), cur.to_array(), prev.to_array(), color);
-            prev = cur;
-        }
-    }
-
-    pub fn filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
-        let c = glam::Vec3::from(center);
-        let h = half;
-        let corners = [
-            c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new(h, -h, -h),
-            c + glam::Vec3::new(h, h, -h),
-            c + glam::Vec3::new(-h, h, -h),
-            c + glam::Vec3::new(-h, -h, h),
-            c + glam::Vec3::new(h, -h, h),
-            c + glam::Vec3::new(h, h, h),
-            c + glam::Vec3::new(-h, h, h),
-        ];
-        let quads: [[usize; 4]; 6] = [
-            [0, 3, 2, 1],
-            [4, 5, 6, 7],
-            [0, 4, 7, 3],
-            [1, 2, 6, 5],
-            [0, 1, 5, 4],
-            [3, 7, 6, 2],
-        ];
-        for [a, b, cc, d] in quads {
-            self.tri(
-                corners[a].to_array(),
-                corners[b].to_array(),
-                corners[cc].to_array(),
-                color,
-            );
-            self.tri(
-                corners[a].to_array(),
-                corners[cc].to_array(),
-                corners[d].to_array(),
-                color,
-            );
-        }
-    }
-
-    pub(crate) fn finish(self) {
-        if self.lines_changed {
-            self.state.user_lines_generation = self.state.user_lines_generation.wrapping_add(1);
-        }
-        if self.tris_changed {
-            self.state.user_tris_generation = self.state.user_tris_generation.wrapping_add(1);
-        }
-    }
-}
-
 impl Renderer {
+    /// Publish an already-built frontend acceleration projection for the next
+    /// frame only. Call after flushing SceneDB and preparing its BLAS/TLAS; an
+    /// omitted update expires instead of reusing potentially stale geometry.
+    pub fn set_ray_tracing_frame(&mut self, tlas: Option<&wgpu::Tlas>) {
+        self.ray_frame.publish(self.frame_count, tlas);
+    }
+
+    /// Publish a TLAS and its matching per-instance transmission buffer for one
+    /// frame. Material rows must follow the exact TLAS instance ordering.
+    pub fn set_ray_tracing_frame_with_transmission(
+        &mut self,
+        tlas: Option<&wgpu::Tlas>,
+        transmission: Option<&wgpu::Buffer>,
+    ) {
+        self.ray_frame.publish_with_transmission(self.frame_count, tlas, transmission);
+    }
+
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
     /// external debug capture (e.g. an example dumping it to a PNG to
     /// answer "is anything actually being rasterized"). Every other
@@ -581,6 +416,54 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
+    /// Configure passes in the current graph and every graph created by resize.
+    /// Use this for settings applied directly to passes, which a fresh graph
+    /// would otherwise reset to defaults.
+    pub fn set_graph_rebuild_hook(
+        &mut self,
+        hook: impl Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync + 'static,
+    ) {
+        hook(&mut self.graph, &self.device);
+        self.graph_rebuild_hook = Some(Arc::new(hook));
+    }
+
+    /// Forward portal/sublevel coordinate spaces through the generic graph
+    /// input seam. The owning pass uploads its own GPU table during prepare.
+    pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces.extend_from_slice(spaces);
+        self.apply_coordinate_spaces();
+    }
+
+    /// Upload a resolver-generated portal projection frame while preserving
+    /// the renderer's existing coordinate-space seam. The frame owns slot
+    /// zero as identity and this facade accepts the non-identity tail because
+    /// The graph broadcasts the frame to whichever pass families consume it;
+    /// the renderer does not need to know their concrete types.
+    pub fn set_portal_projection_frame(
+        &mut self,
+        frame: &helio_pass_portal_cull::PortalProjectionFrame,
+    ) {
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces
+            .extend_from_slice(frame.renderer_coordinate_spaces());
+        self.portal_projection_counts = Some((
+            frame.counts.portal_view_count,
+            frame.counts.portal_chain_count,
+        ));
+        self.apply_coordinate_spaces();
+    }
+
+    pub(crate) fn apply_coordinate_spaces(&mut self) {
+        let inputs = RenderFrameInputs {
+            coordinate_spaces: &self.coordinate_spaces,
+            projection_counts: self
+                .portal_projection_counts
+                .map(|(view_count, chain_count)| [view_count, chain_count]),
+        };
+        self.graph.set_frame_inputs(&inputs);
+    }
+
     /// Select the cloud representation used by the default sky pass.
     ///
     /// This is intentionally a no-op when a custom graph does not contain a
@@ -632,6 +515,13 @@ impl Renderer {
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
+    }
+
+    /// Replace the shared sampler used by SceneDB material texture slots.
+    /// Incrementing the binding version refreshes pass descriptor caches.
+    pub fn set_material_sampler(&mut self, descriptor: &wgpu::SamplerDescriptor<'_>) {
+        self.material_bindings.fallback_sampler = self.device.create_sampler(descriptor);
+        self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
     }
 
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {

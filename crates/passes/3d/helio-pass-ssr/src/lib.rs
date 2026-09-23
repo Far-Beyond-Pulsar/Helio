@@ -13,7 +13,13 @@
 //! is available (`rc_cascades`), the shader can fall back to RC-based irradiance
 //! for rough surfaces where SSR + RT lack enough samples.
 //!
-//! Writes Rgba16Float at full resolution: RGB = colour, A = hit confidence.
+//! Writes Rgba16Float at half internal resolution: RGB = colour, A = hit
+//! confidence. The composite pass reconstructs it onto the full-resolution
+//! lighting target. This keeps the expensive RT query budget proportional to
+//! reflection detail rather than display pixels.
+
+mod compose;
+pub use compose::SsrCompositePass;
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
@@ -30,11 +36,13 @@ pub struct SsrPass {
 
     bg_0: wgpu::BindGroup,
     bg_1: Option<wgpu::BindGroup>,
-    bg_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bg_1_key: Option<[wgpu::TextureView; 6]>,
     bg_2: Option<wgpu::BindGroup>,
-    bg_2_key: Option<(usize, usize)>,
+    bg_2_key: Option<(wgpu::Tlas, Option<wgpu::TextureView>, wgpu::Buffer)>,
 
     linear_sampler: wgpu::Sampler,
+    rc_fallback: wgpu::TextureView,
+    transmission_fallback: wgpu::Buffer,
     use_rt: bool,
 
     width: u32,
@@ -64,6 +72,32 @@ impl SsrPass {
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 
+        // A missing irradiance cascade must not reinterpret the scene image as
+        // directional probe data. The shader rejects this 1x1 sentinel.
+        let rc_fallback = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("SSR absent irradiance cascade"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+
+        // Zero-initialized header disables transmission when metadata is absent.
+        let transmission_fallback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SSR absent transmission"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let shader = helio_core::shader::module_with(
             device,
             "SSR Trace Shader",
@@ -108,6 +142,16 @@ impl SsrPass {
                     // RC cascade texture for reflection fallback (optional).
                     // Bound as unfiltered float to match Rgba16Float storage format.
                     texture_unfiltered_entry(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             })
         });
@@ -130,14 +174,13 @@ impl SsrPass {
 
         // ── RT pipeline (Hi-Z + ray query) ──────────────────────────────
         let rt_pipeline = use_rt.then(|| {
-            // The RT shader is self-contained (declares Camera + helpers inline)
-            // so `enable wgpu_ray_query;` can appear at line 1 as WGSL requires.
-            let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("SSR RT Trace Shader"),
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
-                    include_str!("../shaders/ssr_trace_rt.wgsl").to_string(),
-                )),
-            });
+            // The shared resolver hoists ray-query directives ahead of the
+            // prelude, keeping RT and raster G-buffer conventions identical.
+            let rt_shader = helio_core::shader::module(
+                device,
+                "SSR RT Trace Shader",
+                include_str!("../shaders/ssr_trace_rt.wgsl"),
+            );
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("SSR RT PL"),
@@ -174,9 +217,11 @@ impl SsrPass {
             bg_2: None,
             bg_2_key: None,
             linear_sampler,
+            rc_fallback,
+            transmission_fallback,
             use_rt,
-            width,
-            height,
+            width: width.div_ceil(2),
+            height: height.div_ceil(2),
         }
     }
 }
@@ -187,18 +232,21 @@ impl RenderPass for SsrPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "hiz_min", "pre_aa", "render_environment"]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["ssr_trace"]
+        &[
+            "gbuffer",
+            "depth",
+            "hiz_min",
+            "pre_aa",
+            "render_environment",
+            "ray_transmission",
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
             "ssr_trace",
             wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::MatchSurface,
+            ResourceSize::ScaledInternal { divisor: 2 },
         );
         builder.with_extra_usage(
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -215,8 +263,8 @@ impl RenderPass for SsrPass {
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
+        self.width = width.div_ceil(2);
+        self.height = height.div_ceil(2);
         self.bg_1 = None;
         self.bg_1_key = None;
         self.bg_2 = None;
@@ -224,16 +272,20 @@ impl RenderPass for SsrPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "SsrPass") {
+        let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "SsrPass",
+        ) {
             Some(g) => g,
             None => return Ok(()),
         };
 
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.resources.get(helio_core::ResourceKey::new("pre_aa")) {
-            Some(v) => v,
-            None => return Ok(()),
-        };
+        let pre_aa_view: &wgpu::TextureView =
+            match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
+                Some(v) => v,
+                None => return Ok(()),
+            };
         let hiz_min_view = match ctx.resource_pool.get_view("hiz_min") {
             Some(v) => v,
             None => return Ok(()),
@@ -244,16 +296,16 @@ impl RenderPass for SsrPass {
         };
 
         // ── BG1: always bound ───────────────────────────────────────────
-        let key = (
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            depth_view as *const _ as usize,
-            pre_aa_view as *const _ as usize,
-            hiz_min_view as *const _ as usize,
-            ssr_trace as *const _ as usize,
-        );
+        let key = [
+            gbuffer.views[1].clone(),
+            gbuffer.views[2].clone(),
+            depth_view.clone(),
+            pre_aa_view.clone(),
+            hiz_min_view.clone(),
+            ssr_trace.clone(),
+        ];
 
-        if self.bg_1_key != Some(key) {
+        if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("SSR BG1"),
                 layout: &self.bgl_1,
@@ -281,21 +333,24 @@ impl RenderPass for SsrPass {
 
         // ── Decide between default and RT path ──────────────────────────
         if self.use_rt {
-            let environment = ctx.resources.read::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment"), "SsrPass");
+            let environment = ctx.registry.read::<helio_core::RenderEnvironment>(
+                helio_core::resource_keys::render_environment(),
+                "SsrPass",
+            );
             let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
-                let rc_view = ctx.resources.get(helio_core::ResourceKey::new("rc_view"));
+                let rc_view: Option<&wgpu::TextureView> =
+                    ctx.registry.get(helio_core::ResourceKey::new("rc_view"));
 
-                let rt_key = (
-                    tlas_binding as *const _ as usize,
-                    rc_view.map_or(0, |v| v as *const _ as usize),
-                );
+                let transmission = ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
+                    .unwrap_or(&self.transmission_fallback);
+                let rt_key = (tlas_binding.clone(), rc_view.cloned(), transmission.clone());
 
-                if self.bg_2_key != Some(rt_key) {
-                    // RC cascade texture (or scene_color as a dummy fallback — the
-                    // shader checks texture dimensions before sampling RC data).
-                    let rc_tex = rc_view.unwrap_or(pre_aa_view);
+                if self.bg_2_key.as_ref() != Some(&rt_key) {
+                    let rc_tex = rc_view.unwrap_or(&self.rc_fallback);
 
                     self.bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("SSR BG2 (RT)"),
@@ -309,13 +364,17 @@ impl RenderPass for SsrPass {
                                 binding: 1,
                                 resource: wgpu::BindingResource::TextureView(rc_tex),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: transmission.as_entire_binding(),
+                            },
                         ],
                     }));
                     self.bg_2_key = Some(rt_key);
                 }
 
                 // RT path
-                let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+                let cpass = unsafe { &mut *ctx.encoder_ptr };
                 let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SSR Hybrid Trace"),
                     timestamp_writes: None,
@@ -331,7 +390,7 @@ impl RenderPass for SsrPass {
         }
 
         // ── Default: Hi-Z only ──────────────────────────────────────────
-        let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+        let cpass = unsafe { &mut *ctx.encoder_ptr };
         let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("SSR Trace"),
             timestamp_writes: None,

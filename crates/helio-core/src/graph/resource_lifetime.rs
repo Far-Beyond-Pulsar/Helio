@@ -98,10 +98,15 @@ impl RenderGraph {
 
         for w in &writes {
             let mut last_read = w.pass_index;
+            // A pass can publish a pooled view under a logical name (water's
+            // output becomes pre_aa). Reusing that allocation before the
+            // logical consumers finish creates read/write aliasing on GPU.
+            let aliases = &builders[w.pass_index].published_aliases;
             for (j, builder) in builders.iter().enumerate() {
                 for d in builder.declarations() {
                     if d.access == crate::graph::ResourceAccess::Read
-                        && d.name == w.name
+                        && (d.name == w.name || aliases.iter().any(|(allocation, published)|
+                            *allocation == w.name && *published == d.name))
                         && j > last_read
                     {
                         last_read = j;
@@ -313,5 +318,34 @@ impl RenderGraph {
         }
 
         self.pre_pass_actions = actions;
+    }
+}
+
+#[cfg(test)]
+mod publication_alias_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires a GPU device"]
+    fn published_view_outlives_its_allocation_name() {
+        pollster::block_on(async {
+            let instance=wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            let adapter=instance.request_adapter(&Default::default()).await.unwrap();
+            let (device,queue)=adapter.request_device(&Default::default()).await.unwrap();
+            let device=std::sync::Arc::new(device);
+            let queue=std::sync::Arc::new(queue);
+            let mut graph=RenderGraph::new(&device,&queue);
+            let mut producer=ResourceBuilder::new();
+            producer.write_color_raw("water_output",wgpu::TextureFormat::Rgba16Float,crate::graph::ResourceSize::MatchSurface);
+            producer.publish_alias("water_output","pre_aa");
+            let mut filter=ResourceBuilder::new();
+            filter.read("pre_aa");
+            filter.write_color_raw("filtered",wgpu::TextureFormat::Rgba16Float,crate::graph::ResourceSize::MatchSurface);
+            let mut consumer=ResourceBuilder::new();
+            consumer.read("filtered");
+            graph.build_resource_lifetimes(&[producer,filter,consumer]);
+            assert_eq!(graph.resources["water_output"].last_read_pass,1);
+            graph.assign_chain_aware_alias_groups();
+            assert_ne!(graph.resources["water_output"].alias_group,graph.resources["filtered"].alias_group);
+        });
     }
 }

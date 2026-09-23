@@ -5,8 +5,12 @@ use std::sync::Arc;
 use glam::Vec3;
 use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::SceneDb;
 
-use crate::common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
+use crate::common::{
+    box_mesh, insert_object, make_material, plane_mesh, point_light, spawn_light,
+    spawn_material, spawn_mesh,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
@@ -24,26 +28,28 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer.scene().insert_material(make_material(
+        let world = &mut scene_db.world;
+        let concrete = spawn_material(world, make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.8,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let glass = renderer.scene().insert_material(make_material(
+        let glass = spawn_material(world, make_material(
             [0.3, 0.35, 0.4, 0.5],
             0.1,
             0.9,
             [0.0; 3],
             0.0,
         ));
-        let pole_mat = renderer.scene().insert_material(make_material(
+        let pole_mat = spawn_material(world, make_material(
             [0.2, 0.2, 0.22, 1.0],
             0.3,
             0.8,
@@ -52,10 +58,8 @@ impl HelioWasmApp for Demo {
         ));
 
         // Ground
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 30.0)));
-        let _ = insert_object(renderer, ground, concrete, glam::Mat4::IDENTITY, 30.0);
+        let ground = spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 30.0));
+        let _ = insert_object(world, ground, concrete, glam::Mat4::IDENTITY, 30.0);
 
         // Buildings arranged around a central plaza
         let bld_data = [
@@ -66,39 +70,31 @@ impl HelioWasmApp for Demo {
             ([0.0, 8.0, -20.0], [6.0, 8.0, 3.0]),
         ];
         for (pos, ext) in bld_data {
-            let m = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(pos, ext)));
-            let _ = insert_object(renderer, m, concrete, glam::Mat4::IDENTITY, 10.0);
+            let m = spawn_mesh(world, box_mesh(pos, ext));
+            let _ = insert_object(world, m, concrete, glam::Mat4::IDENTITY, 10.0);
             // Glass band near top
-            let gw = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let gw = spawn_mesh(world, box_mesh(
                     [pos[0], pos[1] * 2.0 - 1.0, pos[2]],
                     [ext[0], 0.4, ext[2]],
-                )));
-            let _ = insert_object(renderer, gw, glass, glam::Mat4::IDENTITY, 4.0);
+                ));
+            let _ = insert_object(world, gw, glass, glam::Mat4::IDENTITY, 4.0);
         }
 
         // Streetlamp poles (4 corners of the plaza)
         let lamp_positions = [[-8.0_f32, -8.0], [8.0, -8.0], [-8.0, 8.0], [8.0, 8.0]];
         for [lx, lz] in lamp_positions {
-            let pole = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let pole = spawn_mesh(world, box_mesh(
                     [lx, 2.5, lz],
                     [0.08, 2.5, 0.08],
-                )));
-            let _ = insert_object(renderer, pole, pole_mat, glam::Mat4::IDENTITY, 2.5);
+                ));
+            let _ = insert_object(world, pole, pole_mat, glam::Mat4::IDENTITY, 2.5);
             // Warm streetlight
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
+            spawn_light(world, point_light(
                     [lx, 5.2, lz],
                     [1.0, 0.85, 0.55],
                     6.0,
                     14.0,
-                )));
+                ));
         }
 
         renderer.set_ambient([0.05, 0.08, 0.15], 0.03);

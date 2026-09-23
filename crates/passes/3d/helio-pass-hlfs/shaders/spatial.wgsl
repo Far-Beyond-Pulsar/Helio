@@ -1,8 +1,26 @@
 @group(2) @binding(0) var filtered_lighting: texture_2d<u32>;
 @group(2) @binding(1) var filtered_geometry: texture_2d<u32>;
 @group(2) @binding(2) var spatial_lighting: texture_storage_2d<rg32uint,write>;
+var<workgroup> neighborhood_normal_depth: array<vec4<f32>,144>;
+var<workgroup> neighborhood_diffuse_age: array<vec4<f32>,144>;
+var<workgroup> neighborhood_specular: array<vec3<f32>,144>;
+const SPATIAL_WEIGHT_RADIUS_1 = array<f32, 9>(
+    1.0, 0.36787945, 0.13533528, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+const SPATIAL_WEIGHT_RADIUS_2 = array<f32, 9>(
+    1.0, 0.7788008, 0.60653067, 0.47236654, 0.36787945,
+    0.2865048, 0.22313017, 0.17377394, 0.13533528);
 @compute @workgroup_size(8,8)
-fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
+fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+    for(var index=lane;index<144u;index+=64u) {
+        let q=clamp(vec2<i32>(group.xy*8u)+vec2<i32>(i32(index%12u)-2,i32(index/12u)-2),
+            vec2<i32>(0),vec2<i32>(globals.sample_size)-1);
+        let geometry=load_geometry(filtered_geometry,q);
+        neighborhood_normal_depth[index]=vec4<f32>(oct_decode(geometry.xy),exp2(geometry.z));
+        neighborhood_diffuse_age[index]=vec4<f32>(load_radiance(filtered_lighting,q,0u),geometry.w);
+        neighborhood_specular[index]=load_radiance(filtered_lighting,q,1u);
+    }
+    workgroupBarrier();
     if any(id.xy>=globals.sample_size) { return; }
     let pixel=sample_pixel(id.xy,globals.frame);
     if textureLoad(gbuf_depth,vec2<i32>(pixel),0)>=1.0 {
@@ -25,19 +43,24 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(spatial_lighting,center,textureLoad(filtered_lighting,center,0)); return;
     } else {
         // One sparse rotated filter, with a narrow footprint for stable signals.
-        let radius=select(1,2,variance>select(0.02,0.05,confidence) || age<4.0);
+        let glossy=(globals.surface_flags&4u)!=0u && s.roughness<0.2;
+        let radius=select(1,2,!glossy && (variance>select(0.02,0.05,confidence) || age<4.0));
         let phase=globals.frame&3u;
         for(var y=-2;y<=2;y++) { for(var x=-2;x<=2;x++) {
             if abs(x)>radius || abs(y)>radius { continue; }
             if radius==2 && abs(x)+abs(y)>2 && ((u32(x+2)+u32(y+2)+phase)&1u)==0u { continue; }
             let p=center+vec2<i32>(x,y);
             if any(p<vec2<i32>(0)) || any(p>=vec2<i32>(globals.sample_size)) { continue; }
-            let geo=load_geometry(filtered_geometry,p);
-            if !geometry_matches(geo,s.normal,z) { continue; }
-            let offset=vec2<f32>(p)-sample_pos;
-            let spatial=exp(-dot(offset,offset)/f32(radius*radius));
-            let weight=spatial*pow(max(dot(oct_decode(geo.xy),s.normal),0.0),32.0);
-            let d=load_radiance(filtered_lighting,p,0u); let sp=load_radiance(filtered_lighting,p,1u);
+            let index=(lane/8u+u32(y+2))*12u+lane%8u+u32(x+2);
+            let normal_depth=neighborhood_normal_depth[index];
+            let diffuse_age=neighborhood_diffuse_age[index];
+            let alignment=dot(normal_depth.xyz,s.normal);
+            if !(diffuse_age.w>0.0 && alignment>0.9 && abs(normal_depth.w-z)<max(0.02,abs(z)*0.01)) { continue; }
+            let distance_squared=u32(x*x+y*y);
+            let spatial=select(SPATIAL_WEIGHT_RADIUS_1[distance_squared],
+                SPATIAL_WEIGHT_RADIUS_2[distance_squared],radius==2);
+            let weight=spatial*normal_weight(alignment);
+            let d=diffuse_age.xyz; let sp=neighborhood_specular[index];
             // Tonemapped accumulation for disocclusions suppresses sparse fireflies.
             if age<4.0 {
                 diffuse+=d/(1.0+luminance(d))*weight; specular+=sp/(1.0+luminance(sp))*weight;

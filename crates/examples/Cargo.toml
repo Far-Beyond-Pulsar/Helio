@@ -76,6 +76,10 @@ name = "indoor_cathedral_hlfs"
 path = "indoor_cathedral_hlfs.rs"
 
 [[bin]]
+name = "drone_flight"
+path = "drone_flight.rs"
+
+[[bin]]
 name = "indoor_server_room"
 path = "indoor_server_room.rs"
 
@@ -160,22 +164,6 @@ name = "oil_rig_night"
 path = "oil_rig_night.rs"
 
 [[bin]]
-name = "editor_demo"
-path = "editor_demo.rs"
-
-[[bin]]
-name = "editor_demo_mini"
-path = "editor_demo_mini.rs"
-
-[[bin]]
-name = "editor_demo_xl"
-path = "editor_demo_xl.rs"
-
-[[bin]]
-name = "editor_demo_tsr"
-path = "editor_demo_tsr.rs"
-
-[[bin]]
 name = "meshlet_cull_benchmark"
 path = "meshlet_cull_benchmark.rs"
 
@@ -198,18 +186,6 @@ path = "volumetric_fog_demo.rs"
 [[bin]]
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
-
-[[bin]]
-name = "voxel_demo"
-path = "voxel/mesh_demo.rs"
-
-[[bin]]
-name = "voxel_demo_raymarch"
-path = "voxel/raymarch_demo.rs"
-
-[[bin]]
-name = "planet_voxel_demo"
-path = "planet_voxel_demo.rs"
 
 [[bin]]
 name = "radiant_demo"
@@ -275,9 +251,8 @@ helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
-helio-pass-voxel-raymarch = { path = "../passes/3d/helio-pass-voxel-raymarch" }
-helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
-helio-pass-planetary-voxel = { workspace = true }
+helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
+helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
@@ -336,3 +311,11 @@ path = "cloud_engine_curve.rs"
 [[bin]]
 name = "procedural_clouds_demo"
 path = "procedural_clouds_demo.rs"
+
+[[bin]]
+name = "cathedral_volumetric_fog_demo"
+path = "monumental_arch_hlfs.rs"
+
+[[bin]]
+name = "technology_gallery_hlfs"
+path = "technology_gallery_hlfs.rs"

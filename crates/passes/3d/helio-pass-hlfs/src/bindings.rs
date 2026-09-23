@@ -45,6 +45,7 @@ impl InternalBindings {
                 t.coarse.as_entire_binding(),
                 t.grid.as_entire_binding(),
                 view(&t.depth_mips[0]),
+                t.proposals.as_entire_binding(),
             ],
         );
         let depth_reduce = t
@@ -72,6 +73,9 @@ impl InternalBindings {
                     view(&t.raw_lighting.view),
                     view(&previous.geometry.view),
                     view(&t.depth_bounds.view),
+                    t.proposals.as_entire_binding(),
+                    view(&previous.reservoirs.view),
+                    view(&t.history[write].reservoirs.view),
                 ],
             )
         });
@@ -117,6 +121,8 @@ impl InternalBindings {
                     view(&t.depth_bounds.view),
                     view(&t.history[1 - write].lighting.view),
                     view(&t.history[1 - write].geometry.view),
+                    t.proposals.as_entire_binding(),
+                    t.grid.as_entire_binding(),
                 ],
             )
         });
@@ -134,6 +140,7 @@ impl InternalBindings {
 pub(crate) struct Inputs<'a> {
     pub camera: &'a wgpu::Buffer,
     pub lights: &'a wgpu::Buffer,
+    pub compact_lights: &'a wgpu::Buffer,
     pub shadow_matrices: &'a wgpu::Buffer,
     pub shadow_atlas: &'a wgpu::TextureView,
     pub shadow_sampler: &'a wgpu::Sampler,
@@ -149,7 +156,7 @@ struct CommonKey {
 impl CommonKey {
     fn matches(&self, i: &Inputs<'_>) -> bool {
         &self.buffers[0] == i.camera
-            && &self.buffers[1] == i.lights
+            && &self.buffers[1] == i.compact_lights
             && &self.buffers[2] == i.shadow_matrices
             && &self.shadow == i.shadow_atlas
             && &self.sampler == i.shadow_sampler
@@ -170,12 +177,38 @@ impl GBufferKey {
 }
 #[derive(Default)]
 pub(crate) struct ExternalBindings {
+    pub compact: Option<wgpu::BindGroup>,
+    compact_key: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    pub ray: Option<wgpu::BindGroup>,
+    pub transmission: bool,
+    ray_key: Option<(wgpu::Tlas, wgpu::Buffer)>,
     pub common: Option<wgpu::BindGroup>,
     pub gbuffer: Option<wgpu::BindGroup>,
     common_key: Option<CommonKey>,
     gbuffer_key: Option<GBufferKey>,
 }
 impl ExternalBindings {
+    pub fn clear_ray_binding(&mut self) {
+        self.ray = None;
+        self.ray_key = None;
+    }
+    pub fn update_ray(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        tlas: &wgpu::Tlas,
+        transmission: &wgpu::Buffer,
+    ) {
+        if !self.ray_key.as_ref().is_some_and(|(old_tlas, old_buffer)| old_tlas == tlas && old_buffer == transmission) {
+            self.ray = Some(bind_group(
+                device,
+                "HLFS scene TLAS",
+                layout,
+                &[tlas.as_binding(), transmission.as_entire_binding()],
+            ));
+            self.ray_key = Some((tlas.clone(), transmission.clone()));
+        }
+    }
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -185,6 +218,22 @@ impl ExternalBindings {
         shadows: &wgpu::Buffer,
         i: &Inputs<'_>,
     ) {
+        if !self
+            .compact_key
+            .as_ref()
+            .is_some_and(|(source, dest)| source == i.lights && dest == i.compact_lights)
+        {
+            self.compact = Some(bind_group(
+                device,
+                "HLFS compact light copy",
+                &p.compact_bgl,
+                &[
+                    i.lights.as_entire_binding(),
+                    i.compact_lights.as_entire_binding(),
+                ],
+            ));
+            self.compact_key = Some((i.lights.clone(), i.compact_lights.clone()));
+        }
         // Compare actual wgpu handles. Wrapper addresses can remain unchanged when
         // a growable SceneDB buffer reallocates and must never be cache keys.
         if !self.common_key.as_ref().is_some_and(|k| k.matches(i)) {
@@ -195,7 +244,7 @@ impl ExternalBindings {
                 &[
                     globals.as_entire_binding(),
                     i.camera.as_entire_binding(),
-                    i.lights.as_entire_binding(),
+                    i.compact_lights.as_entire_binding(),
                     shadows.as_entire_binding(),
                     view(i.shadow_atlas),
                     wgpu::BindingResource::Sampler(i.shadow_sampler),
@@ -206,7 +255,7 @@ impl ExternalBindings {
             self.common_key = Some(CommonKey {
                 buffers: [
                     i.camera.clone(),
-                    i.lights.clone(),
+                    i.compact_lights.clone(),
                     i.shadow_matrices.clone(),
                 ],
                 shadow: i.shadow_atlas.clone(),

@@ -18,14 +18,13 @@
 use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{
-    Camera, DebugDrawState, MaterialId, RenderGraph, Renderer, RendererConfig, Scene, SceneEntity,
-};
-use helio_default_graphs::build_default_graph_with_user_effects;
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
+use pulsar_scenedb::{Entity, SceneDb, World};
 
-use crate::common::{box_mesh, insert_object, make_material, point_light};
+use crate::common::{
+    box_mesh, insert_object, make_material, point_light, spawn_light, spawn_material, spawn_mesh,
+};
 
 const VHS_SHADER_SNIPPET: &str = include_str!("vhs_effects.wgsl");
 
@@ -62,18 +61,16 @@ pub struct Demo {
 }
 
 /// Insert a static box (mesh + object) at `center` with the given half-extents.
-fn add_box(renderer: &mut Renderer, center: [f32; 3], half: [f32; 3], material: MaterialId) {
+fn add_box(world: &mut World, center: [f32; 3], half: [f32; 3], material: Entity) {
     // Build the box at the local origin and place it via the transform. The
     // object's cull bounds are derived from the transform translation, so baking
     // the position into the mesh (and leaving an identity transform) would put
     // every box's bounding sphere at the world origin — making them all frustum-
     // cull together instead of each on its own geometry.
-    let mesh = renderer
-        .scene()
-        .insert_entity(SceneEntity::mesh(box_mesh([0.0, 0.0, 0.0], half)));
+    let mesh = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], half));
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
     let _ = insert_object(
-        renderer,
+        world,
         mesh,
         material,
         Mat4::from_translation(Vec3::from(center)),
@@ -85,58 +82,41 @@ impl Demo {
     /// Build the whole scene from `self.seed`: wipe any prior contents, create
     /// materials, lay out the maze, and re-add the scene-wide VHS post-process
     /// volume (which `clear` also removes).
-    fn build_scene(&self, renderer: &mut Renderer) {
-        renderer.scene().clear();
-
+    fn build_scene(&self, world: &mut World) {
         let (wall, floor, ceiling, pillar, fixture) = {
-            let scene = renderer.scene();
+            let world = &mut *world;
             (
                 // Classic mono-yellow damp wallpaper.
-                scene.insert_material(make_material(
-                    [0.78, 0.70, 0.34, 1.0],
-                    0.92,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
+                spawn_material(
+                    world,
+                    make_material([0.78, 0.70, 0.34, 1.0], 0.92, 0.0, [0.0; 3], 0.0),
+                ),
                 // Moist patterned carpet.
-                scene.insert_material(make_material(
-                    [0.42, 0.37, 0.22, 1.0],
-                    0.96,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
+                spawn_material(
+                    world,
+                    make_material([0.42, 0.37, 0.22, 1.0], 0.96, 0.0, [0.0; 3], 0.0),
+                ),
                 // Off-white drop-ceiling tiles.
-                scene.insert_material(make_material(
-                    [0.80, 0.78, 0.70, 1.0],
-                    0.88,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
-                scene.insert_material(make_material(
-                    [0.74, 0.66, 0.32, 1.0],
-                    0.9,
-                    0.0,
-                    [0.0; 3],
-                    0.0,
-                )),
+                spawn_material(
+                    world,
+                    make_material([0.80, 0.78, 0.70, 1.0], 0.88, 0.0, [0.0; 3], 0.0),
+                ),
+                spawn_material(
+                    world,
+                    make_material([0.74, 0.66, 0.32, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+                ),
                 // Emissive fluorescent panel.
-                scene.insert_material(make_material(
-                    [0.9, 0.9, 0.85, 1.0],
-                    0.6,
-                    0.0,
-                    [1.0, 0.96, 0.85],
-                    6.0,
-                )),
+                spawn_material(
+                    world,
+                    make_material([0.9, 0.9, 0.85, 1.0], 0.6, 0.0, [1.0, 0.96, 0.85], 6.0),
+                ),
             )
         };
 
         // Floor + ceiling slabs spanning the whole plan.
-        add_box(renderer, [0.0, -WALL_T, 0.0], [HALF, WALL_T, HALF], floor);
+        add_box(world, [0.0, -WALL_T, 0.0], [HALF, WALL_T, HALF], floor);
         add_box(
-            renderer,
+            world,
             [0.0, WALL_H + WALL_T, 0.0],
             [HALF, WALL_T, HALF],
             ceiling,
@@ -149,12 +129,7 @@ impl Demo {
             (-HALF, 0.0, WALL_T, HALF),
             (HALF, 0.0, WALL_T, HALF),
         ] {
-            add_box(
-                renderer,
-                [cx, WALL_H * 0.5, cz],
-                [hx, WALL_H * 0.5, hz],
-                wall,
-            );
+            add_box(world, [cx, WALL_H * 0.5, cz], [hx, WALL_H * 0.5, hz], wall);
         }
 
         let mut rng = Rng(self.seed | 1);
@@ -170,7 +145,7 @@ impl Demo {
                 // Wall on the +X edge of this cell (interior edges only).
                 if gx < GRID - 1 && rng.chance(0.45) {
                     add_box(
-                        renderer,
+                        world,
                         [cx + CELL * 0.5, WALL_H * 0.5, cz],
                         [WALL_T, WALL_H * 0.5, seg],
                         wall,
@@ -179,7 +154,7 @@ impl Demo {
                 // Wall on the +Z edge of this cell.
                 if gz < GRID - 1 && rng.chance(0.45) {
                     add_box(
-                        renderer,
+                        world,
                         [cx, WALL_H * 0.5, cz + CELL * 0.5],
                         [seg, WALL_H * 0.5, WALL_T],
                         wall,
@@ -189,7 +164,7 @@ impl Demo {
                 // Occasional support pillar at a cell corner.
                 if rng.chance(0.22) {
                     add_box(
-                        renderer,
+                        world,
                         [cx + CELL * 0.5, WALL_H * 0.5, cz + CELL * 0.5],
                         [0.35, WALL_H * 0.5, 0.35],
                         pillar,
@@ -198,39 +173,14 @@ impl Demo {
 
                 // Ceiling fluorescent fixture + light. A few cells stay dark.
                 if !rng.chance(0.16) {
-                    add_box(
-                        renderer,
-                        [cx, WALL_H - 0.05, cz],
-                        [1.2, 0.05, 0.35],
-                        fixture,
+                    add_box(world, [cx, WALL_H - 0.05, cz], [1.2, 0.05, 0.35], fixture);
+                    spawn_light(
+                        world,
+                        point_light([cx, WALL_H - 0.3, cz], [1.0, 0.96, 0.85], 6.0, CELL * 1.6),
                     );
-                    renderer
-                        .scene()
-                        .insert_entity(SceneEntity::light(point_light(
-                            [cx, WALL_H - 0.3, cz],
-                            [1.0, 0.96, 0.85],
-                            6.0,
-                            CELL * 1.6,
-                        )));
                 }
             }
         }
-
-        // Scene-wide post-process volume. All effects come from the injected VHS
-        // snippet, so the built-in chain stays at its no-op defaults.
-        renderer
-            .scene()
-            .insert_entity(SceneEntity::post_process_volume(
-                PostProcessVolumeDescriptor {
-                    bounds_min: [-1000.0, -1000.0, -1000.0],
-                    bounds_max: [1000.0, 1000.0, 1000.0],
-                    blend_radius: 0.0,
-                    unbound: true,
-                    priority: 100.0,
-                    blend_weight: 1.0,
-                    settings: PostProcessSettings::default(),
-                },
-            ));
     }
 }
 
@@ -245,32 +195,9 @@ impl HelioWasmApp for Demo {
         1.0
     }
 
-    fn build_graph(
-        device: &Arc<wgpu::Device>,
-        queue: &Arc<wgpu::Queue>,
-        scene: &Scene,
-        config: RendererConfig,
-        debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
-        debug_camera_buf: &wgpu::Buffer,
-        cull_stats_buf: &wgpu::Buffer,
-    ) -> Option<RenderGraph> {
-        // Full default deferred chain with the VHS WGSL snippet injected into
-        // the post-process pass. Identical to the native backrooms graph.
-        Some(build_default_graph_with_user_effects(
-            device,
-            queue,
-            scene,
-            config,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-            None, // debug_overlay
-            VHS_SHADER_SNIPPET,
-        ))
-    }
-
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
@@ -284,7 +211,7 @@ impl HelioWasmApp for Demo {
             seed: 1,
             prev_regen: false,
         };
-        demo.build_scene(renderer);
+        demo.build_scene(&mut scene_db.world);
 
         renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -344,7 +271,8 @@ impl HelioWasmApp for Demo {
         let regen = input.keys.contains(&KeyCode::KeyR);
         if regen && !self.prev_regen {
             self.seed = self.seed.wrapping_mul(2654435761).wrapping_add(1);
-            self.build_scene(renderer);
+            // SceneDB is authoritative; rebuilding requires a World handle in
+            // the update hook, which the current WASM trait does not expose.
         }
         self.prev_regen = regen;
 

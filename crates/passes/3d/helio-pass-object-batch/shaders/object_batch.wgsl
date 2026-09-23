@@ -55,12 +55,9 @@
 //!    `helio-pass-gbuffer`'s `multi_draw_indexed_indirect(indirect, start *
 //!    20, count)` call expects (`start`/`count` index the `draw_calls`/
 //!    `indirect` array directly, not `instances`). Split into three parallel
-//!    output arrays (opaque/transparent/forward) by the *first* group's
-//!    flags in each run -- matching `Scene::rebuild_instance_buffers`'s own
-//!    "takes whichever flag the first group in the run has" behavior exactly
-//!    (not attempting to "fix" a same-`(class, graph_hash)` run whose
-//!    members' materials disagree on transparency/forward-shading, which the
-//!    trusted CPU reference never handled specially either).
+//!    output arrays (opaque/transparent/forward). A shading-category change
+//!    also splits the run: materials sharing a class and graph can still
+//!    require different passes.
 //! 8. `cs_shadow_partition` — one thread per LIVE sorted instance: atomically
 //!    appends a one-instance `DrawIndexedIndirectArgs` into either
 //!    `shadow_static_indirect` or `shadow_movable_indirect` depending on
@@ -377,9 +374,12 @@ struct GpuInstanceDataOut {
     flags: u32,
     lightmap_index: u32,
 }
+// Layout mirrors `GpuAabb` in indirect_dispatch.wgsl (32 bytes: min, pad, max, pad).
 struct GpuInstanceAabbOut {
-    center: array<f32, 3>,
-    radius: f32,
+    min: array<f32, 3>,
+    _pad0: f32,
+    max: array<f32, 3>,
+    _pad1: f32,
 }
 @group(0) @binding(3) var<storage, read_write> instances_out: array<GpuInstanceDataOut>;
 @group(0) @binding(4) var<storage, read_write> aabbs_out: array<GpuInstanceAabbOut>;
@@ -401,9 +401,13 @@ fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
         row.flags,
         0xFFFFFFFFu,
     );
+    // Conservative world AABB: the bounding sphere's box.
+    let r = row.bounds[3];
     aabbs_out[i] = GpuInstanceAabbOut(
-        array<f32, 3>(row.bounds[0], row.bounds[1], row.bounds[2]),
-        row.bounds[3],
+        array<f32, 3>(row.bounds[0] - r, row.bounds[1] - r, row.bounds[2] - r),
+        0.0,
+        array<f32, 3>(row.bounds[0] + r, row.bounds[1] + r, row.bounds[2] + r),
+        0.0,
     );
 }
 
@@ -661,6 +665,7 @@ fn cs_build_draw_calls(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(3) var<storage, read> group_graph_hash_hi_rls: array<u32>;
 @group(0) @binding(4) var<storage, read_write> local_range_rank: array<u32>;
 @group(0) @binding(5) var<storage, read_write> block_range_totals: array<u32>;
+@group(0) @binding(6) var<storage, read> group_shading_rls: array<u32>;
 
 var<workgroup> range_scan_buf: array<u32, 256>;
 
@@ -680,7 +685,8 @@ fn cs_range_local_scan(
             let i = gid.x;
             if group_material_class_rls[i] != group_material_class_rls[i - 1u]
                 || group_graph_hash_lo_rls[i] != group_graph_hash_lo_rls[i - 1u]
-                || group_graph_hash_hi_rls[i] != group_graph_hash_hi_rls[i - 1u] {
+                || group_graph_hash_hi_rls[i] != group_graph_hash_hi_rls[i - 1u]
+                || group_shading_rls[i] != group_shading_rls[i - 1u] {
                 is_start = 1u;
             }
         }
@@ -764,7 +770,8 @@ fn cs_range_write(
         is_start = true;
     } else if group_material_class_rw[g] != group_material_class_rw[g - 1u]
         || group_graph_hash_lo_rw[g] != group_graph_hash_lo_rw[g - 1u]
-        || group_graph_hash_hi_rw[g] != group_graph_hash_hi_rw[g - 1u] {
+        || group_graph_hash_hi_rw[g] != group_graph_hash_hi_rw[g - 1u]
+        || group_shading_rw[g] != group_shading_rw[g - 1u] {
         is_start = true;
     }
     if !is_start {
@@ -782,7 +789,8 @@ fn cs_range_write(
         }
         if group_material_class_rw[end] != group_material_class_rw[g]
             || group_graph_hash_lo_rw[end] != group_graph_hash_lo_rw[g]
-            || group_graph_hash_hi_rw[end] != group_graph_hash_hi_rw[g] {
+            || group_graph_hash_hi_rw[end] != group_graph_hash_hi_rw[g]
+            || group_shading_rw[end] != group_shading_rw[g] {
             break;
         }
         end += 1u;

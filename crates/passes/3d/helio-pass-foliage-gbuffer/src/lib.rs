@@ -35,7 +35,7 @@
 //! pass's colour attachments in count and format (`RenderPassContext::check_compatible`
 //! compares the lists element-wise), so a 5-target pipeline needs its own render pass,
 //! which forfeits subpass fusion. Breaking the chain forces a store and reload of every
-//! touched attachment; at 1080p and 48 bytes/sample that is ~100 MiB each way on a
+//! touched attachment; at 1080p and 52 bytes/sample that is ~100 MiB each way on a
 //! tile-based GPU, far more than the lever was ever going to save.
 //!
 //! So: all eight targets, identical formats to `GBufferPass`'s, and
@@ -198,7 +198,7 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rg16Float,   // 4 lightmap_uv
     wgpu::TextureFormat::Rgba16Float, // 5 sss
     wgpu::TextureFormat::Rgba16Float, // 6 extra
-    wgpu::TextureFormat::Rg16Float,   // 7 velocity
+    wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
 /// The three targets grass does not write, which therefore carry
@@ -1039,8 +1039,8 @@ impl RenderPass for FoliageGBufferPass {
         // forget: a published view with no published origin would bend every blade in
         // the world against a 64 m field sitting at the world origin, which looks like a
         // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.pass_resources.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction")).is_some()
-            && ctx.pass_resources.get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler")).is_some()
+        let interaction_valid = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction")).is_some()
+            && ctx.registry.get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler")).is_some()
             && self.interaction_field_published;
         let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {
@@ -1107,16 +1107,16 @@ impl RenderPass for FoliageGBufferPass {
         // underneath it and are not part of the key.
         //
         // Built inside a block that ends before the assignment: the interaction view is
-        // borrowed either out of `ctx.resources` or out of `self`, and holding that
+        // borrowed either out of `ctx.registry` or out of `self`, and holding that
         // borrow across `self.bind_group_0 = ...` would not compile. The created bind
         // group owns its references, so nothing escapes the block.
         let (key, rebuilt) = {
             let interaction_view = ctx
-                .resources
+                .registry
                 .get(helio_core::ResourceKey::new("foliage_interaction"))
                 .unwrap_or(&self.placeholder_view);
             let interaction_sampler = ctx
-                .resources
+                .registry
                 .get(helio_core::ResourceKey::new("foliage_interaction_sampler"))
                 .unwrap_or(&self.placeholder_sampler);
             let wind_buffer = ctx

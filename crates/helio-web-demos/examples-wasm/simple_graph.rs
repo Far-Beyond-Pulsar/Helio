@@ -11,8 +11,12 @@ use std::sync::Arc;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::SceneDb;
 
-use crate::common::{cube_mesh, directional_light, insert_object, make_material, point_light};
+use crate::common::{
+    cube_mesh, directional_light, insert_object, make_material, point_light, spawn_light,
+    spawn_material, spawn_mesh,
+};
 
 const LOOK_SENS: f32 = 0.002;
 const FLY_SPEED: f32 = 3.0;
@@ -32,40 +36,36 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
         // Single white cube at origin
-        let mat = renderer.scene().insert_material(make_material(
+        let world = &mut scene_db.world;
+        let mat = spawn_material(world, make_material(
             [0.95, 0.95, 0.95, 1.0],
             0.5,
             0.05,
             [0.0; 3],
             0.0,
         ));
-        let mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.0)));
-        let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 1.0);
+        let mesh = spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 1.0));
+        let _ = insert_object(world, mesh, mat, glam::Mat4::IDENTITY, 1.0);
 
         // Simple lighting
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
+        spawn_light(world, directional_light(
                 [0.4, -0.8, 0.5],
                 [1.0, 1.0, 1.0],
                 1.2,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
+            ));
+        spawn_light(world, point_light(
                 [3.0, 2.0, 2.0],
                 [0.5, 0.7, 1.0],
                 6.0,
                 12.0,
-            )));
+            ));
         renderer.set_ambient([0.4, 0.45, 0.5], 0.15);
 
         Self {

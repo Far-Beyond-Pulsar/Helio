@@ -25,16 +25,18 @@ use std::time::Instant;
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    LightRenderInput, Renderer, RendererBuilder, RendererConfig, VirtualMeshUpload,
-    VirtualObjectDescriptor,
+    Renderer, RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::SceneDb;
-use pulsar_scenedb::World;
-use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
+use v3_demo_common::{
+    cube_mesh, directional_light, flush_scene_db, make_material, new_scene_db_with_gpu_mirror,
+    point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    update_light,
+};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -77,45 +79,6 @@ const MARKER_COLORS: [[f32; 4]; 6] = [
     [0.9, 0.4, 1.0, 0.85], // violet
     [1.0, 1.0, 1.0, 0.85], // white
 ];
-
-/// SceneDB-owned light state used by this example's small projection seam.
-/// Helio receives only the transient `LightRenderInput` list below.
-#[derive(Clone, Copy, Debug)]
-struct SceneLight {
-    light: helio::GpuLight,
-    position: [f32; 3],
-}
-
-fn spawn_scene_light(
-    world: &mut World,
-    light: helio::GpuLight,
-    position: [f32; 3],
-) -> pulsar_scenedb::Entity {
-    let entity = world.spawn();
-    world.insert(entity, SceneLight { light, position });
-    entity
-}
-
-fn scene_light_inputs(world: &World) -> Vec<LightRenderInput> {
-    world
-        .query::<&SceneLight>()
-        .map(|(entity, scene_light)| {
-            let mut light = scene_light.light;
-            light.position_range[0..3].copy_from_slice(&scene_light.position);
-            LightRenderInput {
-                light,
-                user_tag: entity.index() as u64,
-                entity_index: entity.index(),
-            }
-        })
-        .collect()
-}
-
-fn rebuild_scene_lights(renderer: &mut Renderer, scene_db: &SceneDb) {
-    renderer
-        .scene()
-        .rebuild_light_instances(&scene_light_inputs(&scene_db.world));
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -268,60 +231,38 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let mut scene_db = SceneDb::new();
-        let mut renderer = RendererBuilder::new(config)
+        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
-            .with_clear_color([0.34, 0.48, 0.72, 1.0])
-            .with_ambient([0.38, 0.44, 0.50], 1.3)
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(
-                device.clone(),
-                queue.clone(),
-                size.width,
-                size.height,
-                surface_format,
-            );
+            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+        renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]);
+        renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
 
         // ── Sun light ─────────────────────────────────────────────────────
         let sun_angle: f32 = 0.62; // radians above horizon
         let sun_dir = Vec3::new(-sun_angle.cos(), -sun_angle.sin(), -0.6).normalize();
         let sun_entity = {
-            let sun_entity = spawn_scene_light(
+            let sun_entity = spawn_light(
                 &mut scene_db.world,
                 directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
-                [0.0, 0.0, 0.0],
             );
-            spawn_scene_light(
-                &mut scene_db.world,
-                point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0),
-                [0.0, 8.0, 0.0],
-            );
-            spawn_scene_light(
-                &mut scene_db.world,
-                point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0),
-                [60.0, 4.0, -40.0],
-            );
+            spawn_light(&mut scene_db.world, point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0));
+            spawn_light(&mut scene_db.world, point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0));
             sun_entity
         };
 
         // ── Ground plane ──────────────────────────────────────────────────
-        let ground_mat = renderer.scene().insert_material(make_material(
+        let ground_mat = spawn_material(&mut scene_db.world, make_material(
             [0.28, 0.23, 0.18, 1.0],
             0.92,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let ground_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(v3_demo_common::plane_mesh(
-                [0.0, 0.0, 0.0],
-                250.0,
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
+        let ground_mesh = spawn_mesh(&mut scene_db.world, v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0));
+        let _ = spawn_object(
+            &mut scene_db.world,
             ground_mesh,
             ground_mat,
             Mat4::IDENTITY,
@@ -339,20 +280,16 @@ impl ApplicationHandler for App {
         ];
 
         // Fallback cube material/mesh for any type that failed to load
-        let fallback_mat = renderer.scene().insert_material(make_material(
+        let fallback_mat = spawn_material(&mut scene_db.world, make_material(
             [0.35, 0.30, 0.25, 1.0],
             0.85,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let fallback_mesh = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
+        let fallback_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
         // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
-        let rock_vg: Vec<Option<Vec<(helio::VirtualMeshId, u32)>>> = rock_paths
+        let rock_meshes: Vec<Option<Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)>>> = rock_paths
             .iter()
             .map(|path| {
                 let scene = match load_scene_file_with_config(path, LoadConfig::default()) {
@@ -362,35 +299,21 @@ impl ApplicationHandler for App {
                         return None;
                     }
                 };
-                let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
-                    Ok(ids) => ids,
-                    Err(e) => {
-                        log::warn!(
-                            "Could not upload rock materials for '{}': {e}",
-                            path.display()
-                        );
-                        return None;
-                    }
-                };
-                let entries: Vec<(helio::VirtualMeshId, u32)> = scene
+                let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
+                let entries: Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)> = scene
                     .meshes
                     .iter()
                     .map(|mesh| {
-                        let vm_id = renderer
-                            .scene()
-                            .insert_entity(helio::SceneEntity::virtual_mesh(VirtualMeshUpload {
-                                vertices: mesh.vertices.clone(),
-                                indices: mesh.indices.clone(),
-                            }))
-                            .as_virtual_mesh()
-                            .unwrap();
+                        let vm_id = spawn_mesh(&mut scene_db.world, helio::MeshUpload {
+                            vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
+                        });
                         let mat_id = mesh
                             .material_index
                             .and_then(|idx| mat_ids.get(idx))
                             .or_else(|| mat_ids.first())
                             .copied()
                             .unwrap_or(fallback_mat);
-                        (vm_id, mat_id.slot())
+                        (vm_id, mat_id)
                     })
                     .collect();
                 Some(entries)
@@ -403,7 +326,7 @@ impl ApplicationHandler for App {
         let mut billboards = Vec::new();
 
         for rock_type in 0..3usize {
-            let vg_entries = rock_vg[rock_type].as_deref();
+            let vg_entries = rock_meshes[rock_type].as_deref();
 
             for _ in 0..ROCK_COUNT_PER_TYPE {
                 // Random position in a disc
@@ -441,8 +364,8 @@ impl ApplicationHandler for App {
 
                 match vg_entries {
                     None => {
-                        let _ = v3_demo_common::insert_object(
-                            &mut renderer,
+                        let _ = spawn_object(
+                            &mut scene_db.world,
                             fallback_mesh,
                             fallback_mat,
                             transform,
@@ -450,21 +373,8 @@ impl ApplicationHandler for App {
                         );
                     }
                     Some(entries) => {
-                        for &(vm_id, mat_slot) in entries {
-                            let _ =
-                                renderer
-                                    .scene()
-                                    .insert_entity(helio::SceneEntity::virtual_object(
-                                        VirtualObjectDescriptor {
-                                            virtual_mesh: vm_id,
-                                            material_id: mat_slot,
-                                            transform,
-                                            bounds: [center.x, center.y, center.z, bounds_radius],
-                                            flags: 0,
-                                            groups: helio::GroupMask::NONE,
-                                            movability: None, // Static rocks
-                                        },
-                                    ));
+                        for &(mesh_id, mat_id) in entries {
+                            let _ = spawn_object(&mut scene_db.world, mesh_id, mat_id, transform, bounds_radius);
                         }
                     }
                 }
@@ -472,7 +382,14 @@ impl ApplicationHandler for App {
                 _global_rock_idx += 1;
             }
         }
-        renderer.set_billboard_instances(&billboards);
+        for billboard in billboards {
+            let entity = scene_db.world.spawn();
+            scene_db.world.insert(entity, helio_pass_billboard::BillboardComponent {
+                world_pos: billboard.world_pos,
+                scale_flags: billboard.scale_flags,
+                color: billboard.color,
+            });
+        }
 
         // ── Ship (parked nearby) ───────────────────────────────────────────
         let ship_pos = Vec3::new(18.0, 0.0, -12.0);
@@ -485,8 +402,8 @@ impl ApplicationHandler for App {
         match load_result {
             Ok(scene) => {
                 // Upload meshes + materials in a single traversal.
-                match upload_scene_materials(&mut renderer, &scene) {
-                    Ok(mat_ids) => {
+                {
+                    let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
                         let ship_transform =
                             Mat4::from_rotation_translation(Quat::from_rotation_y(0.4), ship_pos);
                         for mesh in &scene.meshes {
@@ -495,40 +412,30 @@ impl ApplicationHandler for App {
                                 .iter()
                                 .map(|v| Vec3::from_array(v.position).length())
                                 .fold(0.5_f32, f32::max);
-                            let mesh_id = renderer
-                                .scene()
-                                .insert_entity(helio::SceneEntity::mesh(helio::MeshUpload {
+                            let mesh_id = spawn_mesh(&mut scene_db.world, helio::MeshUpload {
                                     vertices: mesh.vertices.clone(),
                                     indices: mesh.indices.clone(),
-                                }))
-                                .as_mesh()
-                                .unwrap();
+                                });
                             let mat = mesh
                                 .material_index
                                 .and_then(|idx| mat_ids.get(idx))
                                 .or_else(|| mat_ids.first())
                                 .copied()
                                 .unwrap_or(fallback_mat);
-                            let _ = v3_demo_common::insert_object(
-                                &mut renderer,
+                            let _ = spawn_object(
+                                &mut scene_db.world,
                                 mesh_id,
                                 mat,
                                 ship_transform,
                                 radius,
                             );
                         }
-                    }
-                    Err(e) => log::warn!("Could not upload ship materials: {e}"),
                 }
             }
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
-                let ship_mesh = renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.0, 0.0], 1.5)))
-                    .as_mesh()
-                    .unwrap();
-                let ship_mat = renderer.scene().insert_material(make_material(
+                let ship_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 1.5));
+                let ship_mat = spawn_material(&mut scene_db.world, make_material(
                     [0.55, 0.70, 0.90, 1.0],
                     0.25,
                     0.75,
@@ -536,8 +443,8 @@ impl ApplicationHandler for App {
                     0.0,
                 ));
                 let transform = Mat4::from_translation(ship_pos);
-                let _ = v3_demo_common::insert_object(
-                    &mut renderer,
+                let _ = spawn_object(
+                    &mut scene_db.world,
                     ship_mesh,
                     ship_mat,
                     transform,
@@ -716,14 +623,10 @@ impl ApplicationHandler for App {
                 )
                 .normalize();
                 {
-                    state
-                        .scene_db
-                        .world
-                        .get_mut::<SceneLight>(state.sun_entity)
-                        .expect("SceneDB sun light disappeared")
-                        .light = directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2);
+                    update_light(&mut state.scene_db.world, state.sun_entity,
+                        directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2));
                 }
-                rebuild_scene_lights(&mut state.renderer, &state.scene_db);
+                flush_scene_db(&state.scene_db, &state.queue);
 
                 // ── Camera ────────────────────────────────────────────────
                 let forward = state.update_camera(dt);

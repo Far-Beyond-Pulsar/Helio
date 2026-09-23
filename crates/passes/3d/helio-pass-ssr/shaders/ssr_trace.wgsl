@@ -11,7 +11,8 @@
 // ray is a straight line in (uv, depth01) space. Nothing in the loop needs
 // perspective correction or linearization.
 //
-// Writes Rgba16Float at full resolution: RGB = colour, A = confidence.
+// Writes Rgba16Float at half resolution. G-buffer reads are reconstructed at
+// the corresponding full-resolution pixel so ray origins remain accurate.
 //
 // The traversal itself lives in helio_core::shader::HIZ, shared with the water
 // pass — see #147.
@@ -46,16 +47,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let px = vec2<i32>(gid.xy);
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
+    let source_dims = textureDimensions(gbuf_depth);
+    let source_px = clamp(
+        vec2<i32>(uv * vec2<f32>(source_dims)),
+        vec2<i32>(0),
+        vec2<i32>(source_dims) - vec2<i32>(1),
+    );
 
     // ── G-buffer reads ──────────────────────────────────────────────────────
-    let depth_01 = textureLoad(gbuf_depth, px, 0);
+    let depth_01 = textureLoad(gbuf_depth, source_px, 0);
     if depth_01 >= 1.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
 
-    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, px, 0).xyz);
-    let roughness = textureLoad(gbuf_orm, px, 0).g;
+    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, source_px, 0).xyz);
+    let roughness = textureLoad(gbuf_orm, source_px, 0).g;
     let roughness_fade = 1.0 - smoothstep(0.4, 0.7, roughness);
     if roughness_fade <= 0.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
@@ -105,7 +112,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ── Thickness validation ────────────────────────────────────────────────
     let ray_depth = linearize_depth(ray.z);
     let scene_depth = linearize_depth(
-        textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(dims)), 0)
+        textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(source_dims)), 0)
     );
     if ray_depth > scene_depth * (1.0 + THICKNESS) {
         textureStore(ssr_output, px, vec4<f32>(0.0));
@@ -114,7 +121,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ── Validity and confidence ─────────────────────────────────────────────
     let n_hit = helio_gbuffer_normal(
-        textureLoad(gbuf_normal, vec2<i32>(hit_uv * vec2<f32>(dims)), 0).xyz
+        textureLoad(gbuf_normal, vec2<i32>(hit_uv * vec2<f32>(source_dims)), 0).xyz
     );
     let arriving = -dot(R, n_hit);
     let backface_fade = smoothstep(-0.15, 0.15, arriving);

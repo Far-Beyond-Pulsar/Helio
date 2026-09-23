@@ -1,10 +1,11 @@
 //! Indoor cathedral example with HLFS ScreenSpace visibility
 //!
-//! A large Gothic cathedral interior: a 60 m nave flanked by two side aisles,
-//! 12 stone columns, a raised altar platform with a cross, carved stone pews
-//! in 6 rows on each side, three ornate chandeliers, stained-glass window
-//! shafts casting coloured light at intervals along both walls, and candle
-//! clusters near the altar.
+//! A Gothic interior with ribbed vaults, clustered limestone piers, marble
+//! paving, carved oak pews, bronze chandeliers and leaded stained glass.
+//! Panes use alpha blending, with explicit thin-sheet RGB shadow transmission
+//! in RT mode. Refraction and caustics are not simulated.
+//! RT defaults to one daylight sun plus interior lights. Set
+//! `HLFS_LEGACY_CATHEDRAL_LIGHTS=1` for the multi-window transmission stress setup.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
 //! temporal/spatial filtering with a bounded shadow budget per shading pixel.
@@ -17,6 +18,9 @@
 //!   Escape      — release cursor / exit
 
 mod hlfs_capture;
+mod architectural_mesh;
+mod cathedral_detail;
+mod cathedral_large;
 mod v3_demo_common;
 
 use helio::{
@@ -27,9 +31,9 @@ use helio_default_graphs::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, update_light,
+    new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light,
+    update_light,
 };
 
 use std::io::{self, BufRead};
@@ -55,14 +59,14 @@ const COLUMN_Z: &[f32] = &[-22.0, -14.0, -6.0, 2.0, 10.0, 18.0];
 // Positive x = right-side windows, negative = left-side; placed just inside the wall
 const GLASS_LIGHTS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // Left wall (x ≈ -10.5), windows between columns
-    (-10.3, 9.0, -18.0, 0.8, 0.2, 1.0), // violet
+    (-10.3, 9.0, -22.0, 0.8, 0.2, 1.0), // violet
     (-10.3, 9.0, -6.0, 0.2, 0.7, 1.0),  // sky blue
-    (-10.3, 9.0, 6.0, 0.2, 1.0, 0.4),   // emerald
+    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),   // emerald
     (-10.3, 9.0, 18.0, 1.0, 0.7, 0.1),  // gold
     // Right wall (x ≈ +10.5)
-    (10.3, 9.0, -18.0, 1.0, 0.2, 0.3), // ruby
+    (10.3, 9.0, -22.0, 1.0, 0.2, 0.3), // ruby
     (10.3, 9.0, -6.0, 1.0, 0.5, 0.1),  // amber
-    (10.3, 9.0, 6.0, 0.1, 0.8, 0.9),   // teal
+    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),   // teal
     (10.3, 9.0, 18.0, 0.9, 0.1, 0.7),  // magenta
     // Rose window above entrance (back wall, z ≈ +28)
     (0.0, 13.0, 27.0, 1.0, 0.75, 0.3), // warm gold
@@ -70,6 +74,7 @@ const GLASS_LIGHTS: &[(f32, f32, f32, f32, f32, f32)] = &[
 
 // Chandelier positions (x=0, hanging from y≈19.5, at z intervals)
 const CHANDELIER_Z: &[f32] = &[-16.0, 0.0, 16.0];
+const LARGE_CHANDELIER_Z: &[f32] = &[-54.0, -36.0, -18.0, 0.0, 18.0, 36.0, 54.0];
 
 // Candle cluster positions near the altar (z ≈ -24)
 const CANDLES: &[(f32, f32, f32)] = &[
@@ -79,13 +84,10 @@ const CANDLES: &[(f32, f32, f32)] = &[
     (1.5, 1.6, -23.0),
     (3.0, 1.6, -23.5),
 ];
-
-// Pew rows: 6 per side, spaced 2.4 m apart starting at z = -20
-const PEW_Z_START: f32 = -20.0;
-const PEW_Z_STEP: f32 = 3.2;
-const PEW_COUNT: usize = 6;
-
-// ─────────────────────────────────────────────────────────────────────────────
+const LARGE_CANDLES: &[(f32, f32, f32)] = &[
+    (-4.0, 1.6, -64.0), (-2.0, 1.6, -63.5), (0.0, 1.6, -64.0),
+    (2.0, 1.6, -63.5), (4.0, 1.6, -64.0),
+];
 
 fn main() {
     env_logger::init();
@@ -95,6 +97,15 @@ fn main() {
         .and_then(|_| std::env::args().nth(2))
     {
         hlfs_capture::run(&directory, populate_cathedral);
+        return;
+    }
+    if let Some(directory) = std::env::args()
+        .nth(1)
+        .filter(|a| a == "--capture-large")
+        .and_then(|_| std::env::args().nth(2))
+    {
+        hlfs_capture::run_scene(&directory, "cathedral_large", populate_large_cathedral,
+            large_cathedral_camera);
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
@@ -120,6 +131,7 @@ struct AppState {
     cam_yaw: f32,
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
+    alt_pressed: bool,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
@@ -129,11 +141,14 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
+    acceleration: Option<helio_pass_hlfs::SceneDbRayTracing>,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
     candle_light_ids: Vec<Entity>,
+    large: bool,
     start_time: std::time::Instant,
+    motion_frame: u32,
 }
 
 impl App {
@@ -171,6 +186,7 @@ impl ApplicationHandler for App {
             apply_limit_buckets: false,
         }))
         .expect("adapter");
+        eprintln!("Interactive cathedral adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
@@ -209,16 +225,77 @@ impl ApplicationHandler for App {
         );
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_tsr_quality(helio_pass_tsr::TsrQuality::Native)
+            .with_shadow_quality(helio::ShadowQuality::High)
+            .with_ssr(true)
+            .with_environment_reflections(true);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let (chandelier_light_ids, candle_light_ids) = populate_cathedral(&mut scene_db.world);
+        let large = std::env::var_os("HLFS_LARGE_CATHEDRAL").is_some();
+        let (chandelier_light_ids, candle_light_ids) = if large {
+            populate_large_cathedral(&mut scene_db.world)
+        } else {
+            populate_cathedral(&mut scene_db.world)
+        };
+        let ray_traced = std::env::var_os("HLFS_RT").is_some();
+        eprintln!("Interactive cathedral: large={large} ray_traced={ray_traced} presampled={}",
+            std::env::var_os("HLFS_PRESAMPLED").is_some());
+        if ray_traced {
+            // The renderer captures SceneDB's initial light flags at build.
+            // Match the offscreen path by setting RT flags before building it.
+            hlfs_capture::enable_ray_shadows(&mut scene_db.world);
+        }
 
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_editor_mode(true)
+        let mut scene_handle = scene_db_handle(&scene_db);
+        let stone_store = hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let has_stone = stone_store.is_some();
+        if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
+        let mut renderer = RendererBuilder::new(config, scene_handle)
+            .with_external_device()
+            .with_editor_mode(false)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, format);
-        renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        if has_stone { hlfs_capture::architectural_materials::configure_sampler(&mut renderer); }
+        let mut acceleration = if ray_traced {
+            let config = if std::env::var_os("HLFS_PRESAMPLED").is_some() {
+                helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
+            } else {
+                helio_pass_hlfs::HlfsConfig { mode: helio_pass_hlfs::HlfsMode::RayTraced, ..Default::default() }
+            };
+            renderer.set_graph_rebuild_hook(move |graph, device| {
+                graph.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass")
+                    .set_config(device, config);
+            });
+            eprintln!("Interactive HLFS configuration: {:?}",
+                renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
+            Some(helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone()))
+        } else { None };
+        renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
+
+        let warmup_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Cathedral startup warmup"),
+            size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let warmup_view = warmup_texture.create_view(&Default::default());
+        let aspect = size.width as f32 / size.height.max(1) as f32;
+        let warmup_camera = if large { large_cathedral_camera(0.0, aspect) } else {
+            let pos = glam::Vec3::new(0.0, 2.0, 24.0);
+            Camera::perspective_look_at(pos,
+                pos + glam::Vec3::new(0.0, 0.065_f32.sin(), -0.065_f32.cos()),
+                glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0)
+        };
+        if let Some(acceleration) = acceleration.as_mut() {
+            v3_demo_common::flush_scene_db(&scene_db, &queue);
+            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+        }
+        hlfs_capture::warm_up_cathedral(&scene_db, &mut renderer, acceleration.as_ref(),
+            &device, &queue, &warmup_camera, &warmup_view);
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
@@ -251,11 +328,14 @@ impl ApplicationHandler for App {
             action_rx,
             last_frame: std::time::Instant::now(),
             scene_db,
+            acceleration,
             // Start at entrance, looking toward the altar
-            cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
-            cam_pitch: -0.05,
+            cam_pos: if large { glam::Vec3::new(0.0, 2.3, 67.0) }
+                else { glam::Vec3::new(0.0, 2.0, 24.0) },
+            cam_yaw: 0.0,
+            cam_pitch: 0.065,
             keys: HashSet::new(),
+            alt_pressed: false,
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             debug_mode: 0,
@@ -263,7 +343,9 @@ impl ApplicationHandler for App {
             debug_overlay_enabled: false,
             chandelier_light_ids,
             candle_light_ids,
+            large,
             start_time: std::time::Instant::now(),
+            motion_frame: 0,
         });
     }
 
@@ -271,6 +353,19 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(false) => {
+                // Some platforms swallow key-up while a system menu or another
+                // window owns focus. Never keep flying on a stale movement key.
+                state.keys.clear();
+                state.alt_pressed = false;
+                state.mouse_delta = (0.0, 0.0);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.alt_pressed = modifiers.state().alt_key();
+                if state.alt_pressed {
+                    state.keys.clear();
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -368,7 +463,9 @@ impl ApplicationHandler for App {
                 ..
             } => match ks {
                 ElementState::Pressed => {
-                    state.keys.insert(key);
+                    if !state.alt_pressed {
+                        state.keys.insert(key);
+                    }
                 }
                 ElementState::Released => {
                     state.keys.remove(&key);
@@ -475,7 +572,7 @@ impl AppState {
         let aspect = size.width as f32 / size.height.max(1) as f32;
         let time = self.start_time.elapsed().as_secs_f32();
 
-        let camera = Camera::perspective_look_at(
+        let mut camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
@@ -484,6 +581,15 @@ impl AppState {
             0.1,
             200.0,
         );
+        configure_cathedral_fog(&mut camera, self.large);
+        if self.large && std::env::var_os("HLFS_LIVE_MOTION_TEST").is_some() {
+            // Travel the same path as --capture-large, then reverse smoothly.
+            // This exercises the real swapchain and resize path while moving.
+            let phase = (self.motion_frame % 600) as f32 / 300.0;
+            let t = if phase <= 1.0 { phase } else { 2.0 - phase };
+            camera = large_cathedral_camera(t, aspect);
+            self.motion_frame = self.motion_frame.wrapping_add(1);
+        }
 
         // Apply commands from REPL / quark to renderer
         let mut renderer = self.renderer.lock().unwrap();
@@ -500,22 +606,29 @@ impl AppState {
         // Candle flicker — more pronounced
         let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
 
+        let with_shadows = |mut light: helio::GpuLight| {
+            light.set_ray_traced_shadows(self.acceleration.is_some());
+            light
+        };
         // Update flickering chandelier intensities
+        let chandelier_z = if self.large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
+        let candles = if self.large { LARGE_CANDLES } else { CANDLES };
         for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
-            let z = CHANDELIER_Z[i];
+            let z = chandelier_z[i];
             update_light(
                 &mut self.scene_db.world,
                 id,
-                point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0),
+                with_shadows(point_light([0.0_f32, if self.large { 31.0 } else { 15.0 }, z],
+                    [1.0, 0.92, 0.78], 160.0 * flicker, 22.0)),
             );
         }
         // Update flickering candle intensities
         for (i, &id) in self.candle_light_ids.iter().enumerate() {
-            let (x, y, z) = CANDLES[i];
+            let (x, y, z) = candles[i];
             update_light(
                 &mut self.scene_db.world,
                 id,
-                point_light([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0),
+                with_shadows(point_light([x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0)),
             );
         }
 
@@ -528,332 +641,99 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+        if let Some(acceleration) = &self.acceleration {
+            renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
+        }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
+        }
+        if self.acceleration.is_some() {
+            static CONFIG_LOGGED: std::sync::Once = std::sync::Once::new();
+            CONFIG_LOGGED.call_once(|| eprintln!("HLFS after first live render: {:?}",
+                renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config()));
         }
         self.queue.present(output);
     }
 }
 
 fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    let mat = spawn_material(
-        world,
-        make_material(
-            [0.75, 0.72, 0.68, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ),
-    );
-
     spawn_indoor_cathedral_sky(world);
+    cathedral_detail::populate(world);
+    populate_cathedral_lights(world, false)
+}
 
-    // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
-    // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-    let _floor = spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 32.0));
-    let _wall_back = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [11.0, 10.5, 0.25],
-        ));
-    let _wall_front = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [11.0, 10.5, 0.25],
-        ));
-    let _aisle_ceil_l = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [2.5, 0.15, 28.0],
-        ));
-    let _nave_ceiling = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [6.0, 0.18, 28.0],
-        ));
-    let _aisle_ceil_r = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [2.5, 0.15, 28.0],
-        ));
-    let _wall_left_outer = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.25, 7.0, 28.0],
-        ));
-    let _wall_right_outer = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.25, 7.0, 28.0],
-        ));
-    let _ = spawn_object(
-            world, _floor, mat, glam::Mat4::IDENTITY, 11.0);
-    let _ = spawn_object(
-            world,
-        _nave_ceiling,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 21.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _aisle_ceil_l,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(-8.5, 11.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _aisle_ceil_r,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(8.5, 11.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_left_outer,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(-11.0, 7.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_right_outer,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(11.0, 7.0, 0.0)),
-        28.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_front,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, 28.0)),
-        11.0,
-    );
-    let _ = spawn_object(
-            world,
-        _wall_back,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, -28.0)),
-        11.0,
-    );
+fn configure_cathedral_fog(camera: &mut Camera, large: bool) {
+    if !large || std::env::var_os("HLFS_NO_FOG").is_some() { return; }
+    let settings = &mut camera.postprocess_settings;
+    settings.fog_enabled = true;
+    settings.fog_density = 0.004;
+    settings.fog_color = [0.57, 0.55, 0.51];
+    settings.fog_scattering_anisotropy = 0.65;
+    settings.fog_max_distance = 180.0;
+    settings.fog_start_distance = 1.5;
+}
 
-    // Colonnade: short wall segments between columns (between column z-positions)
-    // 7 segments per side: before first col, between each pair, after last col
-    let col_z_all: Vec<f32> = {
-        let mut v = vec![-28.0_f32]; // south wall
-        v.extend_from_slice(COLUMN_Z);
-        v.push(28.0); // north wall
-        v
-    };
-    let _colonnade_l: Vec<Entity> = col_z_all
-        .windows(2)
-        .map(|w| {
-            let mid_z = (w[0] + w[1]) * 0.5;
-            let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.25, 5.5, half_len.max(0.1)],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
-                5.5,
-            );
-            id
-        })
-        .collect();
-    let _colonnade_r: Vec<Entity> = col_z_all
-        .windows(2)
-        .map(|w| {
-            let mid_z = (w[0] + w[1]) * 0.5;
-            let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.25, 5.5, half_len.max(0.1)],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
-                5.5,
-            );
-            id
-        })
-        .collect();
+fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
+    let mut camera = Camera::perspective_look_at(
+        glam::Vec3::new(4.0 * t, 2.3, 67.0 - 29.0 * t),
+        glam::Vec3::new(0.0, 10.0, -68.0), glam::Vec3::Y,
+        std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
+    );
+    configure_cathedral_fog(&mut camera, true);
+    camera
+}
 
-    // Columns: 0.65 m square, 20 m tall, at x = ±5.5
-    let _columns: Vec<Entity> = COLUMN_Z
-        .iter()
-        .flat_map(|&z| {
-            let l = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.65, 10.0, 0.65],
-                ));
-            let _ = spawn_object(
-            world,
-                l,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
-                10.0,
-            );
-            let r = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.65, 10.0, 0.65],
-                ));
-            let _ = spawn_object(
-            world,
-                r,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
-                10.0,
-            );
-            [l, r]
-        })
-        .collect();
+fn populate_large_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
+    spawn_indoor_cathedral_sky(world);
+    cathedral_large::populate(world);
+    populate_cathedral_lights(world, true)
+}
 
-    // Altar: at far end (z = -26)
-    let _altar_step = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [5.5, 0.20, 3.0],
-        ));
-    let _altar_plinth = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [3.0, 0.45, 1.5],
-        ));
-    let _cross_vert = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [0.18, 2.2, 0.18],
-        ));
-    let _cross_horiz = spawn_mesh(world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [1.0, 0.18, 0.18],
-        ));
-    let _ = spawn_object(
-            world,
-        _altar_step,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.2, -24.5)),
-        5.5,
-    );
-    let _ = spawn_object(
-            world,
-        _altar_plinth,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.65, -25.5)),
-        3.0,
-    );
-    let _ = spawn_object(
-            world,
-        _cross_vert,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.2, -25.8)),
-        2.2,
-    );
-    let _ = spawn_object(
-            world,
-        _cross_horiz,
-        mat,
-        glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.5, -25.8)),
-        1.0,
-    );
-
-    // Pews: long narrow rect3d per row, 6 rows each side
-    let _pews_left: Vec<Entity> = (0..PEW_COUNT)
-        .map(|i| {
-            let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.45, 0.5],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
-                1.5,
-            );
-            id
-        })
-        .collect();
-    let _pews_right: Vec<Entity> = (0..PEW_COUNT)
-        .map(|i| {
-            let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.45, 0.5],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
-                1.5,
-            );
-            id
-        })
-        .collect();
-
-    // Chandeliers: vertical chain + horizontal ring at each Z
-    let chandelier_mat = spawn_material(
-        world,
-        make_material(
-            [0.3, 0.28, 0.25, 1.0],
-            0.5,
-            0.8,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ),
-    );
-    let _chandelier_chains: Vec<Entity> = CHANDELIER_Z
-        .iter()
-        .map(|&z| {
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.06, 2.0, 0.06],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                chandelier_mat,
-                glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
-                2.0,
-            );
-            id
-        })
-        .collect();
-    let _chandelier_rings: Vec<Entity> = CHANDELIER_Z
-        .iter()
-        .map(|&z| {
-            let id = spawn_mesh(world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.2, 0.12, 1.2],
-                ));
-            let _ = spawn_object(
-            world,
-                id,
-                chandelier_mat,
-                glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
-                1.2,
-            );
-            id
-        })
-        .collect();
+fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Vec<Entity>) {
+    let chandelier_z = if large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
+    let candles = if large { LARGE_CANDLES } else { CANDLES };
 
     // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
     let mut chandelier_light_ids = Vec::new();
-    for &z in CHANDELIER_Z {
+    for &z in chandelier_z {
         chandelier_light_ids.push(spawn_light(
             world,
-            point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0),
+            point_light([0.0_f32, if large { 31.0 } else { 15.0 }, z],
+                [1.0, 0.92, 0.78], 160.0, 22.0),
         ));
     }
-    // Stained glass shafts — static, no need to store ids
-    for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-        spawn_light(world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
+    // A single exterior sun supplies a coherent daylight direction. Keep the
+    // older multi-window emitter setup as an explicit transmission stress case.
+    if std::env::var_os("HLFS_RT").is_some()
+        && std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none()
+    {
+        spawn_light(world, v3_demo_common::directional_light(
+            [0.80, -0.48, -0.30], [1.0, 0.94, 0.84], 4.0,
+        ));
+    } else {
+        // Stained glass shafts — static, no need to store ids
+        // RT uses white exterior sources: pane materials supply the transmitted tint.
+        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+            let (x, y, z) = if large { (x.signum() * 21.5, y * 1.8, z * 2.4) }
+                else { (x, y, z) };
+            let light = if std::env::var_os("HLFS_RT").is_some() {
+                let position = if x == 0.0 { [0.0, if large { 34.0 } else { 17.0 },
+                    if large { 78.0 } else { 34.0 }] }
+                    else { [x.signum() * if large { 29.0 } else { 16.0 },
+                        if large { 24.0 } else { 12.0 }, z] };
+                point_light(position, [1.0; 3], 2500.0, 65.0)
+            } else {
+                point_light([x, y, z], [r, g, b], 35.0, 10.0)
+            };
+            spawn_light(world, light);
+        }
     }
     let mut candle_light_ids = Vec::new();
-    for &(x, y, z) in CANDLES {
+    for &(x, y, z) in candles {
         candle_light_ids.push(spawn_light(
             world,
-            point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
+            point_light([x, y, z], [1.0, 0.6, 0.15], 8.0, 4.0),
         ));
     }
 

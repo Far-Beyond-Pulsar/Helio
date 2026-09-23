@@ -9,9 +9,14 @@ license = "MIT OR Apache-2.0"
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
+twox-hash = { version = "2.1.3", default-features = false, features = ["alloc", "xxhash3_64"] }
 glam      = { workspace = true }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-shadow-matrix = { workspace = true }
+
+pulsar_scenedb = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+helio-mats = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

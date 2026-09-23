@@ -74,10 +74,8 @@ pub struct SdfPass {
     pub(crate) brick_size: u32,
     pub(crate) grid_dim: u32,
     pub(crate) base_voxel_size: f32,
-    pub(crate) padded_brick_voxels: u32,
     pub(crate) volume_min: [f32; 3],
     pub(crate) volume_max: [f32; 3],
-    pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) cached_snap_origins: [[i32; 3]; 8],
     pub(crate) gpu_passes_clean: bool,
 }

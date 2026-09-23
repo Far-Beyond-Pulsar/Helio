@@ -12,7 +12,7 @@
 //! | 1    | normal         | Rgba16Float   | world normal.xyz + F0.r           |
 //! | 2    | orm            | Rgba8Unorm    | AO, roughness, metallic, F0.g     |
 //! | 3    | emissive       | Rgba16Float   | emissive.rgb + F0.b               |
-//! | 7    | gbuffer_velocity | Rg16Float    | screen-space velocity (px/frame)  |
+//! | 7    | gbuffer_velocity | Rgba16Float  | motion.xy + depth residual.z / validity.w  |
 //!
 //! # Material Bind Group
 //!
@@ -34,10 +34,12 @@ pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
 mod object_batch_frame_data;
+#[allow(deprecated)]
 pub use components::{
     MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
     SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
-    SublevelComponent, SublevelSceneBinding,
+    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, SublevelComponent,
+    SublevelSceneBinding, DEFAULT_SUBLEVEL_INDEX,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
@@ -73,6 +75,7 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
+    timing_query: Option<wgpu::QuerySet>,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
@@ -91,7 +94,7 @@ pub struct GBufferPass {
     bind_group_0_key: Option<(usize, usize, usize, usize)>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    bind_group_1_version: Option<(u64,u64)>,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     /// CSM cascade split distances. Must match the values used in shadow_matrices.wgsl
@@ -113,11 +116,14 @@ pub struct GBufferPass {
     coordinate_spaces: wgpu::Buffer,
     coordinate_spaces_prev: wgpu::Buffer,
     /// Fallback `MaterialTextureData` storage buffer (352 bytes = one
-    /// zeroed slot) so `"material_textures"`' bind group stays valid before
+    /// sentinel slot) so `"material_textures"`' bind group stays valid before
     /// SceneDB publishes a real table. Pass-owned because 352 is this
     /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
     /// generic Renderer has no business knowing it.
     fallback_material_textures: wgpu::Buffer,
+    /// CPU-side projection input staged by the generic graph interface and
+    /// uploaded during `prepare()` with the current frame queue.
+    pending_coordinate_spaces: Option<Vec<glam::Mat4>>,
 }
 
 impl GBufferPass {
@@ -240,28 +246,34 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
-        let identity_space = glam::Mat4::IDENTITY.to_cols_array();
+        let mut coordinate_space_words = vec![0.0f32; 32 * 16];
+        coordinate_space_words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
         let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Coordinate Spaces (space_id 0 = identity)"),
-            contents: bytemuck::bytes_of(&identity_space),
+            contents: bytemuck::cast_slice(&coordinate_space_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         let coordinate_spaces_prev = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Coordinate Spaces Prev (space_id 0 = identity)"),
-            contents: bytemuck::bytes_of(&identity_space),
+            contents: bytemuck::cast_slice(&coordinate_space_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
         // `MaterialTextureData` (gbuffer.wgsl) is 7 `MaterialTextureSlot`s
         // (48 bytes each) + a 16-byte params vec4 = 352 bytes -- see this
         // pass's own material bind-group-1 doc above.
-        let fallback_material_textures = device.create_buffer(&wgpu::BufferDescriptor {
+        // params.w = -1 marks the descriptor-only fallback. Shaders derive
+        // basic texture slots from SceneDB material rows instead of indexing
+        // this single row by arbitrary material IDs.
+        let mut fallback_words=[0u32;88];
+        fallback_words[87]=(-1.0f32).to_bits();
+        let fallback_material_textures = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fallback Material Texture Slots"),
-            size: 352,
+            contents: bytemuck::cast_slice(&fallback_words),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         Self {
+            timing_query: None,
             material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
@@ -282,6 +294,7 @@ impl GBufferPass {
             coordinate_spaces,
             coordinate_spaces_prev,
             fallback_material_textures,
+            pending_coordinate_spaces: None,
         }
     }
 
@@ -293,9 +306,44 @@ impl GBufferPass {
         &self.coordinate_spaces
     }
 
+    /// Optional GPU timestamps around rasterizing the GBuffer.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("GBuffer timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
+    }
+
     /// See [`Self::coordinate_spaces_buffer`].
     pub fn coordinate_spaces_prev_buffer(&self) -> &wgpu::Buffer {
         &self.coordinate_spaces_prev
+    }
+
+    /// Upload the current portal/sublevel coordinate-space table. Slot zero is
+    /// always world space; additional slots map authored target geometry into
+    /// the source portal that displays it.
+    pub fn set_coordinate_spaces(&self, queue: &wgpu::Queue, spaces: &[glam::Mat4]) {
+        let mut words = [0.0f32; 32 * 16];
+        words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
+        for (slot, space) in spaces.iter().take(31).enumerate() {
+            words[(slot + 1) * 16..(slot + 2) * 16]
+                .copy_from_slice(&space.to_cols_array());
+        }
+        queue.write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
+        queue.write_buffer(
+            &self.coordinate_spaces_prev,
+            0,
+            bytemuck::cast_slice(&words),
+        );
     }
 
     /// Fallback `"material_textures"` buffer. See
@@ -309,6 +357,37 @@ impl GBufferPass {
 impl RenderPass for GBufferPass {
     fn name(&self) -> &'static str {
         "GBuffer"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.pending_coordinate_spaces = Some(inputs.coordinate_spaces.to_vec());
+    }
+
+    fn publish_frame_inputs<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // SAFETY: these buffers are owned by the GBuffer pass, which is owned
+        // by the RenderGraph for longer than the current frame registry.
+        let coordinate_spaces: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.coordinate_spaces)
+        };
+        let coordinate_spaces_prev: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.coordinate_spaces_prev)
+        };
+        let fallback_material_textures: &'a wgpu::Buffer = unsafe {
+            std::mem::transmute(&self.fallback_material_textures)
+        };
+        frame.write(
+            helio_core::resource_keys::coordinate_spaces(),
+            helio_core::CoordinateSpacesFrameData {
+                coordinate_spaces,
+                coordinate_spaces_prev,
+            },
+            "GBuffer",
+        );
+        frame.write(
+            helio_core::ResourceKey::new("material_texture_fallback"),
+            fallback_material_textures,
+            "GBuffer",
+        );
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -349,7 +428,9 @@ impl RenderPass for GBufferPass {
         );
         builder.write_color_raw(
             "gbuffer_velocity",
-            wgpu::TextureFormat::Rg16Float,
+            // XY remain pixel motion. Z is the FP16 view-depth residual and W=2
+            // marks a valid correction for precise ray-query receiver origins.
+            wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
     }
@@ -474,20 +555,40 @@ impl RenderPass for GBufferPass {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: self.timing_query.as_ref().map(|query| wgpu::RenderPassTimestampWrites {
+                query_set: query,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         })
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from pass_resources so the GBuffer globals match
+        if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.as_ref() {
+            let mut words = [0.0f32; 32 * 16];
+            words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
+            for (slot, space) in pending_coordinate_spaces.iter().take(31).enumerate() {
+                words[(slot + 1) * 16..(slot + 2) * 16]
+                    .copy_from_slice(&space.to_cols_array());
+            }
+            ctx.queue
+                .write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
+            ctx.queue.write_buffer(
+                &self.coordinate_spaces_prev,
+                0,
+                bytemuck::cast_slice(&words),
+            );
+            self.pending_coordinate_spaces = None;
+        }
+        // Read per-scene values from the frame registry so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let rc_volume = ctx
-            .pass_resources
+            .registry
             .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")).as_ref() {
+            if let Some(ref environment) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).as_ref() {
                 (
                     [
                         environment.ambient_color[0],
@@ -541,17 +642,17 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx.registry.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(material_textures) = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "GBuffer") else {
+        let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "GBuffer") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -573,7 +674,7 @@ impl RenderPass for GBufferPass {
         let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let coord_spaces = ctx.resources.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces"));
+        let coord_spaces = ctx.registry.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces());
         let coordinate_spaces_buf = coord_spaces
             .map(|c| c.coordinate_spaces)
             .unwrap_or(ctx.camera);
@@ -637,7 +738,7 @@ impl RenderPass for GBufferPass {
 
         // Rebuild bind group 1 when material textures version changes.
         let needs_rebuild = self.bind_group_1_version != Some(
-            material_textures.version ^ materials_epoch,
+            (material_textures.version, materials_epoch),
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -663,7 +764,7 @@ impl RenderPass for GBufferPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let indirect = culled.indirect;
@@ -747,15 +848,6 @@ impl RenderPass for GBufferPass {
         &["material_textures", "render_environment", "object_batch", "culled_batch"]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &[
-            "gbuffer",
-            "gbuffer_lightmap_uv",
-            "gbuffer_sss",
-            "gbuffer_extra",
-            "gbuffer_velocity",
-        ]
-    }
 }
 
 impl GBufferPass {
@@ -955,7 +1047,7 @@ impl GBufferPass {
                             write_mask: wgpu::ColorWrites::ALL,
                         }),
                         Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rg16Float,
+                            format: wgpu::TextureFormat::Rgba16Float,
                             blend: None,
                             write_mask: wgpu::ColorWrites::ALL,
                         }),

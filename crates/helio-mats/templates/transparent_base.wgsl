@@ -96,17 +96,30 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 // `"scene_lights"` buffer directly, already entity-indexed the same way
 // `transforms` is.
 @group(1) @binding(3) var<storage, read> light_entity_indices: array<u32>;
-// SceneDB's `Transform` component. This is the ONLY source of light world
-// position -- `GpuLight.position_range.xyz` carries a stale/zeroed
-// placeholder for it (see `helio_pass_forward_lit`'s identical binding
-// doc); `.position_range.w` (range) is a real light property and still
-// comes from `lights` as before.
+// Legacy template ABI; the default path uses the world-space position in
+// LightComponent.position_range, matching the other SceneDB render passes.
 struct Transform {
     position: array<f32, 3>,
     rotation: array<f32, 3>,
     scale:    array<f32, 3>,
 }
 @group(1) @binding(4) var<storage, read> transforms: array<Transform>;
+
+struct GpuMaterial {
+    base_color:         vec4<f32>,
+    emissive:           vec4<f32>,
+    roughness_metallic: vec4<f32>,
+    tex_base_color:     u32,
+    tex_normal:         u32,
+    tex_roughness:      u32,
+    tex_emissive:       u32,
+    tex_occlusion:      u32,
+    workflow:           u32,
+    flags:              u32,
+    material_class:     u32,
+    class_params:       vec4<f32>,
+}
+@group(1) @binding(5) var<storage, read> materials: array<GpuMaterial>;
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -138,7 +151,7 @@ fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
         inst.normal_mat_2.xyz,
     );
     var out: VertexOutput;
-    out.clip_position  = cameras[0].view_proj * world_pos;
+    out.clip_position  = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat * decode_snorm8x4(vertex.normal));
     out.tex_coords     = vertex.tex_coords;
@@ -200,14 +213,19 @@ fn radiant_eval_transparent(material_id: u32,
                             world_pos: vec3<f32>,
                             world_normal: vec3<f32>,
                             tex_coords: vec2<f32>) -> vec4<f32> {
+    let material = materials[material_id];
     let ambient = globals.ambient_color.rgb * globals.ambient_intensity;
-    let normal_shade = world_normal * 0.5 + 0.5;
-    let color = ambient + normal_shade * 0.4;
-    return vec4<f32>(color, 0.5);
+    let emission = material.emissive.rgb * material.emissive.a;
+    return vec4<f32>(material.base_color.rgb * ambient + emission, clamp(material.base_color.a, 0.0, 1.0));
 }
 
+// HELIO_TRANSPARENT_REACTIVITY: location 1 carries composited alpha coverage.
+struct TransparentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) reactivity: vec4<f32>,
+}
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> TransparentOutput {
     // RADIANT_OVERRIDE_TRANSPARENT
     // RADIANT_OVERRIDE_END
 
@@ -219,24 +237,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
 
     let V = normalize(cameras[0].position_near.xyz - input.world_position);
-    let N = normalize(input.world_normal);
-    let F0 = vec3<f32>(0.04);
-    let albedo = surface.rgb;
-    let roughness = 0.5;
-    let metallic = 0.0;
+    let material = materials[input.material_id];
+    let normal = normalize(input.world_normal);
+    let N = select(-normal, normal, dot(normal, V) >= 0.0);
+    let albedo = material.base_color.rgb;
+    let roughness = clamp(material.roughness_metallic.x, 0.04, 1.0);
+    let metallic = clamp(material.roughness_metallic.y, 0.0, 1.0);
+    let F0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     let tile_x = u32(input.clip_position.x) / TILE_SIZE;
     let tile_y = u32(input.clip_position.y) / TILE_SIZE;
     let tile_idx = tile_y * globals.num_tiles_x + tile_x;
-    let tile_light_count = tile_light_counts[tile_idx];
+    let tile_light_count = min(tile_light_counts[tile_idx], MAX_LIGHTS_PER_TILE);
 
     var Lo = vec3<f32>(0.0);
     for (var i = 0u; i < tile_light_count; i++) {
         let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
         let light = lights[light_idx];
-        let entity_idx = select(light_entity_indices[light_idx], light_idx, globals.light_mode_direct_index != 0u);
-        let t = transforms[entity_idx];
-        let light_pos = vec3<f32>(t.position[0], t.position[1], t.position[2]);
+        let light_pos = light.position_range.xyz;
         if light.light_type != 0u {
             let dist = length(light_pos - input.world_position);
             if dist > light.position_range.w { continue; }
@@ -248,5 +266,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     surface = vec4<f32>(surface.rgb + Lo, surface.a);
-    return surface;
+    return TransparentOutput(surface, vec4<f32>(clamp(surface.a, 0.0, 1.0)));
 }

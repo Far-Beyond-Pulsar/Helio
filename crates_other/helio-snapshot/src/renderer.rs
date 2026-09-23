@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    Camera, DebugDrawState, GpuLight, GpuMaterial, GroupMask, LightType, ObjectDescriptor,
-    Renderer, RendererConfig, Scene, SceneActor,
+    Camera, GpuLight, GpuMaterial, LightType, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_asset_compat::{load_scene_file_with_config, upload_scene, LoadConfig};
-use helio_default_graphs::build_default_graph_external;
+use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials, LoadConfig};
+use helio_pass_forward_lit::LightComponent;
+use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
+use pulsar_scenedb::{Entity, SceneDb, World};
+use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use thiserror::Error;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -165,95 +167,38 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // Use new_with_external_device so the graph uses deferred (non-blocking)
     // GPU timestamp readback — we drive polling ourselves after the frame.
     let renderer_cfg = RendererConfig::new(cfg.width, cfg.height, FORMAT).with_render_scale(1.0);
-    let helio_scene = Scene::new(device.clone(), queue.clone());
-    let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Debug Camera Buffer"),
-        size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Cull Stats Buffer"),
-        size: 32,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-    let graph = build_default_graph_external(
-        &device,
-        &queue,
-        &helio_scene,
-        renderer_cfg,
-        debug_state.clone(),
-        &debug_camera_buf,
-        &cull_stats_buf,
-        None,
-    );
-    let mut renderer = Renderer::new_with_external_device(
-        device.clone(),
-        queue.clone(),
-        renderer_cfg.surface_format,
-        renderer_cfg.width,
-        renderer_cfg.height,
-        renderer_cfg.render_scale,
-        renderer_cfg,
-        helio_scene,
-        graph,
-        debug_state,
-        debug_camera_buf,
-        cull_stats_buf,
-    );
+    let mut scene_db = new_scene_db(&device, &queue);
+    let mut renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
+        .with_external_device()
+        .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+        .build(device.clone(), queue.clone(), cfg.width, cfg.height, FORMAT);
 
     // ── 6. Upload all meshes + materials via helio-asset-compat ──────────────
-    let uploaded =
-        upload_scene(&mut renderer, &scene).map_err(|e| SnapshotError::Render(e.to_string()))?;
+    let (mesh_ids, material_ids) = upload_scene_rows(&mut scene_db.world, &scene);
 
     // ── 7. Insert a fallback material for meshes with no material ─────────────
-    let fallback_mat = renderer.scene_mut().insert_material(GpuMaterial {
-        base_color: [0.7, 0.65, 0.55, 1.0],
-        emissive: [0.0; 4],
-        roughness_metallic: [0.6, 0.0, 1.5, 0.0],
-        tex_base_color: GpuMaterial::NO_TEXTURE,
-        tex_normal: GpuMaterial::NO_TEXTURE,
-        tex_roughness: GpuMaterial::NO_TEXTURE,
-        tex_emissive: GpuMaterial::NO_TEXTURE,
-        tex_occlusion: GpuMaterial::NO_TEXTURE,
-        workflow: 0,
-        flags: 0,
-        material_class: 0,
-        class_params: [0.0; 4],
-    });
+    let fallback_mat = {
+        let entity = scene_db.world.spawn();
+        scene_db.world.insert(entity, fallback_material());
+        entity
+    };
 
     // ── 8. Place a renderable object for each uploaded mesh ───────────────────
     for (i, mesh) in scene.meshes.iter().enumerate() {
-        let mesh_id = match uploaded.mesh_ids.get(i) {
+        let mesh_id = match mesh_ids.get(i) {
             Some(&id) => id,
             None => continue,
         };
-        let material_id = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
+        let material_id = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(fallback_mat);
         let transform = mesh.node_transform;
         let world_center = transform.transform_point3(Vec3::ZERO);
 
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::object(ObjectDescriptor {
-                mesh: mesh_id,
-                material: material_id,
-                transform,
-                bounds: [world_center.x, world_center.y, world_center.z, radius],
-                flags: 3, // casts + receives shadow
-                groups: GroupMask::NONE,
-                movability: None,
-                user_tag: 0,
-            }));
+        insert_object(&mut scene_db.world, mesh_id, material_id, transform,
+            [world_center.x, world_center.y, world_center.z, radius], radius)?;
     }
 
     // ── 9. Two-light rig: key (warm directional) + fill (cool fill) ───────────
-    renderer
-        .scene_mut()
-        .insert_actor(SceneActor::light(GpuLight {
+    insert_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [-0.5_f32.sqrt(), -0.5_f32.sqrt(), 0.0, 0.0],
             color_intensity: [1.0, 0.98, 0.95, 3.0],
@@ -277,10 +222,8 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             light_function_index: -1,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        }));
-    renderer
-        .scene_mut()
-        .insert_actor(SceneActor::light(GpuLight {
+        });
+    insert_light(&mut scene_db.world, GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [0.5_f32.sqrt(), 0.5_f32.sqrt(), 0.0, 0.0],
             color_intensity: [0.5, 0.6, 0.8, 1.2],
@@ -304,9 +247,8 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             light_function_index: -1,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        }));
-
-    renderer.scene_mut().flush();
+        });
+    scene_db.world.flush_gpu_mirror(&queue);
 
     // ── 10. Auto-place camera to frame the bounding sphere ────────────────────
     let camera = build_camera(center, radius, &cfg);
@@ -319,10 +261,124 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // Flush all submitted GPU work before we copy the texture to the staging buffer.
     // Because we used new_with_external_device the graph never blocks internally —
     // this single poll is the only synchronisation point we need.
-    device.poll(wgpu::PollType::wait_indefinitely());
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     // ── 12. Read pixels back to CPU ───────────────────────────────────────────
     readback_rgba(&device, &queue, &target_texture, cfg.width, cfg.height).await
+}
+
+// ── SceneDB authoring ─────────────────────────────────────────────────────────
+
+fn new_scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> SceneDb {
+    let mut scene_db = SceneDb::new();
+    let ctx = EngineGpuContext::new(device.clone(), queue.clone());
+    let config = SceneGpuConfig {
+        classes: Vec::new(),
+        tombstone_headroom: 0,
+        max_cells_metadata: 0,
+    };
+    let mut store = SceneGpuStore::new(&ctx, config);
+    MeshComponent::register_gpu_columns_growable(&mut store, 4096, device);
+    MaterialComponent::register_gpu_columns_growable(&mut store, 4096, device);
+    StaticObjectComponent::register_gpu_columns_growable(&mut store, 4096, device);
+    LightComponent::register_gpu_columns_growable(&mut store, 256, device);
+    let mirror = GpuMirrorHandle::new(Arc::new(store), queue.clone());
+    scene_db.world.attach_gpu_mirror(mirror);
+    scene_db
+}
+
+fn upload_scene_rows(
+    world: &mut World,
+    scene: &helio_asset_compat::ConvertedScene,
+) -> (Vec<Entity>, Vec<Entity>) {
+    let material_ids = upload_scene_materials(world, scene);
+    let mesh_ids = scene
+        .meshes
+        .iter()
+        .map(|mesh| {
+            let entity = world.spawn();
+            world.insert(
+                entity,
+                MeshComponent {
+                    vertices: mesh.vertices.clone(),
+                    indices: mesh.indices.clone(),
+                },
+            );
+            entity
+        })
+        .collect();
+    (mesh_ids, material_ids)
+}
+
+fn fallback_material() -> MaterialComponent {
+    MaterialComponent::from(GpuMaterial {
+        base_color: [0.7, 0.65, 0.55, 1.0],
+        emissive: [0.0; 4],
+        roughness_metallic: [0.6, 0.0, 1.5, 0.0],
+        tex_base_color: GpuMaterial::NO_TEXTURE,
+        tex_normal: GpuMaterial::NO_TEXTURE,
+        tex_roughness: GpuMaterial::NO_TEXTURE,
+        tex_emissive: GpuMaterial::NO_TEXTURE,
+        tex_occlusion: GpuMaterial::NO_TEXTURE,
+        workflow: 0,
+        flags: 0,
+        material_class: 0,
+        class_params: [0.0; 4],
+    })
+}
+
+fn insert_object(
+    world: &mut World,
+    mesh: Entity,
+    material: Entity,
+    transform: glam::Mat4,
+    bounds: [f32; 4],
+    _radius: f32,
+) -> Result<Entity, SnapshotError> {
+    let mirror = world
+        .gpu_mirror()
+        .cloned()
+        .ok_or_else(|| SnapshotError::Render("SceneDB GPU mirror is missing".into()))?;
+    let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+        .filter(|handle| handle.count != 0)
+        .ok_or_else(|| SnapshotError::Render("mesh has no GPU vertex range".into()))?;
+    let indices = MeshComponent::indices_gpu_handle(mirror.store(), mesh.index())
+        .filter(|handle| handle.count != 0)
+        .ok_or_else(|| SnapshotError::Render("mesh has no GPU index range".into()))?;
+    let material_component = world
+        .get::<MaterialComponent>(material)
+        .ok_or_else(|| SnapshotError::Render("material entity is missing".into()))?;
+    let object = StaticObjectComponent::new(
+        mesh.index(),
+        mesh.generation().wrapping_add(1),
+        material.index(),
+        material.generation().wrapping_add(1),
+        transform,
+        bounds,
+        indices.count,
+        indices.offset,
+        vertices.offset as i32,
+        material_component.material_class,
+        0,
+        3,
+    );
+    let entity = world.spawn();
+    world.insert(entity, object);
+    Ok(entity)
+}
+
+fn insert_light(world: &mut World, light: GpuLight) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, LightComponent::from(light));
+    entity
+}
+
+fn scene_db_handle(scene_db: &SceneDb) -> helio::SceneDbHandle {
+    scene_db
+        .world
+        .gpu_mirror()
+        .cloned()
+        .expect("SceneDB GPU mirror is attached during initialization")
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -418,7 +474,7 @@ async fn readback_rgba(
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    device.poll(wgpu::PollType::wait_indefinitely());
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.await.unwrap()?;
 
     // Strip the 256-byte row padding before building the image.
@@ -465,8 +521,8 @@ fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
 /// A persistent batch renderer — GPU and Helio are initialised once, then
 /// [`render`](SnapshotBatch::render) can be called for thousands of models.
 ///
-/// The scene is fully cleared between models using Helio's remove APIs, so
-/// there is no memory growth across models.
+/// SceneDB rows for each model are despawned after readback, so there is no
+/// authored-scene growth across models.
 ///
 /// # Example
 /// ```no_run
@@ -481,10 +537,12 @@ fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
 pub struct SnapshotBatch {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+    scene_db: SceneDb,
     renderer: Renderer,
     target_texture: wgpu::Texture,
     target_view: wgpu::TextureView,
     config: SnapshotConfig,
+    live_entities: Vec<Entity>,
 }
 
 impl SnapshotBatch {
@@ -545,54 +603,21 @@ impl SnapshotBatch {
 
         let renderer_cfg =
             RendererConfig::new(config.width, config.height, FORMAT).with_render_scale(1.0);
-        let helio_scene = Scene::new(device.clone(), queue.clone());
-        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Camera Buffer"),
-            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 32,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph_external(
-            &device,
-            &queue,
-            &helio_scene,
-            renderer_cfg,
-            debug_state.clone(),
-            &debug_camera_buf,
-            &cull_stats_buf,
-            None,
-        );
-        let renderer = Renderer::new_with_external_device(
-            device.clone(),
-            queue.clone(),
-            renderer_cfg.surface_format,
-            renderer_cfg.width,
-            renderer_cfg.height,
-            renderer_cfg.render_scale,
-            renderer_cfg,
-            helio_scene,
-            graph,
-            debug_state,
-            debug_camera_buf,
-            cull_stats_buf,
-        );
+        let scene_db = new_scene_db(&device, &queue);
+        let renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
+            .with_external_device()
+            .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+            .build(device.clone(), queue.clone(), config.width, config.height, FORMAT);
 
         Ok(Self {
             device,
             queue,
+            scene_db,
             renderer,
             target_texture,
             target_view,
             config,
+            live_entities: Vec::new(),
         })
     }
 
@@ -623,44 +648,23 @@ impl SnapshotBatch {
         let radius = ((aabb_max - aabb_min) * 0.5).length().max(0.01);
         let camera = build_camera(center, radius, &self.config);
 
-        let uploaded = upload_scene(&mut self.renderer, &scene)
-            .map_err(|e| SnapshotError::Render(e.to_string()))?;
-
-        let fallback_mat = self.renderer.scene_mut().insert_material(GpuMaterial {
-            base_color: [0.7, 0.65, 0.55, 1.0],
-            emissive: [0.0; 4],
-            roughness_metallic: [0.6, 0.0, 1.5, 0.0],
-            tex_base_color: GpuMaterial::NO_TEXTURE,
-            tex_normal: GpuMaterial::NO_TEXTURE,
-            tex_roughness: GpuMaterial::NO_TEXTURE,
-            tex_emissive: GpuMaterial::NO_TEXTURE,
-            tex_occlusion: GpuMaterial::NO_TEXTURE,
-            workflow: 0,
-            flags: 0,
-            material_class: 0,
-            class_params: [0.0; 4],
-        });
+        let (mesh_ids, material_ids) = upload_scene_rows(&mut self.scene_db.world, &scene);
+        self.live_entities.extend(mesh_ids.iter().chain(material_ids.iter()).copied());
+        let fallback_mat = self.scene_db.world.spawn();
+        self.scene_db.world.insert(fallback_mat, fallback_material());
+        self.live_entities.push(fallback_mat);
 
         for (i, mesh) in scene.meshes.iter().enumerate() {
-            let Some(&mesh_id) = uploaded.mesh_ids.get(i) else {
+            let Some(&mesh_id) = mesh_ids.get(i) else {
                 continue;
             };
-            let material_id = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
+            let material_id = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(fallback_mat);
             let transform = mesh.node_transform;
             let world_center = transform.transform_point3(Vec3::ZERO);
 
-            self.renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
-                    mesh: mesh_id,
-                    material: material_id,
-                    transform,
-                    bounds: [world_center.x, world_center.y, world_center.z, radius],
-                    flags: 3,
-                    groups: GroupMask::NONE,
-                    movability: None,
-                    user_tag: 0,
-                }));
+            let object = insert_object(&mut self.scene_db.world, mesh_id, material_id, transform,
+                [world_center.x, world_center.y, world_center.z, radius], radius)?;
+            self.live_entities.push(object);
         }
 
         // ── Camera-relative three-point light rig ─────────────────────────────
@@ -670,9 +674,8 @@ impl SnapshotBatch {
             (fill_dir, [0.55, 0.65, 0.85], 1.2, u32::MAX),
             (rim_dir, [0.90, 0.95, 1.00], 0.8, u32::MAX),
         ] {
-            self.renderer
-                .scene_mut()
-                .insert_actor(SceneActor::light(GpuLight {
+            let light = self.scene_db.world.spawn();
+            self.scene_db.world.insert(light, LightComponent::from(GpuLight {
                     position_range: [0.0, 0.0, 0.0, f32::MAX],
                     direction_outer: [dir.x, dir.y, dir.z, 0.0],
                     color_intensity: [color[0], color[1], color[2], intensity],
@@ -697,16 +700,17 @@ impl SnapshotBatch {
                     ies_angle_scale: 0.0,
                     ies_angle_offset: 0.0,
                 }));
+            self.live_entities.push(light);
         }
 
-        self.renderer.scene_mut().flush();
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
 
         // ── Render ────────────────────────────────────────────────────────────
         self.renderer
             .render(&camera, &self.target_view)
             .map_err(|e| SnapshotError::Render(e.to_string()))?;
 
-        self.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         // ── Readback ──────────────────────────────────────────────────────────
         let img = readback_rgba(
@@ -718,9 +722,13 @@ impl SnapshotBatch {
         )
         .await?;
 
-        // Scene::clear() — no ID tracking needed; Helio's cascade handles
-        // objects → meshes → materials → textures → lights automatically.
-        self.renderer.scene_mut().clear();
+        // Remove the per-model rows from the authoritative SceneDB world.
+        // Recreate the world/mirror on the next render so all GPU pools and
+        // entity generations remain consistent without a renderer-side clear.
+        for entity in self.live_entities.drain(..) {
+            self.scene_db.world.despawn(entity);
+        }
+        self.scene_db.world.flush_gpu_mirror(&self.queue);
 
         Ok(img)
     }

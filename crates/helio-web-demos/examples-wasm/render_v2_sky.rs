@@ -5,23 +5,25 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, MeshId, Renderer};
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use crate::common::{
     box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, point_light,
+    spawn_light, spawn_material, spawn_mesh,
 };
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
 
 pub struct Demo {
-    _cube1: MeshId,
-    _cube2: MeshId,
-    _cube3: MeshId,
-    _ground: MeshId,
-    _roof: MeshId,
-    sun_light: LightId,
+    _cube1: Entity,
+    _cube2: Entity,
+    _cube3: Entity,
+    _ground: Entity,
+    _roof: Entity,
+    sun_light: Entity,
 
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -36,110 +38,45 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer.scene().insert_material(make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-
-        let cube1 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
-            .as_mesh()
-            .unwrap();
-        let roof = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.2, 0.0],
-                [2.5, 0.1, 2.5],
-            )))
-            .as_mesh()
-            .unwrap();
-
-        let _ = insert_object(
-            renderer,
-            helio::SceneEntityId::Mesh(cube1),
-            mat,
-            glam::Mat4::IDENTITY,
-            0.5,
-        );
-        let _ = insert_object(
-            renderer,
-            helio::SceneEntityId::Mesh(cube2),
-            mat,
-            glam::Mat4::IDENTITY,
-            0.4,
-        );
-        let _ = insert_object(
-            renderer,
-            helio::SceneEntityId::Mesh(cube3),
-            mat,
-            glam::Mat4::IDENTITY,
-            0.3,
-        );
-        let _ = insert_object(
-            renderer,
-            helio::SceneEntityId::Mesh(ground),
-            mat,
-            glam::Mat4::IDENTITY,
-            5.0,
-        );
-        let _ = insert_object(
-            renderer,
-            helio::SceneEntityId::Mesh(roof),
-            mat,
-            glam::Mat4::IDENTITY,
-            2.5,
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [-3.5, 2.0, -1.5],
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(point_light(
-                [3.5, 1.5, 1.5],
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3 = spawn_mesh(&mut scene_db.world, cube_mesh([2.0, 0.3, 0.5], 0.3));
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let roof = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 1.2, 0.0], [2.5, 0.1, 2.5]),
+        );
 
-        let sun_light = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::light(directional_light(
-                [-0.5, -0.8, -0.3],
-                [1.0, 0.9, 0.7],
-                1.0,
-            )))
-            .as_light()
-            .unwrap();
+        let _ = insert_object(&mut scene_db.world, cube1, mat, glam::Mat4::IDENTITY, 0.5);
+        let _ = insert_object(&mut scene_db.world, cube2, mat, glam::Mat4::IDENTITY, 0.4);
+        let _ = insert_object(&mut scene_db.world, cube3, mat, glam::Mat4::IDENTITY, 0.3);
+        let _ = insert_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let _ = insert_object(&mut scene_db.world, roof, mat, glam::Mat4::IDENTITY, 2.5);
+
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0),
+        );
+
+        let sun_light = spawn_light(
+            &mut scene_db.world,
+            directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0),
+        );
         renderer.set_ambient([0.2, 0.25, 0.35], 0.15);
         renderer.set_clear_color([0.53, 0.81, 0.98, 1.0]);
 
@@ -215,11 +152,6 @@ impl HelioWasmApp for Demo {
             [0.2 + sun_elev * 0.1, 0.25 + sun_elev * 0.05, 0.35],
             0.1 + sun_elev * 0.1,
         );
-        let _ = renderer.scene().update_light(
-            self.sun_light,
-            directional_light([sun_dir.x, sun_dir.y, sun_dir.z], sun_color, sun_intensity),
-        );
-
         Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,

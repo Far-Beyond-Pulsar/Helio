@@ -756,7 +756,7 @@ impl RenderPass for VirtualGeometryPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_debug_readback(ctx.device);
 
-        let Some(vg): Option<crate::VgFrameData<'_>> = ctx.pass_resources.get(helio_core::ResourceKey::new("vg")) else {
+        let Some(vg): Option<crate::VgFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("vg")) else {
             return Ok(());
         };
 
@@ -949,12 +949,12 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(material_textures): Option<helio_mats::MaterialTextureBindings<'_>> = ctx.pass_resources.read(helio_core::ResourceKey::new("material_textures"), "VirtualGeometry") else {
+        let Some(material_textures): Option<helio_mats::MaterialTextureBindings<'_>> = ctx.registry.read(helio_core::resource_keys::material_textures(), "VirtualGeometry") else {
             return Ok(());
         };
-        let environment: Option<helio_core::RenderEnvironment<'_>> = ctx.pass_resources.get(helio_core::ResourceKey::new("render_environment"));
+        let environment: Option<helio_core::RenderEnvironment<'_>> = ctx.registry.get(helio_core::resource_keys::render_environment());
         let rc_volume = ctx
-            .pass_resources
+            .registry
             .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
@@ -1125,17 +1125,17 @@ impl RenderPass for VirtualGeometryPass {
         if self.last_object_count == 0
             || self.last_work_item_count == 0
             || self.last_max_draw_count == 0
-            || !ctx.resources.contains("vg")
+            || !ctx.registry.contains("vg")
         {
             return Ok(());
         }
 
         let hiz_view = ctx
-            .resources
+            .registry
             .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("hiz"))
             .expect("VirtualGeometry: 'hiz' view not routed by graph");
         let hiz_sampler = ctx
-            .resources
+            .registry
             .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("hiz_sampler"))
             .expect("VirtualGeometry: 'hiz_sampler' not available");
         let hiz_key = (

@@ -356,6 +356,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // must occur under uniform control flow, so we do it before any
     // non-uniform branch/early-return.
     var sky_col = sample_sky_lut(ray_dir);
+    // Registered buffers may contain an empty or deleted environment row.
+    if sky.earth_radius <= 0.0 || sky.atm_radius <= sky.earth_radius
+        || sky.rayleigh_h_scale <= 0.0 || sky.mie_h_scale <= 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
 
     // Below horizon: preserve sunset colors with gradual darkening to night.
     if ray_dir.y < 0.0 {

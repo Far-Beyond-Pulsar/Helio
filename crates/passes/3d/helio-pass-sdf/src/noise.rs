@@ -31,8 +31,7 @@ fn hash3(px: f32, py: f32, pz: f32) -> f32 {
     }
 }
 
-/// 3D value noise with quintic interpolation, matching WGSL 
-oise3()`.
+/// 3D value noise with quintic interpolation, matching WGSL `noise3()`.
 /// Returns value in [-1, 1].
 pub fn noise3(px: f32, py: f32, pz: f32) -> f32 {
     let ix = px.floor();

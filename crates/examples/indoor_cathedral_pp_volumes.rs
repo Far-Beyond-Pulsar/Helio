@@ -1,9 +1,12 @@
 //! Indoor cathedral with post-process volumes
 //!
-//! Three overlapping post-process volumes demonstrate per-volume blending:
+//! Tailored cathedral post-process / volumetric fog showcase:
 //!   - Warm/golden volume around the altar (vignette + color shift)
 //!   - Cool cyan volume near the entrance (cool color grade + bloom)
 //!   - Vignette-only volume around each chandelier
+//!   - A bounded blue-grey fog pocket under the central ceiling arches, lit by
+//!     the stained-glass and chandelier lights to make the volumetric shafts
+//!     readable against real cathedral geometry.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -20,7 +23,7 @@ use helio::{
 };
 use helio_default_graphs::build_fxaa_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
-use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
@@ -70,7 +73,7 @@ const PEW_Z_START: f32 = -20.0;
 const PEW_Z_STEP: f32 = 3.2;
 const PEW_COUNT: usize = 6;
 
-fn main() {
+pub(crate) fn main() {
     env_logger::init();
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
@@ -145,7 +148,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio – Indoor Cathedral (Post-Process Volumes)")
+                        .with_title("Helio – Cathedral Volumetric Fog Showcase")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -550,6 +553,33 @@ impl ApplicationHandler for App {
                     color_gamma: [1.0, 1.0, 1.0],
                     color_gain: [1.0, 1.0, 1.0],
                     color_offset: [0.05, 0.02, 0.0],
+                    ..PostProcessSettings::default()
+                },
+            },
+        );
+
+        // Volume 4: the hero effect — a bounded pocket beneath the central
+        // ceiling arches. It overlaps the chandelier and stained-glass lights
+        // so their shadows become visible as shafts instead of a flat haze.
+        spawn_post_process_volume(
+            &mut scene_db.world,
+            PostProcessVolumeDescriptor {
+                bounds_min: [-9.0, 10.0, -13.0],
+                bounds_max: [9.0, 17.0, 1.0],
+                priority: 20.0,
+                blend_radius: 3.0,
+                blend_weight: 1.0,
+                unbound: false,
+                settings: PostProcessSettings {
+                    fog_enabled: true,
+                    fog_mode: FogMode::HeightBased,
+                    fog_density: 0.075,
+                    fog_height_falloff: 0.16,
+                    fog_height: 9.0,
+                    fog_start_distance: 0.0,
+                    fog_max_distance: 180.0,
+                    fog_scattering_anisotropy: 0.68,
+                    fog_color: [0.58, 0.68, 0.86],
                     ..PostProcessSettings::default()
                 },
             },

@@ -57,7 +57,7 @@ pub struct ForwardLitPass {
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    bind_group_1_version: Option<(u64,u64)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     /// When true, renders from `material_class_ranges` (all opaque draws)
@@ -368,10 +368,6 @@ impl RenderPass for ForwardLitPass {
         ]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("depth");
         builder.read("cluster_light_grid");
@@ -423,7 +419,7 @@ impl RenderPass for ForwardLitPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let (ambient_color, ambient_intensity) =
-            if let Some(ref environment) = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment")).as_ref() {
+            if let Some(ref environment) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).as_ref() {
                 (environment.ambient_color, environment.ambient_intensity)
             } else {
                 ([0.1, 0.1, 0.15], 0.1)
@@ -462,10 +458,10 @@ impl RenderPass for ForwardLitPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(culled) = ctx.resources.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx.registry.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
         let draw_count = batch.draw_count;
@@ -473,7 +469,7 @@ impl RenderPass for ForwardLitPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(material_textures) = ctx.resources.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::ResourceKey::new("material_textures"), "ForwardLit") else {
+        let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "ForwardLit") else {
             return Ok(());
         };
         let Some(vertices_handle) = ctx
@@ -516,7 +512,7 @@ impl RenderPass for ForwardLitPass {
         // real Transform buffer shows up.
         let transforms_ptr = 0;
 
-        let cluster = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
+        let cluster = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
             .unwrap_or(0);
@@ -535,7 +531,7 @@ impl RenderPass for ForwardLitPass {
             transforms_ptr,
         );
         if self.bind_group_0_key != Some(bg0_key) {
-            let cluster_ref = ctx.resources.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
+            let cluster_ref = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
             let fallback_buf = batch.instances; // fallback buffer for tile lists when cluster is absent
             let tile_lists = cluster_ref
                 .map(|c| c.tile_light_lists)
@@ -599,7 +595,7 @@ impl RenderPass for ForwardLitPass {
         }
 
         let needs_rebuild = self.bind_group_1_version != Some(
-            material_textures.version ^ materials_epoch,
+            (material_textures.version, materials_epoch),
         )
             || self.bind_group_1.is_none();
         if needs_rebuild {
@@ -625,7 +621,7 @@ impl RenderPass for ForwardLitPass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version ^ materials_epoch);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let indirect = culled.indirect;

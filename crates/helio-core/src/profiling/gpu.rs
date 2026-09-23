@@ -401,6 +401,25 @@ impl GpuProfiler {
         }
     }
 
+    /// Retires the whole timestamp pipeline after a GPU-level failure.
+    ///
+    /// A failed or destroyed readback (e.g., after the OS slept and the driver
+    /// reset the device, destroying every buffer the profiler owns) leaves no
+    /// usable GPU objects. Rather than repeatedly re-tripping validation
+    /// errors on dead resources, the query set, resolve target and readback
+    /// slots are dropped so the "disabled" query-set-`None` path takes over:
+    /// `begin_pass` / `end_pass` / `resolve_queries` become no-ops and
+    /// `supported()` reports `false` until a fresh profiler is created for a
+    /// rebuilt device. `last_timings` is preserved so overlays keep showing
+    /// the last completed sample.
+    fn invalidate_gpu_resources(&mut self) {
+        self.query_set = None;
+        self.query_buffer = None;
+        self.readback_slots.clear();
+        self.pending_queries.clear();
+        self.next_index = 0;
+    }
+
     fn consume_completed_mappings(&mut self) {
         loop {
             let next_index = self
@@ -422,37 +441,60 @@ impl GpuProfiler {
             let completion = self.readback_slots[index]
                 .map_completion
                 .load(Ordering::Acquire);
-            let slot = &mut self.readback_slots[index];
-            if completion == MAP_SUCCEEDED {
-                let data = slot
-                    .buffer
-                    .slice(..)
-                    .get_mapped_range()
-                    .expect("completed GPU timestamp mapping must be readable");
-                let timestamps: &[u64] = bytemuck::cast_slice(&data);
-                let mut samples = Vec::with_capacity(slot.queries.len());
-                for &(name, start_index, end_index) in &slot.queries {
-                    if (end_index as usize) < timestamps.len()
-                        && (start_index as usize) < timestamps.len()
-                    {
-                        let duration_ticks = timestamps[end_index as usize]
-                            .saturating_sub(timestamps[start_index as usize]);
-                        samples.push(GpuTimestamp {
-                            name,
-                            duration_ns: (duration_ticks as f32 * self.timestamp_period) as u64,
-                        });
-                    }
-                }
-                self.last_timings = aggregate_timings(samples);
-                self.last_completed_frame = Some(frame_index);
-                drop(data);
-            } else {
+
+            if completion != MAP_SUCCEEDED {
                 debug_assert_eq!(completion, MAP_FAILED);
                 self.dropped_readbacks = self.dropped_readbacks.saturating_add(1);
+                // A mapping failure means the device or the buffer is gone,
+                // so no surviving GPU objects are worth resolving into.
+                self.invalidate_gpu_resources();
+                break;
             }
-            slot.buffer.unmap();
-            slot.queries.clear();
-            slot.state = ReadbackState::Idle;
+
+            // The mapping reported success, but the GPU resource may have been
+            // destroyed underneath us between `map_async` and now (machine
+            // sleep/wake with a driver device reset is the common case). wgpu
+            // surfaces that as an error from `get_mapped_range`; count the
+            // sample as dropped and retire the pipeline instead of panicking
+            // and killing the render thread.
+            let data = match self.readback_slots[index]
+                .buffer
+                .slice(..)
+                .get_mapped_range()
+            {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!(
+                        "Helio GPU profiler: timestamp readback resource is gone ({error}); GPU profiling disabled"
+                    );
+                    self.dropped_readbacks = self.dropped_readbacks.saturating_add(1);
+                    self.invalidate_gpu_resources();
+                    break;
+                }
+            };
+
+            let timestamps: &[u64] = bytemuck::cast_slice(&data);
+            let query_count = self.readback_slots[index].queries.len();
+            let mut samples = Vec::with_capacity(query_count);
+            for &(name, start_index, end_index) in &self.readback_slots[index].queries {
+                if (end_index as usize) < timestamps.len()
+                    && (start_index as usize) < timestamps.len()
+                {
+                    let duration_ticks = timestamps[end_index as usize]
+                        .saturating_sub(timestamps[start_index as usize]);
+                    samples.push(GpuTimestamp {
+                        name,
+                        duration_ns: (duration_ticks as f32 * self.timestamp_period) as u64,
+                    });
+                }
+            }
+            self.last_timings = aggregate_timings(samples);
+            self.last_completed_frame = Some(frame_index);
+            drop(data);
+
+            self.readback_slots[index].buffer.unmap();
+            self.readback_slots[index].queries.clear();
+            self.readback_slots[index].state = ReadbackState::Idle;
         }
     }
 

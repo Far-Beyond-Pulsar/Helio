@@ -112,7 +112,7 @@ impl<T> MaybeSync for T {}
 
 use crate::graph::{BindingOverrideBuilder, PipelineRecipeBuilder, ResourceBuilder};
 use crate::shader::ReflectedShader;
-use crate::{PassContext, PrepareContext, Result};
+use crate::{PassContext, PrepareContext, RenderFrameInputs, ResourceRegistry, Result};
 
 /// Describes a debug visualisation mode that a render pass provides.
 ///
@@ -329,6 +329,11 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// - **O(1)**: Returns a static string (no allocations)
     fn name(&self) -> &'static str;
 
+    /// Whether this pass needs a current scene acceleration structure.
+    fn requires_ray_tracing(&self) -> bool {
+        false
+    }
+
     /// Whether this pass consumes a deliberately jittered camera projection.
     ///
     /// Temporal reconstruction passes opt in so the renderer can keep FXAA and
@@ -359,6 +364,13 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// triggered graph rebuild) still picks up the current mode instead of
     /// resetting to its own default.
     fn set_editor_mode(&mut self, _enabled: bool) {}
+
+    /// Receives generic host-provided projection inputs for the current frame.
+    ///
+    /// The graph broadcasts these inputs without knowing which pass consumes
+    /// them. A pass that owns the corresponding GPU state may copy or stage
+    /// the values for its next `prepare()` call.
+    fn set_frame_inputs(&mut self, _inputs: &RenderFrameInputs<'_>) {}
 
     /// Executes the pass by recording GPU commands.
     ///
@@ -394,14 +406,13 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
     fn publish<'a>(&self, _frame: &mut crate::ResourceRegistry<'a>) {}
 
-    /// Publishes outputs into the open typed resource registry.
+    /// Publishes pass-owned resources that consumers need before the first
+    /// pass executes in a frame. This is intentionally separate from
+    /// [`publish`](Self::publish), which publishes outputs after execution.
     ///
-    /// This is the phase 3 migration path. Existing passes may continue to
-    /// Existing passes may continue to implement [`publish`](Self::publish)
-    /// against the typed pass-resource view; new graph-owned outputs should
-    /// declare a [`crate::ResourceKey`] in their own crate and publish
-    /// through this hook instead.
-    fn publish_registry(&self, _registry: &mut crate::ResourceRegistry<'_>) {}
+    /// The graph owns the lifetime bridge for resources borrowed from pass
+    /// state, just as it does for ordinary `publish` calls.
+    fn publish_frame_inputs<'a>(&self, _frame: &mut ResourceRegistry<'a>) {}
 
     /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
     /// pass's own compound `ResourceRegistry` field.

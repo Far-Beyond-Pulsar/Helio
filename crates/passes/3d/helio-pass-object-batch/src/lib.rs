@@ -72,8 +72,9 @@ const DRAW_CALL_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `GpuInstanceDataOut` -- 208 bytes,
 /// see `helio_pass_object_batch::GpuInstanceData`'s own doc for the exact field breakdown.
 const INSTANCE_BYTES: u64 = 208;
-/// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 16 bytes.
-const AABB_BYTES: u64 = 16;
+/// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 32 bytes (min, pad, max, pad),
+/// the layout `indirect_dispatch.wgsl` reads as `GpuAabb`.
+const AABB_BYTES: u64 = 32;
 /// Matches `shaders/object_batch.wgsl`'s `GpuRangeOut` -- 20 bytes.
 const RANGE_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `DrawIndexedIndirectArgsOut` -- 20
@@ -484,6 +485,7 @@ impl ObjectBatchPass {
                     bgl_entry_storage(3, cs, true),
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
+                    bgl_entry_storage(6, cs, true),
                 ],
             }),
             range_block_scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -893,6 +895,7 @@ impl ObjectBatchPass {
                 bg_entry(3, &s.group_graph_hash_hi),
                 bg_entry(4, &s.local_range_rank),
                 bg_entry(5, &s.block_range_totals),
+                bg_entry(6, &s.group_shading),
             ],
         }));
 
@@ -1246,10 +1249,6 @@ impl RenderPass for ObjectBatchPass {
         None // Compute-only pass -- no render pass.
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["object_batch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.write_buffer("object_batch");
     }
@@ -1378,7 +1377,7 @@ mod tests {
     #[test]
     fn output_struct_sizes_match_wgsl() {
         assert_eq!(INSTANCE_BYTES, 208);
-        assert_eq!(AABB_BYTES, 16);
+        assert_eq!(AABB_BYTES, 32);
         assert_eq!(DRAW_CALL_BYTES, 20);
         assert_eq!(RANGE_BYTES, 20);
         assert_eq!(INDIRECT_ARGS_BYTES, 20);

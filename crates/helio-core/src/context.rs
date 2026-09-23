@@ -250,11 +250,7 @@ pub struct PassContext<'a> {
     /// Device reference for creating bind groups in execute() if needed (rare).
     pub device: &'a wgpu::Device,
 
-    /// Per-frame transient resource views.
-    pub resources: &'a crate::ResourceRegistry<'a>,
-
-    /// Open typed per-frame resource registry. New passes should prefer this
-    /// over the legacy `resources` field when publishing or consuming data.
+    /// Open typed per-frame resource registry.
     pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// Subpass index within a fused render-pass chain.
@@ -620,10 +616,7 @@ pub struct PrepareContext<'a> {
     /// `PassContext::scene_buffers`'s doc; the same field, same removal.
     pub scene_buffers: &'a SceneBufferProjection,
 
-    /// Per-frame transient resource views (for passes that need them in prepare).
-    pub pass_resources: &'a crate::ResourceRegistry<'a>,
-
-    /// Open typed per-frame resource registry for new passes.
+    /// Open typed per-frame resource registry.
     pub registry: &'a crate::ResourceRegistry<'a>,
 
     /// True if the render target was resized this frame.

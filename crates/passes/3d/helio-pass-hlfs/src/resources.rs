@@ -5,6 +5,7 @@ pub(crate) const COARSE_TILE_SIZE: u32 = 64;
 pub(crate) const GRID_CAPACITY: u64 = 64;
 pub(crate) const COARSE_CAPACITY: u64 = 256;
 pub(crate) const VISIBLE_CAPACITY: u64 = 16;
+pub(crate) const PROPOSAL_BYTES: u64 = 40;
 
 pub(crate) struct Image {
     pub texture: wgpu::Texture,
@@ -45,6 +46,7 @@ impl Image {
     }
 }
 pub(crate) struct History {
+    pub reservoirs: Image,
     pub lighting: Image,
     pub geometry: Image,
     pub visible: wgpu::Buffer,
@@ -56,6 +58,7 @@ pub(crate) struct Targets {
     pub history: [History; 2],
     pub output: Image,
     pub coarse: wgpu::Buffer,
+    pub proposals: wgpu::Buffer,
     pub grid: wgpu::Buffer,
     pub width: u32,
     pub height: u32,
@@ -89,6 +92,14 @@ impl Targets {
         );
         let color = |label| Image::new(device, label, sw, sh, wgpu::TextureFormat::Rg32Uint, true);
         let history = std::array::from_fn(|_| History {
+            reservoirs: Image::new(
+                device,
+                "HLFS weighted reservoir history",
+                if config.temporal_resampling { sw } else { 1 },
+                if config.temporal_resampling { sh * config.samples_per_pixel } else { 1 },
+                wgpu::TextureFormat::Rgba32Uint,
+                true,
+            ),
             lighting: color("HLFS lighting history"),
             geometry: Image::new(
                 device,
@@ -143,12 +154,21 @@ impl Targets {
             coarse: buffer(
                 device,
                 "HLFS coarse light grid",
-                tile_count(width, height, COARSE_TILE_SIZE) * (1 + COARSE_CAPACITY / 2) * 4,
+                tile_count(width, height, COARSE_TILE_SIZE) * (2 + COARSE_CAPACITY / 2) * 4,
+            ),
+            proposals: buffer(
+                device,
+                "HLFS tile proposals",
+                if config.tile_presampling {
+                    (tile_count(width, height, COARSE_TILE_SIZE) * 256 + 1) * PROPOSAL_BYTES
+                } else {
+                    PROPOSAL_BYTES
+                },
             ),
             grid: buffer(
                 device,
                 "HLFS fine light grid",
-                tile_count(width, height, TILE_SIZE) * (1 + GRID_CAPACITY / 2) * 4,
+                tile_count(width, height, TILE_SIZE) * (2 + GRID_CAPACITY / 2) * 4,
             ),
             width,
             height,
@@ -159,6 +179,8 @@ impl Targets {
 }
 
 pub(crate) struct Fallbacks {
+    pub empty_lights: wgpu::Buffer,
+    pub empty_shadow_matrices: wgpu::Buffer,
     pub black: Image,
     pub lightmap_uv: Image,
     pub _shadow: Image,
@@ -273,6 +295,18 @@ impl Fallbacks {
             ..Default::default()
         });
         Self {
+            empty_lights: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS empty lights"),
+                size: 128,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            empty_shadow_matrices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS empty shadow matrices"),
+                size: 64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             black,
             lightmap_uv,
             _shadow: shadow,

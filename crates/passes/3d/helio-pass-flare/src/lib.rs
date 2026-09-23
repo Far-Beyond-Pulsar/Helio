@@ -622,10 +622,6 @@ impl RenderPass for LensFlarePass {
         "LensFlare"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["depth"]
-    }
-
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
@@ -703,7 +699,7 @@ impl RenderPass for LensFlarePass {
         // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
         // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
         // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
-        let depth_view = ctx.resources.get(helio_core::ResourceKey::new("depth_sampler_view")).unwrap_or(ctx.depth);
+        let depth_view = ctx.registry.get(helio_core::ResourceKey::new("depth_sampler_view")).unwrap_or(ctx.depth);
 
         // Rebuild bind groups when buffer/depth pointers change
         let lights_buf = ctx

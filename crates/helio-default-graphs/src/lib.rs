@@ -27,9 +27,6 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_planetary_voxel::{
-    PlanetaryRenderError, PlanetaryVoxelRenderConfig, PlanetaryVoxelRenderPass,
-};
 use helio_pass_portal_cull::PortalCullPass;
 use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
@@ -44,7 +41,6 @@ use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
-use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
@@ -517,10 +513,8 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         ctx.owns_device,
         None,
         None,
-        None,
         ctx.scene_db.clone(),
     )
-    .expect("the default graph has no fallible optional pass")
 }
 
 /// Build the externally-owned default graph from [`PassBuildContext`].
@@ -528,27 +522,6 @@ pub fn build_default_graph_external_with_context(ctx: PassBuildContext<'_>) -> R
     let mut ctx = ctx;
     ctx.owns_device = false;
     build_default_graph_with_context(ctx)
-}
-
-/// Build the externally-owned planetary default graph from [`PassBuildContext`].
-pub fn build_default_graph_external_with_planetary_voxels_with_context(
-    ctx: PassBuildContext<'_>,
-    planetary_config: PlanetaryVoxelRenderConfig,
-) -> Result<RenderGraph, PlanetaryRenderError> {
-    build_default_graph_internal(
-        ctx.device,
-        ctx.queue,
-        ctx.camera_buffer,
-        ctx.config,
-        ctx.debug_state,
-        ctx.camera_buffer,
-        ctx.cull_stats_buffer,
-        false,
-        None,
-        None,
-        Some(planetary_config),
-        ctx.scene_db.clone(),
-    )
 }
 
 /// Build the deferred graph with user post-process effects from the shared ABI.
@@ -567,10 +540,8 @@ pub fn build_default_graph_with_user_effects_with_context(
         ctx.owns_device,
         None,
         Some(user_effects),
-        None,
         ctx.scene_db.clone(),
     )
-    .expect("the default graph has no fallible optional pass")
 }
 
 pub fn build_default_graph(
@@ -595,10 +566,8 @@ pub fn build_default_graph(
         true,
         debug_overlay,
         None,
-        None,
         scene_db,
     )
-    .expect("the default graph has no fallible optional pass")
 }
 
 pub fn build_default_graph_with_user_effects(
@@ -624,10 +593,8 @@ pub fn build_default_graph_with_user_effects(
         true,
         debug_overlay,
         Some(user_effects),
-        None,
         scene_db,
     )
-    .expect("the default graph has no fallible optional pass")
 }
 
 pub fn build_default_graph_external(
@@ -652,44 +619,6 @@ pub fn build_default_graph_external(
         false,
         debug_overlay,
         None,
-        None,
-        scene_db,
-    )
-    .expect("the default graph has no fallible optional pass")
-}
-
-/// Build the externally-owned default graph with one graph-owned planetary
-/// voxel pass composited after deferred lighting.
-///
-/// This is additive: existing default-graph builders never allocate the
-/// planetary cache. The bounded configuration is retained by the graph
-/// rebuilder, so a renderer resize recreates the same pass and callers can
-/// rediscover it through [`helio::Renderer::find_pass_mut`].
-#[allow(clippy::too_many_arguments)]
-pub fn build_default_graph_external_with_planetary_voxels(
-    device: &Arc<wgpu::Device>,
-    queue: &Arc<wgpu::Queue>,
-    camera_buf: &wgpu::Buffer,
-    config: RendererConfig,
-    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
-    debug_camera_buf: &wgpu::Buffer,
-    cull_stats_buf: &wgpu::Buffer,
-    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
-    planetary_config: PlanetaryVoxelRenderConfig,
-    scene_db: helio::SceneDbHandle,
-) -> Result<RenderGraph, PlanetaryRenderError> {
-    build_default_graph_internal(
-        device,
-        queue,
-        camera_buf,
-        config,
-        debug_state,
-        debug_camera_buf,
-        cull_stats_buf,
-        false,
-        debug_overlay,
-        None,
-        Some(planetary_config),
         scene_db,
     )
 }
@@ -705,9 +634,8 @@ fn build_default_graph_internal(
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
-    planetary_config: Option<PlanetaryVoxelRenderConfig>,
     scene_db: helio::SceneDbHandle,
-) -> Result<RenderGraph, PlanetaryRenderError> {
+) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
@@ -782,27 +710,6 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
-
-    // Planetary terrain owns an independent bounded cache but composes into
-    // the same pre-AA color/depth targets as other post-lighting geometry.
-    // Keep it opt-in so existing applications pay no allocation or pass cost.
-    if let Some(planetary_config) = planetary_config {
-        graph.add_pass(Box::new(PlanetaryVoxelRenderPass::new_composited(
-            device,
-            queue,
-            config.surface_format,
-            planetary_config,
-        )?));
-    }
-
-    // Voxel mesh pass — real triangles with depth testing, composited over
-    // deferred lighting. When no voxel volumes are present the pass is a no-op
-    // (extract pass has zero dirty bricks → no geometry emitted).
-    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
-        device,
-        queue,
-        config.surface_format,
-    )));
 
     add_late_passes(
         &mut graph,
@@ -907,15 +814,13 @@ fn build_default_graph_internal(
                 owns_device,
                 overlay_owned.as_ref(),
                 effect_snippet,
-                planetary_config,
                 scene_db.clone(),
             )
-            .expect("a previously validated planetary graph configuration must rebuild")
         },
     );
     graph.set_graph_data(rebuilder);
 
-    Ok(graph)
+    graph
 }
 
 pub fn build_fxaa_graph(
@@ -1173,6 +1078,10 @@ fn build_hlfs_graph_internal(
     let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+    }
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,
@@ -1198,6 +1107,13 @@ fn build_hlfs_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
+    // Blend transparent surfaces in the same linear HDR target as HLFS.
+    let mut transparent = helio_pass_transparent::TransparentPass::new(
+        device, lighting_format,
+    ).with_pre_aa_target();
+    if config.tsr_quality.is_some() { transparent = transparent.with_reactive_mask(); }
+    graph.add_pass(Box::new(transparent));
+
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
     if let Some(quality) = config.tsr_quality {
@@ -1209,17 +1125,20 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
+        ).with_intermediate_output().with_transparency_reactivity()));
     }
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+    let postprocess = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
         config.height,
         config.surface_format,
         None,
-    )));
+    );
+    graph.add_pass(Box::new(if config.tsr_quality.is_some() {
+        postprocess.with_tsr_input()
+    } else { postprocess }));
 
     add_final_passes(
         &mut graph,
@@ -1405,6 +1324,10 @@ fn build_fxaa_hlfs_graph_internal(
     let mut hlfs_pass = HlfsPass::new(device, queue, w, h, lighting_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, w, h)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+    }
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,
@@ -1430,7 +1353,13 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
-    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    // Match the native HLFS graph: transparent glass belongs in linear HDR
+    // before anti-aliasing and tonemapping, alongside the opaque lighting.
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
+        device, lighting_format,
+    ).with_pre_aa_target()));
+
+    graph.add_pass(Box::new(FxaaPass::new(device, lighting_format).with_intermediate_target(lighting_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,
@@ -1439,7 +1368,7 @@ fn build_fxaa_hlfs_graph_internal(
         config.height,
         config.surface_format,
         None,
-    )));
+    ).with_fxaa_input()));
 
     add_final_passes(
         &mut graph,
@@ -1683,14 +1612,6 @@ fn build_forward_graph_internal(
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
     add_forward_geometry_passes(&mut graph, device, camera_buf, &config, &perf, true);
-
-    // Voxel mesh pass — real triangles with depth testing, composited over
-    // the forward-lit output.
-    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
-        device,
-        queue,
-        config.surface_format,
-    )));
 
     add_late_passes(
         &mut graph,

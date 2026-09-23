@@ -3,12 +3,12 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use arrayvec::ArrayVec;
 use helio_core::Result as HelioResult;
 
 use crate::camera::Camera;
 
-use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, Renderer};
+use super::debug::DebugCameraUniform;
+use super::renderer_impl::{CullStatsReadbackState, Renderer};
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
 use helio_core::temporal::r1_r2_jitter;
@@ -97,13 +97,30 @@ impl Renderer {
         // Embedders may share the device and set `owns_device = false`; in
         // that mode we still must poll here or completed submissions and map
         // callbacks can accumulate in the backend indefinitely.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        helio_core::cpu_scope!("Helio::Renderer::render");
+        {
+            // Takes wgpu's device-wide locks; can wait behind another thread's
+            // submit/present on the shared device.
+            helio_core::cpu_scope!("Helio: device.poll");
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
         // Browser WebGPU buffer mapping is asynchronous. Consume the previous
         // frame's completed readback before recording a new copy.
-        self.rebuild_graph_if_sky_changed();
-        self.poll_cull_stats_readback();
+        {
+            helio_core::cpu_scope!("Helio: rebuild_graph_if_sky_changed");
+            self.rebuild_graph_if_sky_changed();
+        }
+        {
+            helio_core::cpu_scope!("Helio: apply_coordinate_spaces");
+            self.apply_coordinate_spaces();
+        }
+        {
+            helio_core::cpu_scope!("Helio: poll_cull_stats_readback");
+            self.poll_cull_stats_readback();
+        }
 
         if let Some((w, h)) = self.pending_resize.take() {
+            helio_core::cpu_scope!("Helio: apply_resize_now");
             self.apply_resize_now(w, h);
         }
 
@@ -178,8 +195,8 @@ impl Renderer {
         } else {
             (glam::Mat4::IDENTITY, 0.0, 0.0)
         };
-        let jittered_m = jitter_mat * camera.proj * camera.view;
-        let col = jittered_m.to_cols_array();
+        // Output-resolution editor handles must align with unjittered pointer rays.
+        let col = (camera.proj * camera.view).to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {
             view_proj: [
                 [col[0], col[1], col[2], col[3]],
@@ -188,16 +205,19 @@ impl Renderer {
                 [col[12], col[13], col[14], col[15]],
             ],
         };
-        self.queue.write_buffer(
-            &self.debug_camera_buffer,
-            0,
-            bytemuck::bytes_of(&debug_camera_uniform),
-        );
+        {
+            helio_core::cpu_scope!("Helio: upload camera");
+            self.queue.write_buffer(
+                &self.debug_camera_buffer,
+                0,
+                bytemuck::bytes_of(&debug_camera_uniform),
+            );
 
-        let mut jittered_camera = camera.clone();
-        jittered_camera.proj = jitter_mat * camera.proj;
-        jittered_camera.jitter = [jx, jy];
-        self.upload_camera(&jittered_camera);
+            let mut jittered_camera = camera.clone();
+            jittered_camera.proj = jitter_mat * camera.proj;
+            jittered_camera.jitter = [jx, jy];
+            self.upload_camera(&jittered_camera);
+        }
 
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
@@ -227,6 +247,7 @@ impl Renderer {
         target: &wgpu::TextureView,
         multiview: bool,
     ) -> HelioResult<()> {
+        helio_core::cpu_scope!("Helio::Renderer::submit_frame");
         #[cfg(not(target_arch = "wasm32"))]
         let depth: &wgpu::TextureView = if multiview {
             self.xr_depth_view.as_ref().ok_or_else(|| {
@@ -255,6 +276,7 @@ impl Renderer {
             .is_some();
 
         {
+            helio_core::cpu_scope!("Helio: upload postprocess settings");
             // Upload camera defaults as base; GPU volume blending (in PostProcessPass)
             // will blend toward active volumes if any are present.
             // The camera's postprocess_settings.hdr_output_mode controls HDR output.
@@ -348,55 +370,93 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs: Option<helio_bake_types::BakedPvsRef<'_>> = None;
 
-        let material_texture_views = vec![
-            &self.material_bindings.fallback_view;
-            self.material_bindings.texture_count
-        ];
-        let material_samplers = vec![
-            &self.material_bindings.fallback_sampler;
-            self.material_bindings.texture_count
-        ];
-        // `"material_textures"`/`"coordinate_spaces"` are `GBufferPass`-owned
-        // (that pass's own `MaterialTextureData`/portal-space struct layouts
-        // -- a generic `Renderer` has no business knowing either). Reached
-        // in via `find_pass`, the same pattern already used below for
-        // `PostProcessPass`, rather than `Renderer` allocating and owning
-        // them itself. `GBufferPass` is always present in every graph this
-        // `Renderer` can build, so this is infallible in practice; the
-        // `unwrap_or` fallbacks only guard a graph that omits it entirely
-        // (e.g. a focused test graph), not a normal runtime path.
-        // Captured as raw pointers, not references: `execute_with_resources`
-        // below needs `&mut self.graph`, which would otherwise conflict with
-        // the immutable borrow `find_pass` takes on it. The pass list isn't
-        // mutated/reallocated between this lookup and that call -- only the
-        // passes' own internal buffers are read -- so these stay valid for
-        // the whole frame.
-        let (material_textures_ptr, coordinate_spaces_ptr, coordinate_spaces_prev_ptr): (
-            *const wgpu::Buffer,
-            *const wgpu::Buffer,
-            *const wgpu::Buffer,
-        ) = {
-            let gbuffer_pass = self.graph.find_pass::<helio_pass_gbuffer::GBufferPass>();
-            (
-                gbuffer_pass
-                    .map(|p| p.fallback_material_textures_buffer() as *const wgpu::Buffer)
-                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
-                gbuffer_pass
-                    .map(|p| p.coordinate_spaces_buffer() as *const wgpu::Buffer)
-                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
-                gbuffer_pass
-                    .map(|p| p.coordinate_spaces_prev_buffer() as *const wgpu::Buffer)
-                    .unwrap_or(&self.camera_buffer as *const wgpu::Buffer),
-            )
+        // SceneDB owns texture residency. Retain descriptor views by GPU handle
+        // identity, including slot replacement/removal; no duplicate uploads.
+        let texture_store = self.scene_db.texture_store();
+        let texture_guard = {
+            // Shared with SceneDB's texture streaming/upload side, which takes
+            // the write half; a long wait here is streaming holding the store.
+            helio_core::cpu_scope!("Helio: wait SceneDB texture store lock");
+            texture_store
+                .as_ref()
+                .map(|store| {
+                    store.read().map_err(|_| {
+                        helio_core::Error::InvalidPassConfig(
+                            "SceneDB texture store lock poisoned".into(),
+                        )
+                    })
+                })
+                .transpose()?
         };
-        // SAFETY: see comment above -- these buffers outlive this frame's
-        // `execute_with_resources` call regardless of `self.graph`'s borrow state.
-        let material_textures_buf = unsafe { &*material_textures_ptr };
-        let coordinate_spaces_buf = unsafe { &*coordinate_spaces_ptr };
-        let coordinate_spaces_prev_buf = unsafe { &*coordinate_spaces_prev_ptr };
-
+        let bind_textures_scope = helio_core::CpuScope::new("Helio: bind material textures");
+        if texture_guard
+            .as_ref()
+            .is_some_and(|store| store.slot_count() as usize > self.material_bindings.texture_count)
+        {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "SceneDB texture slots exceed the device material binding capacity".into(),
+            ));
+        }
+        for (slot, cached) in self.material_bindings.scene_views.iter_mut().enumerate() {
+            let texture = texture_guard
+                .as_ref()
+                .and_then(|store| store.texture(slot as u32));
+            if cached.as_ref().map(|(texture, _)| texture) == texture {
+                continue;
+            }
+            if let Some(texture) = texture {
+                if texture.dimension() != wgpu::TextureDimension::D2
+                    || texture.depth_or_array_layers() != 1
+                    || texture.sample_count() != 1
+                    || !texture
+                        .usage()
+                        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+                    || texture
+                        .format()
+                        .sample_type(None, Some(self.device.features()))
+                        != Some(wgpu::TextureSampleType::Float { filterable: true })
+                {
+                    return Err(helio_core::Error::InvalidPassConfig(format!("SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture")));
+                }
+                *cached = Some((texture.clone(), texture.create_view(&Default::default())));
+            } else {
+                *cached = None;
+            }
+            self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
+        }
+        drop(texture_guard);
+        drop(bind_textures_scope);
+        let material_texture_views: Vec<_> = self
+            .material_bindings
+            .scene_views
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map(|(_, view)| view)
+                    .unwrap_or(&self.material_bindings.fallback_view)
+            })
+            .collect();
+        let material_samplers =
+            vec![&self.material_bindings.fallback_sampler; self.material_bindings.texture_count];
         let mut resource_registry = helio_core::ResourceRegistry::empty();
-        resource_registry.write(helio_core::ResourceKey::new("material_textures"),
+        // Pass-owned buffers are published through the graph before any pass
+        // executes. The renderer only consumes the generic contracts and no
+        // longer downcasts into GBufferPass to discover its storage.
+        self.graph.publish_frame_inputs(&mut resource_registry);
+        let material_textures_buf = resource_registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("material_texture_fallback"))
+            .unwrap_or(&self.camera_buffer);
+        let coordinate_spaces = resource_registry
+            .get::<helio_core::CoordinateSpacesFrameData<'_>>(
+                helio_core::resource_keys::coordinate_spaces(),
+            )
+            .unwrap_or(helio_core::CoordinateSpacesFrameData {
+                coordinate_spaces: &self.camera_buffer,
+                coordinate_spaces_prev: &self.camera_buffer,
+            });
+        resource_registry.write(
+            helio_core::resource_keys::material_textures(),
             helio_mats::MaterialTextureBindings {
                 material_textures: material_textures_buf,
                 texture_views: &material_texture_views,
@@ -405,26 +465,32 @@ impl Renderer {
             },
             "Renderer",
         );
-        resource_registry.write(helio_core::ResourceKey::new("render_environment"),
+        resource_registry.write(
+            helio_core::resource_keys::render_environment(),
             helio_core::RenderEnvironment {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
-                tlas: None,
+                tlas: self.ray_frame.tlas(self.frame_count),
             },
             "Renderer",
         );
-        // See `GBufferPass::coordinate_spaces_buffer`'s doc: every instance
+        if let Some(transmission) = self.ray_frame.transmission(self.frame_count) {
+            resource_registry.write(
+                helio_core::ResourceKey::new("ray_transmission"),
+                transmission,
+                "Renderer",
+            );
+        }
+        // Every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/
         // sublevel producer exists. Without this, `OcclusionCullPass`/
         // `IndirectDispatchPass`/`ShadowPass`/`ShadowCullPass`/both portal
         // passes all hard-require this resource and silently never dispatch
         // without it -- stalling the entire GPU-driven cull pipeline.
-        resource_registry.write(helio_core::ResourceKey::new("coordinate_spaces"),
-            helio_pass_gbuffer::CoordinateSpacesFrameData {
-                coordinate_spaces: coordinate_spaces_buf,
-                coordinate_spaces_prev: coordinate_spaces_prev_buf,
-            },
+        resource_registry.write(
+            helio_core::resource_keys::coordinate_spaces(),
+            coordinate_spaces,
             "Renderer",
         );
         resource_registry.write(
@@ -438,12 +504,24 @@ impl Renderer {
         // Geometry, materials, lights, shadows, and transforms are SceneDB
         // component buffers. Passes resolve them by BufferKey from the
         // read-only SceneInput projection; Renderer owns none of those rows.
-        resource_registry.write(helio_core::ResourceKey::new("postprocess_uniforms"), &self.postprocess_buffer, "Renderer");
+        resource_registry.write(
+            helio_core::ResourceKey::new("postprocess_uniforms"),
+            &self.postprocess_buffer,
+            "Renderer",
+        );
         if let Some(ref lut) = self.color_grading_lut_view {
-            resource_registry.write(helio_core::ResourceKey::new("color_grading_lut"), lut, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("color_grading_lut"),
+                lut,
+                "Renderer",
+            );
         }
         if let Some(ref ies) = self.ies_texture_view {
-            resource_registry.write(helio_core::ResourceKey::new("ies_textures"), ies, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("ies_textures"),
+                ies,
+                "Renderer",
+            );
         }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
@@ -458,7 +536,11 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
-        resource_registry.write(helio_core::ResourceKey::new("depth_texture"), depth_texture, "Renderer");
+        resource_registry.write(
+            helio_core::ResourceKey::new("depth_texture"),
+            depth_texture,
+            "Renderer",
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let depth_sampler_view: &wgpu::TextureView = if multiview {
             self.xr_depth_view_layer0
@@ -470,41 +552,77 @@ impl Renderer {
         };
         #[cfg(target_arch = "wasm32")]
         let depth_sampler_view: &wgpu::TextureView = &self.depth_view;
-        resource_registry.write(helio_core::ResourceKey::new("depth_sampler_view"), depth_sampler_view, "Renderer");
+        resource_registry.write(
+            helio_core::ResourceKey::new("depth_sampler_view"),
+            depth_sampler_view,
+            "Renderer",
+        );
         if let Some(v) = self
             .full_res_depth_view
             .as_ref()
             .map(|v| v as &wgpu::TextureView)
         {
-            resource_registry.write(helio_core::ResourceKey::new("full_res_depth"), v, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("full_res_depth"),
+                v,
+                "Renderer",
+            );
         }
         if let Some(t) = self
             .full_res_depth_texture
             .as_ref()
             .map(|t| t as &wgpu::Texture)
         {
-            resource_registry.write(helio_core::ResourceKey::new("full_res_depth_texture"), t, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("full_res_depth_texture"),
+                t,
+                "Renderer",
+            );
         }
         if let Some(ao) = baked_ao {
             resource_registry.write(helio_core::ResourceKey::new("baked_ao"), ao, "Renderer");
         }
         if let Some(ao_sampler) = baked_ao_sampler {
-            resource_registry.write(helio_core::ResourceKey::new("baked_ao_sampler"), ao_sampler, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("baked_ao_sampler"),
+                ao_sampler,
+                "Renderer",
+            );
         }
         if let Some(lightmap) = baked_lightmap {
-            resource_registry.write(helio_core::ResourceKey::new("baked_lightmap"), lightmap, "Renderer");
+            resource_registry.write(
+                helio_core::resource_keys::baked_lightmap(),
+                lightmap,
+                "Renderer",
+            );
         }
         if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            resource_registry.write(helio_core::ResourceKey::new("baked_lightmap_sampler"), lightmap_sampler, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("baked_lightmap_sampler"),
+                lightmap_sampler,
+                "Renderer",
+            );
         }
         if let Some(reflection) = baked_reflection {
-            resource_registry.write(helio_core::ResourceKey::new("baked_reflection"), reflection, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("baked_reflection"),
+                reflection,
+                "Renderer",
+            );
         }
         if let Some(reflection_sampler) = baked_reflection_sampler {
-            resource_registry.write(helio_core::ResourceKey::new("baked_reflection_sampler"), reflection_sampler, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("baked_reflection_sampler"),
+                reflection_sampler,
+                "Renderer",
+            );
         }
         if let Some(irradiance_sh) = baked_irradiance_sh {
-            resource_registry.write(helio_core::ResourceKey::new("baked_irradiance_sh"), irradiance_sh, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new("baked_irradiance_sh"),
+                irradiance_sh,
+                "Renderer",
+            );
         }
         if let Some(pvs) = baked_pvs {
             resource_registry.write(helio_core::ResourceKey::new("baked_pvs"), pvs, "Renderer");
@@ -548,22 +666,27 @@ impl Renderer {
             });
         }
         clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
-        self.queue.submit(std::iter::once(clear_encoder.finish()));
+        {
+            helio_core::cpu_scope!("Helio: queue.submit (target clear)");
+            self.queue.submit(std::iter::once(clear_encoder.finish()));
+        }
 
         let _graph_start = Instant::now();
-        let scene_input = crate::renderer::input::SceneInputAdapter::from_scene_db(
-            &self.scene_db,
-            &self.camera_buffer,
-            &self.camera_data,
-            self.camera_generation,
-            self.frame_count,
-        );
-        self.graph.execute_with_resources(
-            &scene_input,
-            target,
-            depth,
-            &mut resource_registry,
-        )?;
+        let scene_input = {
+            helio_core::cpu_scope!("Helio: SceneInputAdapter::from_scene_db");
+            crate::renderer::input::SceneInputAdapter::from_scene_db(
+                &self.scene_db,
+                &self.camera_buffer,
+                &self.camera_data,
+                self.camera_generation,
+                self.frame_count,
+            )
+        };
+        {
+            helio_core::cpu_scope!("Helio: RenderGraph execute");
+            self.graph
+                .execute_with_registry(&scene_input, target, depth, &mut resource_registry)?;
+        }
         drop(resource_registry);
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
@@ -582,7 +705,10 @@ impl Renderer {
                 0,
                 32,
             );
-            self.queue.submit(std::iter::once(read_encoder.finish()));
+            {
+                helio_core::cpu_scope!("Helio: queue.submit (cull stats readback)");
+                self.queue.submit(std::iter::once(read_encoder.finish()));
+            }
 
             let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
             let callback_completion = std::sync::Arc::clone(&completion);
@@ -623,6 +749,11 @@ impl Renderer {
     /// the shaders is a follow-up (stereo depth requires it).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+        if self.graph.requires_ray_tracing() {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "HLFS RT stereo support is not implemented".into(),
+            ));
+        }
         self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
 
@@ -862,8 +993,6 @@ impl Renderer {
         image_index: u32,
         mirror: &wgpu::TextureView,
     ) -> HelioResult<()> {
-        use wgpu::util::DeviceExt as _;
-
         if self.xr_mirror_sampler.is_none() {
             self.xr_mirror_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("XR Mirror Sampler"),

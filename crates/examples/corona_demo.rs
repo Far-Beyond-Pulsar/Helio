@@ -22,7 +22,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
     LightType, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_with_context;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -239,11 +239,8 @@ impl ApplicationHandler for App {
         let mut scene_db = v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let scene_db_handle = v3_demo_common::scene_db_handle(&scene_db);
 
-        let graph_scene_db = scene_db_handle.clone();
         let mut renderer = RendererBuilder::new(config, scene_db_handle)
-            .with_graph(Box::new(move |d, q, s, c, ds, cb, csb| {
-                build_default_graph(d, q, ds, s, c, cb, csb, None, graph_scene_db.clone())
-            }))
+            .with_pass_build_context(Box::new(build_default_graph_with_context))
             .build(
                 device.clone(),
                 queue.clone(),

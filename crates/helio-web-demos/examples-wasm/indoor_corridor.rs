@@ -5,8 +5,11 @@ use std::sync::Arc;
 use glam::Vec3;
 use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
-use crate::common::{box_mesh, insert_object, make_material, point_light};
+use crate::common::{
+    box_mesh, insert_object, make_material, point_light, spawn_light, spawn_material, spawn_mesh,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 4.0;
@@ -24,63 +27,46 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer.scene().insert_material(make_material(
-            [0.60, 0.58, 0.55, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let tile_mat = renderer.scene().insert_material(make_material(
-            [0.80, 0.78, 0.75, 1.0],
-            0.6,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let concrete = spawn_material(
+            &mut scene_db.world,
+            make_material([0.60, 0.58, 0.55, 1.0], 0.85, 0.0, [0.0; 3], 0.0),
+        );
+        let tile_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.80, 0.78, 0.75, 1.0], 0.6, 0.0, [0.0; 3], 0.0),
+        );
 
         // Long corridor: 2.4m wide, 3m tall, 40m long (z: 0..40)
-        let floor = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, -0.05, 20.0],
-                [1.2, 0.05, 20.0],
-            )));
-        let ceiling = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 3.05, 20.0],
-                [1.2, 0.05, 20.0],
-            )));
-        let wall_l = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [-1.3, 1.5, 20.0],
-                [0.1, 1.5, 20.0],
-            )));
-        let wall_r = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [1.3, 1.5, 20.0],
-                [0.1, 1.5, 20.0],
-            )));
-        let back_w = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.5, 40.1],
-                [1.4, 1.5, 0.1],
-            )));
-        let front_w = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(box_mesh(
-                [0.0, 1.5, -0.1],
-                [1.4, 1.5, 0.1],
-            )));
+        let floor = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, -0.05, 20.0], [1.2, 0.05, 20.0]),
+        );
+        let ceiling = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 3.05, 20.0], [1.2, 0.05, 20.0]),
+        );
+        let wall_l = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([-1.3, 1.5, 20.0], [0.1, 1.5, 20.0]),
+        );
+        let wall_r = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([1.3, 1.5, 20.0], [0.1, 1.5, 20.0]),
+        );
+        let back_w = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 1.5, 40.1], [1.4, 1.5, 0.1]),
+        );
+        let front_w = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 1.5, -0.1], [1.4, 1.5, 0.1]),
+        );
 
         for (m, mat, r) in [
             (floor, tile_mat, 20.0),
@@ -90,20 +76,16 @@ impl HelioWasmApp for Demo {
             (back_w, concrete, 5.0),
             (front_w, concrete, 5.0),
         ] {
-            let _ = insert_object(renderer, m, mat, glam::Mat4::IDENTITY, r);
+            let _ = insert_object(&mut scene_db.world, m, mat, glam::Mat4::IDENTITY, r);
         }
 
         // Periodic overhead lights every 5m
         for i in 0..8 {
             let z = 2.5 + i as f32 * 5.0;
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(point_light(
-                    [0.0, 2.8, z],
-                    [1.0, 0.95, 0.85],
-                    3.0,
-                    6.0,
-                )));
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 2.8, z], [1.0, 0.95, 0.85], 3.0, 6.0),
+            );
         }
         renderer.set_ambient([0.15, 0.15, 0.18], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

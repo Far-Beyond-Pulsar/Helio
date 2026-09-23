@@ -11,7 +11,7 @@
 //!    against unrelated nearby real geometry.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalMaskPass {
@@ -26,6 +26,9 @@ pub struct PortalMaskPass {
     reset_bind_group_key: Option<usize>,
 
     portal_count: u32,
+    /// Active resolver-published view rows. `None` preserves legacy manual
+    /// behavior for callers that do not provide projection counts.
+    active_portal_count: Option<u32>,
 }
 
 impl PortalMaskPass {
@@ -204,13 +207,24 @@ impl PortalMaskPass {
             reset_bind_group: None,
             reset_bind_group_key: None,
             portal_count: 0,
+            active_portal_count: None,
         }
+    }
+
+    /// Set the active dense portal-view row count. Growable SceneDB storage
+    /// can contain more capacity than the current projection frame.
+    pub fn set_active_portal_count(&mut self, count: u32) {
+        self.active_portal_count = Some(count);
     }
 }
 
 impl RenderPass for PortalMaskPass {
     fn name(&self) -> &'static str {
         "PortalMask"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_portal_count = inputs.projection_counts.map(|counts| counts[0]);
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -220,14 +234,6 @@ impl RenderPass for PortalMaskPass {
             ResourceSize::MatchSurface,
         );
         builder.with_extra_usage(wgpu::TextureUsages::TEXTURE_BINDING);
-    }
-
-    fn reads(&self) -> &'static [&'static str] {
-        &["depth"]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["portal_mask"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -241,16 +247,11 @@ impl RenderPass for PortalMaskPass {
         None
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_views"))
-            .map(|h| {
-                (h.buffer.size()
-                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                    as u32
-            })
-            .unwrap_or(0);
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        // SceneDB storage is growable, so its buffer size is reserved
+        // capacity rather than the active number of portal views. Only the
+        // projection bridge knows which dense rows are live this frame.
+        self.portal_count = self.active_portal_count.unwrap_or(0);
         Ok(())
     }
 

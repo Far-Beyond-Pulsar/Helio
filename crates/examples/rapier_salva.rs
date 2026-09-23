@@ -31,7 +31,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
 use salva3d::{
     kernel::CubicSplineKernel,
     object::{Boundary, Fluid},
@@ -463,9 +463,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-            .with_graph(Box::new(move |d, q, c, ds, cb, dcb, csb| {
-                build_default_graph_external(d, q, cb, c, ds, dcb, csb, None, graph_scene_db.clone())
-            }))
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
             .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.08, 0.08, 0.1], 1.0);
 

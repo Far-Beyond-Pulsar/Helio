@@ -22,7 +22,8 @@
 //! `execute()` records exactly:
 //! 1. One fullscreen draw (TSR resolve) into `output_texture`.
 //! 2. One `copy_texture_to_texture` (history ping-pong).
-//! 3. One fullscreen draw (passthrough blit) into `ctx.target`.
+//! 3. Optional fullscreen blit into `ctx.target`; intermediate mode publishes
+//!    the HDR resolve as `tsr_color` for a following post-process pass.
 //!
 //! All three are constant-time GPU operations regardless of scene complexity.
 
@@ -56,6 +57,8 @@ struct VertexOut {
 
 #[cfg(test)]
 mod camera_sampling_tests;
+#[cfg(test)]
+mod depth_history_tests;
 
 // ── Quality presets ───────────────────────────────────────────────────────────
 
@@ -129,10 +132,11 @@ impl TsrQuality {
 struct TsrUniform {
     jitter_offset: [f32; 2], // sub-pixel jitter in [-0.5, 0.5)
     reactivity: f32,         // extra blend toward current (0 = full history)
-    reset: u32,              // 1 on first frame / after reset_history()
+    flags: u32,              // bit 0: reset, bit 1: transparency coverage
     time_delta: f32,         // seconds since last frame
     tap_radius: u32,         // 1 = 3×3, 2 = 5×5
-    _pad: [f32; 2],
+    previous_jitter_uv: [f32; 2],
+    previous_view: [f32; 16],
 }
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
@@ -141,13 +145,19 @@ struct TsrUniform {
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
 /// Reads `"pre_aa"` from [`ResourceRegistry`](helio_core::ResourceRegistry) and
-/// writes the upsampled, temporally accumulated image to `ctx.target`.
+/// publishes the upsampled, temporally accumulated image as `tsr_color`.
+/// By default it also blits to `ctx.target`.
 pub struct TsrPass {
+    intermediate_output: bool,
+    timing_query: Option<wgpu::QuerySet>,
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView)>,
+    _reactivity_fallback: wgpu::Texture,
+    reactivity_fallback_view: wgpu::TextureView,
+    transparency_reactivity: bool,
     uniform_buf: wgpu::Buffer,
 
     // ── Blit pipeline (output_texture → ctx.target) ───────────────────────────
@@ -159,9 +169,13 @@ pub struct TsrPass {
     /// Previous frame's TSR output at display resolution.
     pub history_texture: wgpu::Texture,
     pub history_view: wgpu::TextureView,
-    /// Current frame's TSR output (rendered to, then copied → history).
+    /// Current frame's TSR output (rendered to, then copied to history).
     pub output_texture: wgpu::Texture,
     pub output_view: wgpu::TextureView,
+    history_depth: wgpu::Texture,
+    history_depth_view: wgpu::TextureView,
+    output_depth: wgpu::Texture,
+    output_depth_view: wgpu::TextureView,
 
     // ── Samplers ──────────────────────────────────────────────────────────────
     linear_sampler: wgpu::Sampler,
@@ -176,6 +190,8 @@ pub struct TsrPass {
     // ── Reactivity state ──────────────────────────────────────────────────────
     /// `true` until the first frame (or after `reset_history()`).
     first_frame: bool,
+    previous_jitter_uv: [f32; 2],
+    previous_view: [f32; 16],
     /// Blend bias toward current frame (`0` = full history, `1` = no history).
     reactivity: f32,
 
@@ -183,6 +199,19 @@ pub struct TsrPass {
 }
 
 impl TsrPass {
+    /// Publish the HDR resolve for post-processing without a redundant surface blit.
+    pub fn with_intermediate_output(mut self) -> Self {
+        self.intermediate_output = true;
+        self
+    }
+
+    /// Opt in to R8 transparency coverage and retain it in history alpha.
+    /// The resolved RGB is unchanged for zero current/previous coverage.
+    pub fn with_transparency_reactivity(mut self) -> Self {
+        self.transparency_reactivity = true;
+        self
+    }
+
     /// Create a new TSR pass.
     ///
     /// - `internal_*` — pre-AA (geometry) render resolution.
@@ -235,7 +264,19 @@ impl TsrPass {
         let output_height = output_height.max(1);
 
         let (history_texture, history_view, output_texture, output_view) =
-            Self::create_textures(device, output_width, output_height);
+            Self::create_textures(device, output_width, output_height, wgpu::TextureFormat::Rgba16Float);
+        let (history_depth, history_depth_view, output_depth, output_depth_view) =
+            Self::create_textures(device, output_width, output_height, wgpu::TextureFormat::R32Float);
+
+        // Zero-initialized fallback keeps graphs without transparency unchanged.
+        let reactivity_fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TSR zero reactivity"),
+            size: wgpu::Extent3d {width:1,height:1,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::R8Unorm,usage:wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats:&[],
+        });
+        let reactivity_fallback_view = reactivity_fallback.create_view(&Default::default());
 
         // ── TSR BGL ───────────────────────────────────────────────────────────
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -247,6 +288,8 @@ impl TsrPass {
                 sampler_entry(3, wgpu::SamplerBindingType::Filtering),             // linear_sampler
                 sampler_entry(4, wgpu::SamplerBindingType::NonFiltering),          // point_sampler
                 camera_storage_entry(5),                                           // camera
+                tex_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                tex_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
                 uniform_entry(6),                                                  // tsr
             ],
         });
@@ -286,6 +329,8 @@ impl TsrPass {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
+                }), Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Float, blend: None, write_mask: wgpu::ColorWrites::RED,
                 })],
             }),
             primitive: wgpu::PrimitiveState {
@@ -334,10 +379,15 @@ impl TsrPass {
         });
 
         Self {
+            intermediate_output: false,
+            timing_query: None,
             pipeline,
             bgl,
             bind_group: None,
             bind_group_key: None,
+            _reactivity_fallback: reactivity_fallback,
+            reactivity_fallback_view,
+            transparency_reactivity: false,
             uniform_buf,
             blit_pipeline,
             blit_bgl,
@@ -346,6 +396,7 @@ impl TsrPass {
             history_view,
             output_texture,
             output_view,
+            history_depth, history_depth_view, output_depth, output_depth_view,
             linear_sampler,
             point_sampler,
             internal_width,
@@ -353,6 +404,8 @@ impl TsrPass {
             output_width,
             output_height,
             first_frame: true,
+            previous_jitter_uv: [0.0; 2],
+            previous_view: [0.0; 16],
             reactivity: 0.0,
             quality,
         }
@@ -366,6 +419,33 @@ impl TsrPass {
     /// change where stale history would cause visible ghosting.
     pub fn reset_history(&mut self) {
         self.first_frame = true;
+    }
+
+    /// Optional GPU timestamps around resolve, history copies and final blit.
+    pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+            return false;
+        }
+        self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("TSR timings"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 4,
+        }));
+        true
+    }
+
+    pub fn timing_query(&self) -> Option<&wgpu::QuerySet> {
+        self.timing_query.as_ref()
+    }
+
+    /// Enable coverage history for a graph providing `transparency_reactivity`.
+    /// Changing modes resets history because its alpha channel changes meaning.
+    pub fn set_transparency_reactivity(&mut self, enabled: bool) {
+        if self.transparency_reactivity != enabled {
+            self.transparency_reactivity = enabled;
+            self.reset_history();
+            self.bind_group_key = None;
+        }
     }
 
     /// Set a per-frame reactivity bias.
@@ -391,6 +471,7 @@ impl TsrPass {
         device: &wgpu::Device,
         width: u32,
         height: u32,
+        format: wgpu::TextureFormat,
     ) -> (
         wgpu::Texture,
         wgpu::TextureView,
@@ -408,7 +489,7 @@ impl TsrPass {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::RENDER_ATTACHMENT
                     | extra,
@@ -506,6 +587,15 @@ impl RenderPass for TsrPass {
         "TSR"
     }
 
+    fn writes(&self) -> &'static [&'static str] { &["tsr_color"] }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        // The pass owns this view for the graph lifetime; frame registries
+        // cannot outlive it. Resize replaces it before the next publication.
+        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.output_view) };
+        frame.write(helio_core::ResourceKey::new("tsr_color"), view, "TSR");
+    }
+
     fn requires_camera_jitter(&self) -> bool {
         true
     }
@@ -521,13 +611,17 @@ impl RenderPass for TsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
+        if self.transparency_reactivity { builder.read("transparency_reactivity"); }
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.output_width = width.max(1);
         self.output_height = height.max(1);
 
-        let (ht, hv, ot, ov) = Self::create_textures(device, self.output_width, self.output_height);
+        let (ht, hv, ot, ov) = Self::create_textures(device, self.output_width, self.output_height, wgpu::TextureFormat::Rgba16Float);
+        let (hd, hdv, od, odv) = Self::create_textures(device, self.output_width, self.output_height, wgpu::TextureFormat::R32Float);
+        self.history_depth=hd; self.history_depth_view=hdv;
+        self.output_depth=od; self.output_depth_view=odv;
         self.history_texture = ht;
         self.history_view = hv;
         self.output_texture = ot;
@@ -567,34 +661,41 @@ impl RenderPass for TsrPass {
         let u = TsrUniform {
             jitter_offset: jitter,
             reactivity: self.reactivity,
-            reset,
+            flags: reset | (u32::from(self.transparency_reactivity) << 1),
             time_delta: ctx.delta_time.max(0.0),
             tap_radius: self.quality.tap_radius(),
-            _pad: [0.0; 2],
+            previous_jitter_uv: self.previous_jitter_uv,
+            previous_view: self.previous_view,
         };
 
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        self.previous_jitter_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
+        self.previous_view = ctx.camera_data.view;
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
+        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )
         })?;
 
-        let key = (
-            pre_aa_view as *const _ as usize,
-            ctx.depth as *const _ as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        let reactive_view = if self.transparency_reactivity {
+            ctx.registry.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
+                .ok_or_else(|| helio_core::Error::InvalidPassConfig(
+                    "TSR coverage mode requires transparency_reactivity".into()))?
+        } else { &self.reactivity_fallback_view };
+        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone());
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TSR BG"),
                 layout: &self.bgl,
                 entries: &[
+                    wgpu::BindGroupEntry {binding:8,resource:wgpu::BindingResource::TextureView(reactive_view)},
+                    wgpu::BindGroupEntry {binding:7,resource:wgpu::BindingResource::TextureView(&self.history_depth_view)},
                     wgpu::BindGroupEntry {
                         binding: 0,
                         resource: wgpu::BindingResource::TextureView(pre_aa_view),
@@ -629,6 +730,9 @@ impl RenderPass for TsrPass {
         }
 
         // ── 2. TSR resolve → output_view ──────────────────────────────────────
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 0);
+        }
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &self.output_view,
@@ -638,6 +742,9 @@ impl RenderPass for TsrPass {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
+            }), Some(wgpu::RenderPassColorAttachment {
+                view: &self.output_depth_view, resolve_target: None, depth_slice: None,
+                ops: wgpu::Operations {load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store},
             })];
             let mut pass =
                 unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -652,8 +759,11 @@ impl RenderPass for TsrPass {
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 1);
+        }
 
-        // ── 3. Copy output → history ───────────────────────────────────────────
+        // ── 3. Copy output to history ─────────────────────────────────────────
         unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
@@ -664,8 +774,16 @@ impl RenderPass for TsrPass {
             },
         );
 
+        unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
+            self.output_depth.as_image_copy(), self.history_depth.as_image_copy(),
+            wgpu::Extent3d {width:self.output_width,height:self.output_height,depth_or_array_layers:1},
+        );
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 2);
+        }
+
         // ── 4. Blit output_view → ctx.target ──────────────────────────────────
-        {
+        if !self.intermediate_output {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: ctx.target,
                 resolve_target: None,
@@ -687,6 +805,10 @@ impl RenderPass for TsrPass {
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        if let Some(query) = &self.timing_query {
+            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 3);
         }
 
         Ok(())

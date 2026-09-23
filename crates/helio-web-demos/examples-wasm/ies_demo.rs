@@ -1,7 +1,10 @@
-use crate::common::{insert_object, make_material, plane_mesh};
+use crate::common::{
+    insert_object, make_material, plane_mesh, spawn_light, spawn_material, spawn_mesh,
+};
 use glam::Vec3;
 use helio::{Camera, Renderer, TonemapOperator};
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
+use pulsar_scenedb::{Entity, SceneDb};
 use std::sync::Arc;
 
 const LOOK_SENS: f32 = 0.0024;
@@ -11,7 +14,7 @@ pub struct Demo {
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
-    light_ids: [helio::LightId; 3],
+    light_ids: [Entity; 3],
     ies_enabled: [bool; 3],
     gobo_enabled: bool,
 }
@@ -27,24 +30,26 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let floor_mat = renderer.scene().insert_material(make_material(
-            [0.15, 0.15, 0.16, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let ground = renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::mesh(plane_mesh([0.0, 0.0, 0.0], 6.0)));
-        let _ = insert_object(renderer, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.15, 0.15, 0.16, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 6.0));
+        let _ = insert_object(
+            &mut scene_db.world,
+            ground,
+            floor_mat,
+            glam::Mat4::IDENTITY,
+            6.0,
+        );
 
-        let light_ids: [helio::LightId; 3] = std::array::from_fn(|i| {
+        let light_ids: [Entity; 3] = std::array::from_fn(|i| {
             let mut light = helio::GpuLight::default();
             light.light_type = helio::LightType::Spot as u32;
             light.color_intensity = match i {
@@ -67,11 +72,7 @@ impl HelioWasmApp for Demo {
                 1 => 0.92,
                 _ => 0.80,
             };
-            renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::light(light))
-                .as_light()
-                .unwrap()
+            spawn_light(&mut scene_db.world, light)
         });
 
         // Upload a 2-layer IES texture array
@@ -206,43 +207,6 @@ impl HelioWasmApp for Demo {
         }
         if input.keys.contains(&KeyCode::KeyG) {
             self.gobo_enabled = !self.gobo_enabled;
-        }
-
-        for (i, &enabled) in self.ies_enabled.iter().enumerate() {
-            let mut light = helio::GpuLight::default();
-            light.light_type = helio::LightType::Spot as u32;
-            light.color_intensity = match i {
-                0 => [1.0, 0.3, 0.2, 8.0],
-                1 => [0.2, 1.0, 0.3, 8.0],
-                _ => [0.3, 0.4, 1.0, 8.0],
-            };
-            light.direction_outer = match i {
-                0 => [0.0, -1.0, 0.0, 0.85],
-                1 => [0.0, -1.0, 0.0, 0.75],
-                _ => [0.0, -1.0, 0.0, 0.50],
-            };
-            light.position_range = match i {
-                0 => [-1.5, 3.0, -1.0, 8.0],
-                1 => [1.5, 3.0, -1.0, 8.0],
-                _ => [0.0, 3.0, 2.0, 8.0],
-            };
-            light.inner_angle = match i {
-                0 => 0.98,
-                1 => 0.92,
-                _ => 0.80,
-            };
-            if enabled {
-                light.ies_profile_index = 0; // layer 0 = spotlight gradient
-                light.ies_angle_scale = match i {
-                    0 => 0.5,
-                    1 => 1.0,
-                    _ => 2.0,
-                };
-            }
-            if self.gobo_enabled {
-                light.light_function_index = 1; // layer 1 = checkerboard gobo
-            }
-            let _ = renderer.scene().update_light(self.light_ids[i], light);
         }
 
         let camera = Camera::perspective_look_at(

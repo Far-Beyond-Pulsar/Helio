@@ -24,7 +24,7 @@
 //   4 lightmap_uv  Rg16Float    NOT written — grass has no lightmap UV
 //   5 sss          Rgba16Float  NOT written
 //   6 extra        Rgba16Float  NOT written
-//   7 velocity     Rg16Float    written
+//   7 velocity     Rgba16Float    written
 //
 // The empty write masks are mandatory, not cosmetic: a fragment target with no
 // corresponding shader output has an UNDEFINED value, so without the mask those three
@@ -602,7 +602,7 @@ struct FoliageGBufferOutput {
     @location(1) normal: vec4<f32>,
     @location(2) orm: vec4<f32>,
     @location(3) emissive: vec4<f32>,
-    @location(7) velocity: vec2<f32>,
+    @location(7) velocity: vec4<f32>,
 }
 
 /// Grass is a dielectric; 0.04 is the standard non-metal F0, packed into the spare alpha
@@ -689,6 +689,6 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     out.normal = vec4<f32>(normal, FOLIAGE_F0);
     out.orm = vec4<f32>(ao, 0.75, 0.0, FOLIAGE_F0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, FOLIAGE_F0);
-    out.velocity = foliage_velocity(input.clip_position.xy, input.prev_clip_position);
+    out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position),0.0,0.0);
     return out;
 }

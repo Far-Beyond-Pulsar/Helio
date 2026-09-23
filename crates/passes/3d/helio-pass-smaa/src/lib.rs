@@ -10,8 +10,7 @@
 //! `execute()` records exactly **3** `draw(0..3, 0..1)` calls regardless of scene size.
 //!
 //! ## Lazy bind groups
-//! `edge` and 
-eighbor` bind groups are rebuilt when `frame.pre_aa` changes pointer
+//! `edge` and `neighbor` bind groups are rebuilt when `frame.pre_aa` changes pointer
 //! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
 //! the internal `edge_view` which is recreated then.
 
@@ -35,8 +34,7 @@ pub struct SmaaPass {
     /// Lazy — shares the same key as `edge_bind_group`.
     neighbor_bind_group: Option<wgpu::BindGroup>,
 
-    /// Key for `edge_bind_group` / 
-eighbor_bind_group`: pointer to the pre_aa TextureView.
+    /// Key for `edge_bind_group` / `neighbor_bind_group`: pointer to the pre_aa TextureView.
     input_key: Option<usize>,
 
     pub edge_texture: wgpu::Texture,
@@ -300,10 +298,6 @@ impl RenderPass for SmaaPass {
         None
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
     }
@@ -314,7 +308,7 @@ impl RenderPass for SmaaPass {
         // ── Lazy bind group rebuild ───────────────────────────────────────────
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's pointer changes (e.g. after resize).
-        let pre_aa = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "SMAA").ok_or_else(|| {
+        let pre_aa = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "SMAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )

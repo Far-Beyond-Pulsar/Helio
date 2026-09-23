@@ -139,7 +139,7 @@ impl RenderPass for SceneInjectorPass {
             "SceneInjector",
         );
         frame.write(
-            ResourceKey::new("coordinate_spaces"),
+            helio_core::resource_keys::coordinate_spaces(),
             CoordinateSpacesFrameData {
                 coordinate_spaces,
                 coordinate_spaces_prev: coordinate_spaces,

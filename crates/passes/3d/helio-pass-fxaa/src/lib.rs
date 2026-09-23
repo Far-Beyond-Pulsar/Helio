@@ -11,10 +11,11 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
+    intermediate_format: Option<wgpu::TextureFormat>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<usize>,
+    bind_group_key: Option<wgpu::TextureView>,
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
 }
@@ -99,12 +100,20 @@ impl FxaaPass {
         });
 
         Self {
+            intermediate_format: None,
             pipeline,
             bind_group_layout,
             bind_group: None,
             bind_group_key: None,
             sampler,
         }
+    }
+
+    /// Keep linear HDR output available to a following post-process pass.
+    /// The format must match the format passed to `new`.
+    pub fn with_intermediate_target(mut self, format: wgpu::TextureFormat) -> Self {
+        self.intermediate_format = Some(format);
+        self
     }
 }
 
@@ -113,21 +122,23 @@ impl RenderPass for FxaaPass {
         "FXAA"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
+        if let Some(format) = self.intermediate_format {
+            builder.write_color_raw("fxaa_color", format, helio_core::graph::ResourceSize::MatchSurface);
+        }
     }
 
     fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
         _depth: &'a wgpu::TextureView,
-        _resources: &'a helio_core::ResourceRegistry<'a>,
+        resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let target = if self.intermediate_format.is_some() {
+            resources.get(helio_core::ResourceKey::new("fxaa_color"))?
+        } else { target };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
@@ -149,11 +160,10 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.resources.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
+        let input_view = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
-        let input_key = input_view as *const _ as usize;
-        if self.bind_group_key != Some(input_key) {
+        if self.bind_group_key.as_ref() != Some(input_view) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("FXAA BG"),
                 layout: &self.bind_group_layout,
@@ -168,7 +178,7 @@ impl RenderPass for FxaaPass {
                     },
                 ],
             }));
-            self.bind_group_key = Some(input_key);
+            self.bind_group_key = Some(input_view.clone());
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };

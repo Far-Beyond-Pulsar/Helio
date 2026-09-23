@@ -103,9 +103,11 @@
 //! with external telemetry or custom debug overlays.
 
 mod cpu;
+mod focused;
 mod gpu;
 
 pub use cpu::{CpuProfiler, ScopeGuard};
+pub use focused::{FocusedTiming, FocusedTimingGroup, FocusedTimingReport};
 pub use gpu::{GpuProfiler, GpuTimestamp};
 
 /// Combined CPU/GPU profiler with automatic feature-gating.

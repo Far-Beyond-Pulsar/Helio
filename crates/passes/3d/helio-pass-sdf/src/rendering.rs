@@ -373,10 +373,8 @@ impl SdfPass {
             brick_size,
             grid_dim,
             base_voxel_size,
-            padded_brick_voxels,
             volume_min,
             volume_max,
-            surface_format,
             cached_snap_origins: [[i32::MIN; 3]; 8],
             gpu_passes_clean: false,
         }
@@ -863,7 +861,7 @@ impl RenderPass for SdfPass {
         }
 
         {
-            let depth_view = ctx.resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(ctx.depth);
+            let depth_view = ctx.registry.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(ctx.depth);
             let color_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
             } else {

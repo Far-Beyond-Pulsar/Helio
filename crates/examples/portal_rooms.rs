@@ -28,14 +28,18 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
+use helio_pass_portal_cull::{
+    components::PortalComponent,
+    PortalProjectionBridge, SubLevelContents, SubLevelResolver,
+};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
-    sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, sphere_mesh,
 };
 
 use winit::{
@@ -46,7 +50,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -117,7 +121,6 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    _portal_pairs: Vec<helio::PortalPair>,
     _light_ids: Vec<Entity>,
 
     /// Debug-only: when `ROOMS_SCREENSHOT` is set, counts frames so a single
@@ -202,29 +205,33 @@ impl ApplicationHandler for App {
         let mut config = RendererConfig::new(size.width, size.height, format);
         config.enable_portals = true;
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
-                build_default_graph_external(
-                    d,
-                    q,
-                    cb,
-                    graph_config,
-                    debug_state,
-                    dcb,
-                    csb,
-                    None,
-                    graph_scene_db.clone(),
-                )
-            }))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
+
+        // Portal GPU rows are entity-indexed. Allocate their six rows before
+        // the rest of the scene so the portal table is compact and contains
+        // no ambiguity about which chain slots are authored.
+        let projection_entities: Vec<Entity> = (0..6).map(|_| scene_db.world.spawn()).collect();
+        let authored_portal_entities: Vec<(Entity, Entity)> = (0..6)
+            .map(|_| (scene_db.world.spawn(), scene_db.world.spawn()))
+            .collect();
 
         // Two shared unit meshes (half-extent/radius 1) — every side room's
         // shell panel, piece of furniture, and accent prop in this scene is
         // one of these two, scaled/positioned per instance via its own
         // transform (see `insert_room_shell`/`furnish_room` below). The hub
         // itself has no geometry — see the module doc.
-        let unit_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]));
+        let unit_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        );
         let unit_sphere = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 1.0));
 
         // Shared furniture materials, reused across every room so the six
@@ -317,7 +324,7 @@ impl ApplicationHandler for App {
         const ROOM_UP: Vec3 = Vec3::Y;
         const ROOM_FORWARD: Vec3 = Vec3::Z;
 
-        let mut portal_pairs = Vec::new();
+        let mut authored_portals = Vec::with_capacity(faces.len() * 2);
         let mut light_ids = Vec::new();
         for (i, (normal, up_hint, theme)) in faces.iter().enumerate() {
             let normal = *normal;
@@ -406,12 +413,45 @@ impl ApplicationHandler for App {
             // the entire face — full corner-to-corner coverage, no doorway
             // inset — which is what makes the face itself *be* the portal
             // instead of a hole cut into a wall.
-            let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, -normal, up);
+            let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, normal, up);
             let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
             let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
-            let portal = helio::PortalPair { a, b };
-            portal_pairs.push(portal);
+            let (source_entity, target_entity) = authored_portal_entities[i];
+            let source = PortalComponent::new(
+                Some(target_entity),
+                a.transform,
+                [HUB_HALF_SIZE, HUB_HALF_SIZE],
+            );
+            let mut target = PortalComponent::new(
+                Some(source_entity),
+                b.transform,
+                [ROOM_HALF_SIZE, ROOM_HALF_SIZE],
+            );
+            // The room entrance is the peer/content anchor for this demo,
+            // not another visible portal opening. It remains authored and
+            // peer-linked so the generalized resolver can resolve it.
+            target.flags &= !PortalComponent::FLAG_ENABLED;
+            scene_db.world.insert(source_entity, source);
+            scene_db.world.insert(target_entity, target);
+            authored_portals.push((source_entity, source));
+            authored_portals.push((target_entity, target));
         }
+
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(0, SubLevelContents::new([], authored_portals));
+        let projection_frame = PortalProjectionBridge::new(1)
+            .expect("portal_rooms projection depth")
+            .build(&resolver)
+            .expect("portal_rooms authored portal graph");
+        projection_frame
+            .publish_to_world(
+                &mut scene_db.world,
+                &projection_entities,
+                &projection_entities,
+                projection_entities[0],
+            )
+            .expect("portal_rooms dense projection rows");
+        renderer.set_portal_projection_frame(&projection_frame);
 
         // ── A light near the hub's center so its own walls read clearly.
         light_ids.push(spawn_light(
@@ -479,7 +519,6 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            _portal_pairs: portal_pairs,
             _light_ids: light_ids,
             frame_count: 0,
         });
@@ -644,6 +683,10 @@ impl AppState {
             FAR_PLANE,
         );
 
+        // Publish authoritative SceneDB component rows before the render graph
+        // consumes the GPU mirror.
+        flush_scene_db(&self.scene_db, &self.queue);
+
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
@@ -712,7 +755,15 @@ fn insert_box_panel(
         center.extend(1.0),
     );
     let radius = half_extent.length();
-    let _ = spawn_object(world, unit_mesh, material, transform, radius);
+    if let Ok(entity) = spawn_object(world, unit_mesh, material, transform, radius) {
+        // Debug mode: keep every target mesh in the portal scene alive
+        // through frustum and Hi-Z culling so portal failures are not
+        // confused with ordinary scene culling failures.
+        if let Some(mut object) = world.get_mut::<helio_pass_gbuffer::StaticObjectComponent>(entity)
+        {
+            object.flags |= helio_pass_object_batch::INSTANCE_FLAG_ALWAYS_VISIBLE;
+        }
+    }
 }
 
 /// Inserts a side room's shell: a `half_size`-cube built from 6 axis-aligned

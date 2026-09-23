@@ -31,7 +31,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_with_user_effects;
+use helio_default_graphs::build_default_graph_with_user_effects_with_context;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb, World};
@@ -1243,21 +1243,9 @@ impl ApplicationHandler for App {
         }));
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_graph(Box::new(move |d, q, graph_config, debug_state, cb, dcb, csb| {
-                build_default_graph_with_user_effects(
-                    d,
-                    q,
-                    cb,
-                    graph_config,
-                    debug_state,
-                    dcb,
-                    csb,
-                    None,
-                    VHS_SHADER_SNIPPET,
-                    graph_scene_db.clone(),
-                )
+            .with_pass_build_context(Box::new(|ctx| {
+                build_default_graph_with_user_effects_with_context(ctx, VHS_SHADER_SNIPPET)
             }))
             .build(
                 device.clone(),

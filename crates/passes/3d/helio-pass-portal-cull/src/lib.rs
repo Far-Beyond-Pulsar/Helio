@@ -1,8 +1,7 @@
 //! Per-portal-*chain* GPU frustum culling.
 //!
-//! For each active portal chain (a sequence of up to `MAX_CHAIN_DEPTH` portals
-//! — see `GpuPortalChain`'s docs for why chains, not single
-//! portals, are what makes portals reflect each other automatically), tests
+//! For each active portal chain (a runtime-sized sequence of portal indices),
+//! tests
 //! every draw-call group's instances — mapped through that chain's *composed*
 //! transform — against the main camera frustum, and compacts survivors into
 //! two shared output buffers (`portal_indirect_buf` / `portal_compacted_indices_buf`,
@@ -57,12 +56,25 @@ mod portal_math;
 pub use portal_math::{
     crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
 };
+mod resolver;
+pub use resolver::{
+    PortalOccurrence, PortalProjection, PortalRecord, ResolutionError, ResolvedPortalChain,
+    SubLevelActorRecord, SubLevelContents, SubLevelResolver, SubLevelRuntimeContext,
+};
+mod projection;
+pub use projection::{
+    PortalProjectionBridge, PortalProjectionFrame, PortalProjectionKey, ProjectionError,
+    PortalProjectionConfig, RuntimePortalKey, IDENTITY_COORDINATE_SPACE_SLOT,
+};
 mod contract;
-pub use contract::{GpuPortalChain, GpuPortalView, MAX_CHAIN_DEPTH, MAX_PORTAL_CHAINS};
+pub use contract::{
+    GpuPortalView, MAX_PORTAL_CHAINS, PORTAL_CHAIN_HANDLE_BUFFER,
+    PORTAL_CHAIN_PORTAL_POOL_BUFFER,
+};
 pub use helio_pass_gbuffer::CoordinateSpacesFrameData;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, RenderFrameInputs, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 pub mod components;
 
@@ -113,11 +125,15 @@ pub struct PortalCullPass {
     copy_pending: bool,
 
     bind_group: Option<wgpu::BindGroup>,
-    /// (camera, instances, draw_calls, coordinate_spaces, portal_views, portal_chains)
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    /// (camera, instances, draw_calls, coordinate_spaces, portal_views,
+    /// chain_handles, chain_portals, compacted_chains)
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
 
     draw_count: u32,
     chain_count: u32,
+    /// Active resolver-published rows. `None` preserves the legacy manual
+    /// path, which historically used the whole growable buffer.
+    active_chain_count: Option<u32>,
 }
 
 impl PortalCullPass {
@@ -192,8 +208,9 @@ impl PortalCullPass {
                 storage_entry(6, false),  // portal_indirect
                 storage_entry(7, false),  // portal_compacted_indices
                 storage_entry(8, false),  // portal_stats
-                storage_entry(9, true),   // portal_chains
+                storage_entry(9, true),   // portal chain VarLenHandle table
                 storage_entry(10, false), // portal_compacted_chains
+                storage_entry(11, true),  // portal chain u32 payload pool
             ],
         });
 
@@ -235,7 +252,14 @@ impl PortalCullPass {
             bind_group_key: None,
             draw_count: 0,
             chain_count: 0,
+            active_chain_count: None,
         }
+    }
+
+    /// Set the active chain row count published by the resolver/projection
+    /// bridge. The SceneDB buffer may be larger than the current dense frame.
+    pub fn set_active_chain_count(&mut self, count: u32) {
+        self.active_chain_count = Some(count);
     }
 }
 
@@ -257,8 +281,8 @@ impl RenderPass for PortalCullPass {
         "PortalCull"
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch"]
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_chain_count = inputs.projection_counts.map(|counts| counts[1]);
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
@@ -276,15 +300,15 @@ impl RenderPass for PortalCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx
-            .pass_resources
+            .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.draw_count)
             .unwrap_or(0);
-        self.chain_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_chains"))
-            .map(|h| (h.buffer.size() / std::mem::size_of::<GpuPortalChain>() as u64) as u32)
-            .unwrap_or(0)
-            .min(MAX_PORTAL_CHAINS as u32);
+        // A growable SceneDB buffer reports reserved capacity, not the number
+        // of live rows. Never turn that capacity into dispatch work: doing so
+        // makes a zero-portal scene run one cull lane per draw group for every
+        // reserved chain slot. The resolver/projection bridge publishes the
+        // live count explicitly through `set_active_chain_count`.
+        self.chain_count = self.active_chain_count.unwrap_or(0);
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {
@@ -317,16 +341,25 @@ impl RenderPass for PortalCullPass {
         if self.draw_count == 0 || self.chain_count == 0 {
             return Ok(());
         }
-        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.resources.get(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.registry.get(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
-        let Some(portal_chains) = ctx.scene_buffers.get(BufferKey::of("portal_chains")) else {
+        let Some(portal_chain_handles) = ctx
+            .scene_buffers
+            .get(BufferKey::of(PORTAL_CHAIN_HANDLE_BUFFER))
+        else {
+            return Ok(());
+        };
+        let Some(portal_chain_portals) = ctx
+            .scene_buffers
+            .get(BufferKey::of(PORTAL_CHAIN_PORTAL_POOL_BUFFER))
+        else {
             return Ok(());
         };
 
@@ -336,7 +369,9 @@ impl RenderPass for PortalCullPass {
             batch.draw_calls as *const wgpu::Buffer as usize,
             coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
             &portal_views.buffer as *const wgpu::Buffer as usize,
-            &portal_chains.buffer as *const wgpu::Buffer as usize,
+            &portal_chain_handles.buffer as *const wgpu::Buffer as usize,
+            &portal_chain_portals.buffer as *const wgpu::Buffer as usize,
+            &*self.portal_compacted_chains_buf as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -381,11 +416,15 @@ impl RenderPass for PortalCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,
-                        resource: portal_chains.buffer.as_entire_binding(),
+                        resource: portal_chain_handles.buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: self.portal_compacted_chains_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: portal_chain_portals.buffer.as_entire_binding(),
                     },
                 ],
             }));

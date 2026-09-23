@@ -280,14 +280,6 @@ impl RenderPass for IndirectDispatchPass {
         None
     }
 
-    fn reads(&self) -> &'static [&'static str] {
-        &["object_batch"]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["indirect_dispatch"]
-    }
-
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
         builder.write_buffer("indirect_dispatch");
@@ -308,7 +300,7 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let Some(batch) = ctx.pass_resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             self.draw_count = 0;
             return Ok(());
         };
@@ -331,10 +323,10 @@ impl RenderPass for IndirectDispatchPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let Some(batch) = ctx.resources.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.resources.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::ResourceKey::new("coordinate_spaces")) else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
 

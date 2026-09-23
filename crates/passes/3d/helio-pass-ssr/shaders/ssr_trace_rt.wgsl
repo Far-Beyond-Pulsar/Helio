@@ -1,42 +1,6 @@
-// ssr_trace_rt.wgsl — Hybrid SSR with hardware ray queries.
-//
-// Fully self-contained — no prelude dependency, because `enable wgpu_ray_query;`
-// must appear before any other declaration and the prelude-based concatenation
-// would place it after the prelude's struct definitions.
-
+// Hybrid SSR uses the same camera, depth and signed normal contract as raster SSR.
+//!use helio_prelude
 enable wgpu_ray_query;
-
-// ── Camera (mirrors helio_core GpuCameraUniforms) ──────────────────────────
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
-
-// ── Screen-space helpers ───────────────────────────────────────────────────
-fn helio_uv_to_ndc(uv: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0));
-}
-fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-}
-fn helio_view_depth(device_depth01: f32, near: f32, far: f32) -> f32 {
-    return near * far / (far + device_depth01 * (near - far));
-}
-fn helio_world_from_depth(view_proj_inv: mat4x4<f32>, uv: vec2<f32>, depth01: f32) -> vec3<f32> {
-    let ndc = helio_uv_to_ndc(uv);
-    let clip = vec4<f32>(ndc, depth01, 1.0);
-    let world = view_proj_inv * clip;
-    return world.xyz / world.w;
-}
-fn helio_gbuffer_normal(encoded: vec3<f32>) -> vec3<f32> {
-    return normalize(encoded * 2.0 - 1.0);
-}
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
@@ -92,26 +56,69 @@ fn exit_cell(
     return o + d * min(delta.x, delta.y);
 }
 
-fn ray_query_hit(world_pos: vec3<f32>, R: vec3<f32>) -> bool {
-    let origin = world_pos + R * 0.001;
+// Transmission query contract: nearest opaque endpoint, then tint only the
+// segment before it. Candidate traversal order is unspecified, so accumulating
+// tint while searching for the endpoint would include panes behind that hit.
+struct RayTransmissionData { header: vec4<u32>, rows: array<vec4<f32>> };
+@group(2) @binding(2) var<storage, read> ray_transmission: RayTransmissionData;
+struct ReflectionHit { position: vec4<f32>, throughput: vec3<f32> };
+fn reflection_tint(instance: u32) -> vec3<f32> {
+    if instance>=min(ray_transmission.header.y,arrayLength(&ray_transmission.rows)) {
+        return vec3<f32>(0.0);
+    }
+    return ray_transmission.rows[instance].rgb;
+}
+fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>) -> ReflectionHit {
+    let origin = world_pos + normal * 0.002;
+    let transmitting=ray_transmission.header.y!=0u;
     var rq: ray_query;
+    // Force candidates when metadata is present, including generic TLAS inputs
+    // whose BLAS opacity may not yet match their material classification.
     rayQueryInitialize(&rq, acc_struct,
-        RayDesc(0x01u, 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
-    rayQueryProceed(&rq);
-    return rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE;
+        RayDesc(select(0x01u,0x02u,transmitting), 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
+    while rayQueryProceed(&rq) {
+        let candidate=rayQueryGetCandidateIntersection(&rq);
+        if all(reflection_tint(candidate.instance_index)==vec3<f32>(0.0)) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    let hit=rayQueryGetCommittedIntersection(&rq);
+    if hit.kind==RAY_QUERY_INTERSECTION_NONE {
+        return ReflectionHit(vec4<f32>(0.0),vec3<f32>(1.0));
+    }
+    var throughput=vec3<f32>(1.0);
+    if transmitting {
+        var tint_query: ray_query;
+        rayQueryInitialize(&tint_query,acc_struct,
+            RayDesc(0x02u,0xFFu,0.001,hit.t,origin,R));
+        while rayQueryProceed(&tint_query) {
+            let sheet=rayQueryGetCandidateIntersection(&tint_query);
+            // Strict endpoint exclusion also rejects coplanar endpoint hits.
+            if sheet.t<hit.t {
+                throughput*=reflection_tint(sheet.instance_index);
+            }
+        }
+    }
+    return ReflectionHit(vec4<f32>(origin+R*hit.t,1.0),throughput);
 }
 
-fn ray_query_hit_world_pos(world_pos: vec3<f32>, R: vec3<f32>) -> vec3<f32> {
-    let origin = world_pos + R * 0.001;
-    var rq: ray_query;
-    rayQueryInitialize(&rq, acc_struct,
-        RayDesc(0x01u, 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
-    rayQueryProceed(&rq);
-    if rayQueryGetCommittedIntersection(&rq).kind != RAY_QUERY_INTERSECTION_NONE {
-        let t = rayQueryGetCommittedIntersection(&rq).t;
-        return origin + R * t;
-    }
-    return world_pos;
+// Screen color is valid only if it represents this RT hit, rather than an
+// unrelated foreground surface at the same projected coordinate.
+fn projected_hit_color(hit: vec4<f32>, direction: vec3<f32>) -> vec4<f32> {
+    if hit.w==0.0 { return vec4<f32>(0.0); }
+    let clip=cameras[0].view_proj*vec4<f32>(hit.xyz,1.0);
+    if clip.w<=0.0 { return vec4<f32>(0.0); }
+    let uv=helio_ndc_to_uv(clip.xy/clip.w);
+    if any(uv<vec2<f32>(0.0)) || any(uv>=vec2<f32>(1.0)) { return vec4<f32>(0.0); }
+    let px=vec2<i32>(uv*vec2<f32>(textureDimensions(gbuf_depth)));
+    let depth=textureLoad(gbuf_depth,px,0);
+    if depth>=1.0 { return vec4<f32>(0.0); }
+    let hit_z=-(cameras[0].view*vec4<f32>(hit.xyz,1.0)).z;
+    let visible_z=linearize_depth(depth);
+    if abs(hit_z-visible_z)>max(0.02,0.005*hit_z) { return vec4<f32>(0.0); }
+    let normal=helio_gbuffer_normal(textureLoad(gbuf_normal,px,0).xyz);
+    if dot(normal,-direction)<=0.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(textureLoad(scene_color,px,0).rgb,1.0);
 }
 
 fn sample_rc_reflection(world_pos: vec3<f32>, R: vec3<f32>, roughness: f32) -> vec3<f32> {
@@ -147,15 +154,21 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let px = vec2<i32>(gid.xy);
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
-    let depth_01 = textureLoad(gbuf_depth, px, 0);
+    let source_dims = textureDimensions(gbuf_depth);
+    let source_px = clamp(
+        vec2<i32>(uv * vec2<f32>(source_dims)),
+        vec2<i32>(0),
+        vec2<i32>(source_dims) - vec2<i32>(1),
+    );
+    let depth_01 = textureLoad(gbuf_depth, source_px, 0);
 
     if depth_01 >= 1.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
 
-    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, px, 0).xyz);
-    let roughness = textureLoad(gbuf_orm, px, 0).g;
+    let N = helio_gbuffer_normal(textureLoad(gbuf_normal, source_px, 0).xyz);
+    let roughness = textureLoad(gbuf_orm, source_px, 0).g;
     let roughness_fade = 1.0 - smoothstep(0.4, 0.7, roughness);
     if roughness_fade <= 0.0 {
         textureStore(ssr_output, px, vec4<f32>(0.0));
@@ -243,88 +256,45 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
         tr = next;
     }
 
-    // ── Hybrid blend ────────────────────────────────────────────────────────
-    var final_color = vec3<f32>(0.0);
-    var final_confidence = 0.0;
-    let rt_hit = ray_query_hit(world_pos, R2);
-
+    // Prefer reliable screen hits in opaque scenes. Hardware fallback reuses
+    // screen radiance only after checking the projected hit depth.
+    var final_color=vec3<f32>(0.0);
+    var final_confidence=0.0;
     if hiz_hit {
-        let hit_uv = tr.xy;
-        let r_depth = linearize_depth(tr.z);
-        let scene_depth = linearize_depth(
-            textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(dims)), 0)
-        );
-
-        if r_depth <= scene_depth * (1.0 + THICKNESS) {
-            let n_hit = helio_gbuffer_normal(
-                textureLoad(gbuf_normal, vec2<i32>(hit_uv * vec2<f32>(dims)), 0).xyz
-            );
-            let arriving = -dot(R2, n_hit);
-            let backface_fade = smoothstep(-0.15, 0.15, arriving);
-            let border = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
-            let edge_fade = smoothstep(0.0, 0.1, border);
-            let facing_fade = 1.0 - smoothstep(0.26, 0.5, dot(R2, V));
-            let travelled = length(hit_uv - p0.xy) / max(length(d.xy), 1e-6);
-            let dist_fade = 1.0 - smoothstep(FADE_START, 1.0, travelled);
-            let confidence = clamp(
-                backface_fade * edge_fade * facing_fade * dist_fade * roughness_fade,
-                0.0, 1.0,
-            );
-
-            let ssr_col = textureSampleLevel(scene_color, linear_sampler, hit_uv, 0.0).rgb;
-
-            if confidence >= 0.5 || !rt_hit {
-                final_color = ssr_col;
-                final_confidence = confidence;
-            } else {
-                let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-                let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-                let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-                if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-                    let rt_col = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-                    final_color = mix(ssr_col, rt_col, 1.0 - confidence);
-                    final_confidence = max(confidence, 0.5);
-                } else {
-                    let rc_col = sample_rc_reflection(world_pos, R2, roughness);
-                    final_color = mix(ssr_col, rc_col, 1.0 - confidence);
-                    final_confidence = confidence;
-                }
-            }
-        } else if rt_hit {
-            let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-            let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-            let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-            if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-                final_color = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-                final_confidence = 0.6;
-            } else {
-                final_color = sample_rc_reflection(world_pos, R2, roughness);
-                final_confidence = roughness_fade * 0.3;
-            }
-        } else {
-            textureStore(ssr_output, px, vec4<f32>(0.0));
-            return;
-        }
-    } else if rt_hit {
-        let rt_hit_pos = ray_query_hit_world_pos(world_pos, R2);
-        let rt_clip = cameras[0].view_proj * vec4<f32>(rt_hit_pos, 1.0);
-        let rt_uv = helio_ndc_to_uv(rt_clip.xy / rt_clip.w);
-        if all(rt_uv >= vec2<f32>(0.0)) && all(rt_uv <= vec2<f32>(1.0)) {
-            final_color = textureSampleLevel(scene_color, linear_sampler, rt_uv, 0.0).rgb;
-            final_confidence = 0.5;
-        } else {
-            final_color = sample_rc_reflection(world_pos, R2, roughness);
-            final_confidence = roughness_fade * 0.3;
-        }
-    } else {
-        if roughness > 0.6 {
-            final_color = sample_rc_reflection(world_pos, R2, roughness);
-            final_confidence = roughness_fade * 0.2;
-        } else {
-            textureStore(ssr_output, px, vec4<f32>(0.0));
-            return;
+        let hit_uv=tr.xy;
+        // The trace target is half resolution; depth and normals are full
+        // resolution. Validate the hit against the same screen coordinate.
+        let hit_px=clamp(vec2<i32>(hit_uv*vec2<f32>(source_dims)),
+            vec2<i32>(0),vec2<i32>(source_dims)-vec2<i32>(1));
+        let ray_z=linearize_depth(tr.z);
+        let scene_z=linearize_depth(textureLoad(gbuf_depth,hit_px,0));
+        if abs(ray_z-scene_z)<=max(0.02,scene_z*THICKNESS) {
+            let n_hit=helio_gbuffer_normal(textureLoad(gbuf_normal,hit_px,0).xyz);
+            let border=min(min(hit_uv.x,1.0-hit_uv.x),min(hit_uv.y,1.0-hit_uv.y));
+            let travelled=length(hit_uv-p0.xy)/max(length(d.xy),1e-6);
+            final_confidence=clamp(smoothstep(-0.15,0.15,-dot(R2,n_hit))
+                *smoothstep(0.0,0.1,border)*(1.0-smoothstep(0.26,0.5,dot(R2,V)))
+                *(1.0-smoothstep(FADE_START,1.0,travelled))*roughness_fade,0.0,1.0);
+            final_color=textureSampleLevel(scene_color,linear_sampler,hit_uv,0.0).rgb;
         }
     }
-
-    textureStore(ssr_output, px, vec4<f32>(final_color, final_confidence));
+    // Screen-space traversal cannot see panes absent from the opaque G-buffer.
+    // Validate all reflection segments when transmission metadata is present.
+    if final_confidence<0.5 || ray_transmission.header.y!=0u {
+        let hit=ray_query_hit_position(world_pos,N,R2);
+        let radiance=projected_hit_color(hit.position,R2);
+        if radiance.a>0.0 {
+            final_color=radiance.rgb*hit.throughput;
+            final_confidence=roughness_fade;
+        } else if ray_transmission.header.y!=0u {
+            // Do not keep an unfiltered Hi-Z hit when hardware found a different
+            // endpoint. Offscreen hit shading remains a separate missing path.
+            final_color=vec3<f32>(0.0);
+            final_confidence=0.0;
+        } else if final_confidence==0.0 && roughness>0.6 {
+            final_color=sample_rc_reflection(world_pos,R2,roughness);
+            final_confidence=roughness_fade*0.2;
+        }
+    }
+    textureStore(ssr_output,px,vec4<f32>(final_color,final_confidence));
 }

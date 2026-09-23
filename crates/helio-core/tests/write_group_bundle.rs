@@ -152,7 +152,7 @@ impl RenderPass for ConsumerPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         *self.seen_views.lock().unwrap() = ctx
-            .resources
+            .registry
             .read::<helio_core::ViewGroup<'_, 4>>(
                 helio_core::ResourceKey::new("gbuffer"),
                 "StandInGBuffer",

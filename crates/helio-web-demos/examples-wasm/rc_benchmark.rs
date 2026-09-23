@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{Camera, LightId, Renderer};
+use helio::{Camera, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
+use pulsar_scenedb::{Entity, SceneDb};
 
 use crate::common::{box_mesh, insert_object, make_material, point_light};
 
@@ -20,7 +21,7 @@ const LIGHT_BASE: &[([f32; 3], [f32; 3], f32, f32)] = &[
 ];
 
 pub struct Demo {
-    light_ids: [LightId; 3],
+    light_ids: [Entity; 3],
     intensity: f32,
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -34,33 +35,35 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
+        scene_db: &mut SceneDb,
         _device: Arc<wgpu::Device>,
         _queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat_white = renderer.scene().insert_material(make_material(
+        let world = &mut scene_db.world;
+        let mat_white = crate::common::spawn_material(world, make_material(
             [0.9, 0.9, 0.9, 1.0],
             0.9,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let mat_red = renderer.scene().insert_material(make_material(
+        let mat_red = crate::common::spawn_material(world, make_material(
             [0.8, 0.1, 0.1, 1.0],
             0.9,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let mat_green = renderer.scene().insert_material(make_material(
+        let mat_green = crate::common::spawn_material(world, make_material(
             [0.1, 0.7, 0.1, 1.0],
             0.9,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let mat_cube = renderer.scene().insert_material(make_material(
+        let mat_cube = crate::common::spawn_material(world, make_material(
             [0.8, 0.78, 0.72, 1.0],
             0.85,
             0.0,
@@ -69,14 +72,12 @@ impl HelioWasmApp for Demo {
         ));
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer
-                .scene()
-                .insert_entity(helio::SceneEntity::mesh(box_mesh(
+            let m = crate::common::spawn_mesh(world, box_mesh(
                     [cx, cy, cz],
                     [hx, hy, hz],
-                )));
+                ));
             let _ = insert_object(
-                renderer,
+                world,
                 m,
                 mat,
                 glam::Mat4::IDENTITY,
@@ -95,14 +96,10 @@ impl HelioWasmApp for Demo {
         add_box(-3.0, 1.0, 1.5, 1.0, 1.0, 1.0, mat_cube);
         add_box(3.0, 0.6, -1.5, 0.6, 0.6, 0.6, mat_cube);
 
-        let mut ids_vec: Vec<LightId> = LIGHT_BASE
+        let mut ids_vec: Vec<pulsar_scenedb::Entity> = LIGHT_BASE
             .iter()
             .map(|&(pos, col, int, rng)| {
-                renderer
-                    .scene()
-                    .insert_entity(helio::SceneEntity::light(point_light(pos, col, int, rng)))
-                    .as_light()
-                    .unwrap()
+                crate::common::spawn_light(world, point_light(pos, col, int, rng))
             })
             .collect();
         let light_ids = [ids_vec.remove(0), ids_vec.remove(0), ids_vec.remove(0)];

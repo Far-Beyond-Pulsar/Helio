@@ -1,4 +1,5 @@
-// Shared layouts. Keep Camera/GpuLight byte-compatible with libhelio.
+// Camera follows the renderer layout. GpuLight is the GPU-derived 64-byte
+// prefix of SceneDB's 128-byte light row; no other light fields are read here.
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>, position_near: vec4<f32>, forward_far: vec4<f32>,
@@ -7,10 +8,6 @@ struct Camera {
 struct GpuLight {
     position_range: vec4<f32>, direction_outer: vec4<f32>, color_intensity: vec4<f32>,
     shadow_index: u32, light_type: u32, inner_angle: f32, _pad: u32,
-    god_rays_enabled: u32, god_rays_density: f32, god_rays_weight: f32, god_rays_decay: f32,
-    god_rays_exposure: f32, flare_enabled: u32, flare_type: u32, flare_intensity: f32,
-    flare_scale: f32, flare_tint_r: f32, flare_tint_g: f32, flare_tint_b: f32,
-    ies_profile_index: i32, light_function_index: i32, ies_angle_scale: f32, ies_angle_offset: f32,
 }
 struct Globals {
     frame: u32, sample_count: u32, light_count: u32, history_valid: u32,
@@ -19,6 +16,9 @@ struct Globals {
     max_history: f32, discovery_fraction: f32, exposure: f32, debug_mode: u32,
     ambient: vec4<f32>, csm_splits: vec4<f32>,
     previous_view: mat4x4<f32>,
+    ray_settings: vec4<f32>,
+    inverse_view: mat4x4<f32>,
+    inverse_projection: mat4x4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var<storage, read> cameras: array<Camera, 2>;
@@ -47,8 +47,8 @@ const GRID_CAPACITY: u32 = 64u;
 const COARSE_CAPACITY: u32 = 256u;
 const VISIBLE_CAPACITY: u32 = 16u;
 
-struct LightTile { count: u32, indices: array<u32, 32>, }
-struct CoarseTile { count: u32, indices: array<u32, 128>, }
+struct LightTile { count: u32, has_directional: u32, indices: array<u32, 32>, }
+struct CoarseTile { count: u32, has_directional: u32, indices: array<u32, 128>, }
 struct VisibleTile { count: u32, indices: array<u32, 16>, confidence_low: u32, confidence_high: u32, }
 
 fn div_ceil(n: vec2<u32>, d: u32) -> vec2<u32> { return (n + d - 1u) / d; }
@@ -70,6 +70,9 @@ fn stbn(pixel: vec2<u32>, dimension: u32) -> f32 {
     return (textureLoad(blue_noise, vec2<i32>(p), i32(z), 0).r * 255.0 + 0.5) / 256.0;
 }
 fn sample_pixel(p: vec2<u32>, frame: u32) -> vec2<u32> {
+    // Native shading has no four-rooks offset. Avoid phase and modulo work
+    // in the sampler and in every temporal neighborhood load.
+    if globals.sample_scale == 1u { return min(p, globals.screen_size - 1u); }
     // Four-rooks over the 2x2 block. Half resolution visits every full-res pixel.
     let phase = (frame + (p.x & 1u) + 2u * (p.y & 1u)) & 3u;
     let offset = vec2<u32>(phase & 1u, phase >> 1u) % globals.sample_scale;
@@ -81,9 +84,28 @@ fn sample_position_from_uv(uv: vec2<f32>) -> vec2<f32> {
     return uv*vec2<f32>(globals.screen_size)/f32(globals.sample_scale);
 }
 fn world_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
-    let uv = pixel / vec2<f32>(globals.screen_size);
-    let h = cameras[0].view_proj_inv * vec4<f32>(uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0), depth, 1.0);
-    return h.xyz / h.w;
+    let ndc=pixel/vec2<f32>(globals.screen_size)*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0);
+    let p=cameras[0].proj;
+    var view_position: vec3<f32>;
+    // For a standard perspective matrix, solve depth before applying the view
+    // transform. Subtracting depth from its projection coefficient avoids the
+    // cancellation in inverse_projection * clip (two large reciprocal terms).
+    // Jitter/off-centre perspective is supported through p[2].xy.
+    if abs(p[2].w)==1.0 && p[3].w==0.0 && p[0].y==0.0 && p[1].x==0.0
+        && p[0].z==0.0 && p[1].z==0.0 && p[0].w==0.0 && p[1].w==0.0
+        && p[3].x==0.0 && p[3].y==0.0 {
+        var z=p[3].z/(p[2].w*depth-p[2].z);
+        if globals.has_velocity!=0u {
+            let motion=textureLoad(gbuf_velocity,vec2<i32>(pixel),0);
+            if motion.w==2.0 { z+=motion.z; }
+        }
+        view_position=vec3<f32>((p[2].w*ndc-p[2].xy)*z/vec2<f32>(p[0].x,p[1].y),z);
+    } else {
+        let h=globals.inverse_projection*vec4<f32>(ndc,depth,1.0);
+        view_position=h.xyz/h.w;
+    }
+    let world=globals.inverse_view*vec4<f32>(view_position,1.0);
+    return world.xyz/world.w;
 }
 fn previous_uv(pixel: vec2<u32>, position: vec3<f32>) -> vec2<f32> {
     if globals.has_velocity != 0u {
@@ -110,6 +132,11 @@ fn geometry_matches(g: vec4<f32>, normal: vec3<f32>, view_depth: f32) -> bool {
 fn finite_color(v: vec3<f32>) -> vec3<f32> {
     // Keep pre-exposed lighting finite within the packed HDR representation.
     return min(select(vec3<f32>(0.0), v, v >= vec3<f32>(0.0)), vec3<f32>(60000.0));
+}
+fn normal_weight(value: f32) -> f32 {
+    let x=max(value,0.0);
+    let p2=x*x; let p4=p2*p2; let p8=p4*p4; let p16=p8*p8;
+    return p16*p16;
 }
 
 // Unsigned floats use five exponent bits and five or six mantissa bits.
@@ -167,4 +194,22 @@ fn load_geometry(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec4<f32> {
 fn load_moments(signal: texture_2d<u32>, pixel: vec2<i32>) -> vec2<f32> {
     let bits=textureLoad(signal,pixel,0).g;
     return vec2<f32>(unpack_moment(bits&2047u),unpack_moment((bits>>11u)&2047u));
+}
+
+struct LightProposal {
+    id: u32, inverse_probability: f32, alias_index: u32, alias_probability: f32,
+    total_weight: f32, key_light: u32,
+    // The final array element is a control record. There, id and alias_index
+    // are the light-set stamp and inverse_probability stores active light count.
+    // Exact weights for the four IDs in this 256-wide stratum when the light
+    // population is at most 1,024. The alias table selects a stratum, then
+    // sampling chooses one of its IDs with its actual conditional probability.
+    weights: array<f32,4>,
+}
+fn proposal_weight(light: GpuLight, center: vec3<f32>) -> f32 {
+    let power=luminance(max(light.color_intensity.rgb*light.color_intensity.w,vec3<f32>(0.0)));
+    if power<=0.0 { return 0.0; }
+    let delta=light.position_range.xyz-center;
+    let attenuation=select(1.0/max(dot(delta,delta),0.0001),1.0,light.light_type==0u);
+    return clamp(power*attenuation,1e-20,1e20);
 }

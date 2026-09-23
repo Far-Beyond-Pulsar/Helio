@@ -197,7 +197,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    out.clip_position  = cameras[0].view_proj * world_pos;
+    out.clip_position  = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position = world_pos.xyz;
     out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
@@ -451,10 +451,22 @@ fn pbr_direct_light(
     return (diffuse_term + specular) * radiance * NdL;
 }
 
+// Basic SceneDB materials carry texture-store indices directly. An explicit
+// metadata table can still supply transformed UVs and extension textures.
+fn material_slot(index: u32) -> MaterialTextureSlot {
+    return MaterialTextureSlot(index,0u,0u,0u,vec4<f32>(0.0,0.0,1.0,1.0),vec4<f32>(0.0,1.0,0.0,0.0));
+}
+fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData {
+    if material_textures[0].params.w!=-1.0 && id<arrayLength(&material_textures) { return material_textures[id]; }
+    return MaterialTextureData(material_slot(material.tex_base_color),material_slot(material.tex_normal),
+        material_slot(material.tex_roughness),material_slot(material.tex_emissive),material_slot(material.tex_occlusion),
+        material_slot(NO_TEXTURE),material_slot(NO_TEXTURE),vec4<f32>(1.0,1.0,0.0,0.0));
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let material = materials[input.material_id];
-    let material_tex = material_textures[input.material_id];
+    let material_tex = material_texture_data(material,input.material_id);
 
     let surface = radiant_eval_surface(material, material_tex, input);
 

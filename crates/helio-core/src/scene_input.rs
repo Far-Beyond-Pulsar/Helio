@@ -14,6 +14,12 @@ pub struct SceneBufferProjection {
 }
 
 impl SceneBufferProjection {
+    /// Construct a projection from frontend-owned GPU handles, including focused
+    /// test fixtures. Handles are owned snapshots and survive buffer replacement.
+    pub fn from_handles(entries: impl IntoIterator<Item = (BufferKey, BufferHandle)>) -> Self {
+        Self { entries: entries.into_iter().collect() }
+    }
+
     pub fn empty() -> Self {
         Self::default()
     }

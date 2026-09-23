@@ -38,7 +38,9 @@ pub fn select_hdr_surface_format(
     mode: helio_pass_postprocess::HdrOutputMode,
 ) -> wgpu::TextureFormat {
     let preferred = match mode {
-        helio_pass_postprocess::HdrOutputMode::Ldr => caps.formats.iter().find(|f| f.is_srgb()).copied(),
+        helio_pass_postprocess::HdrOutputMode::Ldr => {
+            caps.formats.iter().find(|f| f.is_srgb()).copied()
+        }
         helio_pass_postprocess::HdrOutputMode::Hdr10
         | helio_pass_postprocess::HdrOutputMode::ScRgb
         | helio_pass_postprocess::HdrOutputMode::Passthrough => caps

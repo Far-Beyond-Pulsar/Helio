@@ -11,7 +11,7 @@
 //   @group(1) — bloom compute: per-dispatch src (sampled) + dst (storage write)
 //
 // Entry points:
-//   cs_exposure              — compute: luminance histogram → avg log-luminance
+//   cs_exposure/reduce       — compute: sampled log-luminance reduction
 //   cs_volume_blend          — compute: blend active post-process volumes → output
 //   cs_bloom_down_extract    — compute: extract brights from HDR → bloom mip 0
 //   cs_bloom_down            — compute: 2x downsample from bloom_src → bloom_dst
@@ -192,6 +192,7 @@ struct GpuPostProcessVolume {
 @group(0) @binding(9)  var                     bloom_3:      texture_2d<f32>;
 @group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
 @group(0) @binding(11) var<storage, read_write> avg_luminance: array<f32>;
+@group(0) @binding(15) var<storage, read_write> exposure_partials: array<vec2<f32>>;
 @group(0) @binding(12) var                     noise_tex:    texture_2d<f32>;
 @group(0) @binding(13) var                     noise_samp:   sampler;
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
@@ -339,7 +340,7 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
     var vol_count: u32 = 0u;
 
     // Phase 1: evaluate all active volumes, store weight + index
-    for (var i = 0u; i < MAX_PP_VOLUMES; i++) {
+    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
         let v = pp_volumes[i];
         if v.blend_weight <= 0.0 { continue; }
 
@@ -370,10 +371,11 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
         }
         vol_indices[vol_count] = i;
         vol_count++;
+        if vol_count == MAX_PP_VOLUMES { break; }
     }
 
     if vol_count == 0u {
-        blend_output = postprocess;
+        blend_output = spatial_fog_settings(postprocess, 0u);
         return;
     }
 
@@ -404,31 +406,61 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
         total_weight += w;
     }
 
-    blend_output = result;
+    blend_output = spatial_fog_settings(result, vol_count);
 }
 
-// ── cs_exposure: histogram-based auto exposure ─────────────────────────────────
+// Screen effects are selected at the camera. Media are evaluated in world
+// space by the fog pass, including volumes seen from outside their bounds.
+fn spatial_fog_settings(screen: GpuPostProcessUniforms, count: u32) -> GpuPostProcessUniforms {
+    var r = screen;
+    var medium = postprocess;
+    // Only unbounded media participate in the global fog settings. Apply in
+    // ascending priority so the highest priority is the final override.
+    for (var n = count; n > 0u; n--) {
+        let v = pp_volumes[vol_indices[n - 1u]];
+        if v.unbound != 0u {
+            medium = blend_settings(medium, v.settings, clamp(v.blend_weight, 0.0, 1.0));
+        }
+    }
+    r.fog_enabled = medium.fog_enabled;
+    r.fog_density = select(0.0, medium.fog_density, medium.fog_enabled != 0u);
+    r.fog_mode = medium.fog_mode;
+    r.fog_height_falloff = medium.fog_height_falloff;
+    r.fog_start_distance = medium.fog_start_distance;
+    r.fog_height = medium.fog_height;
+    r.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
+    r.fog_color = medium.fog_color;
+    r.fog_emissive = medium.fog_emissive;
+    var range = select(0.0, medium.fog_max_distance, medium.fog_enabled != 0u);
+    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
+        let v = pp_volumes[i];
+        if v.blend_weight > 0.0 && v.unbound == 0u && v.settings.fog_enabled != 0u && v.settings.fog_density > 0.0 {
+            r.fog_enabled = 1u;
+            range = max(range, v.settings.fog_max_distance);
+        }
+    }
+    r.fog_max_distance = max(range, 1.0);
+    return r;
+}
+
+// ── cs_exposure: unique workgroup partials, then one final reduction ──────────
 
 var<workgroup> wg_sum:   array<f32, 256>;
 var<workgroup> wg_count: array<u32, 256>;
 
 @compute @workgroup_size(16, 16)
-fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>,
+               @builtin(local_invocation_id) lid: vec3<u32>,
+               @builtin(workgroup_id) group: vec3<u32>) {
     let dims = textureDimensions(hdr_input);
-    let w = dims.x;
-    let h = dims.y;
-
     let stride = 4u;
     var sum_log: f32 = 0.0;
     var count: u32 = 0u;
-
-    for (var y = gid.y * stride; y < h; y += stride * 16u) {
-        for (var x = gid.x * stride; x < w; x += stride * 16u) {
-            let col = textureLoad(hdr_input, vec2<i32>(i32(x), i32(y)), 0).rgb;
-            let l = max(luminance(col), 0.0001);
-            sum_log += log2(l);
-            count++;
-        }
+    let pixel = gid.xy * stride;
+    if all(pixel < dims) {
+        let col = textureLoad(hdr_input, vec2<i32>(pixel), 0).rgb;
+        sum_log = log2(max(luminance(col), 0.0001));
+        count = 1u;
     }
 
     let lidx = lid.y * 16u + lid.x;
@@ -447,9 +479,40 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
         reduce_active >>= 1u;
     }
 
-    if lidx == 0u && wg_count[0] > 0u {
-        let avg_log = wg_sum[0] / f32(wg_count[0]);
-        avg_luminance[0] = avg_log;
+    if lidx == 0u {
+        let groups_x = (dims.x + stride * 16u - 1u) / (stride * 16u);
+        exposure_partials[group.y * groups_x + group.x] = vec2<f32>(wg_sum[0], f32(wg_count[0]));
+    }
+}
+
+@compute @workgroup_size(256)
+fn cs_exposure_reduce(@builtin(local_invocation_index) lid: u32) {
+    let dims = textureDimensions(hdr_input);
+    let groups_x = (dims.x + 63u) / 64u;
+    let groups_y = (dims.y + 63u) / 64u;
+    let partial_count = groups_x * groups_y;
+    var sum_log = 0.0;
+    var count = 0u;
+    for (var index = lid; index < partial_count; index += 256u) {
+        let partial = exposure_partials[index];
+        sum_log += partial.x;
+        count += u32(partial.y);
+    }
+    wg_sum[lid] = sum_log;
+    wg_count[lid] = count;
+    workgroupBarrier();
+    var reduce_active = 128u;
+    loop {
+        if reduce_active == 0u { break; }
+        if lid < reduce_active {
+            wg_sum[lid] += wg_sum[lid + reduce_active];
+            wg_count[lid] += wg_count[lid + reduce_active];
+        }
+        workgroupBarrier();
+        reduce_active >>= 1u;
+    }
+    if lid == 0u && wg_count[0] > 0u {
+        avg_luminance[0] = wg_sum[0] / f32(wg_count[0]);
     }
 }
 
@@ -787,23 +850,23 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     //
     // fog.rgb is already premultiplied by the transmittance in front of it, so this
     // is a straight over: attenuate the scene, add what scattered in.
-    // The min/max clamps ensure the fog never fully hides the background and never
-    // clips — otherwise dense fog + bright sun produces values > 1.0 that blow out
-    // every surface to solid white.
+    // Preserve HDR radiance and Beer-Lambert extinction; exposure and tonemapping
+    // below handle bright scattering. Dense smoke may fully obscure the scene.
     if postprocess.fog_enabled != 0u {
         let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
         // Slices are planes of constant view depth, so convert the buffer value
         // rather than using radial distance.
         let view_depth = helio_view_depth(fog_d, cameras[0].position_near.w, cameras[0].forward_far.w);
         let slice = clamp(
-            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance),
+            // Integration stores the cumulative value at each slice's far
+            // face, not its centre. Account for texture texel-centre sampling.
+            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance)
+                - 0.5 / f32(textureDimensions(fog_input).z),
             0.0,
             1.0,
         );
         let fog = textureSampleLevel(fog_input, linear_samp, vec3<f32>(uv, slice), 0.0);
-        // Cap the fog contribution so the background is always at least 5% visible
-        // and the inscattering never clips — a soft failure mode instead of blowout.
-        color = color * max(fog.a, 0.05) + min(fog.rgb, vec3<f32>(0.95));
+        color = color * clamp(fog.a, 0.0, 1.0) + max(fog.rgb, vec3<f32>(0.0));
     }
 
     //%P0

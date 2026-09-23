@@ -3,10 +3,10 @@
 //! Mirrors the `v3_demo_common` module used by the native examples.
 
 use glam::{Mat4, Vec3};
-use helio::{
-    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, ObjectDescriptor,
-    PackedVertex, Renderer,
-};
+use helio::{GpuLight, LightType, MeshUpload, PackedVertex};
+use pulsar_scenedb::{Entity, World};
+
+pub type SceneResult<T> = Result<T, &'static str>;
 
 pub fn make_material(
     base_color: [f32; 4],
@@ -14,21 +14,14 @@ pub fn make_material(
     metallic: f32,
     emissive: [f32; 3],
     emissive_strength: f32,
-) -> GpuMaterial {
-    GpuMaterial {
+) -> helio_pass_gbuffer::MaterialComponent {
+    helio_pass_gbuffer::MaterialComponent::new(
         base_color,
-        emissive: [emissive[0], emissive[1], emissive[2], emissive_strength],
-        roughness_metallic: [roughness, metallic, 1.5, 0.5],
-        tex_base_color: GpuMaterial::NO_TEXTURE,
-        tex_normal: GpuMaterial::NO_TEXTURE,
-        tex_roughness: GpuMaterial::NO_TEXTURE,
-        tex_emissive: GpuMaterial::NO_TEXTURE,
-        tex_occlusion: GpuMaterial::NO_TEXTURE,
-        workflow: 0,
-        flags: 0,
-        material_class: 0,
-        class_params: [0.0; 4],
-    }
+        roughness,
+        metallic,
+        emissive,
+        emissive_strength,
+    )
 }
 
 pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> GpuLight {
@@ -79,36 +72,77 @@ pub fn spot_light(
 }
 
 pub fn insert_object(
-    renderer: &mut Renderer,
-    mesh: helio::SceneEntityId,
-    material: MaterialId,
+    world: &mut World,
+    mesh: Entity,
+    material: Entity,
     transform: Mat4,
     radius: f32,
-) -> helio::SceneResult<helio::ObjectId> {
-    let mesh = mesh
-        .as_mesh()
-        .ok_or(helio::SceneError::InvalidHandle { resource: "mesh" })?;
-    let object_actor_id =
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
-                mesh,
-                material,
-                transform,
-                bounds: [
-                    transform.w_axis.x,
-                    transform.w_axis.y,
-                    transform.w_axis.z,
-                    radius,
-                ],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability: None, // Default to Static
-                user_tag: 0,
-            }));
-    object_actor_id
-        .as_object()
-        .ok_or(helio::SceneError::InvalidHandle { resource: "object" })
+) -> SceneResult<Entity> {
+    let mirror = world
+        .gpu_mirror()
+        .cloned()
+        .ok_or("scene has no GPU mirror")?;
+    let vertices =
+        helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+            .filter(|handle| handle.count != 0)
+            .ok_or("mesh has no GPU vertex range")?;
+    let indices =
+        helio_pass_gbuffer::MeshComponent::indices_gpu_handle(mirror.store(), mesh.index())
+            .filter(|handle| handle.count != 0)
+            .ok_or("mesh has no GPU index range")?;
+    let material_component = world
+        .get::<helio_pass_gbuffer::MaterialComponent>(material)
+        .ok_or("material entity has no MaterialComponent")?;
+    let bounds = [
+        transform.w_axis.x,
+        transform.w_axis.y,
+        transform.w_axis.z,
+        radius,
+    ];
+    let object = helio_pass_gbuffer::StaticObjectComponent::new(
+        mesh.index(),
+        mesh.generation().wrapping_add(1),
+        material.index(),
+        material.generation().wrapping_add(1),
+        transform,
+        bounds,
+        indices.count,
+        indices.offset,
+        vertices.offset as i32,
+        material_component.material_class,
+        0,
+        0,
+    );
+    let entity = world.spawn();
+    world.insert(entity, object);
+    Ok(entity)
+}
+
+pub fn spawn_material(
+    world: &mut World,
+    material: helio_pass_gbuffer::MaterialComponent,
+) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, material);
+    entity
+}
+
+pub fn spawn_mesh(world: &mut World, upload: MeshUpload) -> Entity {
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        helio_pass_gbuffer::MeshComponent {
+            vertices: upload.vertices,
+            indices: upload.indices,
+        },
+    );
+    entity
+}
+
+pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, helio_pass_forward_lit::LightComponent::from(light));
+    entity
 }
 
 pub fn cube_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
@@ -180,34 +214,15 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
 }
 
 pub fn insert_object_with_movability(
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
+    world: &mut World,
+    mesh: Entity,
+    material: Entity,
     transform: Mat4,
     radius: f32,
     movability: Option<helio::Movability>,
-) -> helio::SceneResult<helio::ObjectId> {
-    let object_actor_id =
-        renderer
-            .scene()
-            .insert_entity(helio::SceneEntity::object(ObjectDescriptor {
-                mesh,
-                material,
-                transform,
-                bounds: [
-                    transform.w_axis.x,
-                    transform.w_axis.y,
-                    transform.w_axis.z,
-                    radius,
-                ],
-                flags: 0,
-                groups: helio::GroupMask::NONE,
-                movability,
-                user_tag: 0,
-            }));
-    object_actor_id
-        .as_object()
-        .ok_or(helio::SceneError::InvalidHandle { resource: "object" })
+) -> SceneResult<Entity> {
+    let _ = movability;
+    insert_object(world, mesh, material, transform, radius)
 }
 
 pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {

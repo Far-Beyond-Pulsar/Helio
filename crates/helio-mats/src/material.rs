@@ -266,6 +266,9 @@ impl GpuMaterial {
 }
 
 /// Borrowed material-texture state for passes that sample Helio's texture table.
+/// The G-buffer's single-row fallback reserves metadata `params.w = -1` to
+/// select texture-store IDs directly from `GpuMaterial`, with identity UVs.
+/// Explicit metadata tables must not use that reserved marker.
 #[derive(Clone, Copy)]
 pub struct MaterialTextureBindings<'a> {
     pub material_textures: &'a wgpu::Buffer,

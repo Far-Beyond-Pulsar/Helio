@@ -43,11 +43,11 @@ blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
-# Pulsar-Profiling fork (Unreal-Insights-style instrumentation) -- the same
+# Published Pulsar-Native profiler (including cross-thread scope contexts) -- the same
 # collector that powers the editor flamegraph. Feature-flag aliased below so
 # the fork's `profile_scope!` coexists with the compile-time `profiling`
 # feature already gating helio-core's per-pass CpuProfiler.
-profiling = { path = "../../../crates/profiling" }
+profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "45cda191beb316fee0859ae40d59f0dff986a66a" }
 egui = "0.36.1"
 egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
@@ -97,12 +97,11 @@ helio-xr = { path = "crates/helio-xr" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
-helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
 helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
-helio-pass-voxel-mesh = { path = "crates/passes/3d/helio-pass-voxel-mesh" }
+helio-voxel-data = { path = "crates/helio-voxel-data" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
 helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }

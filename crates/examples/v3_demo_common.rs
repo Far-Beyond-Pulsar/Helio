@@ -31,9 +31,35 @@ pub fn new_scene_db_with_gpu_mirror(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
+    helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::SubLevelActorComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalViewComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalChainComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1024,
+        device,
+    );
+    helio_pass_portal_cull::components::PortalProjectionCountsComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        1,
+        device,
+    );
     helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,
@@ -86,19 +112,9 @@ pub fn build_default_renderer(
     let graph_scene_db = scene_db_handle(scene_db);
     RendererBuilder::new(config, graph_scene_db.clone())
         .with_external_device()
-        .with_graph(Box::new(move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
-            helio_default_graphs::build_default_graph_external(
-                device,
-                queue,
-                camera,
-                config,
-                debug_state,
-                debug_camera,
-                cull_stats,
-                None,
-                graph_scene_db.clone(),
-            )
-        }))
+        .with_pass_build_context(Box::new(
+            helio_default_graphs::build_default_graph_external_with_context,
+        ))
         .build(
             device,
             queue,

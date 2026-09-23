@@ -8,7 +8,7 @@
 //! that owns them).
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalEditorOverlayPass {
@@ -17,6 +17,9 @@ pub struct PortalEditorOverlayPass {
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(usize, usize)>,
     portal_count: u32,
+    /// Active resolver-published view rows. `None` preserves legacy manual
+    /// behavior for callers that do not provide projection counts.
+    active_portal_count: Option<u32>,
     editor_mode: bool,
 }
 
@@ -123,8 +126,14 @@ impl PortalEditorOverlayPass {
             bind_group: None,
             bind_group_key: None,
             portal_count: 0,
+            active_portal_count: None,
             editor_mode: false,
         }
+    }
+
+    /// Set the active dense portal-view row count for editor visualization.
+    pub fn set_active_portal_count(&mut self, count: u32) {
+        self.active_portal_count = Some(count);
     }
 
     /// Enable or disable the checkerboard indicator. Mirrors whatever
@@ -142,6 +151,10 @@ impl PortalEditorOverlayPass {
 impl RenderPass for PortalEditorOverlayPass {
     fn name(&self) -> &'static str {
         "PortalEditorOverlay"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
+        self.active_portal_count = inputs.projection_counts.map(|counts| counts[0]);
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -213,16 +226,11 @@ impl RenderPass for PortalEditorOverlayPass {
         })
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.portal_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("portal_views"))
-            .map(|h| {
-                (h.buffer.size()
-                    / std::mem::size_of::<helio_pass_portal_cull::GpuPortalView>() as u64)
-                    as u32
-            })
-            .unwrap_or(0);
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        // Growable SceneDB storage exposes capacity, not live portal rows.
+        // An absent active count therefore means no authored/projected
+        // portals, not "draw the whole reserve".
+        self.portal_count = self.active_portal_count.unwrap_or(0);
         Ok(())
     }
 

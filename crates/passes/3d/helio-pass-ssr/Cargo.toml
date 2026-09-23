@@ -10,3 +10,7 @@ helio-core = { workspace = true }
 helio-pass-hiz = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+pollster = { workspace = true }

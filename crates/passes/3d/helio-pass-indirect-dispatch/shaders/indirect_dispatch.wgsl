@@ -227,7 +227,15 @@ fn main(
                 atomicStore(&wg_nonsubpixel, 1u);
             } else {
                 let clip_pos = cameras[0].view_proj * vec4<f32>(result.world_center, 1.0);
-                if clip_pos.w > 0.0 {
+                // A frustum-visible sphere whose centre is behind the eye can
+                // still cover a substantial part of the screen (this is
+                // common for the cathedral's large origin-centred meshes
+                // while the camera flies inside them).  Treat it as
+                // non-subpixel instead of letting the batch-level gate drop
+                // the entire draw when the centre projection is undefined.
+                if clip_pos.w <= 0.0 {
+                    atomicStore(&wg_nonsubpixel, 1u);
+                } else {
                     let r_ndc = abs(inst.bounds.w * cameras[0].proj[1][1] / clip_pos.w);
                     if r_ndc >= 0.001 {
                         atomicStore(&wg_nonsubpixel, 1u);

@@ -245,7 +245,6 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
             width: job.width,
             height: job.height,
             device: worker_device,
-            resources: visible_ref,
             registry: visible_ref,
             owns_device: job.owns_device,
             resource_pool,
@@ -279,7 +278,6 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
             width: job.width,
             height: job.height,
             device: worker_device,
-            resources: visible_ref,
             registry: visible_ref,
             owns_device: job.owns_device,
             resource_pool,
@@ -390,6 +388,10 @@ pub struct RenderGraph {
 /// (and its query resources) forever when the host never polls the device.
 const MAX_PENDING_WORKER_PROFILERS: usize = 64;
 impl RenderGraph {
+    pub fn requires_ray_tracing(&self) -> bool {
+        self.passes.iter().any(|pass| pass.requires_ray_tracing())
+    }
+
     fn create_reflected_groups(
         &self,
         pass_index: usize,
@@ -637,6 +639,31 @@ impl RenderGraph {
     pub fn set_editor_mode(&mut self, enabled: bool) {
         for pass in &mut self.passes {
             pass.set_editor_mode(enabled);
+        }
+    }
+
+    /// Broadcast generic per-frame projection inputs to every pass.
+    ///
+    /// Passes interpret only the fields they own; the graph and renderer
+    /// facade never downcast into concrete pass implementations.
+    pub fn set_frame_inputs(&mut self, inputs: &crate::RenderFrameInputs<'_>) {
+        for pass in &mut self.passes {
+            pass.set_frame_inputs(inputs);
+        }
+    }
+
+    /// Publish pass-owned resources required before the first pass executes.
+    ///
+    /// These resources are borrowed from graph-owned pass state and therefore
+    /// need the same narrowly-scoped lifetime extension used by the executor's
+    /// output publication path. The graph remains the sole owner of this
+    /// bridge; callers only receive the typed registry view.
+    pub fn publish_frame_inputs<'a>(&self, registry: &mut crate::ResourceRegistry<'a>) {
+        let frame_ptr = registry as *mut crate::ResourceRegistry<'a>;
+        for pass in &self.passes {
+            unsafe {
+                pass.publish_frame_inputs(&mut *frame_ptr);
+            }
         }
     }
 
@@ -933,17 +960,7 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
     ) -> Result<wgpu::SubmissionIndex> {
         let mut registry = crate::ResourceRegistry::empty();
-        self.execute_with_resources(scene, target, depth, &mut registry)
-    }
-
-    pub fn execute_with_registry(
-        &mut self,
-        scene: &dyn SceneInput,
-        target: &wgpu::TextureView,
-        depth: &wgpu::TextureView,
-        registry: &mut crate::ResourceRegistry<'_>,
-    ) -> Result<wgpu::SubmissionIndex> {
-        self.execute_with_resources(scene, target, depth, registry)
+        self.execute_with_registry(scene, target, depth, &mut registry)
     }
 
     /// Records graphs with no fused render chains in dependency-layer order.
@@ -1010,13 +1027,21 @@ impl RenderGraph {
                         camera_data: scene.camera_data(),
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
-                        pass_resources: visible,
                         registry: &*visible,
                         resize: resized_this_frame,
                         width: internal_w,
                         height: internal_h,
                         delta_time,
                     };
+                    // Name formatted only while recording; `prepare` often does
+                    // the pass's buffer uploads, so it must be visible per pass.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _prepare_scope = profiling::is_profiling_enabled().then(|| {
+                        profiling::ProfileScope::new(format!(
+                            "{}::prepare",
+                            passes[pass_index].name()
+                        ))
+                    });
                     passes[pass_index].prepare(&prepare_ctx)?;
                 }
             }
@@ -1104,6 +1129,11 @@ impl RenderGraph {
             // Wait until every worker has drained this wave's Sync. Unlike a
             // `Barrier`, the census counts finalized per-worker arrivals, so
             // the completion order across workers is irrelevant.
+            // The render thread parks here while the pass workers run, so this
+            // span is the layer's wall time as seen from the render thread.
+            #[cfg(not(target_arch = "wasm32"))]
+            let wait_scope =
+                profiling::ProfileScope::new_static("RenderGraph: wait for parallel pass workers");
             let mut wait_guard = worker_pool
                 .sync
                 .mtx
@@ -1122,6 +1152,8 @@ impl RenderGraph {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
             drop(wait_guard);
+            #[cfg(not(target_arch = "wasm32"))]
+            drop(wait_scope);
             let mut results = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
             for (pos, &pass_index) in layer.iter().enumerate() {
@@ -1149,20 +1181,18 @@ impl RenderGraph {
                     unsafe { std::mem::transmute(visible as *mut crate::ResourceRegistry<'_>) };
                 unsafe {
                     (&*pass_ptr).publish(&mut *frame_ptr);
-                    (&*pass_ptr).publish_registry(visible);
                 }
             }
         }
         Ok((command_buffers, cpu_timings, worker_profilers))
     }
 
-    /// Executes the graph with both the legacy frame-resource shim and the
-    /// phase 3 open resource registry.
+    /// Executes the graph against the host-provided transient resource registry.
     ///
-    /// `registry` is supplied by the host so external inputs can be written
-    /// with typed [`crate::ResourceKey`] values before execution. Existing
-    /// passes continue to see `pass_resources` unchanged.
-    pub fn execute_with_resources(
+    /// External inputs are written with typed [`crate::ResourceKey`] values
+    /// before execution, and every pass observes the same registry through
+    /// `PassContext::registry` and `PrepareContext::registry`.
+    pub fn execute_with_registry(
         &mut self,
         scene: &dyn SceneInput,
         target: &wgpu::TextureView,
@@ -1173,7 +1203,7 @@ impl RenderGraph {
         // executor-owned arena before recording begins; it remains alive until
         // this method returns and the command buffers have been submitted.
         #[cfg(not(target_arch = "wasm32"))]
-        profiling::profile_scope!("RenderGraph::execute_with_resources");
+        profiling::profile_scope!("RenderGraph::execute_with_registry");
         self.frame_storage.reset();
         assert!(
             self.locked,
@@ -1183,6 +1213,9 @@ impl RenderGraph {
         // External device owners drive wgpu polling. Consume callbacks from
         // that host cadence before reserving a bounded readback slot for this
         // frame; this never polls or waits.
+        #[cfg(not(target_arch = "wasm32"))]
+        let timestamps_scope =
+            profiling::ProfileScope::new_static("RenderGraph: read pending GPU timestamps");
         if !self.owns_device {
             self.profiler.read_gpu_timestamps_deferred();
         }
@@ -1212,7 +1245,11 @@ impl RenderGraph {
             }
         }
         self.profiler.clear_cpu_timings();
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(timestamps_scope);
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let encoders_scope = profiling::ProfileScope::new_static("RenderGraph: create command encoders");
         let mut encoder = scene
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1224,18 +1261,24 @@ impl RenderGraph {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Compute Graph"),
                 });
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(encoders_scope);
 
         // Compute is submitted first, graphics second. Span BOTH command
         // buffers; per-pass markers on compute alone omit all graphics work.
         self.profiler
             .begin_gpu_pass(&mut compute_encoder, "__graph_frame");
         registry.reset_tracking("RenderGraph");
-        let reflected_groups: Vec<Vec<wgpu::BindGroup>> = self
-            .passes
-            .iter()
-            .enumerate()
-            .map(|(pass_index, _)| self.create_reflected_groups(pass_index, registry))
-            .collect::<Result<Vec<_>>>()?;
+        // Builds bind groups for every pass every frame.
+        let reflected_groups: Vec<Vec<wgpu::BindGroup>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: create_reflected_groups");
+            self.passes
+                .iter()
+                .enumerate()
+                .map(|(pass_index, _)| self.create_reflected_groups(pass_index, registry))
+                .collect::<Result<Vec<_>>>()?
+        };
         let resized_this_frame = self.resize_pending;
 
         // The persistent worker-pool path is not safe to enter from every
@@ -1305,7 +1348,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &*registry,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1328,7 +1370,6 @@ impl RenderGraph {
 
                     self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
                     pass.publish(registry);
-                    pass.publish_registry(registry);
                     continue;
                 }
 
@@ -1343,13 +1384,16 @@ impl RenderGraph {
                         camera_data: scene.camera_data(),
                         camera_generation: scene.camera_generation(),
                         scene_buffers: scene.scene_buffers(),
-                        pass_resources: &*registry,
                         registry: &*registry,
                         resize: resized_this_frame,
                         width: self.internal_w,
                         height: self.internal_h,
                         delta_time: self.delta_time,
                     };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _prepare_scope = profiling::is_profiling_enabled().then(|| {
+                        profiling::ProfileScope::new(format!("{}::prepare", pass.name()))
+                    });
                     pass.prepare(&prepare_ctx)?;
                 }
 
@@ -1445,7 +1489,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            resources: &*registry,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1529,7 +1572,6 @@ impl RenderGraph {
                                 width: self.internal_w,
                                 height: self.internal_h,
                                 device: scene.device(),
-                                resources: &*registry,
                                 registry: &*registry,
                                 owns_device: self.owns_device,
                                 resource_pool: &self.pool,
@@ -1579,7 +1621,6 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         device: scene.device(),
-                        resources: &*registry,
                         registry: &*registry,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
@@ -1603,7 +1644,6 @@ impl RenderGraph {
                 self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
 
                 pass.publish(registry);
-                pass.publish_registry(registry);
             }
         }
 
@@ -1616,11 +1656,26 @@ impl RenderGraph {
         // Resolve after the final graphics timestamp, not before graphics runs.
         self.profiler
             .resolve_gpu_queries(&mut encoder, self.frame_count);
-        let mut command_buffers = vec![compute_encoder.finish(), encoder.finish()];
+        let mut command_buffers = {
+            // Finishing the encoders runs wgpu's full command validation.
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: encoder.finish");
+            vec![compute_encoder.finish(), encoder.finish()]
+        };
         command_buffers.extend(parallel_command_buffers);
-        let submission_index = scene.queue().submit(command_buffers);
-        crate::upload::finish_frame();
+        let submission_index = {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: queue.submit (graph)");
+            scene.queue().submit(command_buffers)
+        };
+        {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: upload::finish_frame");
+            crate::upload::finish_frame();
+        }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let readback_scope = profiling::ProfileScope::new_static("RenderGraph: read GPU timestamps");
         if self.owns_device {
             self.profiler.read_gpu_timestamps_blocking(scene.device());
         } else {
@@ -1639,8 +1694,14 @@ impl RenderGraph {
                 self.pending_worker_profilers.push(worker);
             }
         }
-        self.profiler
-            .update_snapshot(self.frame_count, self.passes.iter().map(|pass| pass.name()));
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(readback_scope);
+        {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: update_snapshot");
+            self.profiler
+                .update_snapshot(self.frame_count, self.passes.iter().map(|pass| pass.name()));
+        }
 
         self.frame_count += 1;
         self.resize_pending = false;

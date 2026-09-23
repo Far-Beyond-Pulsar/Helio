@@ -884,10 +884,6 @@ impl RenderPass for DeferredLightPass {
         ]
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
         builder.read("ies_textures");
@@ -898,7 +894,7 @@ impl RenderPass for DeferredLightPass {
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let environment = ctx.pass_resources.get::<helio_core::RenderEnvironment>(helio_core::ResourceKey::new("render_environment"));
+        let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
         let (ambient_color, ambient_intensity) = if let Some(environment) = environment {
             (environment.ambient_color, environment.ambient_intensity)
         } else {
@@ -906,7 +902,7 @@ impl RenderPass for DeferredLightPass {
         };
         // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
         let (rc_min, rc_max) = if let Some(volume) = ctx
-            .pass_resources
+            .registry
             .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME)
         {
             (volume.world_min, volume.world_max)
@@ -917,7 +913,7 @@ impl RenderPass for DeferredLightPass {
         // (set unconditionally by the renderer's GiConfig default), regardless
         // of whether this pipeline actually runs HLFS. Only the presence of a
         // real rc_view texture tells us whether there's anything to sample.
-        let has_rc_gi = ctx.pass_resources.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view")).is_some();
+        let has_rc_gi = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view")).is_some();
 
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
@@ -1001,7 +997,7 @@ impl RenderPass for DeferredLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer_opt = ctx.resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "DeferredLight");
+        let gbuffer_opt = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "DeferredLight");
         let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
@@ -1010,19 +1006,19 @@ impl RenderPass for DeferredLightPass {
 
         // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
         // when a baked AO texture is present) or fall back to the 1×1 white texture.
-        let ao_view = ctx.resources.get(helio_core::ResourceKey::new("ssao")).unwrap_or(&self.fallback_ao_view);
+        let ao_view = ctx.registry.get(helio_core::ResourceKey::new("ssao")).unwrap_or(&self.fallback_ao_view);
 
         // Lightmap UVs from GBuffer
         let lightmap_uv_view = ctx
-            .resources.get(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
+            .registry.get(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
 
         // SSS/Extra data from GBuffer
         let sss_view = ctx
-            .resources.get(helio_core::ResourceKey::new("gbuffer_sss"))
+            .registry.get(helio_core::ResourceKey::new("gbuffer_sss"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
         let extra_view = ctx
-            .resources.get(helio_core::ResourceKey::new("gbuffer_extra"))
+            .registry.get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
 
         let gbuffer_key = [
@@ -1099,37 +1095,37 @@ impl RenderPass for DeferredLightPass {
         }
 
         let shadow_view = ctx
-            .resources.get(helio_core::ResourceKey::new("shadow_atlas"))
+            .registry.get(helio_core::ResourceKey::new("shadow_atlas"))
             .unwrap_or(&self.fallback_shadow_view);
         let static_shadow_view = ctx
-            .resources.get(helio_core::ResourceKey::new("static_shadow_atlas"))
+            .registry.get(helio_core::ResourceKey::new("static_shadow_atlas"))
             .unwrap_or(&self.fallback_static_shadow_view);
         let shadow_sampler = ctx
-            .resources.get(helio_core::ResourceKey::new("shadow_sampler"))
+            .registry.get(helio_core::ResourceKey::new("shadow_sampler"))
             .unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = ctx
-            .resources.get(helio_core::ResourceKey::new("rc_view"))
+            .registry.get(helio_core::ResourceKey::new("rc_view"))
             .unwrap_or(&self.fallback_rc_view);
         // Baked reflection cube array from the probe bake. Falls back to a 1×1
         // black cube array when nothing has been baked, which reads as "no
         // environment" rather than failing to bind.
         let env_view = ctx
-            .resources.get(helio_core::ResourceKey::new("baked_reflection"))
+            .registry.get(helio_core::ResourceKey::new("baked_reflection"))
             .unwrap_or(&self.fallback_env_view);
         let env_sampler = ctx
-            .resources.get(helio_core::ResourceKey::new("baked_reflection_sampler"))
+            .registry.get(helio_core::ResourceKey::new("baked_reflection_sampler"))
             .unwrap_or(&self.fallback_env_sampler);
 
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx
-            .resources.get(helio_core::ResourceKey::new("baked_lightmap"))
+            .registry.get(helio_core::resource_keys::baked_lightmap())
             .unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx
-            .resources.get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
+            .registry.get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
             .unwrap_or(&self.fallback_lightmap_sampler);
 
         let caustics_view = ctx
-            .resources.get(helio_core::ResourceKey::new("water_caustics"))
+            .registry.get(helio_core::ResourceKey::new("water_caustics"))
             .unwrap_or(&self.fallback_caustics_view);
         // `"water_volumes"` is resolved fresh from the SceneDB mirror by key,
         // exactly like `"scene_lights"` in `ForwardLitPass` -- no Renderer
@@ -1147,16 +1143,16 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_reflection_captures);
         let ies_view = ctx
-            .resources.get(helio_core::ResourceKey::new("ies_textures"))
+            .registry.get(helio_core::ResourceKey::new("ies_textures"))
             .unwrap_or(&self.fallback_ies_view);
 
         // SSR texture from SsrPass
         let ssr_view = ctx
-            .resources.get(helio_core::ResourceKey::new("ssr_trace"))
+            .registry.get(helio_core::ResourceKey::new("ssr_trace"))
             .unwrap_or(&self.fallback_ssr_view);
         // Planar reflection texture from PlanarReflectionPass
         let planar_view = ctx
-            .resources.get(helio_core::ResourceKey::new("planar_reflection"))
+            .registry.get(helio_core::ResourceKey::new("planar_reflection"))
             .unwrap_or(&self.fallback_planar_view);
 
         let lights_buf = ctx
@@ -1165,7 +1161,7 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
-            .resources.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::ResourceKey::new("shadow_matrices"))
+            .registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices())
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
         let scene_key = [
@@ -1279,10 +1275,10 @@ impl RenderPass for DeferredLightPass {
 
         // ── Bind group 3: tile light culling results ──────────────────────────
         let tile_lists = ctx
-            .resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
+            .registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
             .unwrap_or(&self.fallback_tile_lists);
         let tile_counts = ctx
-            .resources.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
+            .registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
             .unwrap_or(&self.fallback_tile_counts);
         let tile_key = (
             tile_lists as *const _ as usize,

@@ -425,7 +425,7 @@ impl DebugPass {
         self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.get(helio_core::ResourceKey::new("full_res_depth")) {
+            let depth_view = if let Some(frd) = ctx.registry.get(helio_core::ResourceKey::new("full_res_depth")) {
                 frd
             } else {
                 ctx.depth

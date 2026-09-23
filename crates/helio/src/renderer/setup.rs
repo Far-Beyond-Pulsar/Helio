@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use bytemuck::Zeroable;
+use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7,12 +7,12 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use helio_mats::radiant::RadiantTemplateRegistry;
 use helio_core::{PipelineFormatSet, RenderGraph};
+use helio_mats::radiant::RadiantTemplateRegistry;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer};
+use super::renderer_impl::{CullStatsReadbackState, GraphRebuilder, Renderer};
 
 impl Renderer {
     pub(crate) fn create_depth_resources(
@@ -153,7 +153,8 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let postprocess_buf_size = std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
+        let postprocess_buf_size =
+            std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
             size: postprocess_buf_size,
@@ -194,8 +195,7 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
@@ -212,6 +212,7 @@ impl Renderer {
             fallback_sampler,
             texture_count: material_binding.max_textures,
             version: 0,
+            scene_views: vec![None; material_binding.max_textures],
         };
 
         // Camera jitter is only valid when a temporal pass reconstructs it.
@@ -220,9 +221,7 @@ impl Renderer {
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        let scene_has_sky = false;
-
-        let mut renderer = Self {
+        let renderer = Self {
             device,
             queue,
             graph,
@@ -238,6 +237,7 @@ impl Renderer {
             camera_data: helio_core::GpuCameraUniforms::zeroed(),
             camera_generation: 0,
             frame_count: 0,
+            ray_frame: Default::default(),
             prev_view_proj: glam::Mat4::IDENTITY,
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
@@ -251,6 +251,8 @@ impl Renderer {
             enable_foliage: config.enable_foliage,
             foliage_blades_per_m2: config.foliage_blades_per_m2,
             enable_portals: config.enable_portals,
+            coordinate_spaces: Vec::new(),
+            portal_projection_counts: None,
             enable_planar_reflections: config.enable_planar_reflections,
             enable_environment_reflections: config.enable_environment_reflections,
             debug_mode: config.debug_mode,
@@ -278,7 +280,6 @@ impl Renderer {
             #[cfg(feature = "bake")]
             bake_scene: None,
             clear_target_next_frame: true,
-            graph_has_sky: scene_has_sky,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
             pending_resize: None,
@@ -286,6 +287,7 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            graph_rebuild_hook: None,
             scene_db,
             tsr_quality: config.tsr_quality,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(
