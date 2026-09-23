@@ -20,7 +20,8 @@ use helio::{
     LightType, RenderGraph, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_mesh::{VoxelComponent, VoxelMeshPass, VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
+use helio_component::VoxelTerrainComponent;
+use helio_pass_voxel_mesh::{VoxelMeshPass, VoxelSceneEntry, VoxelEntryId, VoxelDomain};
 use pulsar_scenedb::{Entity, SceneDb, World};
 
 #[path = "../v3_demo_common.rs"]
@@ -41,7 +42,6 @@ const FLY_SPEED: f32 = 10.0;
 const DRAG: f32 = 6.0;
 // The GPU-side voxel volume is always a dense 64^3 grid (fixed by the engine's
 // BRICK_SIZE constant); `VOXEL_SIZE` just scales that grid into world units.
-const VOXEL_SIZE: f32 = 0.75;
 
 // ── app ───────────────────────────────────────────────────────────────────────
 
@@ -212,55 +212,32 @@ impl AppState {
         )
     }
 
-    /// Converts a world-space position into the voxel volume's grid coordinates.
-    /// The volume is centered on the world origin, with voxels scaled by `VOXEL_SIZE`.
-    fn world_to_grid(pos: Vec3) -> [f32; 3] {
-        let half = VOXEL_TERRAIN_GRID_DIM as f32 / 2.0;
-        [
-            pos.x / VOXEL_SIZE + half,
-            pos.y / VOXEL_SIZE + half,
-            pos.z / VOXEL_SIZE + half,
-        ]
-    }
+}
 
-    fn place_edit(
-        add: bool,
-        material: u8,
-        cam_pos: Vec3,
-        yaw: f32,
-        pitch: f32,
-        world: &mut World,
-        voxel_entity: Entity,
-        queue: &Arc<wgpu::Queue>,
-        mesh_pass: &mut VoxelMeshPass,
-    ) {
-        let orientation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
-        let forward = orientation * -Vec3::Z;
-        let center_world = cam_pos + forward * 5.0;
-        let center_grid = Self::world_to_grid(center_world);
-        let radius_grid = 2.0 / VOXEL_SIZE;
-
-        let Some(mut component) = world.get_mut::<VoxelComponent>(voxel_entity) else {
-            return;
-        };
-        if let Some(range) = component.paint_sphere(center_grid, radius_grid, material, add) {
-            let (meta_buf, data_buf) = (
-                mesh_pass.brick_meta_buf().clone(),
-                mesh_pass.voxel_data_buf().clone(),
-            );
-            let touched = component.upload_range_mesh(queue, &meta_buf, &data_buf, range);
-            for (brick_idx, origin, occupied) in touched {
-                mesh_pass.mark_dirty_with_mode(
-                    brick_idx,
-                    component.volume_id(),
-                    origin,
-                    component.voxel_size(),
-                    occupied,
-                    component.render_settings[0],
-                );
-            }
-        }
-    }
+fn scene_entry(world: &World, entity: Entity) -> Option<VoxelSceneEntry> {
+    let component = world.get::<VoxelTerrainComponent>(entity)?;
+    let scale = component.voxel_size;
+    let min = [
+        (component.bounds_min_x / (scale * 8.0)).floor() as i64,
+        (component.bounds_min_y / (scale * 8.0)).floor() as i64,
+        (component.bounds_min_z / (scale * 8.0)).floor() as i64,
+    ];
+    let max = [
+        (component.bounds_max_x / (scale * 8.0)).ceil() as i64 - 1,
+        (component.bounds_max_y / (scale * 8.0)).ceil() as i64 - 1,
+        (component.bounds_max_z / (scale * 8.0)).ceil() as i64 - 1,
+    ];
+    Some(VoxelSceneEntry {
+        id: VoxelEntryId { entity_bits: entity.entity_bits, kind: 0 },
+        store: component.payload_store(),
+        domain: VoxelDomain::Bounded { min, max, max_lod: 0 },
+        source_revision: component.source_revision,
+        origin: [0.0; 3],
+        voxel_size: scale,
+        material_ids: component.material_ids.clone(),
+        smooth_surface: component.smooth_surface,
+        initial_cube: None,
+    })
 }
 
 impl ApplicationHandler for App {
@@ -401,29 +378,6 @@ impl ApplicationHandler for App {
         // visibly shimmer/flicker frame to frame.
         renderer.set_jitter_enabled(false);
 
-        {
-            let pass = renderer
-                .find_pass_mut::<VoxelMeshPass>()
-                .expect("VoxelMeshPass missing from graph");
-            let (meta_buf, data_buf) =
-                (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
-            let component = scene_db
-                .world
-                .get::<VoxelComponent>(voxel_entity)
-                .expect("voxel component missing from SceneDB");
-            let touched = component.upload_all_mesh(&queue, &meta_buf, &data_buf);
-            for (brick_idx, origin, occupied) in touched {
-                pass.mark_dirty_with_mode(
-                    brick_idx,
-                    component.volume_id(),
-                    origin,
-                    component.voxel_size(),
-                    occupied,
-                    component.render_settings[0],
-                );
-            }
-        }
-
         self.state = Some(AppState {
             window,
             surface,
@@ -497,6 +451,9 @@ impl ApplicationHandler for App {
                     KeyCode::Digit3 => state.current_material = 3,
                     KeyCode::Digit4 => state.current_material = 4,
                     KeyCode::KeyR => {
+                        // Generation is owned by the Minecraft SceneDB producer;
+                        // the unified pass observes its source revision.
+                    /*
                         let seed = state
                             .scene_db
                             .world
@@ -529,6 +486,7 @@ impl ApplicationHandler for App {
                                 component.render_settings[0],
                             );
                         }
+                    */
                     }
                     _ => {}
                 }
@@ -562,60 +520,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } if state.cursor_grabbed => {
-                let mat = state.current_material;
-                let pos = state.cam_pos;
-                let yaw = state.yaw;
-                let pitch = state.pitch;
-                let queue = state.queue.clone();
-                let pass = state
-                    .renderer
-                    .find_pass_mut::<VoxelMeshPass>()
-                    .expect("VoxelMeshPass missing from graph");
-                AppState::place_edit(
-                    true,
-                    mat,
-                    pos,
-                    yaw,
-                    pitch,
-                    &mut state.scene_db.world,
-                    state.voxel_entity,
-                    &queue,
-                    pass,
-                );
-            }
-
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Right,
-                ..
-            } if state.cursor_grabbed => {
-                let mat = state.current_material;
-                let pos = state.cam_pos;
-                let yaw = state.yaw;
-                let pitch = state.pitch;
-                let queue = state.queue.clone();
-                let pass = state
-                    .renderer
-                    .find_pass_mut::<VoxelMeshPass>()
-                    .expect("VoxelMeshPass missing from graph");
-                AppState::place_edit(
-                    false,
-                    mat,
-                    pos,
-                    yaw,
-                    pitch,
-                    &mut state.scene_db.world,
-                    state.voxel_entity,
-                    &queue,
-                    pass,
-                );
-            }
-
             WindowEvent::RedrawRequested => {
                 let frame_start = Instant::now();
                 let now = frame_start;
@@ -640,6 +544,18 @@ impl ApplicationHandler for App {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
                 let render_start = Instant::now();
+                if let Some(entry) = scene_entry(&state.scene_db.world, state.voxel_entity) {
+                    let camera_position = [
+                        f64::from(state.cam_pos.x),
+                        f64::from(state.cam_pos.y),
+                        f64::from(state.cam_pos.z),
+                    ];
+                    state
+                        .renderer
+                        .find_pass_mut::<VoxelMeshPass>()
+                        .expect("VoxelMeshPass missing from graph")
+                        .reconcile_scene_entries([entry], camera_position);
+                }
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
@@ -675,12 +591,8 @@ impl ApplicationHandler for App {
 }
 
 fn default_world_setup(world: &mut World) -> Entity {
-    let world_seed = 1;
-    let mut terrain = VoxelTerrain::empty();
-    terrain.generate(world_seed);
     let voxel_entity = world.spawn();
-    let mut voxel_component = VoxelComponent::new(terrain, VOXEL_SIZE, 0);
-    voxel_component.set_seed(world_seed);
+    let voxel_component = VoxelTerrainComponent::default();
     world.insert(voxel_entity, voxel_component);
     voxel_entity
 }
