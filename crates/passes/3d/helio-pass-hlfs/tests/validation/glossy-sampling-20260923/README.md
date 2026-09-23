@@ -19,6 +19,14 @@ lights and camera path, changed sampling from 9.484 to 5.043 ms, HLFS from
 14.813 to 10.427 ms, and full graph from 21.119 to 16.772 ms. The altered
 material is a cost diagnostic; it was restored and is not a quality solution.
 
+A second deliberately invalid diagnostic returned constant weight 1 for every
+glossy candidate instead of evaluating its BRDF target. Sampling fell to
+6.959 ms, HLFS to 12.222 ms, and full graph to 18.536 ms. This changes which
+lights are selected and can change ray cost, so it is not an isolated BRDF
+microbenchmark or a candidate quality preset. It shows that even removing the
+glossy score leaves substantial native sampling work. The production score
+was restored after the capture; raw timing CSVs are retained below.
+
 ## GPU experiments
 
 The control below uses the production shader after the native-pixel fast path.
