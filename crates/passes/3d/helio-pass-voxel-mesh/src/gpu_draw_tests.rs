@@ -38,7 +38,8 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
             .await
             .expect("GPU device");
         device.on_uncaptured_error(Arc::new(|error| panic!("voxel draw validation: {error:?}")));
-        let pass = VoxelMeshPass::new_composited(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        let mut pass =
+            VoxelMeshPass::new_composited(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
         let filled = [1u8; VOXEL_CHUNK_SAMPLES];
         let domain = VoxelDomain::Bounded {
             min: [0, 0, 0],
@@ -286,5 +287,23 @@ fn adjacent_scene_chunks_cull_shared_block_faces_and_draw_visible_pixels() {
         }
         drop(pixels);
         color_read.unmap();
+        assert_eq!(
+            pass.try_mark_dirty_with_mode(
+                VOXEL_MESH_MAX_BRICKS,
+                0,
+                [0.0; 3],
+                1.0,
+                true,
+                VOXEL_MODE_CUBES
+            ),
+            Err(VoxelDirtyError::SlotOutOfRange(VOXEL_MESH_MAX_BRICKS)),
+        );
+        pass.dirty_bricks
+            .resize(VOXEL_MESH_MAX_DIRTY as usize, DirtyBrick::zeroed());
+        assert_eq!(
+            pass.try_mark_dirty_with_mode(0, 0, [0.0; 3], 1.0, true, VOXEL_MODE_CUBES),
+            Err(VoxelDirtyError::DirtyListFull),
+        );
+        assert_eq!(pass.rejected_dirty_entries, 2);
     });
 }
