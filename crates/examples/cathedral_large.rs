@@ -28,7 +28,9 @@ pub fn populate(world: &mut World) {
 
     // A single structural slab underlays human-scale, individually bounded
     // pavers. The dark procession band is geometry, so RT sees its edges.
-    meshes[0].block([0., -0.16, 0.], [HALF_WIDTH, 0.16, HALF_LENGTH]);
+    // Keep the slab below the paver faces. Coplanar tops cause unstable depth
+    // ownership and dashed patches on the floor during camera movement.
+    meshes[0].block([0., -0.18, 0.], [HALF_WIDTH, 0.16, HALF_LENGTH]);
     for x in -18_i32..18 {
         for z in -60_i32..60 {
             let material = if x.abs() <= 1 && z.rem_euclid(9) == 0 { 2 } else { 3 };
