@@ -636,14 +636,10 @@ impl RenderPass for LensFlarePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = if ctx
+        let light_count = ctx
             .scene_buffers
-            .contains(helio_core::BufferKey::of("scene_lights"))
-        {
-            256
-        } else {
-            0
-        };
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map_or(0, |lights| lights.row_capacity());
         self.active_flare_count = light_count;
 
         let uniforms = FlareUniforms {
@@ -702,12 +698,15 @@ impl RenderPass for LensFlarePass {
         let depth_view = ctx.registry.get(helio_core::ResourceKey::new("depth_sampler_view")).unwrap_or(ctx.depth);
 
         // Rebuild bind groups when buffer/depth pointers change
-        let lights_buf = ctx
+        let lights_handle = ctx
             .scene_buffers
-            .get(helio_core::BufferKey::of("scene_lights"))
+            .get(helio_core::BufferKey::of("scene_lights"));
+        let lights_buf = lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
-        let lights_ptr = lights_buf as *const _ as usize;
+        // SceneDB epoch, not this frame's handle address: a reallocated
+        // lights buffer can land at the same address.
+        let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
         let camera_ptr = ctx.camera as *const _ as usize;
         let depth_ptr = depth_view as *const _ as usize;
         let uniform_ptr = &self.uniform_buf as *const _ as usize;

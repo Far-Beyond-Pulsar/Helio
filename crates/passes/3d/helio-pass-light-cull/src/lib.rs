@@ -20,10 +20,9 @@ use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKe
 
 pub const TILE_SIZE: u32 = 16;
 pub const MAX_LIGHTS_PER_TILE: u32 = 64;
-/// Fixed capacity for the `"scene_lights"` SceneDB buffer this pass culls --
-/// kept equal to `helio_pass_forward_lit::MAX_LIGHTS` by construction (both
-/// are literally `DEFAULT_AUTO_REGISTER_CAPACITY`), so culling always covers
-/// every light `ForwardLitPass` can possibly shade.
+/// Initial capacity of the `"scene_lights"` SceneDB buffer (equal to
+/// `helio_pass_forward_lit::MAX_LIGHTS`). The buffer grows past it; passes
+/// iterate its live `BufferHandle::row_capacity()`, never this constant.
 pub const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,15 +58,17 @@ pub struct LightCullPass {
     pub tile_light_counts: wgpu::Buffer,
     /// Cached bind group, rebuilt when camera or lights buffer pointer changes.
     bind_group: Option<wgpu::BindGroup>,
-    /// Key: (camera_ptr, lights_ptr, light_entity_indices_ptr, transforms_ptr)
-    /// — used to skip needless bind-group rebuilds.
-    bind_group_key: Option<(usize, usize, usize, usize)>,
-    /// Light culling cache key: (camera_generation, lights generation --
-    /// either the SceneDB buffer's epoch or `movable_lights_generation`
-    /// depending on which source is active, movable_light_count,
-    /// use_direct_index) — used to skip culling compute when nothing the
-    /// shader reads has changed.
-    cull_cache_key: Option<(u64, u64, u32, bool)>,
+    /// Key: (camera_ptr, lights buffer epoch, light_entity_indices_ptr,
+    /// transforms_ptr) — used to skip needless bind-group rebuilds. The
+    /// lights buffer is keyed by its SceneDB epoch, not by the address of
+    /// this frame's handle, which a reallocated buffer can reuse.
+    bind_group_key: Option<(usize, u64, usize, usize)>,
+    /// Light culling cache key: (camera_generation, lights buffer (epoch,
+    /// content generation), light count, use_direct_index) — used to skip
+    /// culling compute when nothing the shader reads has changed. The
+    /// content generation changes when lights are edited in place, which
+    /// the epoch alone does not.
+    cull_cache_key: Option<(u64, (u64, u64), u32, bool)>,
     num_tiles_x: u32,
     num_tiles_y: u32,
     width: u32,
@@ -198,7 +199,7 @@ impl LightCullPass {
         let tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightLists"),
             size: list_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -206,7 +207,7 @@ impl LightCullPass {
         let tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightCounts"),
             size: count_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -248,7 +249,7 @@ impl RenderPass for LightCullPass {
         self.tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightLists"),
             size: list_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -256,7 +257,7 @@ impl RenderPass for LightCullPass {
         self.tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightCounts"),
             size: count_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -306,13 +307,16 @@ impl RenderPass for LightCullPass {
         // ctx.width/height are internal_w/h from the graph.
         self.num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
         self.num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
-        // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
-        // `MAX_LIGHTS`, no per-frame CPU query) when populated; else
+        // Prefer the SceneDB-direct `"scene_lights"` buffer (every allocated
+        // row, no per-frame CPU query) when populated; else
         // `ctx.scene.movable_light_count`, production's actual light count
         // today (`Renderer::submit_light_frame`, driven by `engine_backend`'s
         // own SceneDB resolve) -- see `light_mode_direct_index`'s doc.
-        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let num_lights = if use_direct_index { MAX_LIGHTS } else { 0 };
+        let scene_lights = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let use_direct_index = scene_lights.is_some();
+        // Every allocated row: the buffer grows with the scene and unused
+        // rows are zeroed.
+        let num_lights = scene_lights.map_or(0, |lights| lights.row_capacity());
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
             num_tiles_y: ctx.height.div_ceil(TILE_SIZE),
@@ -335,7 +339,7 @@ impl RenderPass for LightCullPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let light_entity_indices_buf = ctx.camera;
-        let movable_light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
+        let movable_light_count = scene_lights_handle.map_or(0, |lights| lights.row_capacity());
 
         if !use_direct_index && movable_light_count == 0 {
             // No active movable lights via either source: clear light
@@ -360,7 +364,9 @@ impl RenderPass for LightCullPass {
         // its buffer's own epoch instead, since nothing else identifies "did
         // the row data change" for it.
         let camera_gen = ctx.camera_generation;
-        let lights_gen = scene_lights_handle.map(|h| h.epoch).unwrap_or(0);
+        let lights_gen = scene_lights_handle
+            .map(|h| (h.epoch, h.content_generation))
+            .unwrap_or((0, 0));
 
         let cache_key = (
             camera_gen,
@@ -384,12 +390,12 @@ impl RenderPass for LightCullPass {
         self.cull_cache_key = Some(cache_key);
 
         let camera_ptr = ctx.camera as *const _ as usize;
-        let lights_ptr = lights_buf as *const _ as usize;
+        let lights_epoch = scene_lights_handle.map_or(u64::MAX, |h| h.epoch);
         let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
         let transforms_ptr = transforms_buf as *const _ as usize;
         let key = (
             camera_ptr,
-            lights_ptr,
+            lights_epoch,
             light_entity_indices_ptr,
             transforms_ptr,
         );

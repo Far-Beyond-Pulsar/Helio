@@ -1571,6 +1571,120 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
 
 #[test]
 #[ignore = "requires Vulkan hardware ray queries"]
+fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
+    pollster::block_on(async {
+        use helio_core::Movability;
+        use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
+        use std::sync::Arc;
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.publish_ray_frame = false;
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
+        f.lights(vec![light()]);
+        let mut db = pulsar_scenedb::SceneDb::new();
+        let context = pulsar_scenedb::gpu::EngineGpuContext::new(f.device.clone(), f.queue.clone());
+        let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+            &context,
+            pulsar_scenedb::gpu::SceneGpuConfig {
+                classes: vec![],
+                tombstone_headroom: 0,
+                max_cells_metadata: 0,
+            },
+        );
+        MeshComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        MaterialComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        StaticObjectComponent::register_gpu_columns_growable(&mut store, 8, &f.device);
+        db.world
+            .attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(
+                Arc::new(store),
+                f.queue.clone(),
+            ));
+        let mut acceleration =
+            helio_pass_hlfs::SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
+        let render = |f: &mut Fixture,
+                      acceleration: &mut helio_pass_hlfs::SceneDbRayTracing,
+                      db: &pulsar_scenedb::SceneDb| {
+            db.world.flush_gpu_mirror(&f.queue);
+            acceleration.prepare(&db.world).unwrap();
+            f.ray_frame.publish_with_transmission(f.scene.frame_count, acceleration.tlas(), acceleration.transmission());
+            f.frame();
+            mean(&f.read())
+        };
+        let clear = render(&mut f, &mut acceleration, &db);
+        let mesh = db.world.spawn();
+        db.world.insert(
+            mesh,
+            MeshComponent {
+                vertices: [
+                    [5.0, -100.0, -100.0],
+                    [5.0, 100.0, -100.0],
+                    [5.0, 0.0, 100.0],
+                ]
+                .map(|position| helio_core::PackedVertex {
+                    position,
+                    ..Default::default()
+                })
+                .to_vec(),
+                indices: vec![0, 1, 2],
+            },
+        );
+        db.world.insert(mesh, Movability::Static);
+        let material = db.world.spawn();
+        db.world.insert(
+            material,
+            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+        );
+        let mirror = db.world.gpu_mirror().unwrap();
+        let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index()).unwrap();
+        let indices = MeshComponent::indices_gpu_handle(mirror.store(), mesh.index()).unwrap();
+        let object = db.world.spawn();
+        db.world.insert(
+            object,
+            StaticObjectComponent::new(
+                mesh.index(),
+                mesh.generation() + 1,
+                material.index(),
+                material.generation() + 1,
+                glam::Mat4::IDENTITY,
+                [0.0, 0.0, 0.0, 200.0],
+                indices.count,
+                indices.offset,
+                vertices.offset as i32,
+                0,
+                0,
+                helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW,
+            ),
+        );
+        assert!(
+            render(&mut f, &mut acceleration, &db) < clear * 0.2,
+            "static caster missing"
+        );
+        // Breaking the Static promise is not detected: the cached BLAS is kept.
+        {
+            let mut mesh = db.world.get_mut::<MeshComponent>(mesh).unwrap();
+            for vertex in &mut mesh.vertices {
+                vertex.position[0] += 20.0;
+            }
+        }
+        assert!(
+            render(&mut f, &mut acceleration, &db) < clear * 0.2,
+            "static mesh must reuse its BLAS without re-reading vertices"
+        );
+        // Declaring the mesh Dynamic restores content-based invalidation.
+        db.world.insert(mesh, Movability::Dynamic);
+        let edited = render(&mut f, &mut acceleration, &db);
+        assert!(
+            (edited - clear).abs() < clear * 0.01,
+            "dynamic mesh edit retained stale BLAS"
+        );
+    });
+}
+
+#[test]
+#[ignore = "requires Vulkan hardware ray queries"]
 fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
     pollster::block_on(async {
         for debug_mode in [HlfsDebugMode::Reference, HlfsDebugMode::Unfiltered] {

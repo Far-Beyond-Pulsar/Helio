@@ -146,6 +146,18 @@ struct StaticObjectRow {
 /// `indirect_args[1]` reuse exactly.
 @group(0) @binding(4) var<storage, read_write> gather_count: array<atomic<u32>>;
 
+/// Each static_objects row's transform as of the last frame it was drawn,
+/// with the identity it was drawn under. Supplies per-frame motion vectors:
+/// a row's authored `prev_transform` is the transform before its last edit,
+/// which stays different from `transform` after the object stops moving.
+struct PrevRow {
+    transform: array<array<f32, 4>, 4>,
+    /// (mesh_slot, mesh_generation, material_slot, material_generation);
+    /// all zero once the row is seen dead.
+    identity: vec4<u32>,
+}
+@group(0) @binding(5) var<storage, read_write> prev_rows: array<PrevRow>;
+
 /// A hierarchical per-row sort key matching the CPU reference's tuple sort
 /// PRIORITY ORDER `(material_class, graph_hash, mesh_id, material_id)`, not
 /// just its highest field: `material_class` occupies the top 8 bits
@@ -196,6 +208,9 @@ fn cs_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let row = static_objects[i];
     if row.mesh_generation == 0u {
+        // Never written, or retired: a later object in this row must not
+        // inherit the dead one's last transform.
+        prev_rows[i].identity = vec4<u32>(0u);
         return; // Never written -- Zeroable default, not a live entity.
     }
     let slot = atomicAdd(&gather_count[1], 1u);
@@ -383,6 +398,7 @@ struct GpuInstanceAabbOut {
 }
 @group(0) @binding(3) var<storage, read_write> instances_out: array<GpuInstanceDataOut>;
 @group(0) @binding(4) var<storage, read_write> aabbs_out: array<GpuInstanceAabbOut>;
+@group(0) @binding(5) var<storage, read_write> prev_rows_fg: array<PrevRow>;
 
 @compute @workgroup_size(WG)
 fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -390,12 +406,24 @@ fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
     if i >= fu_fg.count {
         return;
     }
-    let row = static_objects_fg[sorted_indices_fg[i]];
+    let src = sorted_indices_fg[i];
+    let row = static_objects_fg[src];
+    // Previous-frame transform for motion vectors: last frame's transform
+    // of this same object, or this frame's (zero motion) when the row is
+    // new or was reused by another object. `sorted_indices_fg` is a
+    // permutation, so each row is read and written by one invocation.
+    let identity = vec4<u32>(row.mesh_slot, row.mesh_generation, row.material_slot, row.material_generation);
+    let last = prev_rows_fg[src];
+    var prev_transform = row.transform;
+    if all(last.identity == identity) {
+        prev_transform = last.transform;
+    }
+    prev_rows_fg[src] = PrevRow(row.transform, identity);
     instances_out[i] = GpuInstanceDataOut(
         row.transform,
         row.normal_mat,
         row.bounds,
-        row.prev_transform,
+        prev_transform,
         row.mesh_slot,
         row.material_slot,
         row.flags,

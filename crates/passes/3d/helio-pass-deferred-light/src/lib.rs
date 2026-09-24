@@ -918,22 +918,12 @@ impl RenderPass for DeferredLightPass {
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: if ctx
+            // The buffer's live row count: it grows with the scene, so any
+            // constant either reads past its end or drops lights.
+            light_count: ctx
                 .scene_buffers
-                .contains(BufferKey::of("scene_lights"))
-            {
-                // Must match the buffer's REAL fixed capacity, not a guess:
-                // `helio_pass_forward_lit::LightComponent` auto-registers
-                // "scene_lights" at exactly `pulsar_scenedb::gpu::world_
-                // mirror::DEFAULT_AUTO_REGISTER_CAPACITY` rows (that
-                // constant is `MAX_LIGHTS` there). A stale/larger constant
-                // here (previously a hardcoded 256, when the real capacity
-                // is 64) makes the shader read 192 out-of-bounds/garbage
-                // "lights" past the end of the real data every frame.
-                pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY
-            } else {
-                0
-            }, // SceneDB owns the fixed-capacity light component buffer.
+                .get(BufferKey::of("scene_lights"))
+                .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
@@ -1155,9 +1145,8 @@ impl RenderPass for DeferredLightPass {
             .registry.get(helio_core::ResourceKey::new("planar_reflection"))
             .unwrap_or(&self.fallback_planar_view);
 
-        let lights_buf = ctx
-            .scene_buffers
-            .get(BufferKey::of("scene_lights"))
+        let lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let lights_buf = lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
@@ -1165,7 +1154,9 @@ impl RenderPass for DeferredLightPass {
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
         let scene_key = [
-            lights_buf as *const _ as usize,
+            // SceneDB epoch, not this frame's handle address: a reallocated
+            // lights buffer can land at the same address.
+            lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize),
             shadow_view as *const _ as usize,
             shadow_sampler as *const _ as usize,
             shadow_matrices_buf as *const _ as usize,

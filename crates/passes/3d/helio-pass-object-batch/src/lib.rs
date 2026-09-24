@@ -75,6 +75,9 @@ const INSTANCE_BYTES: u64 = 208;
 /// Matches `shaders/object_batch.wgsl`'s `GpuInstanceAabbOut` -- 32 bytes (min, pad, max, pad),
 /// the layout `indirect_dispatch.wgsl` reads as `GpuAabb`.
 const AABB_BYTES: u64 = 32;
+/// Matches `shaders/object_batch.wgsl`'s `PrevRow` -- 80 bytes (transform +
+/// identity vec4).
+const PREV_ROW_BYTES: u64 = 80;
 /// Matches `shaders/object_batch.wgsl`'s `GpuRangeOut` -- 20 bytes.
 const RANGE_BYTES: u64 = 20;
 /// Matches `shaders/object_batch.wgsl`'s `DrawIndexedIndirectArgsOut` -- 20
@@ -244,6 +247,9 @@ struct ScratchBuffers {
     shadow_static_indirect: wgpu::Buffer,
     shadow_movable_indirect: wgpu::Buffer,
     shadow_counts: wgpu::Buffer,
+    /// Per `static_objects` row: last drawn transform + identity, for
+    /// per-frame motion vectors (see `object_batch.wgsl`'s `PrevRow`).
+    prev_rows: wgpu::Buffer,
 }
 
 impl ScratchBuffers {
@@ -304,6 +310,7 @@ impl ScratchBuffers {
                 n * INDIRECT_ARGS_BYTES,
             ),
             shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
+            prev_rows: create_storage_buffer(device, "ObjBatch PrevRows", n * PREV_ROW_BYTES),
         }
     }
 }
@@ -344,6 +351,18 @@ pub struct ObjectBatchPass {
 
     readback: readback::RangeReadback,
 
+    /// Inputs the last recorded run read: `static_objects` and `materials`
+    /// (epoch, content generation) plus row and scratch capacity. The
+    /// pipeline is a pure function of these and its own persistent
+    /// buffers, so an unchanged key reproduces the previous outputs.
+    last_inputs: Option<[u64; 6]>,
+    /// True once a run has seen `last_inputs` twice in a row: the first
+    /// repeat rolls every row's previous-frame transform forward to the
+    /// current one, after which outputs stop changing and runs are skipped.
+    settled: bool,
+    /// Decided in `prepare`, consumed by `execute`.
+    skip_this_frame: bool,
+
     /// Fallback bound in `static_objects`'/`materials`' place before either
     /// has ever been resolved (mirrors every other SceneDB-direct pass's
     /// "bind *some* valid buffer so bind-group creation can't fail" fallback
@@ -369,6 +388,7 @@ impl ObjectBatchPass {
                     bgl_entry_storage(2, cs, false),
                     bgl_entry_storage(3, cs, false),
                     bgl_entry_storage(4, cs, false),
+                    bgl_entry_storage(5, cs, false),
                 ],
             }),
             prepare: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -412,6 +432,7 @@ impl ObjectBatchPass {
                     bgl_entry_storage(2, cs, true),
                     bgl_entry_storage(3, cs, false),
                     bgl_entry_storage(4, cs, false),
+                    bgl_entry_storage(5, cs, false),
                 ],
             }),
             group_local_scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -693,6 +714,9 @@ impl ObjectBatchPass {
             shadow_partition_bg: None,
             bind_group_key: None,
             readback: readback::RangeReadback::new(),
+            last_inputs: None,
+            settled: false,
+            skip_this_frame: false,
             fallback_buf,
         }
     }
@@ -742,6 +766,7 @@ impl ObjectBatchPass {
                 bg_entry(2, &s.keys_a),
                 bg_entry(3, &s.indices_a),
                 bg_entry(4, &s.gather_count),
+                bg_entry(5, &s.prev_rows),
             ],
         }));
 
@@ -810,6 +835,7 @@ impl ObjectBatchPass {
                 bg_entry(2, static_objects),
                 bg_entry(3, &s.instances_out),
                 bg_entry(4, &s.aabbs_out),
+                bg_entry(5, &s.prev_rows),
             ],
         }));
 
@@ -1233,6 +1259,13 @@ impl ObjectBatchPass {
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
+
+    /// Runs one step of the asynchronous range/count readback that
+    /// `prepare()` performs each frame, for tests driving the pass outside a
+    /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
+    pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.readback.poll_and_kick_off(device, queue, &self.scratch);
+    }
 }
 
 impl RenderPass for ObjectBatchPass {
@@ -1322,6 +1355,28 @@ impl RenderPass for ObjectBatchPass {
             self.bind_group_key = Some(key);
         }
 
+        let generation = |handle: Option<&helio_core::BufferHandle>| {
+            handle.map_or((u64::MAX, u64::MAX), |h| (h.epoch, h.content_generation))
+        };
+        let (objects_epoch, objects_content) = generation(static_objects_handle);
+        let (materials_epoch, materials_content) = generation(materials_handle);
+        let inputs = [
+            objects_epoch,
+            objects_content,
+            materials_epoch,
+            materials_content,
+            capacity as u64,
+            self.scratch_capacity as u64,
+        ];
+        if self.last_inputs == Some(inputs) {
+            self.skip_this_frame = self.settled;
+            self.settled = true;
+        } else {
+            self.last_inputs = Some(inputs);
+            self.settled = false;
+            self.skip_this_frame = false;
+        }
+
         ctx.write_buffer(
             &self.batch_uniform,
             0,
@@ -1346,6 +1401,10 @@ impl RenderPass for ObjectBatchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.skip_this_frame {
+            // Nothing the pipeline reads changed: last frame's outputs stand.
+            return Ok(());
+        }
         let capacity = {
             let handle = ctx.scene_buffers.get(BufferKey::of("static_objects"));
             handle

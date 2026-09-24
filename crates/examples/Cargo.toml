@@ -100,6 +100,10 @@ name = "churn_benchmark"
 path = "churn_benchmark.rs"
 
 [[bin]]
+name = "move_benchmark"
+path = "move_benchmark.rs"
+
+[[bin]]
 name = "shape_battle_royale"
 path = "shape_battle_royale.rs"
 
@@ -264,6 +268,7 @@ helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 pulsar_scenedb = { workspace = true }
 scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 rapier3d = "0.24"

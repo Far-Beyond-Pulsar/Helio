@@ -27,14 +27,11 @@
 
 use pulsar_scenedb_derive::SceneStore;
 
-/// Fixed capacity of the `"scene_lights"` buffer. Passes/frontends binding
-/// this buffer iterate exactly this many rows, always — see the module doc
-/// for why that needs no per-frame count at all.
-///
-/// Matches `World`'s own auto-registration capacity exactly: `LightComponent`
-/// registers no buffer up front (see the module doc's `#[gpu(layout =
-/// packed)]` auto-registration) — the first `World::insert` of a
-/// `LightComponent` registers `"scene_lights"` at this same capacity.
+/// Initial capacity of the `"scene_lights"` buffer: `World`'s own
+/// auto-registration capacity, and the capacity frontends register it with.
+/// The buffer grows as lights are added; passes iterate its live
+/// `BufferHandle::row_capacity()` (unused rows are zeroed), never this
+/// constant.
 pub const MAX_LIGHTS: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY;
 
 /// A placed light, authored as a SceneDB component. Field-for-field

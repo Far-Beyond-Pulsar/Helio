@@ -64,6 +64,8 @@ fn scene_buffer_or_dummy(
                 mapped_at_creation: false,
             }),
             epoch: 0,
+            row_bytes: 0,
+            content_generation: 0,
         }
     })
 }
