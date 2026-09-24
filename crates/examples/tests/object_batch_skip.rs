@@ -121,4 +121,9 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
     .unwrap();
     let (centre, side) = render(&mut renderer, &scene_db, 12);
     assert!(side > centre + 60, "the move after idle frames never reached the image: centre {centre}, side {side}");
+
+    // Despawning removes it from the image.
+    despawn_object(&mut scene_db.world, &mut renderer, object).unwrap();
+    let (centre, side) = render(&mut renderer, &scene_db, 6);
+    assert!(side < 30 && centre < 30, "despawned object still drawn: centre {centre}, side {side}");
 }
