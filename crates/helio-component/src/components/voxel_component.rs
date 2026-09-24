@@ -6,6 +6,8 @@
 //! runtime data fields.
 
 use engine_class_derive::engine_class;
+use helio_voxel_data::VoxelStoredPayload;
+pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -20,15 +22,24 @@ use std::{
 /// Component clones create fresh stores; callers can explicitly clone the
 /// `Arc` when shared access is intended. Four opaque words allow collision-free
 /// chunk keys (for example signed XYZ bit patterns plus an LOD word).
-pub type VoxelPayloadKey = [u64; 4];
-pub type VoxelPayloadStore = Arc<RwLock<(u64, HashMap<VoxelPayloadKey, Arc<[u8]>>)>>;
-
 fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
 }
 
 fn default_voxel_generator_version() -> u32 {
     1
+}
+
+fn default_chunk_edge_voxels() -> u32 {
+    8
+}
+
+fn default_max_chunk_lod() -> u32 {
+    16
+}
+
+fn default_lod_scale() -> u32 {
+    2
 }
 
 fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStore {
@@ -51,7 +62,7 @@ fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStor
                 }
                 chunks.insert(
                     [u64::from(x), u64::from(y), u64::from(z), 0],
-                    Arc::from(samples),
+                    VoxelStoredPayload::raw_material(samples),
                 );
             }
         }
@@ -205,6 +216,21 @@ pub struct VoxelTerrainComponent {
     /// Edge length of a base-resolution voxel in world units.
     #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Generation")]
     pub voxel_size: f64,
+    /// Number of base-resolution voxels covered by one chunk key on each
+    /// axis at LOD zero. The payload format can encode that region as samples,
+    /// a hierarchy, a compressed field, or another registered representation.
+    #[serde(default = "default_chunk_edge_voxels")]
+    #[property(category = "Generation")]
+    pub chunk_edge_voxels: u32,
+    /// Highest chunk LOD accepted for this terrain source.
+    #[serde(default = "default_max_chunk_lod")]
+    #[property(category = "Generation")]
+    pub max_chunk_lod: u32,
+    /// Spatial scale between adjacent chunk LODs. Two means each coarser
+    /// chunk covers twice the width of a finer chunk along each axis.
+    #[serde(default = "default_lod_scale")]
+    #[property(category = "Generation")]
+    pub lod_scale: u32,
     /// Stable registered generator/source identifier. Empty means externally
     /// supplied data only; generator implementation is not stored here.
     #[property(category = "Generation")]
@@ -245,6 +271,9 @@ impl Default for VoxelTerrainComponent {
             bounds_max_y: 0.0,
             bounds_max_z: 0.0,
             voxel_size: 1.0,
+            chunk_edge_voxels: default_chunk_edge_voxels(),
+            max_chunk_lod: default_max_chunk_lod(),
+            lod_scale: default_lod_scale(),
             generator_id: String::new(),
             generator_version: 1,
             seed: 0,
@@ -281,6 +310,9 @@ impl Clone for VoxelTerrainComponent {
             bounds_max_y: self.bounds_max_y,
             bounds_max_z: self.bounds_max_z,
             voxel_size: self.voxel_size,
+            chunk_edge_voxels: self.chunk_edge_voxels,
+            max_chunk_lod: self.max_chunk_lod,
+            lod_scale: self.lod_scale,
             generator_id: self.generator_id.clone(),
             generator_version: self.generator_version,
             seed: self.seed,
@@ -316,17 +348,21 @@ mod tests {
         let store = component.payload_store();
         let state = store.read().unwrap();
         assert_eq!(state.1.len(), 8);
-        assert!(state
-            .1
-            .values()
-            .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1)));
+        assert!(
+            state
+                .1
+                .values()
+                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
+        );
         drop(state);
         let serialized = serde_json::to_value(&component).unwrap();
         assert!(serialized.get("payloads").is_none());
-        assert!(!component
-            .get_properties()
-            .iter()
-            .any(|property| property.name == "payloads"));
+        assert!(
+            !component
+                .get_properties()
+                .iter()
+                .any(|property| property.name == "payloads")
+        );
     }
 
     #[test]
@@ -348,30 +384,36 @@ mod tests {
     fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelTerrainComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(!component
-            .get_properties()
-            .iter()
-            .any(|property| property.name == "payloads"));
+        assert!(
+            !component
+                .get_properties()
+                .iter()
+                .any(|property| property.name == "payloads")
+        );
     }
 
     #[test]
-    fn older_terrain_config_defaults_generator_version() {
+    fn older_terrain_config_defaults_generator_version_and_chunk_layout() {
         let mut value = serde_json::to_value(VoxelTerrainComponent::default()).unwrap();
         value.as_object_mut().unwrap().remove("generator_version");
+        value.as_object_mut().unwrap().remove("chunk_edge_voxels");
+        value.as_object_mut().unwrap().remove("max_chunk_lod");
+        value.as_object_mut().unwrap().remove("lod_scale");
         let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
         assert_eq!(restored.generator_version, 1);
+        assert_eq!(restored.chunk_edge_voxels, 8);
+        assert_eq!(restored.max_chunk_lod, 16);
+        assert_eq!(restored.lod_scale, 2);
     }
 
     #[test]
     fn cloned_component_preserves_live_state_without_aliasing_future_mutations() {
         let original = VoxelTerrainComponent::default();
         let payload: Arc<[u8]> = Arc::from([1, 2, 3]);
-        original
-            .payloads
-            .write()
-            .unwrap()
-            .1
-            .insert([u64::MAX, 0, 42, 7], payload.clone());
+        original.payloads.write().unwrap().1.insert(
+            [u64::MAX, 0, 42, 7],
+            VoxelStoredPayload::raw_material(payload.clone()),
+        );
         let clone = original.clone();
 
         assert!(!Arc::ptr_eq(&original.payloads, &clone.payloads));
@@ -389,7 +431,9 @@ mod tests {
 
         // Shared snapshots are explicit and retain immutable bytes cheaply.
         let shared_handle = Arc::clone(&original.payloads);
-        let shared_payload = shared_handle.read().unwrap().1[&[u64::MAX, 0, 42, 7]].clone();
+        let shared_payload = shared_handle.read().unwrap().1[&[u64::MAX, 0, 42, 7]]
+            .bytes
+            .clone();
         assert!(Arc::ptr_eq(&payload, &shared_payload));
     }
 }

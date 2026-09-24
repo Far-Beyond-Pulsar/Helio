@@ -64,6 +64,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
+helio-voxel-data.workspace = true
 helio-asset-compat = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-water-sim = { workspace = true }
