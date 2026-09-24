@@ -1,0 +1,106 @@
+# Object-move benchmark: baseline
+
+Produced by `crates/examples/move_benchmark.rs` (`cargo run --release -p examples --bin move_benchmark`).
+Rerun it after every change that touches the move path and compare against these tables.
+
+Goal: moving one object must cost the same at any scene size. A stage whose time grows
+with `objects`/`tris` in the `move_one` or `editor_resync` rows is a scaling bug.
+
+## How this baseline was captured
+
+* Adapter: Mesa lavapipe (software Vulkan, 4 CPU cores), `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
+  The `gpu` and `rt_gpu` columns are software-rasterizer time and are only meaningful as *deltas
+  between rows of the same size*; CPU columns (`update`, `flush`, `rt`, `render`) are representative.
+  Rerun on real hardware for absolute GPU numbers.
+* 320x180, 10 measured frames per row after 4 warmup frames, `--segments 6`, 64 point lights.
+* Commands:
+  ```
+  move_benchmark --graph hlfs --sizes 1000,4000,16000,32000 --frames 10 --warmup 4 --segments 6
+  move_benchmark --graph default --editor --no-ray-query --sizes 1000,4000,16000,32000 --modes ss --frames 10 --warmup 4 --segments 6
+  move_benchmark --scene cathedral_large --frames 10 --warmup 4 --segments 6
+  ```
+  (`--no-ray-query` only because lavapipe's compiler crashes on the radiance-cascades ray-query pipeline.)
+
+## Findings
+
+1. **Helio's own per-row move path is flat.** `move_one` (one `World::get_mut`) costs ~0.06 ms of
+   CPU (`update`+`flush`) at 1k and at 32k objects, in both the HLFS graph and the editor's default graph.
+2. **The editor's per-frame resync is O(scene).** `editor_resync` reproduces Pulsar-Native's
+   `engine_backend::scene::sync_static_mesh_rows`, which re-inserts a `StaticObjectComponent` for
+   *every* mesh entity on every frame the scene revision changes (every frame of a gizmo drag).
+   SceneDB does not skip unchanged values, so every row is re-marked dirty and re-uploaded
+   (236 B/row, ~7.5 MB/frame at 32k objects). CPU `update`+`flush`: 0.7 ms @1k -> 10.7 ms @32k,
+   in a release build and before the editor's additional per-entity work (Transform lookups,
+   GPU-handle lookups, two full `query().count()` scans for a `tracing::info!`). It also resets
+   `prev_transform`, so the dragged object gets zero motion vectors.
+3. **The RT acceleration path is O(scene) every frame, moving or not.**
+   `SceneDbRayTracing::prepare` re-walks every caster and re-hashes every referenced mesh's full
+   vertex+index data each call: 6.4 ms/frame idle on the large cathedral (416k tris, 16 objects),
+   9.6 ms/frame idle at 32k objects. Any transform change then rebuilds the whole TLAS
+   (`rt` 9.6 -> 16.6 ms CPU at 32k, plus the full TLAS build on the device).
+4. **The editor only renders while something changes** (`is_idle` early-out in the editor
+   renderer), so any fixed per-frame render cost is only *visible* while dragging.
+
+## `grid_hlfs`
+
+Adapter: llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan), graph hlfs, 320x180, 10 measured frames per row (median ms; total also p95)
+
+| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | gpu | total | total p95 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| grid | 1001 | 144012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 3.13 | 185.37 | 188.53 | 208.82 |
+| grid | 1001 | 144012 | 64 | ss | move_one | 0.01 | 0.04 | 0.00 | 0.00 | 3.36 | 176.45 | 179.73 | 209.15 |
+| grid | 1001 | 144012 | 64 | ss | editor_resync | 0.28 | 0.46 | 0.00 | 0.00 | 3.59 | 186.33 | 190.80 | 200.38 |
+| grid | 1001 | 144012 | 64 | rt | idle | 0.00 | 0.02 | 0.90 | 0.09 | 2.81 | 208.47 | 212.33 | 236.49 |
+| grid | 1001 | 144012 | 64 | rt | move_one | 0.01 | 0.05 | 1.25 | 15.32 | 3.34 | 208.12 | 227.95 | 236.49 |
+| grid | 1001 | 144012 | 64 | rt | editor_resync | 0.31 | 0.53 | 0.89 | 15.40 | 3.05 | 204.42 | 226.10 | 240.97 |
+| grid | 4001 | 576012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 4.48 | 265.01 | 269.50 | 289.36 |
+| grid | 4001 | 576012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 4.50 | 269.05 | 272.16 | 312.84 |
+| grid | 4001 | 576012 | 64 | ss | editor_resync | 0.96 | 0.81 | 0.00 | 0.00 | 4.44 | 266.29 | 271.58 | 298.41 |
+| grid | 4001 | 576012 | 64 | rt | idle | 0.00 | 0.02 | 1.82 | 0.13 | 3.63 | 305.91 | 311.44 | 318.94 |
+| grid | 4001 | 576012 | 64 | rt | move_one | 0.01 | 0.06 | 2.86 | 47.31 | 3.49 | 296.34 | 347.95 | 370.09 |
+| grid | 4001 | 576012 | 64 | rt | editor_resync | 1.01 | 0.93 | 2.47 | 44.73 | 3.73 | 290.30 | 344.33 | 380.79 |
+| grid | 16001 | 2304012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 4.54 | 566.89 | 572.43 | 595.17 |
+| grid | 16001 | 2304012 | 64 | ss | move_one | 0.01 | 0.06 | 0.00 | 0.00 | 4.79 | 594.82 | 600.04 | 676.44 |
+| grid | 16001 | 2304012 | 64 | ss | editor_resync | 3.82 | 1.91 | 0.00 | 0.00 | 3.54 | 568.00 | 577.55 | 612.68 |
+| grid | 16001 | 2304012 | 64 | rt | idle | 0.00 | 0.02 | 5.12 | 0.13 | 3.76 | 609.35 | 618.84 | 628.34 |
+| grid | 16001 | 2304012 | 64 | rt | move_one | 0.01 | 0.06 | 9.00 | 73.76 | 5.48 | 601.44 | 690.84 | 722.71 |
+| grid | 16001 | 2304012 | 64 | rt | editor_resync | 3.70 | 3.15 | 8.29 | 75.27 | 5.35 | 589.01 | 678.35 | 718.61 |
+| grid | 32001 | 4608012 | 64 | ss | idle | 0.00 | 0.03 | 0.00 | 0.00 | 3.31 | 968.06 | 970.97 | 991.19 |
+| grid | 32001 | 4608012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 4.27 | 969.57 | 974.43 | 1024.06 |
+| grid | 32001 | 4608012 | 64 | ss | editor_resync | 7.37 | 3.42 | 0.00 | 0.00 | 5.55 | 969.66 | 986.32 | 999.28 |
+| grid | 32001 | 4608012 | 64 | rt | idle | 0.00 | 0.02 | 9.61 | 0.13 | 5.43 | 1016.89 | 1031.24 | 1071.10 |
+| grid | 32001 | 4608012 | 64 | rt | move_one | 0.01 | 0.06 | 16.64 | 103.34 | 6.63 | 1016.34 | 1146.19 | 1174.40 |
+| grid | 32001 | 4608012 | 64 | rt | editor_resync | 7.67 | 4.12 | 16.42 | 107.74 | 5.51 | 1023.03 | 1171.44 | 1219.61 |
+
+## `grid_default`
+
+Adapter: llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan), graph default (editor mode), 320x180, 10 measured frames per row (median ms; total also p95)
+
+| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | gpu | total | total p95 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| grid | 1001 | 144012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 3.10 | 147.15 | 150.60 | 163.66 |
+| grid | 1001 | 144012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 2.68 | 146.67 | 149.52 | 157.94 |
+| grid | 1001 | 144012 | 64 | ss | editor_resync | 0.25 | 0.44 | 0.00 | 0.00 | 3.31 | 143.81 | 147.10 | 163.14 |
+| grid | 4001 | 576012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 4.57 | 257.71 | 262.24 | 273.38 |
+| grid | 4001 | 576012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 2.79 | 245.42 | 248.03 | 254.77 |
+| grid | 4001 | 576012 | 64 | ss | editor_resync | 0.95 | 0.72 | 0.00 | 0.00 | 4.45 | 247.65 | 253.54 | 272.55 |
+| grid | 16001 | 2304012 | 64 | ss | idle | 0.00 | 0.03 | 0.00 | 0.00 | 2.87 | 636.32 | 640.08 | 696.88 |
+| grid | 16001 | 2304012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 4.27 | 636.17 | 640.76 | 656.37 |
+| grid | 16001 | 2304012 | 64 | ss | editor_resync | 3.78 | 1.79 | 0.00 | 0.00 | 4.37 | 639.81 | 653.05 | 692.32 |
+| grid | 32001 | 4608012 | 64 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 2.71 | 1068.20 | 1070.95 | 1127.57 |
+| grid | 32001 | 4608012 | 64 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 2.94 | 1102.68 | 1105.59 | 1141.90 |
+| grid | 32001 | 4608012 | 64 | ss | editor_resync | 7.30 | 3.37 | 0.00 | 0.00 | 5.38 | 1071.62 | 1088.31 | 1119.34 |
+
+## `cathedral_large_hlfs`
+
+Adapter: llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan), graph hlfs, 320x180, 10 measured frames per row (median ms; total also p95)
+
+| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | gpu | total | total p95 |
+|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| cathedral_large | 16 | 416324 | 12 | ss | idle | 0.00 | 0.02 | 0.00 | 0.00 | 2.78 | 238.89 | 241.62 | 250.04 |
+| cathedral_large | 16 | 416324 | 12 | ss | move_one | 0.01 | 0.05 | 0.00 | 0.00 | 2.81 | 236.63 | 239.77 | 262.16 |
+| cathedral_large | 16 | 416324 | 12 | ss | editor_resync | 0.02 | 0.39 | 0.00 | 0.00 | 2.63 | 247.94 | 250.76 | 298.90 |
+| cathedral_large | 16 | 416324 | 12 | rt | idle | 0.00 | 0.02 | 6.43 | 0.13 | 2.78 | 323.68 | 333.25 | 355.20 |
+| cathedral_large | 16 | 416324 | 12 | rt | move_one | 0.01 | 0.05 | 6.57 | 5.76 | 3.49 | 338.75 | 355.16 | 366.66 |
+| cathedral_large | 16 | 416324 | 12 | rt | editor_resync | 0.02 | 0.54 | 6.27 | 5.34 | 3.89 | 314.01 | 329.75 | 347.75 |
+

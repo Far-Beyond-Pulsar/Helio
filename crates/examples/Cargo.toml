@@ -100,6 +100,10 @@ name = "churn_benchmark"
 path = "churn_benchmark.rs"
 
 [[bin]]
+name = "move_benchmark"
+path = "move_benchmark.rs"
+
+[[bin]]
 name = "shape_battle_royale"
 path = "shape_battle_royale.rs"
 
