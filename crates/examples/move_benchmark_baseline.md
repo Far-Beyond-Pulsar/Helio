@@ -104,3 +104,29 @@ Adapter: llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan), graph hlfs, 320x180, 10 meas
 | cathedral_large | 16 | 416324 | 12 | rt | move_one | 0.01 | 0.05 | 6.57 | 5.76 | 3.49 | 338.75 | 355.16 | 366.66 |
 | cathedral_large | 16 | 416324 | 12 | rt | editor_resync | 0.02 | 0.54 | 6.27 | 5.34 | 3.89 | 314.01 | 329.75 | 347.75 |
 
+
+## After: mesh `Movability` + per-frame mesh/material dedupe in `SceneDbRayTracing`
+
+`helio_core::Movability` now has `Static` / `Stationary` / `Movable` / `Dynamic`
+(`can_move()`, `can_deform()`). A mesh entity carrying a non-deforming `Movability`
+(anything but `Dynamic`) builds its BLAS once and is never re-hashed; an untagged mesh keeps
+per-frame content invalidation. Independently of tagging, `prepare` now resolves each mesh's
+GPU ranges and each material's RT properties once per frame instead of once per object.
+
+`rt` column (CPU ms, median, RT mode, same settings as above), captured with
+`--mesh-movability none` (untagged) and `--mesh-movability static`:
+
+| scene | objects | tris | workload | baseline | after, untagged | after, `Static` meshes |
+|---|---:|---:|---|---:|---:|---:|
+| cathedral_large | 16 | 416k | idle | 6.43 | 6.45 | **0.49** |
+| cathedral_large | 16 | 416k | move_one | 6.57 | 6.40 | **0.54** |
+| grid | 1k | 144k | idle | 0.90 | 0.76 | 0.65 |
+| grid | 16k | 2.3M | idle | 5.12 | 3.59 | 3.36 |
+| grid | 16k | 2.3M | move_one | 9.00 | 7.50 | 7.20 |
+| grid | 32k | 4.6M | idle | 9.61 | 6.08 | 6.01 |
+| grid | 32k | 4.6M | move_one | 16.64 | 13.39 | 12.65 |
+
+The grid shares 64 small meshes, so tagging matters little there; its remaining cost is the
+per-object walk (every caster's transform must reach the TLAS) and, on a move, wgpu's full TLAS
+instance upload and rebuild (`rt_gpu`), which is O(instances) inside wgpu itself. Updating only
+the changed TLAS slots in `TlasManager` was tried and measured no difference, so it was not kept.

@@ -1,6 +1,6 @@
 //! Frontend-owned acceleration projection of SceneDB's static shadow casters.
 //! No renderer-owned scene table or GPU readback is involved.
-use helio_core::{BlasGeometry, BlasManager, TlasInstanceInput, TlasManager};
+use helio_core::{BlasGeometry, BlasManager, Movability, TlasInstanceInput, TlasManager};
 use helio_pass_gbuffer::{
     MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,
 };
@@ -48,6 +48,10 @@ impl SceneDbRayTracing {
     /// remains authoritative. This control scans object rows on the CPU and hashes
     /// each referenced mesh/opacity variant once to detect in-place edits without consuming other
     /// clients' SceneDB change events. Hashing is a known CPU cost, not GPU timing.
+    ///
+    /// Insert a non-deforming [`Movability`] (anything but `Dynamic`) on a mesh
+    /// entity to skip that hash: its BLAS is then built once and reused until
+    /// SceneDB reallocates or replaces the mesh's geometry range.
     pub fn prepare(&mut self, world: &World) -> helio_core::Result<&wgpu::Tlas> {
         let result = self.build(world);
         if let Err(error) = result {
@@ -111,6 +115,8 @@ impl SceneDbRayTracing {
                 label: Some("SceneDB RT acceleration"),
             });
         let mut live = HashSet::new();
+        let mut mesh_ranges = HashMap::new();
+        let mut material_rows = HashMap::new();
         let mut instances = Vec::new();
         let mut transmission_rows = Vec::<[f32; 4]>::new();
         let mut has_transmission = false;
@@ -127,25 +133,40 @@ impl SceneDbRayTracing {
             if helio_pass_object_batch::coordinate_space(object.flags) != 0 {
                 return Err(error("non-world coordinate-space casters are unsupported"));
             }
-            let (material_entity, material) = materials
-                .get(&object.material_slot)
-                .ok_or_else(|| error("missing caster material"))?;
-            if material_entity.generation().wrapping_add(1) != object.material_generation {
+            // Resolve each material once per frame; many objects share one.
+            let (material_generation, rgb, transmits) = match material_rows.get(&object.material_slot) {
+                Some(row) => *row,
+                None => {
+                    let (material_entity, material) = materials
+                        .get(&object.material_slot)
+                        .ok_or_else(|| error("missing caster material"))?;
+                    let transmission = world.get::<RayTransmission>(*material_entity);
+                    if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER)
+                        != 0
+                        || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
+                    {
+                        return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
+                    }
+                    let rgb = transmission.map_or([0.0; 3], |value| value.0);
+                    if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+                        return Err(error("transmission must be finite linear RGB in [0, 1]"));
+                    }
+                    let row = (
+                        material_entity.generation().wrapping_add(1),
+                        rgb,
+                        transmission.is_some(),
+                    );
+                    material_rows.insert(object.material_slot, row);
+                    row
+                }
+            };
+            if material_generation != object.material_generation {
                 return Err(error("stale caster material identity"));
             }
-            let transmission = world.get::<RayTransmission>(*material_entity);
-            if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER)
-                != 0
-                || object.graph_hash() != 0
-                || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
-            {
+            if object.graph_hash() != 0 {
                 return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
             }
-            let rgb = transmission.map_or([0.0; 3], |value| value.0);
-            if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
-                return Err(error("transmission must be finite linear RGB in [0, 1]"));
-            }
-            has_transmission |= transmission.is_some();
+            has_transmission |= transmits;
             transmission_rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
             let (entity, mesh) = meshes
                 .get(&object.mesh_slot)
@@ -167,10 +188,16 @@ impl SceneDbRayTracing {
                 self.geometry_ids.insert((mesh_identity, opaque), id);
                 id
             };
-            let vertex_range = MeshComponent::vertices_gpu_handle(store, entity.index())
-                .ok_or_else(|| error("missing mirrored vertices"))?;
-            let index_range = MeshComponent::indices_gpu_handle(store, entity.index())
-                .ok_or_else(|| error("missing mirrored indices"))?;
+            // Resolve each geometry once per frame; many objects share a mesh.
+            let (vertex_range, index_range) = match mesh_ranges.get(&id) {
+                Some(ranges) => *ranges,
+                None => (
+                    MeshComponent::vertices_gpu_handle(store, entity.index())
+                        .ok_or_else(|| error("missing mirrored vertices"))?,
+                    MeshComponent::indices_gpu_handle(store, entity.index())
+                        .ok_or_else(|| error("missing mirrored indices"))?,
+                ),
+            };
             if object.index_count != index_range.count
                 || object.first_index != index_range.offset
                 || object.vertex_offset != vertex_range.offset as i32
@@ -178,6 +205,7 @@ impl SceneDbRayTracing {
                 return Err(error("caster draw range differs from current mesh; refresh the StaticObjectComponent"));
             }
             if live.insert(id) {
+                mesh_ranges.insert(id, (vertex_range, index_range));
                 if vertex_range.count as usize != mesh.vertices.len()
                     || index_range.count as usize != mesh.indices.len()
                 {
@@ -185,17 +213,28 @@ impl SceneDbRayTracing {
                         "mesh mirror is not current; flush SceneDB before RT preparation",
                     ));
                 }
-                // Keep content-based invalidation for in-place edits, but use
-                // the streaming hash's vectorized bulk path for large meshes.
-                let mut hash = twox_hash::XxHash3_64::default();
-                hash.write(bytemuck::cast_slice(&mesh.vertices));
-                hash.write(bytemuck::cast_slice(&mesh.indices));
+                // A mesh without `Movability` keeps content-based invalidation
+                // for in-place edits. A mesh that promises not to deform is
+                // never re-read: its BLAS key (buffer, ranges, opacity) still
+                // rebuilds it when SceneDB moves or replaces the allocation.
+                let revision = if world
+                    .get::<Movability>(*entity)
+                    .is_none_or(|movability| movability.can_deform())
+                {
+                    // Streaming hash's vectorized bulk path for large meshes.
+                    let mut hash = twox_hash::XxHash3_64::default();
+                    hash.write(bytemuck::cast_slice(&mesh.vertices));
+                    hash.write(bytemuck::cast_slice(&mesh.indices));
+                    hash.finish()
+                } else {
+                    0
+                };
                 self.blas
                     .build_from_buffers_with_opacity(
                         id,
                         &mut encoder,
                         BlasGeometry {
-                            revision: hash.finish(),
+                            revision,
                             vertices: &vertices
                                 .as_ref()
                                 .ok_or_else(|| error("missing vertex pool"))?

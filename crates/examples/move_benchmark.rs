@@ -31,6 +31,7 @@
 //! move_benchmark --scene grid --sizes 1000,4000,16000 --lights 64 \
 //!                --modes ss,rt --frames 40 --warmup 8 --out bench_out
 //! move_benchmark --scene cathedral_large --modes ss,rt
+//! move_benchmark --mesh-movability static     # tag every mesh entity (none|static|stationary|movable|dynamic)
 //! move_benchmark --graph default --editor   # Pulsar-Native editor viewport graph
 //!                                            # (add --no-ray-query on lavapipe)
 //! ```
@@ -114,6 +115,7 @@ struct Args {
     graph: String,
     editor: bool,
     no_ray_query: bool,
+    mesh_movability: Option<helio::Movability>,
 }
 
 fn parse_args() -> Args {
@@ -131,6 +133,7 @@ fn parse_args() -> Args {
         graph: "hlfs".into(),
         editor: false,
         no_ray_query: false,
+        mesh_movability: None,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -176,6 +179,16 @@ fn parse_args() -> Args {
             "--warmup" => args.warmup = value.parse().expect("--warmup takes an integer"),
             "--out" => args.out = value,
             "--graph" => args.graph = value,
+            "--mesh-movability" => {
+                args.mesh_movability = match value.as_str() {
+                    "none" => None,
+                    "static" => Some(helio::Movability::Static),
+                    "stationary" => Some(helio::Movability::Stationary),
+                    "movable" => Some(helio::Movability::Movable),
+                    "dynamic" => Some(helio::Movability::Dynamic),
+                    other => panic!("unknown movability {other}"),
+                }
+            }
             "--editor" => {
                 args.editor = true;
                 i += 1;
@@ -566,6 +579,16 @@ fn build_bench(
         "cathedral_large" => populate_cathedral_large(&mut scene_db.world),
         other => panic!("unknown scene {other}; use grid or cathedral_large"),
     };
+    if let Some(movability) = args.mesh_movability {
+        let meshes: Vec<Entity> = scene_db
+            .world
+            .query::<(&helio_pass_gbuffer::MeshComponent,)>()
+            .map(|(entity, _)| entity)
+            .collect();
+        for mesh in meshes {
+            scene_db.world.insert(mesh, movability);
+        }
+    }
     if mode == Mode::RayTraced {
         // The renderer captures SceneDB's light flags at build time.
         enable_ray_shadows(&mut scene_db.world, &scene.objects);
@@ -674,8 +697,9 @@ fn main() {
 fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
     let mut table = String::new();
     table.push_str(&format!(
-        "Adapter: {} ({:?}), graph {}{}, {}x{}, {} measured frames per row (median ms; total also p95)\n\n",
-        info.name, info.backend, args.graph, if args.editor { " (editor mode)" } else { "" }, WIDTH, HEIGHT, args.frames
+        "Adapter: {} ({:?}), graph {}{}, mesh movability {}, {}x{}, {} measured frames per row (median ms; total also p95)\n\n",
+        info.name, info.backend, args.graph, if args.editor { " (editor mode)" } else { "" },
+        args.mesh_movability.map_or("unset".to_string(), |m| format!("{m:?}")), WIDTH, HEIGHT, args.frames
     ));
     table.push_str("| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | gpu | total | total p95 |\n");
     table.push_str("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
@@ -722,7 +746,13 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
     }
     println!("{table}");
     std::fs::create_dir_all(&args.out).expect("create --out directory");
-    let stem = format!("{}/{}_{}", args.out, args.scene, args.graph);
+    let stem = format!(
+        "{}/{}_{}_{}",
+        args.out,
+        args.scene,
+        args.graph,
+        args.mesh_movability.map_or("unset".to_string(), |m| format!("{m:?}").to_lowercase())
+    );
     std::fs::write(format!("{stem}_summary.md"), &table).expect("write summary");
     std::fs::write(format!("{stem}_frames.csv"), csv).expect("write csv");
     eprintln!("wrote {stem}_summary.md and {stem}_frames.csv");
