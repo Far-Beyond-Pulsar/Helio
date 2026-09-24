@@ -56,6 +56,20 @@ impl LazyEngineVoxelPass {
             .as_ref()
             .map_or(0, EngineVoxelPass::chunk_jobs_pending)
     }
+
+    /// Keep a host viewport ticking while a selected cut is being planned or
+    /// uploaded. A removed source has no reason to keep an idle viewport awake.
+    pub fn needs_frame(&self) -> bool {
+        let source_active = self
+            .source
+            .try_lock()
+            .map_or(true, |source| source.is_some());
+        source_active
+            && self
+                .active
+                .as_ref()
+                .is_some_and(EngineVoxelPass::needs_frame)
+    }
 }
 
 impl RenderPass for LazyEngineVoxelPass {
@@ -95,15 +109,16 @@ impl RenderPass for LazyEngineVoxelPass {
         None
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        if self.active.is_none()
-            && self
-                .source
-                .lock()
-                .map_err(|_| {
-                    helio_core::Error::InvalidPassConfig("Voxel frame source was poisoned".into())
-                })?
-                .is_some()
-        {
+        let has_source = self
+            .source
+            .lock()
+            .map_err(|_| {
+                helio_core::Error::InvalidPassConfig("Voxel frame source was poisoned".into())
+            })?
+            .is_some();
+        if !has_source {
+            self.active = None;
+        } else if self.active.is_none() {
             self.active = Some(EngineVoxelPass::with_frame_source(
                 ctx.device,
                 ctx.queue,
@@ -178,6 +193,11 @@ impl EngineVoxelPass {
     }
     pub fn ready(&self) -> bool {
         self.terrain.stats().ready
+    }
+
+    pub fn needs_frame(&self) -> bool {
+        let stats = self.terrain.stats();
+        !stats.ready || stats.planning || stats.pending > 0
     }
     pub fn set_stage_profiling(&mut self, enabled: bool) {
         self.terrain.set_stage_profiling(enabled);

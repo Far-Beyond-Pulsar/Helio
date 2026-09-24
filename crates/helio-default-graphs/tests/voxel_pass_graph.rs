@@ -144,6 +144,10 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
             validation_error.is_none(),
             "active graph GPU validation: {validation_error:?}"
         );
+        assert!(renderer
+            .find_pass::<LazyEngineVoxelPass>()
+            .unwrap()
+            .needs_frame());
 
         if let Ok(path) = std::env::var("HELIO_VOXEL_CAPTURE") {
             let world = Arc::new(World::default());
@@ -189,18 +193,33 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 if renderer
                     .find_pass::<LazyEngineVoxelPass>()
-                    .is_some_and(LazyEngineVoxelPass::ready)
+                    .is_some_and(|pass| pass.ready() && !pass.needs_frame())
                 {
                     break;
                 }
             }
             assert!(
-                renderer.find_pass::<LazyEngineVoxelPass>().unwrap().ready(),
-                "voxel cut still loading after 240 frames; {} jobs pending",
+                !renderer
+                    .find_pass::<LazyEngineVoxelPass>()
+                    .unwrap()
+                    .needs_frame(),
+                "voxel cut still planning or loading after 240 frames; {} jobs pending",
                 renderer
                     .find_pass::<LazyEngineVoxelPass>()
                     .unwrap()
                     .chunk_jobs_pending()
+            );
+            let mut steady_ms = Vec::with_capacity(32);
+            for _ in 0..32 {
+                let start = std::time::Instant::now();
+                renderer.render(&camera, &view).unwrap();
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                steady_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+            }
+            steady_ms.sort_by(f64::total_cmp);
+            eprintln!(
+                "VOXEL_GRAPH_STEADY_CPU_P50_MS={:.2} P95_MS={:.2} MAX_MS={:.2} RESOLUTION=640x360 FRAMES=32",
+                steady_ms[16], steady_ms[30], steady_ms[31]
             );
             let validation_error = validation_scope.pop().await;
             assert!(
@@ -241,5 +260,13 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
             let bytes = slice.get_mapped_range().unwrap().to_vec();
             image::save_buffer(path, &bytes, 640, 360, image::ColorType::Rgba8).unwrap();
         }
+        *frame.lock().unwrap() = None;
+        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        renderer.render(&camera, &view).unwrap();
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert!(validation_scope.pop().await.is_none());
+        let pass = renderer.find_pass::<LazyEngineVoxelPass>().unwrap();
+        assert!(!pass.ready());
+        assert!(!pass.needs_frame());
     });
 }
