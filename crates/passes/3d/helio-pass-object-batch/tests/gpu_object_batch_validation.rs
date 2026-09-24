@@ -636,3 +636,69 @@ fn gpu_object_batch_handles_all_dead_rows() {
     assert_eq!(gpu.shadow_static_count, 0);
     assert_eq!(gpu.shadow_movable_count, 0);
 }
+
+/// More distinct pipelines than the readback's initial staging holds: the
+/// readback must grow instead of publishing a truncated range table.
+#[test]
+fn readback_grows_past_initial_range_capacity_without_truncating() {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .expect("adapter must create a device");
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            panic!("object batch GPU validation error: {error:?}");
+        }));
+
+        // One opaque material per pipeline hash: every row is its own range.
+        const PIPELINES: u32 = 200;
+        let materials: Vec<TestMaterial> =
+            (0..PIPELINES).map(|_| TestMaterial::zeroed()).collect();
+        let class_and_hash: Vec<(u32, u64)> = (0..PIPELINES).map(|i| (0, i as u64 + 1)).collect();
+        let rows: Vec<StaticObjectComponent> = (0..PIPELINES)
+            .map(|i| {
+                let mut row = make_row(&mut Rng(i as u64 + 1), 1, 1, &[class_and_hash[i as usize]]);
+                row.material_slot = i;
+                row
+            })
+            .collect();
+
+        use wgpu::util::DeviceExt;
+        let static_objects = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test StaticObjects"),
+            contents: bytemuck::cast_slice(&rows),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Materials"),
+            contents: bytemuck::cast_slice(&materials),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let mut pass = ObjectBatchPass::new(&device);
+        for _ in 0..12 {
+            pass.run_once_for_testing(&device, &queue, &static_objects, &materials_buf, PIPELINES);
+            pass.poll_readback_for_testing(&device, &queue);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let published = pass.opaque_ranges().len() as u32;
+            assert!(
+                published == 0 || published == PIPELINES,
+                "published a truncated range table: {published} of {PIPELINES}"
+            );
+        }
+        let ranges = pass.opaque_ranges();
+        assert_eq!(ranges.len() as u32, PIPELINES, "readback never grew to fit every range");
+        let mut hashes: Vec<u64> = ranges.iter().map(|&(_, hash, _, _)| hash).collect();
+        hashes.sort_unstable();
+        assert_eq!(hashes, (1..=PIPELINES as u64).collect::<Vec<_>>());
+        assert_eq!(pass.instance_count(), PIPELINES);
+    });
+}

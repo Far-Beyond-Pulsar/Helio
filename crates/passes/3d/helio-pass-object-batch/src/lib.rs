@@ -1233,6 +1233,13 @@ impl ObjectBatchPass {
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
+
+    /// Runs one step of the asynchronous range/count readback that
+    /// `prepare()` performs each frame, for tests driving the pass outside a
+    /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
+    pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.readback.poll_and_kick_off(device, queue, &self.scratch);
+    }
 }
 
 impl RenderPass for ObjectBatchPass {

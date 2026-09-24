@@ -21,6 +21,13 @@
 //! This is emphatically NOT a readback of per-instance data: `instances`/
 //! `aabbs` (the only per-object-sized buffers) never touch the CPU.
 //!
+//! The staging copies are sized to the number of ranges actually observed
+//! (one per distinct `(material_class, graph_hash)` pipeline), not to the
+//! object capacity, so the per-frame copy and map cost does not grow with
+//! scene size. A harvested generation whose range count exceeds its staging
+//! capacity is discarded (the previous tables stay current) and the staging
+//! grows before the next copy; a truncated table is never published.
+//!
 //! # Ordering (why this is correct, not racy)
 //!
 //! [`RangeReadback::poll_and_kick_off`] is called from `ObjectBatchPass::
@@ -81,8 +88,8 @@ impl PendingMaps {
 }
 
 impl Generation {
-    fn new(device: &wgpu::Device, capacity: u32) -> Self {
-        let range_bytes = (capacity.max(1) as u64) * super::RANGE_BYTES;
+    fn new(device: &wgpu::Device, range_capacity: u32) -> Self {
+        let range_bytes = (range_capacity.max(1) as u64) * super::RANGE_BYTES;
         let make = |label: &str, size: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -104,14 +111,22 @@ impl Generation {
     fn range_capacity_bytes(&self) -> u64 {
         self.opaque_staging.size()
     }
+
+    fn range_capacity(&self) -> u32 {
+        (self.range_capacity_bytes() / super::RANGE_BYTES) as u32
+    }
 }
 
 const GENERATIONS: usize = 2;
+/// Initial per-table staging size in ranges. Real scenes have a few distinct
+/// pipelines; staging grows to the next power of two when exceeded.
+const MIN_RANGE_CAPACITY: u32 = 64;
 
 pub struct RangeReadback {
     gens: Vec<Generation>,
     next: usize,
-    capacity: u32,
+    /// Ranges per table each staging generation can hold.
+    range_capacity: u32,
 
     opaque: Vec<RangeTuple>,
     transparent: Vec<RangeTuple>,
@@ -138,7 +153,7 @@ impl RangeReadback {
         Self {
             gens: Vec::new(),
             next: 0,
-            capacity: 0,
+            range_capacity: MIN_RANGE_CAPACITY,
             opaque: Vec::new(),
             transparent: Vec::new(),
             forward: Vec::new(),
@@ -181,17 +196,17 @@ impl RangeReadback {
     ) {
         device.poll(wgpu::PollType::Poll).ok();
 
-        let capacity = scratch_capacity_hint(scratch);
-        if self.gens.len() < GENERATIONS || self.capacity != capacity {
-            // (Re)build generations sized to the current scratch capacity.
+        if self.gens.len() < GENERATIONS
+            || self.gens.iter().any(|gen| gen.range_capacity() != self.range_capacity)
+        {
+            // (Re)build generations sized to the current range capacity.
             // Any maps in flight against the old (about to be dropped)
             // buffers simply never get read -- harmless: the public arrays
             // just keep whatever they last held until a new generation's
             // map resolves.
             self.gens = (0..GENERATIONS)
-                .map(|_| Generation::new(device, capacity))
+                .map(|_| Generation::new(device, self.range_capacity))
                 .collect();
-            self.capacity = capacity;
             self.next = 0;
         }
 
@@ -229,6 +244,20 @@ impl RangeReadback {
                 }
             }
             if pending.all_ready() {
+                let needed = required_range_capacity(gen);
+                if needed > gen.range_capacity() {
+                    // Truncated tables: keep the previous ones and grow the
+                    // staging before the next copy.
+                    self.range_capacity = self
+                        .range_capacity
+                        .max(needed.checked_next_power_of_two().unwrap_or(needed));
+                    gen.counts_staging.unmap();
+                    gen.opaque_staging.unmap();
+                    gen.transparent_staging.unmap();
+                    gen.forward_staging.unmap();
+                    gen.pending = None;
+                    continue;
+                }
                 let prev_shadow_static = self.shadow_static;
                 read_generation_into(
                     gen,
@@ -355,12 +384,15 @@ impl RangeReadback {
     }
 }
 
-/// `ScratchBuffers` doesn't publish its own capacity (it's derived from
-/// buffer sizes, which are only meaningful together) -- recover it the same
-/// way `object_batch.wgsl`'s own capacity math does, from a fixed-4-bytes-
-/// per-row buffer's size.
-fn scratch_capacity_hint(scratch: &ScratchBuffers) -> u32 {
-    (scratch.keys_a.size() / 4) as u32
+/// Largest of the three range counts in a resolved generation's counts.
+fn required_range_capacity(gen: &Generation) -> u32 {
+    let view = gen
+        .counts_staging
+        .slice(..)
+        .get_mapped_range()
+        .expect("counts staging buffer was mapped (map_async already resolved Ok)");
+    let counts: &[u32] = bytemuck::cast_slice(&view);
+    counts[1].max(counts[2]).max(counts[3])
 }
 
 fn read_generation_into(
