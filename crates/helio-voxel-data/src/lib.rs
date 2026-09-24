@@ -20,7 +20,10 @@ pub use bounded_inbox::{
     VoxelPublicationWorker,
 };
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
-pub use data_api::{VoxelBatchReceipt, VoxelPayloadStore, VoxelSourceWriter, VoxelTerrainSnapshot};
+pub use data_api::{
+    VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,
+    VoxelTerrainSnapshot,
+};
 pub use edit_worker::{
     VoxelEditAdmissionError, VoxelEditClose, VoxelEditJob, VoxelEditTicket, VoxelEditTicketState,
     VoxelEditWorker, VoxelEditWorkerStatus, VOXEL_EDIT_MAX_SAMPLES_PER_JOB,
@@ -28,17 +31,20 @@ pub use edit_worker::{
 };
 pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use generation::{
-    VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
+    VoxelBuiltinGeneratorConfig, VoxelChunkGenerator, VoxelGeneratorDescriptor,
+    VoxelGeneratorRegistry, MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES,
     VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR, VOXEL_PLANET_GENERATOR,
 };
 pub use generation_worker::{
-    VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationStatus,
-    VoxelGenerationTicket, VoxelGenerationTicketState, VoxelGenerationWorker,
-    VOXEL_GENERATION_MAX_CHUNKS_PER_JOB, VOXEL_GENERATION_PENDING_JOBS,
+    VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationLimits,
+    VoxelGenerationStatus, VoxelGenerationTicket, VoxelGenerationTicketState,
+    VoxelGenerationWorker, VOXEL_GENERATION_MAX_CHUNKS_PER_JOB,
+    VOXEL_GENERATION_MAX_PAYLOAD_BYTES_PER_JOB, VOXEL_GENERATION_PENDING_JOBS,
 };
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload,
-    VoxelChunkUpdate, VoxelDomain, VoxelSourceId, VoxelTerrainId, VoxelUpdateError,
-    MAX_VOXEL_BATCH_PAYLOAD_BYTES, MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES,
+    VoxelChunkUpdate, VoxelDomain, VoxelFormatDescriptor, VoxelFormatId, VoxelFormatRegistry,
+    VoxelSourceId, VoxelTerrainId, VoxelUpdateError, MAX_VOXEL_BATCH_PAYLOAD_BYTES,
+    MAX_VOXEL_BATCH_UPDATES, MAX_VOXEL_CHUNK_PAYLOAD_BYTES, MAX_VOXEL_FORMAT_PAYLOAD_BYTES,
     VOXEL_CHUNK_EDGE, VOXEL_CHUNK_ENCODING_RAW, VOXEL_CHUNK_SAMPLES, VOXEL_CHUNK_SCHEMA_VERSION,
 };

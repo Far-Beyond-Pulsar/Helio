@@ -83,6 +83,8 @@ pub struct VoxelInboxBatch {
 enum VoxelInboxOp {
     Upsert {
         key: VoxelChunkKey,
+        encoding: crate::VoxelFormatId,
+        schema_version: u16,
         bytes: Arc<[u8]>,
     },
     Delete {
@@ -112,7 +114,15 @@ impl VoxelInboxBatch {
         &self,
         writer: &crate::VoxelSourceWriter,
     ) -> Result<crate::VoxelBatchReceipt, crate::VoxelUpdateError> {
-        self.with_borrowed_batch(|batch| writer.publish_batch(batch))
+        let payloads: Vec<_> = self
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                VoxelInboxOp::Upsert { bytes, .. } => Some(Arc::clone(bytes)),
+                VoxelInboxOp::Delete { .. } => None,
+            })
+            .collect();
+        self.with_borrowed_batch(|batch| writer.publish_shared_batch(batch, &payloads))
     }
 
     /// Temporarily present this owned queue item through the existing borrowed
@@ -122,16 +132,19 @@ impl VoxelInboxBatch {
             .ops
             .iter()
             .map(|op| match op {
-                VoxelInboxOp::Upsert { key, bytes } => {
-                    VoxelChunkOp::Upsert(crate::VoxelChunkUpdate {
-                        key: *key,
-                        payload: crate::VoxelChunkPayload {
-                            encoding: crate::VOXEL_CHUNK_ENCODING_RAW,
-                            schema_version: crate::VOXEL_CHUNK_SCHEMA_VERSION,
-                            bytes,
-                        },
-                    })
-                }
+                VoxelInboxOp::Upsert {
+                    key,
+                    encoding,
+                    schema_version,
+                    bytes,
+                } => VoxelChunkOp::Upsert(crate::VoxelChunkUpdate {
+                    key: *key,
+                    payload: crate::VoxelChunkPayload {
+                        encoding: *encoding,
+                        schema_version: *schema_version,
+                        bytes,
+                    },
+                }),
                 VoxelInboxOp::Delete { key } => VoxelChunkOp::Delete { key: *key },
             })
             .collect();
@@ -167,6 +180,7 @@ pub struct VoxelInboxDrain {
 pub struct BoundedVoxelInbox {
     inner: Arc<InboxShared>,
     limits: VoxelInboxLimits,
+    formats: Arc<crate::VoxelFormatRegistry>,
 }
 
 struct InboxShared {
@@ -183,6 +197,13 @@ struct InboxState {
 
 impl BoundedVoxelInbox {
     pub fn new(limits: VoxelInboxLimits) -> Result<Self, VoxelInboxError> {
+        Self::new_with_formats(limits, Arc::new(crate::VoxelFormatRegistry::default()))
+    }
+
+    pub fn new_with_formats(
+        limits: VoxelInboxLimits,
+        formats: Arc<crate::VoxelFormatRegistry>,
+    ) -> Result<Self, VoxelInboxError> {
         if limits.max_pending_batches == 0
             || limits.max_pending_ops == 0
             || limits.max_batch_ops == 0
@@ -201,6 +222,7 @@ impl BoundedVoxelInbox {
                 wake: Condvar::new(),
             }),
             limits,
+            formats,
         })
     }
 
@@ -252,7 +274,9 @@ impl BoundedVoxelInbox {
                 VoxelInboxInvalid::TooManyPayloadHandles,
             ));
         }
-        if batch.validate(batch.revision.expected).is_err()
+        if batch
+            .validate_envelope_with_formats(batch.revision.expected, &self.formats)
+            .is_err()
             || batch.ops.len() > self.limits.max_batch_ops
             || payload_bytes > self.limits.max_batch_payload_bytes
         {
@@ -267,6 +291,8 @@ impl BoundedVoxelInbox {
             match op {
                 VoxelChunkOp::Upsert(update) => owned_ops.push(VoxelInboxOp::Upsert {
                     key: update.key,
+                    encoding: update.payload.encoding,
+                    schema_version: update.payload.schema_version,
                     bytes: Arc::clone(handles.next().expect("validated payload handle count")),
                 }),
                 VoxelChunkOp::Delete { key } => owned_ops.push(VoxelInboxOp::Delete { key: *key }),
@@ -603,7 +629,8 @@ impl VoxelPublicationWorker {
         writer: crate::VoxelSourceWriter,
         limits: VoxelInboxLimits,
     ) -> Result<Self, VoxelPublicationStartError> {
-        let inbox = BoundedVoxelInbox::new(limits).map_err(VoxelPublicationStartError::Inbox)?;
+        let inbox = BoundedVoxelInbox::new_with_formats(limits, writer.formats().clone())
+            .map_err(VoxelPublicationStartError::Inbox)?;
         let state = Arc::new(Mutex::new(PublicationState::default()));
         let worker_inbox = inbox.clone();
         let worker_state = Arc::clone(&state);
@@ -780,9 +807,9 @@ fn map_lock_error(error: TryLockError<std::sync::MutexGuard<'_, InboxState>>) ->
 mod tests {
     use super::*;
     use crate::{
-        VoxelBatchRevision, VoxelChunkPayload, VoxelChunkUpdate, VoxelDomain, VoxelSourceWriter,
-        VoxelTerrainSnapshot, VoxelUpdateError, VOXEL_CHUNK_ENCODING_RAW,
-        VOXEL_CHUNK_SCHEMA_VERSION,
+        VoxelBatchRevision, VoxelChunkPayload, VoxelChunkUpdate, VoxelDomain,
+        VoxelFormatDescriptor, VoxelFormatRegistry, VoxelSourceWriter, VoxelTerrainSnapshot,
+        VoxelUpdateError, VOXEL_CHUNK_ENCODING_RAW, VOXEL_CHUNK_SCHEMA_VERSION,
     };
     use std::collections::HashMap;
 
@@ -841,6 +868,48 @@ mod tests {
             .unwrap();
         assert_eq!(drained.batches.len(), 1);
         assert_eq!(drained.batches[0].terrain, VoxelTerrainId(1));
+    }
+
+    #[test]
+    fn queue_retains_registered_encoding_and_schema() {
+        let mut formats = VoxelFormatRegistry::default();
+        formats
+            .register(VoxelFormatDescriptor {
+                encoding: 42,
+                schema_version: 2,
+                min_bytes: 4,
+                max_bytes: 4,
+                validate: |bytes| bytes[0] == 0xA5,
+            })
+            .unwrap();
+        let q = BoundedVoxelInbox::new_with_formats(inbox().limits, Arc::new(formats)).unwrap();
+        let bytes: Arc<[u8]> = Arc::from([0xA5, 1, 2, 3]);
+        let ops = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
+            key: VoxelChunkKey::new(0, 0, 0, 0),
+            payload: VoxelChunkPayload {
+                encoding: 42,
+                schema_version: 2,
+                bytes: &bytes,
+            },
+        })];
+        q.try_submit(&make_batch(&ops, 0), &[bytes.clone()])
+            .unwrap();
+        let drained = q
+            .try_drain(VoxelInboxDrainBudget {
+                max_ops: 1,
+                max_payload_bytes: 4,
+            })
+            .unwrap();
+        drained.batches[0].with_borrowed_batch(|batch| {
+            let VoxelChunkOp::Upsert(update) = batch.ops[0] else {
+                panic!("expected upsert")
+            };
+            assert_eq!(
+                (update.payload.encoding, update.payload.schema_version),
+                (42, 2)
+            );
+            assert_eq!(update.payload.bytes, bytes.as_ref());
+        });
     }
 
     #[test]
@@ -970,7 +1039,11 @@ mod tests {
         let receipt = queued.publish_into(&writer).unwrap();
         assert_eq!(receipt.revision, 1);
         let snapshot: VoxelTerrainSnapshot = writer.snapshot().unwrap();
-        assert_eq!(snapshot.get(key), Some(&[1, 2][..]));
+        assert_eq!(snapshot.get_raw_material(key), Some(&[1, 2][..]));
+        assert!(Arc::ptr_eq(
+            &snapshot.get_payload(key).unwrap().bytes,
+            &first
+        ));
 
         let second: Arc<[u8]> = Arc::from([9u8]);
         let replace_ops = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
@@ -992,8 +1065,11 @@ mod tests {
             ops: &replace_ops,
         };
         writer.publish_batch(&replace).unwrap();
-        assert_eq!(snapshot.get(key), Some(&[1, 2][..]));
-        assert_eq!(writer.snapshot().unwrap().get(key), Some(&[9][..]));
+        assert_eq!(snapshot.get_raw_material(key), Some(&[1, 2][..]));
+        assert_eq!(
+            writer.snapshot().unwrap().get_raw_material(key),
+            Some(&[9][..])
+        );
     }
 
     #[test]

@@ -1,24 +1,36 @@
 //! Deterministic CPU chunk generators. A descriptor is serializable by its
-//! owner; executable adapters stay in this runtime registry.
+//! owner; executable generator implementations stay in this runtime registry.
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{VoxelChunkKey, VoxelDomain, VOXEL_CHUNK_SAMPLES};
+use crate::{VoxelChunkKey, VoxelDomain, VoxelStoredPayload, VOXEL_CHUNK_SAMPLES};
 
 pub const VOXEL_FLAT_GENERATOR: &str = "helio.flat";
 pub const VOXEL_PLANET_GENERATOR: &str = "helio.planet";
 pub const VOXEL_BUILTIN_GENERATOR_VERSION: u32 = 1;
+pub const MAX_VOXEL_GENERATOR_ID_BYTES: usize = 256;
+pub const MAX_VOXEL_GENERATOR_PARAMETERS_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoxelGeneratorDescriptor {
     pub id: String,
     pub version: u32,
     pub seed: u64,
-    /// 0 is a plane, 1 is a planet. This must match the registered generator.
-    pub shape_mode: u32,
     pub domain: VoxelDomain,
     pub origin: [f64; 3],
     pub voxel_size: f64,
+    /// Logical width of one chunk key at LOD zero in base-resolution voxels.
+    pub chunk_edge_voxels: u32,
+    /// Spatial scale between adjacent LODs; one disables spatial scaling.
+    pub lod_scale: u32,
+    /// Opaque settings understood by the registered generator. The simple
+    /// built-in generators read this as `VoxelBuiltinGeneratorConfig` JSON.
+    pub parameters: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoxelBuiltinGeneratorConfig {
     pub planet_radius: f64,
     pub base_height: f64,
     pub amplitude: f64,
@@ -27,50 +39,83 @@ pub struct VoxelGeneratorDescriptor {
     pub material_slot: u8,
 }
 
+impl Default for VoxelBuiltinGeneratorConfig {
+    fn default() -> Self {
+        Self {
+            planet_radius: 8.0,
+            base_height: 0.0,
+            amplitude: 0.0,
+            wavelength: 16.0,
+            material_slot: 1,
+        }
+    }
+}
+
 impl VoxelGeneratorDescriptor {
     pub fn validate(&self) -> Result<(), String> {
         if self.id.is_empty() {
             return Err("generator ID is empty; use external chunk batches instead".into());
         }
+        if self.id.len() > MAX_VOXEL_GENERATOR_ID_BYTES
+            || self.parameters.len() > MAX_VOXEL_GENERATOR_PARAMETERS_BYTES
+        {
+            return Err("generator ID or parameters exceed the descriptor limit".into());
+        }
         if self.version == 0 {
             return Err("generator version must be positive".into());
         }
-        if self.shape_mode > 1 {
-            return Err("generator shape must be plane (0) or planet (1)".into());
-        }
         if !self.voxel_size.is_finite()
             || self.voxel_size <= 0.0
+            || self.chunk_edge_voxels == 0
+            || self.lod_scale == 0
             || self.origin.iter().any(|v| !v.is_finite())
-            || !self.base_height.is_finite()
-            || !self.amplitude.is_finite()
-            || self.amplitude < 0.0
-            || !self.wavelength.is_finite()
-            || self.wavelength <= 0.0
-            || (self.shape_mode == 1
-                && (!self.planet_radius.is_finite() || self.planet_radius <= 0.0))
-            || self.material_slot == 0
         {
-            return Err("generator parameters must be finite, positive where required, and use a non-air material slot".into());
+            return Err("generator spatial settings must be finite and positive".into());
         }
         Ok(())
+    }
+
+    fn builtin_config(&self, shape_mode: u32) -> Result<VoxelBuiltinGeneratorConfig, String> {
+        let config = if self.parameters.is_empty() {
+            VoxelBuiltinGeneratorConfig::default()
+        } else {
+            serde_json::from_str(&self.parameters)
+                .map_err(|error| format!("invalid built-in generator parameters: {error}"))?
+        };
+        if self.chunk_edge_voxels != 8
+            || !config.base_height.is_finite()
+            || !config.amplitude.is_finite()
+            || config.amplitude < 0.0
+            || !config.wavelength.is_finite()
+            || config.wavelength <= 0.0
+            || (shape_mode == 1
+                && (!config.planet_radius.is_finite() || config.planet_radius <= 0.0))
+            || config.material_slot == 0
+        {
+            return Err(
+                "built-in generator requires an 8-voxel chunk and valid shape/material parameters"
+                    .into(),
+            );
+        }
+        Ok(config)
     }
 }
 
 /// An external implementation is registered at runtime under an ID and
-/// version. It receives only CPU values and returns a complete canonical
-/// 8³ chunk, or None for known air. The caller publishes the result in a
-/// revisioned batch; adapters never touch renderer/GPU objects.
+/// version. It receives only CPU values and returns a complete versioned
+/// chunk, or None for known empty space. The caller publishes the result in a
+/// revisioned batch; generators never touch renderer/GPU objects.
 pub trait VoxelChunkGenerator: Send + Sync + 'static {
     fn generate(
         &self,
         descriptor: &VoxelGeneratorDescriptor,
         key: VoxelChunkKey,
-    ) -> Result<Option<[u8; VOXEL_CHUNK_SAMPLES]>, String>;
+    ) -> Result<Option<VoxelStoredPayload>, String>;
 }
 
 #[derive(Default, Clone)]
 pub struct VoxelGeneratorRegistry {
-    adapters: HashMap<(String, u32), Arc<dyn VoxelChunkGenerator>>,
+    generators: HashMap<(String, u32), Arc<dyn VoxelChunkGenerator>>,
 }
 
 impl VoxelGeneratorRegistry {
@@ -78,20 +123,21 @@ impl VoxelGeneratorRegistry {
         &mut self,
         id: impl Into<String>,
         version: u32,
-        adapter: Arc<dyn VoxelChunkGenerator>,
+        generator: Arc<dyn VoxelChunkGenerator>,
     ) -> Result<(), String> {
         let id = id.into();
         if id.is_empty()
+            || id.len() > MAX_VOXEL_GENERATOR_ID_BYTES
             || version == 0
             || id == VOXEL_FLAT_GENERATOR
             || id == VOXEL_PLANET_GENERATOR
         {
             return Err("invalid or reserved voxel generator ID/version".into());
         }
-        if self.adapters.contains_key(&(id.clone(), version)) {
+        if self.generators.contains_key(&(id.clone(), version)) {
             return Err("voxel generator ID/version was already registered".into());
         }
-        self.adapters.insert((id, version), adapter);
+        self.generators.insert((id, version), generator);
         Ok(())
     }
 
@@ -99,28 +145,24 @@ impl VoxelGeneratorRegistry {
         &self,
         descriptor: &VoxelGeneratorDescriptor,
         key: VoxelChunkKey,
-    ) -> Result<Option<[u8; VOXEL_CHUNK_SAMPLES]>, String> {
+    ) -> Result<Option<VoxelStoredPayload>, String> {
         descriptor.validate()?;
         descriptor
             .domain
             .validate_key(key)
             .map_err(|e| format!("chunk key outside generator domain: {e:?}"))?;
         match (descriptor.id.as_str(), descriptor.version) {
-            (VOXEL_FLAT_GENERATOR, VOXEL_BUILTIN_GENERATOR_VERSION)
-                if descriptor.shape_mode == 0 =>
-            {
-                generate_builtin(descriptor, key)
+            (VOXEL_FLAT_GENERATOR, VOXEL_BUILTIN_GENERATOR_VERSION) => {
+                generate_builtin(descriptor, key, 0, &descriptor.builtin_config(0)?)
             }
-            (VOXEL_PLANET_GENERATOR, VOXEL_BUILTIN_GENERATOR_VERSION)
-                if descriptor.shape_mode == 1 =>
-            {
-                generate_builtin(descriptor, key)
+            (VOXEL_PLANET_GENERATOR, VOXEL_BUILTIN_GENERATOR_VERSION) => {
+                generate_builtin(descriptor, key, 1, &descriptor.builtin_config(1)?)
             }
             (VOXEL_FLAT_GENERATOR | VOXEL_PLANET_GENERATOR, _) => {
                 Err("built-in generator version or shape is unsupported".into())
             }
             _ => self
-                .adapters
+                .generators
                 .get(&(descriptor.id.clone(), descriptor.version))
                 .ok_or_else(|| {
                     format!(
@@ -136,8 +178,10 @@ impl VoxelGeneratorRegistry {
 fn generate_builtin(
     descriptor: &VoxelGeneratorDescriptor,
     key: VoxelChunkKey,
-) -> Result<Option<[u8; VOXEL_CHUNK_SAMPLES]>, String> {
-    let step = descriptor.voxel_size * 2f64.powi(i32::from(key.lod));
+    shape_mode: u32,
+    config: &VoxelBuiltinGeneratorConfig,
+) -> Result<Option<VoxelStoredPayload>, String> {
+    let step = descriptor.voxel_size * f64::from(descriptor.lod_scale).powi(i32::from(key.lod));
     if !step.is_finite() || step <= 0.0 {
         return Err("LOD voxel size is not representable".into());
     }
@@ -156,28 +200,28 @@ fn generate_builtin(
                 }
                 let local =
                     std::array::from_fn::<_, 3, _>(|axis| point[axis] - descriptor.origin[axis]);
-                let elevation = descriptor.base_height
-                    + descriptor.amplitude
+                let elevation = config.base_height
+                    + config.amplitude
                         * value_noise(
                             descriptor.seed,
-                            local[0] / descriptor.wavelength,
-                            local[2] / descriptor.wavelength,
+                            local[0] / config.wavelength,
+                            local[2] / config.wavelength,
                         );
-                let solid = if descriptor.shape_mode == 0 {
+                let solid = if shape_mode == 0 {
                     local[1] <= elevation
                 } else {
                     let radial =
                         (local[0] * local[0] + local[1] * local[1] + local[2] * local[2]).sqrt();
-                    radial <= descriptor.planet_radius + elevation
+                    radial <= config.planet_radius + elevation
                 };
                 if solid {
-                    samples[z * 64 + y * 8 + x] = descriptor.material_slot;
+                    samples[z * 64 + y * 8 + x] = config.material_slot;
                     non_air = true;
                 }
             }
         }
     }
-    Ok(non_air.then_some(samples))
+    Ok(non_air.then(|| VoxelStoredPayload::raw_material(samples)))
 }
 
 fn value_noise(seed: u64, x: f64, z: f64) -> f64 {
@@ -210,27 +254,24 @@ fn value_noise(seed: u64, x: f64, z: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn descriptor(id: &str, shape_mode: u32) -> VoxelGeneratorDescriptor {
+    fn descriptor(id: &str) -> VoxelGeneratorDescriptor {
         VoxelGeneratorDescriptor {
             id: id.into(),
             version: 1,
             seed: 23,
-            shape_mode,
             domain: VoxelDomain::Unbounded { max_lod: 4 },
             origin: [0.0; 3],
             voxel_size: 1.0,
-            planet_radius: 8.0,
-            base_height: 0.0,
-            amplitude: 0.0,
-            wavelength: 16.0,
-            material_slot: 1,
+            chunk_edge_voxels: 8,
+            lod_scale: 2,
+            parameters: String::new(),
         }
     }
 
     #[test]
     fn flat_and_planet_are_deterministic_across_signed_chunks_and_lod() {
         let registry = VoxelGeneratorRegistry::default();
-        let flat = descriptor(VOXEL_FLAT_GENERATOR, 0);
+        let flat = descriptor(VOXEL_FLAT_GENERATOR);
         assert!(registry
             .generate(&flat, VoxelChunkKey::new(-1, -1, 0, 0))
             .unwrap()
@@ -239,7 +280,7 @@ mod tests {
             .generate(&flat, VoxelChunkKey::new(-1, 0, 0, 0))
             .unwrap()
             .is_none());
-        let planet = descriptor(VOXEL_PLANET_GENERATOR, 1);
+        let planet = descriptor(VOXEL_PLANET_GENERATOR);
         let key = VoxelChunkKey::new(-1, 0, 0, 1);
         assert_eq!(
             registry.generate(&planet, key).unwrap(),
@@ -259,9 +300,10 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_modes_fail_explicitly() {
+    fn unsupported_parameters_and_generators_fail_explicitly() {
         let registry = VoxelGeneratorRegistry::default();
-        let mut spec = descriptor(VOXEL_FLAT_GENERATOR, 1);
+        let mut spec = descriptor(VOXEL_FLAT_GENERATOR);
+        spec.parameters = "not json".into();
         assert!(registry
             .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
             .is_err());
@@ -269,7 +311,12 @@ mod tests {
         assert!(registry
             .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
             .is_err());
-        spec.wavelength = 0.0;
+        spec.parameters = serde_json::to_string(&VoxelBuiltinGeneratorConfig {
+            wavelength: 0.0,
+            ..Default::default()
+        })
+        .unwrap();
+        spec.id = VOXEL_FLAT_GENERATOR.into();
         assert!(registry
             .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
             .is_err());
@@ -278,9 +325,13 @@ mod tests {
     #[test]
     fn seed_and_version_are_part_of_reproducible_generator_identity() {
         let registry = VoxelGeneratorRegistry::default();
-        let mut spec = descriptor(VOXEL_FLAT_GENERATOR, 0);
-        spec.amplitude = 4.0;
-        spec.wavelength = 3.0;
+        let mut spec = descriptor(VOXEL_FLAT_GENERATOR);
+        spec.parameters = serde_json::to_string(&VoxelBuiltinGeneratorConfig {
+            amplitude: 4.0,
+            wavelength: 3.0,
+            ..Default::default()
+        })
+        .unwrap();
         let key = VoxelChunkKey::new(0, 0, 0, 0);
         let original = registry.generate(&spec, key).unwrap();
         assert_eq!(original, registry.generate(&spec, key).unwrap());
@@ -291,15 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn external_adapter_is_registered_by_id_and_version() {
+    fn external_generator_is_registered_by_id_and_version() {
         struct Solid;
         impl VoxelChunkGenerator for Solid {
             fn generate(
                 &self,
                 _descriptor: &VoxelGeneratorDescriptor,
                 _key: VoxelChunkKey,
-            ) -> Result<Option<[u8; VOXEL_CHUNK_SAMPLES]>, String> {
-                Ok(Some([1; VOXEL_CHUNK_SAMPLES]))
+            ) -> Result<Option<VoxelStoredPayload>, String> {
+                Ok(Some(VoxelStoredPayload::raw_material(
+                    [1; VOXEL_CHUNK_SAMPLES],
+                )))
             }
         }
         let mut registry = VoxelGeneratorRegistry::default();
@@ -312,13 +365,13 @@ mod tests {
         assert!(registry
             .register(VOXEL_FLAT_GENERATOR, 1, Arc::new(Solid))
             .is_err());
-        let spec = descriptor("example.solid", 0);
+        let spec = descriptor("example.solid");
         assert_eq!(
             registry
                 .generate(&spec, VoxelChunkKey::new(0, 0, 0, 0))
                 .unwrap()
                 .unwrap(),
-            [1; VOXEL_CHUNK_SAMPLES]
+            VoxelStoredPayload::raw_material([1; VOXEL_CHUNK_SAMPLES])
         );
     }
 }

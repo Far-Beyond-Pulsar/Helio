@@ -23,8 +23,15 @@ pub enum VoxelEditError {
     TooManyEdits(usize),
     TooManyChunks(usize),
     DuplicateSample([i64; 3], u8),
-    MaterialSlotOutOfRange { slot: u8, palette_len: usize },
+    MaterialSlotOutOfRange {
+        slot: u8,
+        palette_len: usize,
+    },
     InvalidPaletteLength(usize),
+    UnsupportedPayloadFormat {
+        encoding: crate::VoxelFormatId,
+        schema_version: u16,
+    },
     Update(VoxelUpdateError),
     Codec(VoxelChunkCodecError),
 }
@@ -88,7 +95,18 @@ impl VoxelSourceWriter {
         let mut encoded = Vec::with_capacity(keys.len());
         for (key, patches) in keys {
             let mut chunk = match snapshot.get(&key) {
-                Some(Some(bytes)) => VoxelMaterialChunk::decode(bytes)?,
+                Some(Some(payload))
+                    if payload.encoding == VOXEL_CHUNK_ENCODING_RAW
+                        && payload.schema_version == VOXEL_CHUNK_SCHEMA_VERSION =>
+                {
+                    VoxelMaterialChunk::decode(&payload.bytes)?
+                }
+                Some(Some(payload)) => {
+                    return Err(VoxelEditError::UnsupportedPayloadFormat {
+                        encoding: payload.encoding,
+                        schema_version: payload.schema_version,
+                    });
+                }
                 _ => VoxelMaterialChunk::default(),
             };
             for (offset, slot) in patches {
@@ -135,7 +153,7 @@ impl VoxelSourceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{VoxelSourceId, VoxelTerrainId};
+    use crate::{VoxelFormatDescriptor, VoxelFormatRegistry, VoxelSourceId, VoxelTerrainId};
     use std::{
         collections::HashMap,
         sync::{Arc, RwLock},
@@ -162,9 +180,12 @@ mod tests {
             1
         );
         let bytes = writer.snapshot().unwrap();
-        let chunk =
-            VoxelMaterialChunk::decode(bytes.get(VoxelChunkKey::new(-1, 0, -1, 0)).unwrap())
-                .unwrap();
+        let chunk = VoxelMaterialChunk::decode(
+            bytes
+                .get_raw_material(VoxelChunkKey::new(-1, 0, -1, 0))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(chunk.sample(7, 0, 0), 1);
         assert!(matches!(
             writer.publish_sample_edits(&[edit, edit], domain, &[7]),
@@ -181,5 +202,74 @@ mod tests {
             ),
             Err(VoxelEditError::MaterialSlotOutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn material_edits_reject_other_payload_formats_without_overwriting_them() {
+        let mut formats = VoxelFormatRegistry::default();
+        formats
+            .register(VoxelFormatDescriptor {
+                encoding: 42,
+                schema_version: 2,
+                min_bytes: 4,
+                max_bytes: 4,
+                validate: |_| true,
+            })
+            .unwrap();
+        let writer = VoxelSourceWriter::new_with_formats(
+            VoxelTerrainId(1),
+            VoxelSourceId(2),
+            Arc::new(RwLock::new((0, HashMap::new()))),
+            Arc::new(formats),
+        );
+        let key = VoxelChunkKey::new(0, 0, 0, 0);
+        let bytes = [1, 2, 3, 4];
+        let ops = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
+            key,
+            payload: VoxelChunkPayload {
+                encoding: 42,
+                schema_version: 2,
+                bytes: &bytes,
+            },
+        })];
+        let domain = VoxelDomain::Unbounded { max_lod: 0 };
+        writer
+            .publish_batch(&VoxelChunkBatch {
+                terrain: VoxelTerrainId(1),
+                source: VoxelSourceId(2),
+                revision: VoxelBatchRevision {
+                    expected: 0,
+                    publish: 1,
+                },
+                domain,
+                ops: &ops,
+            })
+            .unwrap();
+        assert_eq!(
+            writer.publish_sample_edits(
+                &[VoxelSampleEdit {
+                    xyz: [0, 0, 0],
+                    lod: 0,
+                    material_slot: 1,
+                }],
+                domain,
+                &[7],
+            ),
+            Err(VoxelEditError::UnsupportedPayloadFormat {
+                encoding: 42,
+                schema_version: 2,
+            })
+        );
+        assert_eq!(writer.revision().unwrap(), 1);
+        assert_eq!(
+            writer
+                .snapshot()
+                .unwrap()
+                .get_payload(key)
+                .unwrap()
+                .bytes
+                .as_ref(),
+            &bytes
+        );
     }
 }
