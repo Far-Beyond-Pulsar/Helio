@@ -186,6 +186,7 @@ impl Clone for VoxelComponent {
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
+#[category("Rendering", category_color = "#7C9DC9")]
 #[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
@@ -231,6 +232,12 @@ pub struct VoxelTerrainComponent {
     #[serde(default = "default_lod_scale")]
     #[property(category = "Generation")]
     pub lod_scale: u32,
+    /// Stable renderer backend identifier. Empty lets the host select a
+    /// compatible backend from the payload formats; procedural backends may
+    /// be selected explicitly even before any chunks have been generated.
+    #[serde(default)]
+    #[property(category = "Rendering")]
+    pub renderer_id: String,
     /// Stable registered generator/source identifier. Empty means externally
     /// supplied data only; generator implementation is not stored here.
     #[property(category = "Generation")]
@@ -274,6 +281,7 @@ impl Default for VoxelTerrainComponent {
             chunk_edge_voxels: default_chunk_edge_voxels(),
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
+            renderer_id: String::new(),
             generator_id: String::new(),
             generator_version: 1,
             seed: 0,
@@ -313,6 +321,7 @@ impl Clone for VoxelTerrainComponent {
             chunk_edge_voxels: self.chunk_edge_voxels,
             max_chunk_lod: self.max_chunk_lod,
             lod_scale: self.lod_scale,
+            renderer_id: self.renderer_id.clone(),
             generator_id: self.generator_id.clone(),
             generator_version: self.generator_version,
             seed: self.seed,

@@ -313,7 +313,7 @@ struct StoredSurface {
     @location(0) albedo:vec4<f32>,@location(1) normal:vec4<f32>,
     @location(2) orm:vec4<f32>,@location(3) emissive:vec4<f32>,
     @location(4) lightmap:vec2<f32>,@location(5) sss:vec4<f32>,
-    @location(6) extra:vec4<f32>,@location(7) velocity:vec2<f32>,@builtin(frag_depth) depth:f32,
+    @location(6) extra:vec4<f32>,@location(7) velocity:vec4<f32>,@builtin(frag_depth) depth:f32,
 }
 override STORED_REVERSE_DEPTH:bool=false;
 @fragment fn stored_surface(@builtin(position) pixel:vec4<f32>)->StoredSurface {
@@ -322,7 +322,7 @@ override STORED_REVERSE_DEPTH:bool=false;
     if (hit.status&3u)!=1u {
         let loading=(hit.status&3u)==3u;
         let color=select(vec3<f32>(4.0,0.0,2.6),vec3<f32>(0.018,0.023,0.03),loading);
-        return StoredSurface(vec4<f32>(0.0),vec4<f32>(0.0,1.0,0.0,0.04),vec4<f32>(1.0),vec4<f32>(color,0.04),vec2<f32>(-1.0),vec4<f32>(0.0),vec4<f32>(0.0),vec2<f32>(0.0),select(0.0,1.0,STORED_REVERSE_DEPTH));
+        return StoredSurface(vec4<f32>(0.0),vec4<f32>(0.0,1.0,0.0,0.04),vec4<f32>(1.0),vec4<f32>(color,0.04),vec2<f32>(-1.0),vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0),select(0.0,1.0,STORED_REVERSE_DEPTH));
     }
     let normal=stored_normal(hit.status);let camera=stored_cameras[0];
     let position=hit.normal*hit.distance;
@@ -342,7 +342,7 @@ override STORED_REVERSE_DEPTH:bool=false;
     let previous=camera.prev_view_proj*vec4<f32>(camera.position_near.xyz+position,1.0);
     var velocity=vec2<f32>(0.0);
     if previous.w>0.0 {let ndc=previous.xy/previous.w;velocity=pixel.xy-(vec2<f32>(ndc.x,-ndc.y)*0.5+0.5)*p.screen.xy;}
-    return StoredSurface(vec4<f32>(albedo,1.0),vec4<f32>(normal,0.04),vec4<f32>(1.0,0.92,0.0,0.04),vec4<f32>(0.0,0.0,0.0,0.04),vec2<f32>(-1.0,-2.0),vec4<f32>(0.0),vec4<f32>(0.0),velocity,depth);
+    return StoredSurface(vec4<f32>(albedo,1.0),vec4<f32>(normal,0.04),vec4<f32>(1.0,0.92,0.0,0.04),vec4<f32>(0.0,0.0,0.0,0.04),vec2<f32>(-1.0,-2.0),vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(velocity,0.0,0.0),depth);
 }
 @group(1) @binding(1) var stored_receiver:texture_2d<f32>;
 @group(1) @binding(2) var stored_sun:texture_storage_2d<rgba16float,write>;

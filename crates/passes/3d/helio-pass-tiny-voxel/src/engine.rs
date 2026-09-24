@@ -1,6 +1,6 @@
 //! Stored voxel terrain integrated with Helio's GBuffer and lighting graph.
 use crate::{Params, World};
-use helio_core::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 mod residency;
 mod terrain;
@@ -13,7 +13,7 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rg16Float,
     wgpu::TextureFormat::Rgba16Float,
     wgpu::TextureFormat::Rgba16Float,
-    wgpu::TextureFormat::Rg16Float,
+    wgpu::TextureFormat::Rgba16Float,
 ];
 pub struct GBufferTargets<'a> {
     pub colors: [&'a wgpu::TextureView; 8],
@@ -31,6 +31,107 @@ pub struct EngineVoxelFrame {
     pub raytraced_sun: bool,
 }
 pub type SharedVoxelFrame = Arc<Mutex<Option<EngineVoxelFrame>>>;
+
+/// Graph entry that does not allocate the planet's residency buffers until a
+/// matching SceneDB source supplies its first frame.
+pub struct LazyEngineVoxelPass {
+    source: SharedVoxelFrame,
+    active: Option<EngineVoxelPass>,
+}
+
+impl LazyEngineVoxelPass {
+    pub fn new(source: SharedVoxelFrame) -> Self {
+        Self {
+            source,
+            active: None,
+        }
+    }
+
+    pub fn ready(&self) -> bool {
+        self.active.as_ref().is_some_and(EngineVoxelPass::ready)
+    }
+
+    pub fn chunk_jobs_pending(&self) -> usize {
+        self.active
+            .as_ref()
+            .map_or(0, EngineVoxelPass::chunk_jobs_pending)
+    }
+}
+
+impl RenderPass for LazyEngineVoxelPass {
+    fn name(&self) -> &'static str {
+        "TinyVoxelGBuffer"
+    }
+    fn reads(&self) -> &'static [&'static str] {
+        &[
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
+            "gbuffer_velocity",
+        ]
+    }
+    fn writes(&self) -> &'static [&'static str] {
+        &[
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
+            "gbuffer_velocity",
+            "directional_visibility",
+        ]
+    }
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        for name in self.reads() {
+            builder.read(name);
+        }
+    }
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _: &'a wgpu::TextureView,
+        _: &'a wgpu::TextureView,
+        _: &'a helio_core::ResourceRegistry<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        if self.active.is_none()
+            && self
+                .source
+                .lock()
+                .map_err(|_| {
+                    helio_core::Error::InvalidPassConfig("Voxel frame source was poisoned".into())
+                })?
+                .is_some()
+        {
+            self.active = Some(EngineVoxelPass::with_frame_source(
+                ctx.device,
+                ctx.queue,
+                ctx.width,
+                ctx.height,
+                Arc::clone(&self.source),
+            ));
+        }
+        Ok(())
+    }
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        match &mut self.active {
+            Some(pass) => pass.execute(ctx),
+            None => Ok(()),
+        }
+    }
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(pass) = &self.active {
+            pass.publish(frame);
+        }
+    }
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if let Some(pass) = &mut self.active {
+            pass.on_resize(device, width, height);
+        }
+    }
+}
+
 pub struct EngineVoxelPass {
     pub terrain: terrain::StoredTerrain,
     frame_source: Option<SharedVoxelFrame>,
@@ -160,12 +261,11 @@ impl RenderPass for EngineVoxelPass {
                 .map_err(|_| {
                     helio_core::Error::InvalidPassConfig("Voxel frame source was poisoned".into())
                 })?
-                .clone()
-                .ok_or_else(|| {
-                    helio_core::Error::InvalidPassConfig(
-                        "Publish the voxel camera and world before rendering".into(),
-                    )
-                })?;
+                .clone();
+            let Some(frame) = frame else {
+                self.visibility_active = false;
+                return Ok(());
+            };
             self.terrain.set_world(frame.world);
             self.frame_params = Some(frame.params);
             self.visibility_active = frame.raytraced_sun;

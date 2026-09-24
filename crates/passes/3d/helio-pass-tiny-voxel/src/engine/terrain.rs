@@ -74,7 +74,9 @@ impl StoredTerrain {
         height: u32,
         depth: DepthConvention,
     ) -> Self {
-        let mut source = format!("{SHADER}\n{}", include_str!("stored.wgsl"));
+        // Checked-out WGSL may use CRLF on Windows; splitting the generation
+        // and trace modules must not depend on the checkout's line endings.
+        let mut source = format!("{SHADER}\n{}", include_str!("stored.wgsl")).replace("\r\n", "\n");
         let generation_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel brick generation"),
             source: wgpu::ShaderSource::Wgsl(source.clone().into()),

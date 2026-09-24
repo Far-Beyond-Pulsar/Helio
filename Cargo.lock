@@ -1681,6 +1681,7 @@ dependencies = [
  "helio-pass-simple-cube",
  "helio-pass-sky",
  "helio-pass-ssr",
+ "helio-pass-tiny-voxel",
  "helio-pass-transparent",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",

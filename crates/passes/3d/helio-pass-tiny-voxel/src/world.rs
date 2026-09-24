@@ -137,16 +137,29 @@ impl World {
                     .map_err(|e| e.to_string())?,
             );
         }
-        if (world.generator_revision != GENERATOR_REVISION
-            || world.landform_id != crate::landforms::DEFAULT_LANDFORM_ID)
-            && !world.edits.is_empty()
-        {
-            return Err(format!("Edit journal uses terrain revision {} or a different landform identity; this renderer uses {}. Use a new journal so edits are not silently applied to different terrain.",world.generator_revision,GENERATOR_REVISION));
+        world.validate_recipe()
+    }
+    /// Decode the opaque recipe held by a generic voxel terrain source.
+    /// An empty recipe selects the versioned built-in landform.
+    pub fn from_recipe_json(json: &str) -> Result<Self, String> {
+        if json.trim().is_empty() {
+            return Ok(Self::default());
         }
-        world.generator_revision = GENERATOR_REVISION;
-        world.landform_id = crate::landforms::DEFAULT_LANDFORM_ID.into();
-        if world.edits.len() > MAX_EDITS
-            || world.edits.iter().any(|e| {
+        serde_json::from_str::<Self>(json)
+            .map_err(|error| error.to_string())?
+            .validate_recipe()
+    }
+    fn validate_recipe(mut self) -> Result<Self, String> {
+        if (self.generator_revision != GENERATOR_REVISION
+            || self.landform_id != crate::landforms::DEFAULT_LANDFORM_ID)
+            && !self.edits.is_empty()
+        {
+            return Err(format!("Edit journal uses terrain revision {} or a different landform identity; this renderer uses {}. Use a new journal so edits are not silently applied to different terrain.",self.generator_revision,GENERATOR_REVISION));
+        }
+        self.generator_revision = GENERATOR_REVISION;
+        self.landform_id = crate::landforms::DEFAULT_LANDFORM_ID.into();
+        if self.edits.len() > MAX_EDITS
+            || self.edits.iter().any(|e| {
                 !e.radius.is_finite()
                     || e.radius <= 0.0
                     || e.radius > (RADIUS * 2.0) as f32
@@ -157,8 +170,8 @@ impl World {
         {
             return Err("Invalid or oversized voxel edit journal".into());
         }
-        world.rebuild_edits();
-        Ok(world)
+        self.rebuild_edits();
+        Ok(self)
     }
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
         let temp = path.with_extension("json.tmp");
