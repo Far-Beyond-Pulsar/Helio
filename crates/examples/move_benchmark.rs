@@ -10,6 +10,8 @@
 //! * `idle`          -- nothing changes (baseline).
 //! * `move_one`      -- one object is moved through `World::get_mut`, the
 //!                      per-row path SceneDB mirrors directly.
+//! * `move_lights`   -- every light moves every frame (opt-in with
+//!                      `--workloads move_lights`; scale with `--lights`).
 //! * `editor_resync` -- one object is moved and then every object row is
 //!                      re-inserted, which is what Pulsar-Native's
 //!                      `sync_static_mesh_rows` does on every frame the scene
@@ -88,15 +90,24 @@ enum Workload {
     Idle,
     MoveOne,
     EditorResync,
+    MoveLights,
 }
 
 impl Workload {
+    /// Default set; `move_lights` is opt-in via `--workloads`.
     const ALL: [Workload; 3] = [Workload::Idle, Workload::MoveOne, Workload::EditorResync];
+    const KNOWN: [Workload; 4] = [
+        Workload::Idle,
+        Workload::MoveOne,
+        Workload::EditorResync,
+        Workload::MoveLights,
+    ];
     fn label(self) -> &'static str {
         match self {
             Workload::Idle => "idle",
             Workload::MoveOne => "move_one",
             Workload::EditorResync => "editor_resync",
+            Workload::MoveLights => "move_lights",
         }
     }
 }
@@ -168,7 +179,7 @@ fn parse_args() -> Args {
                 args.workloads = value
                     .split(',')
                     .map(|s| {
-                        *Workload::ALL
+                        *Workload::KNOWN
                             .iter()
                             .find(|w| w.label() == s.trim())
                             .unwrap_or_else(|| panic!("unknown workload {s}"))
@@ -409,6 +420,19 @@ fn move_one(world: &mut World, scene: &BenchScene, frame: usize) {
     *object = object.with_transform(transform, bounds);
 }
 
+/// Every light bobs vertically each frame, written through `World::get_mut`.
+fn move_lights(world: &mut World, lights: &[(Entity, [f32; 3])], frame: usize) {
+    let dy = (frame as f32 * 0.2).sin() * 0.5;
+    for (i, &(entity, origin)) in lights.iter().enumerate() {
+        let mut light = world
+            .get_mut::<helio_pass_forward_lit::LightComponent>(entity)
+            .expect("light row");
+        let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+        gpu.position_range[1] = origin[1] + dy * if i % 2 == 0 { 1.0 } else { -1.0 };
+        *light = gpu.into();
+    }
+}
+
 /// Mirrors Pulsar-Native `engine_backend::scene::sync_static_mesh_rows`: every
 /// live mesh row is rebuilt with `StaticObjectComponent::new` and re-inserted,
 /// whether or not it changed.
@@ -468,6 +492,8 @@ struct Bench {
     acceleration: Option<helio_pass_hlfs::SceneDbRayTracing>,
     view: wgpu::TextureView,
     scene: BenchScene,
+    /// Every light and its authored position, for `move_lights`.
+    lights: Vec<(Entity, [f32; 3])>,
 }
 
 impl Bench {
@@ -478,6 +504,7 @@ impl Bench {
             Workload::Idle => {}
             Workload::MoveOne => move_one(&mut self.scene_db.world, &self.scene, frame),
             Workload::EditorResync => editor_resync(&mut self.scene_db.world, &self.scene, frame),
+            Workload::MoveLights => move_lights(&mut self.scene_db.world, &self.lights, frame),
         }
         timing.update = ms(t);
 
@@ -533,6 +560,8 @@ struct Row {
     mode: Mode,
     workload: Workload,
     frames: Vec<FrameTiming>,
+    /// `(pass, median CPU ms, median GPU ms)` from the graph profiler.
+    passes: Vec<(&'static str, f64, f64)>,
 }
 
 async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgpu::AdapterInfo) {
@@ -632,7 +661,15 @@ fn build_bench(
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
-    Bench { device: device.clone(), queue: queue.clone(), scene_db, renderer, acceleration, view, scene }
+    let lights = scene_db
+        .world
+        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .map(|(entity, (light,))| {
+            let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            (entity, [gpu.position_range[0], gpu.position_range[1], gpu.position_range[2]])
+        })
+        .collect();
+    Bench { device: device.clone(), queue: queue.clone(), scene_db, renderer, acceleration, view, scene, lights }
 }
 
 fn main() {
@@ -668,8 +705,38 @@ fn main() {
                 // One unmeasured frame lets any one-off transition (the first
                 // move after idle) settle out of the steady-state numbers.
                 bench.frame(workload, 0);
-                let frames: Vec<FrameTiming> =
-                    (1..=args.frames).map(|frame| bench.frame(workload, frame)).collect();
+                let mut passes: Vec<(&'static str, Vec<f64>, Vec<f64>)> = Vec::new();
+                let frames: Vec<FrameTiming> = (1..=args.frames)
+                    .map(|frame| {
+                        let timing = bench.frame(workload, frame);
+                        // Per-pass CPU/GPU times the graph profiler resolved
+                        // for the most recent completed frame.
+                        for pass in &bench.renderer.timing_snapshot().passes {
+                            let slot = match passes.iter().position(|(name, ..)| *name == pass.name) {
+                                Some(i) => i,
+                                None => {
+                                    passes.push((pass.name, Vec::new(), Vec::new()));
+                                    passes.len() - 1
+                                }
+                            };
+                            if let Some(cpu) = pass.cpu_ms {
+                                passes[slot].1.push(cpu as f64);
+                            }
+                            if let Some(gpu) = pass.gpu_ms {
+                                passes[slot].2.push(gpu as f64);
+                            }
+                        }
+                        timing
+                    })
+                    .collect();
+                let median = |values: &mut Vec<f64>| {
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    percentile(values, 0.5)
+                };
+                let passes: Vec<(&'static str, f64, f64)> = passes
+                    .into_iter()
+                    .map(|(name, mut cpu, mut gpu)| (name, median(&mut cpu), median(&mut gpu)))
+                    .collect();
                 eprintln!(
                     "    {:<14} median total {:8.2} ms",
                     workload.label(),
@@ -687,6 +754,7 @@ fn main() {
                     mode,
                     workload,
                     frames,
+                    passes,
                 });
             }
         }
@@ -755,5 +823,21 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
     );
     std::fs::write(format!("{stem}_summary.md"), &table).expect("write summary");
     std::fs::write(format!("{stem}_frames.csv"), csv).expect("write csv");
-    eprintln!("wrote {stem}_summary.md and {stem}_frames.csv");
+    let mut pass_csv = String::from("scene,objects,mode,workload,pass,cpu_ms,gpu_ms\n");
+    for row in rows {
+        for (name, cpu, gpu) in &row.passes {
+            pass_csv.push_str(&format!(
+                "{},{},{},{},{},{:.4},{:.4}\n",
+                row.scene,
+                row.objects,
+                row.mode.label(),
+                row.workload.label(),
+                name,
+                cpu,
+                gpu
+            ));
+        }
+    }
+    std::fs::write(format!("{stem}_passes.csv"), pass_csv).expect("write pass csv");
+    eprintln!("wrote {stem}_summary.md, {stem}_frames.csv and {stem}_passes.csv");
 }
