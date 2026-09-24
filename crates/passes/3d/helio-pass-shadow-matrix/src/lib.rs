@@ -21,10 +21,17 @@ struct ShadowMatrixUniforms {
 
 pub struct ShadowMatrixPass {
     pipeline: wgpu::ComputePipeline,
-    #[allow(dead_code)]
     bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Buffers bound alongside the lights, kept to rebind when SceneDB
+    /// reallocates the `"scene_lights"` buffer.
+    shadow_matrix_buf: wgpu::Buffer,
+    camera_buf: wgpu::Buffer,
+    shadow_dirty_buf: wgpu::Buffer,
+    shadow_hashes_buf: wgpu::Buffer,
+    /// The lights buffer `bind_group` currently binds.
+    bound_lights: wgpu::Buffer,
     shadow_atlas_size: u32,
 }
 
@@ -118,36 +125,11 @@ impl ShadowMatrixPass {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ShadowMatrix BG"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: lights_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: shadow_matrix_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: shadow_dirty_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: shadow_hashes_buf.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_group = Self::bind(
+            device,
+            &bind_group_layout,
+            [lights_buf, shadow_matrix_buf, camera_buf, &uniform_buf, shadow_dirty_buf, shadow_hashes_buf],
+        );
 
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ShadowMatrix PL"),
@@ -168,8 +150,33 @@ impl ShadowMatrixPass {
             bind_group_layout,
             uniform_buf,
             bind_group,
+            shadow_matrix_buf: shadow_matrix_buf.clone(),
+            camera_buf: camera_buf.clone(),
+            shadow_dirty_buf: shadow_dirty_buf.clone(),
+            shadow_hashes_buf: shadow_hashes_buf.clone(),
+            bound_lights: lights_buf.clone(),
             shadow_atlas_size: shadow_atlas_size.max(1),
         }
+    }
+
+    fn bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        buffers: [&wgpu::Buffer; 6],
+    ) -> wgpu::BindGroup {
+        let entries: Vec<_> = buffers
+            .iter()
+            .enumerate()
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect();
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ShadowMatrix BG"),
+            layout,
+            entries: &entries,
+        })
     }
 }
 
@@ -188,15 +195,26 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights"));
+        // SceneDB grows the lights buffer with the scene: follow the
+        // reallocation instead of reading the buffer bound at construction.
+        if let Some(lights) = lights.filter(|lights| lights.buffer != self.bound_lights) {
+            self.bound_lights = lights.buffer.clone();
+            self.bind_group = Self::bind(
+                ctx.device,
+                &self.bind_group_layout,
+                [
+                    &self.bound_lights,
+                    &self.shadow_matrix_buf,
+                    &self.camera_buf,
+                    &self.uniform_buf,
+                    &self.shadow_dirty_buf,
+                    &self.shadow_hashes_buf,
+                ],
+            );
+        }
         let u = ShadowMatrixUniforms {
-            light_count: if ctx
-                .scene_buffers
-                .contains(helio_core::BufferKey::of("scene_lights"))
-            {
-                256u32
-            } else {
-                0
-            },
+            light_count: lights.map_or(0, |lights| lights.row_capacity()),
             shadow_atlas_size: self.shadow_atlas_size,
             _pad: [0; 2],
         };
@@ -206,14 +224,10 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = if ctx
+        let count = ctx
             .scene_buffers
-            .contains(helio_core::BufferKey::of("scene_lights"))
-        {
-            256u32
-        } else {
-            0
-        }; // SceneDB owns the fixed-capacity light component buffer.
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map_or(0, |lights| lights.row_capacity());
         if count == 0 {
             return Ok(());
         }

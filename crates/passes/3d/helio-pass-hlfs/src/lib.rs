@@ -682,7 +682,7 @@ impl RenderPass for HlfsPass {
             .get(helio_core::BufferKey::of("scene_lights"));
         // SceneDB rows are sparse. Include every allocated row (vacant rows are
         // zeroed), never a fixed limit or a truncated live-light population.
-        let light_count = scene_lights.map_or(0, |l| (l.buffer.size() / 128) as u32);
+        let light_count = scene_lights.map_or(0, |l| l.row_capacity());
         self.current_light_count = light_count;
         let required_size = u64::from(light_count.max(1)) * 64;
         if self.compact_lights.size() < required_size {

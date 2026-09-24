@@ -619,14 +619,10 @@ impl RenderPass for GBufferPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: if ctx
+            light_count: ctx
                 .scene_buffers
-                .contains(pulsar_scenedb::gpu::BufferKey::of("scene_lights"))
-            {
-                256
-            } else {
-                0
-            },
+                .get(pulsar_scenedb::gpu::BufferKey::of("scene_lights"))
+                .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity,
             ambient_color,
             rc_world_min,

@@ -442,7 +442,8 @@ impl AppState {
                 KeyCode::KeyM => {
                     self.fog_mode = match self.fog_mode {
                         FogMode::Uniform => FogMode::HeightBased,
-                        FogMode::HeightBased => FogMode::Uniform,
+                        FogMode::HeightBased => FogMode::Smoke,
+                        FogMode::Smoke => FogMode::Uniform,
                     };
                     dirty = true;
                 }

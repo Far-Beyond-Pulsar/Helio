@@ -626,7 +626,11 @@ pub fn spawn_object_with_movability(
     movability: Option<helio::Movability>,
 ) -> SceneResult<Entity> {
     let entity = spawn_object(world, mesh, material, transform, radius)?;
-    let _ = movability;
+    // Passes that cache per-object state read this component; absent means
+    // they keep their least-restrictive behaviour.
+    if let Some(movability) = movability {
+        world.insert(entity, movability);
+    }
     Ok(entity)
 }
 
