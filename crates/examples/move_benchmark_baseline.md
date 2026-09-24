@@ -130,3 +130,71 @@ The grid shares 64 small meshes, so tagging matters little there; its remaining 
 per-object walk (every caster's transform must reach the TLAS) and, on a move, wgpu's full TLAS
 instance upload and rebuild (`rt_gpu`), which is O(instances) inside wgpu itself. Updating only
 the changed TLAS slots in `TlasManager` was tried and measured no difference, so it was not kept.
+
+## Round 2: change journals, light scaling, object-batch skip
+
+Same machine and settings as above unless noted. SceneDB gained multi-reader
+change journals (`World::open_change_cursor`/`read_changes`), per-buffer
+`BufferHandle::row_capacity()`/`content_generation`, and clears a
+component's GPU row on remove/despawn.
+
+### RT preparation (`rt` column, CPU ms, meshes untagged)
+
+`SceneDbRayTracing::prepare` now reads SceneDB change journals: idle frames
+do no per-object work and transform-only moves patch just those TLAS
+instances. The remaining `move_one` cost is wgpu's full TLAS rebuild, which
+re-serializes every instance (wgpu 30 has no TLAS refit).
+
+| scene | objects | workload | baseline | now |
+|---|---:|---|---:|---:|
+| cathedral_large | 16 | idle | 6.43 | **0.01** |
+| cathedral_large | 16 | move_one | 6.57 | **0.52** |
+| grid | 1k | idle | 0.90 | **0.01** |
+| grid | 1k | move_one | 1.25 | **0.81** |
+| grid | 4k | idle | 1.82 | **0.01** |
+| grid | 4k | move_one | 2.86 | **1.55** |
+| grid | 16k | idle | 5.12 | **0.01** |
+| grid | 16k | move_one | 9.00 | **4.75** |
+| grid | 32k | idle | 9.61 | **0.01** |
+| grid | 32k | move_one | 16.64 | **7.99** |
+
+### Moving lights (default/editor graph, 1k objects, every light moves every frame)
+
+`--graph default --editor --no-ray-query --workloads idle,move_lights --lights N`.
+Every light is now culled and shaded (previously only rows below 64 in the
+default graph). CPU cost of the moves (`update` + `flush`):
+
+| lights | update + flush (ms) |
+|---:|---:|
+| 64 | 0.33 |
+| 1024 | 0.65 |
+| 4096 | 1.49 |
+
+The HLFS RT probe (`gpu_hlfs_rt::benchmark_rt_resolution_and_acceleration`,
+1,024 moving lights) measured host-side 0.03 ms to upload the lights, 0.08 ms
+to build 10k moving instances and ~3 ms to encode/submit their TLAS; its GPU
+numbers on lavapipe (seconds per frame) are software ray-query emulation.
+
+### Object batch on idle frames (default/editor graph, 32k objects)
+
+The sort/group/range pipeline is skipped while `static_objects` and
+`materials` are unchanged (SceneDB content generation), after one settling
+frame:
+
+| workload | ObjectBatch CPU (ms) | render CPU (ms) |
+|---|---:|---:|
+| move_one | 1.77 | 4.30 |
+| idle | **0.45** | **2.22** |
+
+### Correctness fixes found along the way
+
+* Default graph lit at most 64 lights (light culling, deferred, forward,
+  transparent) while other passes read 256 rows of a 64-row buffer; all now
+  use the buffer's live row capacity.
+* `ShadowMatrixPass` kept the lights buffer bound at construction after
+  SceneDB grew it; several bind-group caches keyed buffers by handle address.
+* Motion vectors used the authored `prev_transform`, so an object that stopped
+  moving kept its last velocity forever; the object batch now supplies the
+  previous frame's transform.
+* Despawned objects kept drawing and removed lights kept shining (SceneDB left
+  their GPU rows untouched).
