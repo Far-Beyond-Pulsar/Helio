@@ -315,8 +315,9 @@ impl RenderPass for TransparentPass {
         // `LightsFrameData` bridge's `movable_light_count`, production's
         // actual light count today -- see `ForwardLitPass`'s identical
         // `light_mode_direct_index` doc for the full reasoning.
-        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
+        let scene_lights = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let use_direct_index = scene_lights.is_some();
+        let light_count = scene_lights.map_or(0, |lights| lights.row_capacity());
         ctx.queue.write_buffer(
             &self.globals_buf,
             0,
@@ -431,16 +432,17 @@ impl RenderPass for TransparentPass {
         // component buffer; the camera buffer is a valid binding fallback
         // when no light component has been authored yet.
         let cluster = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
-        let lights_buf = ctx
-            .scene_buffers
-            .get(BufferKey::of("scene_lights"))
+        let lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let lights_buf = lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
         let Some(materials_handle) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
         let materials_buf = &materials_handle.buffer;
-        let lights_ptr = lights_buf as *const _ as usize;
+        // SceneDB epoch, not this frame's handle address: a reallocated
+        // lights buffer can land at the same address.
+        let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
         let light_entity_indices_ptr = 0;
         let tile_lists_ptr = cluster
             .map(|c| c.tile_light_lists as *const _ as usize)
@@ -455,7 +457,7 @@ impl RenderPass for TransparentPass {
             tile_lists_ptr,
             tile_counts_ptr,
             transforms_ptr,
-            materials_buf as *const _ as usize,
+            materials_handle.epoch as usize,
         );
         if self.bind_group_1_key != Some(bg1_key) {
             let fallback = batch.instances;

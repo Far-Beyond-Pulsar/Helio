@@ -479,14 +479,10 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = if ctx
+        let light_count = ctx
             .scene_buffers
-            .contains(helio_core::BufferKey::of("scene_lights"))
-        {
-            256
-        } else {
-            0
-        };
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map_or(0, |lights| lights.row_capacity());
         let sky = ctx
             .registry
             .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))

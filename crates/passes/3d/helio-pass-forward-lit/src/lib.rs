@@ -435,8 +435,9 @@ impl RenderPass for ForwardLitPass {
         // light source is `helio_pass_forward_lit::LightsFrameData (see this pass's own frame-data note)` (the `Renderer`-seeded
         // `light_count`/`lights` bridge -- see that struct's own doc), so
         // that CPU-resolved count is the fallback, not a legacy dead end.
-        let use_direct_index = ctx.scene_buffers.contains(BufferKey::of("scene_lights"));
-        let light_count = if use_direct_index { MAX_LIGHTS } else { 0 };
+        let scene_lights = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let use_direct_index = scene_lights.is_some();
+        let light_count = scene_lights.map_or(0, |lights| lights.row_capacity());
 
         let globals = ForwardLitGlobals {
             frame: ctx.frame_num as u32,
@@ -495,16 +496,17 @@ impl RenderPass for ForwardLitPass {
             .unwrap_or(batch.instances);
         let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
 
-        let lights_buf = ctx
-            .scene_buffers
-            .get(BufferKey::of("scene_lights"))
+        let lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let lights_buf = lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
 
         let camera_ptr = ctx.camera as *const _ as usize;
         let instances_ptr = batch.instances as *const _ as usize;
         let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let lights_ptr = lights_buf as *const _ as usize;
+        // SceneDB epoch, not this frame's handle address: a reallocated
+        // lights buffer can land at the same address.
+        let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
         let light_entity_indices_ptr = 0;
         // `None` (mirror not attached / no entity has a Transform yet) folds
         // to 0, same as the `cluster` map-or-0 below -- distinct from any

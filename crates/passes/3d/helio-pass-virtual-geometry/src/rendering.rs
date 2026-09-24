@@ -989,14 +989,10 @@ impl RenderPass for VirtualGeometryPass {
         let globals = VgGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.016,
-            light_count: if ctx
+            light_count: ctx
                 .scene_buffers
-                .contains(BufferKey::of("scene_lights"))
-            {
-                256
-            } else {
-                0
-            },
+                .get(BufferKey::of("scene_lights"))
+                .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity: environment.map(|value| value.ambient_intensity).unwrap_or(0.1),
             ambient_color: [
                 environment.map(|value| value.ambient_color[0]).unwrap_or(0.1),
