@@ -702,3 +702,84 @@ fn readback_grows_past_initial_range_capacity_without_truncating() {
         assert_eq!(pass.instance_count(), PIPELINES);
     });
 }
+
+/// Motion vectors come from the previous frame's transform, not from the
+/// row's authored `prev_transform`: an object that stops moving must report
+/// zero motion on the next frame even though its authored `prev_transform`
+/// still holds the transform from before its last edit.
+#[test]
+fn instance_prev_transform_is_last_frames_transform() {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .expect("adapter must create a device");
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            panic!("object batch GPU validation error: {error:?}");
+        }));
+
+        let at = |x: f32| {
+            let mut m = IDENTITY_MAT4;
+            m[3][0] = x;
+            m
+        };
+        let mut row = make_row(&mut Rng(7), 1, 1, &[(0, 0)]);
+        row.transform = at(1.0);
+        row.prev_transform = at(1.0);
+
+        use wgpu::util::DeviceExt;
+        let static_objects = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test StaticObjects"),
+            contents: bytemuck::bytes_of(&row),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Test Materials"),
+            contents: bytemuck::bytes_of(&TestMaterial::zeroed()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let mut pass = ObjectBatchPass::new(&device);
+        // Returns (model x, prev_model x) of the single instance.
+        let mut frame = |row: &StaticObjectComponent| -> (f32, f32) {
+            queue.write_buffer(&static_objects, 0, bytemuck::bytes_of(row));
+            pass.run_once_for_testing(&device, &queue, &static_objects, &materials, 1);
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 208,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(pass.instances_buffer(), 0, &staging, 0, 208);
+            queue.submit([encoder.finish()]);
+            staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let words: Vec<f32> =
+                bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
+            // model is floats 0..16 (x translation at 12); prev_model 32..48.
+            (words[12], words[32 + 12])
+        };
+
+        assert_eq!(frame(&row), (1.0, 1.0), "a new object has no motion");
+        let moved = StaticObjectComponent { prev_transform: at(1.0), transform: at(2.0), ..row };
+        assert_eq!(frame(&moved), (2.0, 1.0), "a moving object reports last frame's transform");
+        assert_eq!(
+            frame(&moved),
+            (2.0, 2.0),
+            "a stopped object has no motion even though its authored prev_transform is stale"
+        );
+
+        // The row is retired and reused by a different object: no inherited motion.
+        frame(&dead_row());
+        let replacement = StaticObjectComponent { material_generation: 2, transform: at(9.0), prev_transform: at(9.0), ..row };
+        assert_eq!(frame(&replacement), (9.0, 9.0), "a reused row must not inherit motion");
+    });
+}
