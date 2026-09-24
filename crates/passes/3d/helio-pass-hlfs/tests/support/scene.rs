@@ -102,6 +102,8 @@ impl TestScene {
                 BufferHandle {
                     buffer: self.lights.buffer.clone(),
                     epoch: self.movable_lights_generation,
+                    row_bytes: std::mem::size_of::<helio_pass_forward_lit::GpuLight>() as u64,
+                    content_generation: self.movable_lights_generation,
                 },
             )])
         };

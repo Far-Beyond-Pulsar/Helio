@@ -1047,6 +1047,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
+ "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-perf-overlay",
  "helio-pass-portal-cull",
@@ -3837,7 +3838,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=214cb5319fcef099f2413005e472d86aaf1046b3#214cb5319fcef099f2413005e472d86aaf1046b3"
+source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=6fe94568c05048f37659bb51d354b94e18289e5d#6fe94568c05048f37659bb51d354b94e18289e5d"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -3853,7 +3854,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=214cb5319fcef099f2413005e472d86aaf1046b3#214cb5319fcef099f2413005e472d86aaf1046b3"
+source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=6fe94568c05048f37659bb51d354b94e18289e5d#6fe94568c05048f37659bb51d354b94e18289e5d"
 dependencies = [
  "proc-macro2",
  "quote",
