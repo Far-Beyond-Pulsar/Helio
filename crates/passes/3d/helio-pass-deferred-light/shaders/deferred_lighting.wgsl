@@ -1014,7 +1014,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Screen-space AO (SSAO or pre-baked AO).  Sampled by normalised screen UV
     // so it works regardless of whether the AO texture is at a different resolution.
     let screen_uv    = in.clip_pos.xy / vec2<f32>(textureDimensions(gbuf_albedo));
-    let ssao_factor  = textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    // The stored voxel pass uses (-1, -2) as its unlightmapped surface tag.
+    // Its 10 cm cube edges overwhelm the screen-space AO kernel at distance;
+    // that turns whole side faces black and produces moving contour bands.
+    // Keep material AO and hemisphere fill; voxel-local occlusion belongs to
+    // the stored terrain visibility path instead.
+    let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
+    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
 

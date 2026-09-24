@@ -239,6 +239,8 @@ impl Renderer {
             frame_count: 0,
             ray_frame: Default::default(),
             prev_view_proj: glam::Mat4::IDENTITY,
+            previous_world_origin: None,
+            world_origin: None,
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
@@ -290,6 +292,7 @@ impl Renderer {
             graph_rebuild_hook: None,
             scene_db,
             tsr_quality: config.tsr_quality,
+            fallback_sky_enabled: false,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 RadiantTemplateRegistry::new(),
             )),
