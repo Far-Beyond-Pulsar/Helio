@@ -152,6 +152,7 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
         if let Ok(path) = std::env::var("HELIO_VOXEL_CAPTURE") {
             let world = Arc::new(World::default());
             let eye64 = world.ground_spawn(0.0, 0.0, 3.0);
+            eprintln!("VOXEL_CAPTURE_EYE={eye64:?}");
             let eye = eye64.as_vec3();
             let forward = glam::Vec3::new(0.0, -0.15, -1.0).normalize();
             let right = forward.cross(glam::Vec3::Y).normalize();
