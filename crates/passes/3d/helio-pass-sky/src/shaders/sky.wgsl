@@ -343,25 +343,14 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 // ──────────────────────────────────────────────────────────────────────────────
 
-// A far-plane inverse VP can have w=0 (and a planetary camera position loses
-// metres in f32). Perspective sky rays need only projection scale and rotation.
-fn sky_camera_ray(ndc: vec2<f32>) -> vec3<f32> {
-    let camera = cameras[0];
-    var view_ray = vec3<f32>(0.0, 0.0, -1.0);
-    if camera.proj[3].w == 0.0 {
-        let xy = ndc + camera.proj[2].xy;
-        view_ray = vec3<f32>(xy.x / camera.proj[0][0], xy.y / camera.proj[1][1], -1.0);
-    }
-    let rotation = transpose(mat3x3<f32>(
-        camera.view[0].xyz, camera.view[1].xyz, camera.view[2].xyz));
-    return normalize(rotation * view_ray);
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     sky = sky_rows[0];
+    // Reconstruct world-space ray direction from the inverse VP matrix
+    let clip      = vec4<f32>(in.ndc_xy, 1.0, 1.0);
+    let world     = cameras[0].view_proj_inv * clip;
     let camera_pos = cameras[0].position_near.xyz;
-    let ray_dir = sky_camera_ray(in.ndc_xy);
+    let ray_dir   = normalize(world.xyz / world.w - camera_pos);
 
     // Atmosphere: sample the pre-baked sky-view LUT immediately.  sampling
     // must occur under uniform control flow, so we do it before any
