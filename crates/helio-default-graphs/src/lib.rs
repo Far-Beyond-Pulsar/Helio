@@ -45,15 +45,6 @@ use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
 
-/// An application-provided voxel renderer inserted after opaque geometry and
-/// before decals and deferred lighting. The factory is reused on graph resize.
-/// Scene data and backend selection remain with the application.
-pub type VoxelPassFactory = Arc<
-    dyn Fn(&wgpu::Device, &wgpu::Queue, u32, u32) -> Box<dyn helio_core::RenderPass>
-        + Send
-        + Sync,
->;
-
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
@@ -525,7 +516,6 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         None,
         None,
         ctx.scene_db.clone(),
-        Vec::new(),
     )
 }
 
@@ -534,30 +524,6 @@ pub fn build_default_graph_external_with_context(ctx: PassBuildContext<'_>) -> R
     let mut ctx = ctx;
     ctx.owns_device = false;
     build_default_graph_with_context(ctx)
-}
-
-/// Build the default deferred graph with an application-selected voxel pass.
-/// The pass factory is intentionally independent of any voxel format or
-/// generation implementation.
-pub fn build_default_graph_external_with_voxel_passes(
-    mut ctx: PassBuildContext<'_>,
-    voxel_passes: Vec<VoxelPassFactory>,
-) -> RenderGraph {
-    ctx.owns_device = false;
-    build_default_graph_internal(
-        ctx.device,
-        ctx.queue,
-        ctx.camera_buffer,
-        ctx.config,
-        ctx.debug_state,
-        ctx.camera_buffer,
-        ctx.cull_stats_buffer,
-        false,
-        None,
-        None,
-        ctx.scene_db,
-        voxel_passes,
-    )
 }
 
 /// Build the deferred graph with user post-process effects from the shared ABI.
@@ -577,7 +543,6 @@ pub fn build_default_graph_with_user_effects_with_context(
         None,
         Some(user_effects),
         ctx.scene_db.clone(),
-        Vec::new(),
     )
 }
 
@@ -604,7 +569,6 @@ pub fn build_default_graph(
         debug_overlay,
         None,
         scene_db,
-        Vec::new(),
     )
 }
 
@@ -632,7 +596,6 @@ pub fn build_default_graph_with_user_effects(
         debug_overlay,
         Some(user_effects),
         scene_db,
-        Vec::new(),
     )
 }
 
@@ -659,7 +622,6 @@ pub fn build_default_graph_external(
         debug_overlay,
         None,
         scene_db,
-        Vec::new(),
     )
 }
 
@@ -675,7 +637,6 @@ fn build_default_graph_internal(
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
     scene_db: helio::SceneDbHandle,
-    voxel_passes: Vec<VoxelPassFactory>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -710,10 +671,6 @@ fn build_default_graph_internal(
     )));
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
-
-    for factory in &voxel_passes {
-        graph.add_pass(factory(device, queue, iw, ih));
-    }
 
     // Decal pass — projects decals into the G-buffer after it's been written.
     // Runs as a compute pass between GBuffer and deferred lighting. Reads
@@ -860,7 +817,6 @@ fn build_default_graph_internal(
                 overlay_owned.as_ref(),
                 effect_snippet,
                 scene_db.clone(),
-                voxel_passes.clone(),
             )
         },
     );
