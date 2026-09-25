@@ -87,6 +87,7 @@ fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
 /// this component stores configuration and the SceneDB material-ID palette.
 #[engine_class(category = "Voxel", debug, serialize, deserialize)]
 #[category("Volume", category_color = "#8F8F8F")]
+#[category("Rendering", category_color = "#7C9DC9")]
 #[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelComponent {
@@ -104,6 +105,10 @@ pub struct VoxelComponent {
     /// Initial cubic grid dimensions. The default is 16 × 16 × 16.
     #[property(category = "Volume")]
     pub dimensions: [u32; 3],
+    /// Stable renderer backend identifier. Empty leaves selection to the host.
+    #[serde(default)]
+    #[property(category = "Rendering")]
+    pub renderer_id: String,
     /// Palette of IDs into Helio's existing SceneDB material records.
     #[property(category = "Materials")]
     pub material_ids: Vec<u32>,
@@ -122,6 +127,7 @@ impl Default for VoxelComponent {
             enabled: true,
             voxel_size: 1.0,
             dimensions: [16; 3],
+            renderer_id: String::new(),
             material_ids: vec![0],
             default_material_slot: 1,
             editable: true,
@@ -148,6 +154,7 @@ impl VoxelComponent {
             enabled: true,
             voxel_size: 1.0,
             dimensions,
+            renderer_id: String::new(),
             material_ids,
             default_material_slot: u32::from(slot),
             editable: true,
@@ -172,6 +179,7 @@ impl Clone for VoxelComponent {
             enabled: self.enabled,
             voxel_size: self.voxel_size,
             dimensions: self.dimensions,
+            renderer_id: self.renderer_id.clone(),
             material_ids: self.material_ids.clone(),
             default_material_slot: self.default_material_slot,
             editable: self.editable,
@@ -186,6 +194,7 @@ impl Clone for VoxelComponent {
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
+#[category("Rendering", category_color = "#7C9DC9")]
 #[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
@@ -231,6 +240,12 @@ pub struct VoxelTerrainComponent {
     #[serde(default = "default_lod_scale")]
     #[property(category = "Generation")]
     pub lod_scale: u32,
+    /// Stable renderer backend identifier. Empty lets the host select a
+    /// compatible backend from the payload formats; procedural backends may
+    /// be selected explicitly even before any chunks have been generated.
+    #[serde(default)]
+    #[property(category = "Rendering")]
+    pub renderer_id: String,
     /// Stable registered generator/source identifier. Empty means externally
     /// supplied data only; generator implementation is not stored here.
     #[property(category = "Generation")]
@@ -274,6 +289,7 @@ impl Default for VoxelTerrainComponent {
             chunk_edge_voxels: default_chunk_edge_voxels(),
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
+            renderer_id: String::new(),
             generator_id: String::new(),
             generator_version: 1,
             seed: 0,
@@ -313,6 +329,7 @@ impl Clone for VoxelTerrainComponent {
             chunk_edge_voxels: self.chunk_edge_voxels,
             max_chunk_lod: self.max_chunk_lod,
             lod_scale: self.lod_scale,
+            renderer_id: self.renderer_id.clone(),
             generator_id: self.generator_id.clone(),
             generator_version: self.generator_version,
             seed: self.seed,

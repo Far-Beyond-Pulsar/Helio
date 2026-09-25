@@ -76,7 +76,7 @@ pub struct DeferredLightPass {
     bind_group_3: Option<wgpu::BindGroup>,
     reflection_bind_group_1: Option<wgpu::BindGroup>,
     reflection_bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<[usize; 9]>,
+    bind_group_1_key: Option<[usize; 10]>,
     bind_group_2_key: Option<[usize; 14]>,
     bind_group_3_key: Option<(usize, usize)>,
     reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
@@ -242,6 +242,7 @@ impl DeferredLightPass {
                 texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
                 // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1010,6 +1011,10 @@ impl RenderPass for DeferredLightPass {
         let extra_view = ctx
             .registry.get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
+        let directional_visibility_view = ctx
+            .registry
+            .texture_binding("directional_visibility")
+            .unwrap_or(&self.fallback_ssr_view);
 
         let gbuffer_key = [
             gbuffer.views[0] as *const _ as usize,
@@ -1021,6 +1026,7 @@ impl RenderPass for DeferredLightPass {
             lightmap_uv_view as *const _ as usize,
             sss_view as *const _ as usize,
             extra_view as *const _ as usize,
+            directional_visibility_view as *const _ as usize,
         ];
         if self.bind_group_1_key != Some(gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1047,6 +1053,7 @@ impl RenderPass for DeferredLightPass {
                     texture_view_entry(8, sss_view),
                     // Extra surface data (binding 9)
                     texture_view_entry(9, extra_view),
+                    texture_view_entry(10, directional_visibility_view),
                 ],
             }));
             self.bind_group_1_key = Some(gbuffer_key);

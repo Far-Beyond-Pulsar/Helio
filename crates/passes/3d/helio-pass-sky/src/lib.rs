@@ -266,6 +266,9 @@ pub struct CloudFrameUniform {
 // =============================================================================
 
 pub struct SkyPass {
+    /// A renderer backend may request the ordinary sky when no authored
+    /// SceneDB sky row is present (for example, a generated outdoor world).
+    fallback_sky_enabled: bool,
     // ── Legacy simulation / volume ──────────────────────────────────────────
     sim_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
@@ -396,6 +399,11 @@ fn texture_2d(
 }
 
 impl SkyPass {
+    /// Use the pass-owned atmosphere only when the scene has no sky row.
+    pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
+        self.fallback_sky_enabled = enabled;
+    }
+
     /// Creates the sky pass with a camera buffer (preferred for unified sky+clouds).
     pub fn new(
         device: &wgpu::Device,
@@ -1616,6 +1624,7 @@ impl SkyPass {
             height,
             allocated_divisor: config.divisor,
             use_high_perf: true,
+            fallback_sky_enabled: false,
             sky_uniform_buf,
             sky_lut_pipeline,
             sky_lut_bgl0,
@@ -1879,7 +1888,10 @@ impl RenderPass for SkyPass {
         };
         ctx.queue
             .write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&uniform));
-        let (cloud_base, cloud_top) = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
+        let (cloud_base, cloud_top) = ctx
+            .registry
+            .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+            .and_then(|sky| sky.clouds)
             .map(|clouds| (clouds.base, clouds.top))
             .unwrap_or((32.0, 120.0));
         let temporal_values = [
@@ -1895,9 +1907,23 @@ impl RenderPass for SkyPass {
         );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
-        if ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky) {
+        if self.fallback_sky_enabled
+            || ctx
+                .registry
+                .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+                .map_or(false, |sky| sky.has_sky)
+        {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
-            if let Some(clouds) = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds) {
+            if self.fallback_sky_enabled {
+                sky_uniforms.exposure = 1.0;
+                sky_uniforms.earth_radius = 6371.0;
+                sky_uniforms.atm_radius = 6431.0;
+            }
+            if let Some(clouds) = ctx
+                .registry
+                .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+                .and_then(|sky| sky.clouds)
+            {
                 sky_uniforms.clouds_enabled = self.config.enabled as u32;
                 sky_uniforms.cloud_coverage = clouds.coverage;
                 sky_uniforms.cloud_density = clouds.density;
@@ -1935,15 +1961,21 @@ impl RenderPass for SkyPass {
         // this can't be a one-time construction-time resolution. Falls back
         // to `self.sky_uniform_buf` (this pass's own CPU-driven uniforms)
         // when no `SkyComponent` has ever been inserted.
-        let scene_sky_buf = ctx
-            .scene_buffers
-            .get(BufferKey::of("sky_components"))
+        // SceneDB registers a GPU buffer even before an authored sky row
+        // exists. An enabled fallback must use its own valid uniforms rather
+        // than bind that empty buffer and render a black atmosphere.
+        let scene_sky_buf = (!self.fallback_sky_enabled)
+            .then(|| ctx.scene_buffers.get(BufferKey::of("sky_components")))
+            .flatten()
             .map(|handle| &handle.buffer);
         let scene_sky_key = scene_sky_buf.map_or(0, |b| b as *const _ as usize);
         // SceneDB atmosphere rows do not publish the retired SkyActor context.
         // Empty/deleted rows are rejected in the shaders before integration.
-        let has_sky = scene_sky_buf.is_some()
-            || ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+        let has_sky = self.fallback_sky_enabled
+            || scene_sky_buf.is_some()
+            || ctx
+                .registry
+                .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
                 .is_some_and(|sky| sky.has_sky);
 
         // ── 1) Sky LUT generation (192x108) ─────────────────────────────────
@@ -1996,7 +2028,10 @@ impl RenderPass for SkyPass {
         // also simulate/overlay the legacy 3D volume: that path is expensive
         // and its empty/default volume is the source of the gray/black veil
         // seen over the procedural demo.
-        let procedural_clouds = ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds)
+        let procedural_clouds = ctx
+            .registry
+            .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+            .and_then(|sky| sky.clouds)
             .map(|clouds| clouds.infinite_extent)
             .unwrap_or(false);
 
@@ -2009,7 +2044,10 @@ impl RenderPass for SkyPass {
 
         if !self.use_high_perf {
             // Fallback: legacy fullscreen raymarch (writes to pre_aa when available)
-            let target_view = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
+            let target_view = ctx
+                .registry
+                .get(helio_core::ResourceKey::new("pre_aa"))
+                .unwrap_or(ctx.target);
             if let Some(ptr) = ctx.active_render_pass_ptr() {
                 unsafe { self.render(&mut *ptr) };
             } else {
@@ -2034,7 +2072,9 @@ impl RenderPass for SkyPass {
                 };
                 if has_sky {
                     // Also composite sky when in legacy mode
-                    if let Some(sky_lut_view) = ctx.registry.get(helio_core::ResourceKey::new("sky_lut")) {
+                    if let Some(sky_lut_view) =
+                        ctx.registry.get(helio_core::ResourceKey::new("sky_lut"))
+                    {
                         let key = (sky_lut_view as *const _ as usize, scene_sky_key);
                         if self.sky_bg1_key != Some(key) {
                             self.sky_bg1 =
@@ -2086,8 +2126,15 @@ impl RenderPass for SkyPass {
 
         let volume_clouds_enabled = self.config.enabled
             && self.config.mode == CloudRenderMode::Volume3D
-            && ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).map_or(false, |sky| sky.has_sky)
-            && ctx.registry.get::<crate::SkyContext>(helio_core::ResourceKey::new("sky")).and_then(|sky| sky.clouds).is_some();
+            && ctx
+                .registry
+                .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+                .map_or(false, |sky| sky.has_sky)
+            && ctx
+                .registry
+                .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
+                .and_then(|sky| sky.clouds)
+                .is_some();
         // Godot's reference path deliberately keeps reduced-resolution cloud
         // frames free of temporal color history.  Reusing coarse texels and
         // then filtering them at presentation resolution is what creates the
@@ -2280,7 +2327,10 @@ impl RenderPass for SkyPass {
             }
         } else {
             // No active pass — manual fallback (writes to pre_aa when graph allocates it)
-            let target_view = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(ctx.target);
+            let target_view = ctx
+                .registry
+                .get(helio_core::ResourceKey::new("pre_aa"))
+                .unwrap_or(ctx.target);
             let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
