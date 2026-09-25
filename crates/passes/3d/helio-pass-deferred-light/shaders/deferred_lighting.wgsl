@@ -154,6 +154,7 @@ struct ShadowConfig {
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
 // Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
+@group(1) @binding(10) var directional_visibility: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -1013,7 +1014,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Screen-space AO (SSAO or pre-baked AO).  Sampled by normalised screen UV
     // so it works regardless of whether the AO texture is at a different resolution.
     let screen_uv    = in.clip_pos.xy / vec2<f32>(textureDimensions(gbuf_albedo));
-    let ssao_factor  = textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    // The stored voxel pass uses (-1, -2) as its unlightmapped surface tag.
+    // Its 10 cm cube edges overwhelm the screen-space AO kernel at distance;
+    // that turns whole side faces black and produces moving contour bands.
+    // Keep material AO and hemisphere fill; voxel-local occlusion belongs to
+    // the stored terrain visibility path instead.
+    let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
+    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
 
@@ -1116,6 +1124,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
     // is handled separately — shadow maps do not occlude it (that is AO's job).
+    let voxel_visibility = textureLoad(directional_visibility, pix, 0);
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
@@ -1139,6 +1148,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             var sf = 1.0;
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
+            if light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
+                let light_direction = -normalize(light.direction_outer.xyz);
+                if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
+                    if voxel_visibility.x < 0.0 { return vec4<f32>(4.0, 0.0, 2.6, 1.0); }
+                    sf *= clamp(voxel_visibility.x, 0.0, 1.0);
+                }
             }
             let sss_color = sss_r.rgb;
             Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
