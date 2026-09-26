@@ -164,7 +164,8 @@ fn classify(world: &World, key: Key) -> u32 {
 /// Edits invalidate intersecting keys, including undo and recipe replacement.
 #[derive(Default)]
 struct SelectionCache {
-    regions: HashMap<Key, u32>,
+    // Internal, bounded integer keys: no adversarial string-hashing requirement.
+    regions: rustc_hash::FxHashMap<Key, u32>,
     edits: Vec<Edit>,
     classified: usize,
     reused: usize,

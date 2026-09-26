@@ -140,6 +140,7 @@ fn selection_flight_benchmark() {
         let warm = build(world.clone(), camera, 31_744, &mut cache);
         let cached_ms = start.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(cold.leaves, warm.leaves);
+        assert_eq!(cold.pixels, warm.pixels);
         assert_eq!(cold.nodes.len(), warm.nodes.len());
         for (a, b) in cold.nodes.iter().zip(&warm.nodes) {
             assert_eq!((a.low, a.level, a.child), (b.low, b.level, b.child));

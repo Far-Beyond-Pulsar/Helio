@@ -2194,6 +2194,7 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "pollster 0.4.0",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "sha2",

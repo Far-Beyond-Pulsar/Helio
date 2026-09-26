@@ -20,6 +20,9 @@ The `helio-default-graphs` example `voxel_flight` exercises the full deferred gr
 
 ```powershell
 cargo run -p helio-default-graphs --release --example voxel_flight -- target/voxel-flight/run 1280 720
+cargo run -p helio-default-graphs --release --example voxel_flight -- target/voxel-flight/quality 1920 1080 quality
 ```
+
+Set `HELIO_VOXEL_FLIGHT_RECORD=1` for a separate visual run. Open its `movement.html` to play or scrub every walking and descent frame. Playback speed is illustrative, not measured FPS. Readback changes worker scheduling, so do not compare its residency timing with an unrecorded run. Each capture includes a hit-status audit; the example rejects traversal exhaustion and missing terrain after initial loading. Its first-frame magenta sentinel checks final graph composition.
 
 The current far representation is not a filtered reduction of exact edited leaves. That fidelity gap, refinement latency and visual aliasing must be measured independently of the exact CPU query and generation tests. This backend is not yet qualified for AAA quality or seamless exact-detail arrival.

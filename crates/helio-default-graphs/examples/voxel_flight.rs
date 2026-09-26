@@ -1,7 +1,9 @@
 //! Deterministic full-graph terrain captures and synchronized frame timings.
-//! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT]
+//! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //! Captures are actual render output. CSV times include CPU submission and GPU
 //! completion, exclude readback/PNG encoding, and do not include presentation.
+//! Set HELIO_VOXEL_FLIGHT_RECORD=1 for every walking/descent frame and a local
+//! animation viewer. Recording changes worker scheduling; time an unrecorded run.
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
@@ -34,13 +36,19 @@ struct Flight {
     csv: fs::File,
 }
 impl Flight {
-    async fn new(output: &Path, size: [u32; 2]) -> Self {
+    async fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&Default::default())
             .await
             .expect("GPU required");
         eprintln!("VOXEL_FLIGHT_ADAPTER {:?}", adapter.get_info());
+        eprintln!(
+            "VOXEL_FLIGHT_CONFIG output={}x{} quality={quality:?} render_scale={}",
+            size[0],
+            size[1],
+            quality.render_scale()
+        );
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: required_wgpu_features(adapter.features()),
@@ -93,7 +101,7 @@ impl Flight {
         let factory: VoxelPassFactory =
             Arc::new(move |_, _, _, _| Box::new(LazyEngineVoxelPass::new(pass_source.clone())));
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm)
-            .with_tsr_quality(helio_pass_tsr::TsrQuality::Native);
+            .with_tsr_quality(quality);
         config.enable_foliage = false;
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
@@ -352,7 +360,13 @@ fn main() {
         args.get(2).map_or(1280, |s| s.parse().unwrap()),
         args.get(3).map_or(720, |s| s.parse().unwrap()),
     ];
-    let mut flight = pollster::block_on(Flight::new(output, size));
+    let quality = match args.get(4).map(String::as_str).unwrap_or("native") {
+        "native" => helio_pass_tsr::TsrQuality::Native,
+        "quality" => helio_pass_tsr::TsrQuality::Quality,
+        _ => panic!("quality must be native or quality"),
+    };
+    let mut flight = pollster::block_on(Flight::new(output, size, quality));
+    let record = std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some();
     let validation = flight
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
@@ -383,7 +397,7 @@ fn main() {
     for i in 0..120 {
         let eye = ground + DVec3::new(i as f64 * 0.04, 0.0, -i as f64 * 0.03);
         flight.draw("walk", eye, forward);
-        if i % 30 == 0 {
+        if record || i % 30 == 0 {
             flight.capture(&output.join(format!("walk-{i:03}.png")));
         }
     }
@@ -410,7 +424,7 @@ fn main() {
             ground + DVec3::Y * altitude,
             Vec3::new(0.0, -0.8, -1.0),
         );
-        if i % 30 == 0 || i == 239 {
+        if record || i % 30 == 0 || i == 239 {
             flight.capture(&output.join(format!("descent-{i:03}.png")));
         }
     }
@@ -476,5 +490,24 @@ fn main() {
     let error = pollster::block_on(validation.pop());
     assert!(error.is_none(), "GPU validation errors: {error:?}");
     flight.csv.flush().unwrap();
+    if record {
+        fs::write(output.join("movement.html"), r#"<!doctype html>
+<meta charset="utf-8"><title>Helio terrain movement captures</title>
+<style>body{background:#111;color:#eee;font:16px system-ui;max-width:1100px;margin:2rem auto}img{width:100%;image-rendering:auto}input{width:60%}button,select{font:inherit;margin:.5rem}small{display:block}</style>
+<h1>Terrain movement captures</h1>
+<p>Actual full-graph frames. Playback is fixed at 30 frames/s, not measured game performance.
+The descent covers 300 km to ground in 240 logarithmically spaced steps.</p>
+<select id="stage"><option>walk</option><option>descent</option></select>
+<button id="play">Play</button><input id="seek" type="range" min="0" value="0"><span id="frame"></span>
+<img id="view" alt="Rendered terrain movement frame">
+<small>Known limits: far geometry is reconstructed from sparse density; exact arrival detail can lag.</small>
+<script>
+const stage=document.querySelector('#stage'),seek=document.querySelector('#seek'),view=document.querySelector('#view'),label=document.querySelector('#frame'),button=document.querySelector('#play');
+let playing=false,last=0;
+function show(){seek.max=stage.value==='walk'?119:239;view.src=stage.value+'-'+String(seek.value).padStart(3,'0')+'.png';label.textContent=seek.value+'/'+seek.max;}
+stage.onchange=()=>{seek.value=0;show()};seek.oninput=show;button.onclick=()=>{playing=!playing;button.textContent=playing?'Pause':'Play'};
+function tick(now){if(playing&&now-last>=1000/30){seek.value=(Number(seek.value)+1)%(Number(seek.max)+1);show();last=now}requestAnimationFrame(tick)}show();requestAnimationFrame(tick);
+</script>"#).unwrap();
+    }
     eprintln!("VOXEL_FLIGHT_COMPLETE frames={}", flight.frame);
 }
