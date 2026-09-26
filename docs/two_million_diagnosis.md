@@ -4,6 +4,10 @@ Measured 2026-09-26 on an NVIDIA RTX 4060 Laptop GPU, Vulkan, **800 × 600**,
 Immediate presentation. These numbers are specific to this scene/device and
 include enabled timestamp profiling.
 
+The six retrospective Helio issues, with detailed root causes and actual
+syntax-highlighted before/after diffs, are indexed in
+[the closed-issue records](issues/README.md).
+
 ## Exact causes
 
 1. **Wrong encoder was timed.** Passes such as LightCull return no render-pass
@@ -78,7 +82,8 @@ separately instrumented in this capture. Steady final SceneDB uploads: 0 bytes.
 
 Per-pass GPU scopes explain 3.9187 ms of the 4.0665 ms graph span. The 0.1478 ms
 difference is between pass timestamp boundaries; the serial executor records
-no rendering commands in those intervals, only scope boundaries. Envelope and
+no shader dispatches or draws in those intervals; timestamp/backend command
+boundary costs are not individually separated in this capture. Envelope and
 pass times are preserved separately instead of disguising this difference as
 a shader's cost. Target clear is separately measured at 0.0049 ms outside the
 graph. Fog's inactive scope is 0.0030 ms, not the original bottleneck.
