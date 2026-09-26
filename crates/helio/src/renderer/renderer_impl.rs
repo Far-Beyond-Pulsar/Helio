@@ -29,8 +29,8 @@ pub type GraphRebuilder = Arc<
 /// Reapplies application-owned pass settings after a resize rebuilds the graph.
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
-use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 use crate::camera::Camera;
+use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
 use super::config::GiConfig;
 use super::debug::DebugDrawState;
@@ -68,6 +68,9 @@ pub struct Renderer {
     pub(crate) frame_count: u64,
     pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
+    /// World origin used to express the previous local camera projection.
+    pub(crate) previous_world_origin: Option<glam::DVec3>,
+    pub(crate) world_origin: Option<glam::DVec3>,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) output_width: u32,
@@ -109,6 +112,8 @@ pub struct Renderer {
     pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
+    /// Outdoor fallback sky state must survive graph rebuilds triggered by resize or TSR.
+    pub(crate) fallback_sky_enabled: bool,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -233,7 +238,8 @@ impl Renderer {
         tlas: Option<&wgpu::Tlas>,
         transmission: Option<&wgpu::Buffer>,
     ) {
-        self.ray_frame.publish_with_transmission(self.frame_count, tlas, transmission);
+        self.ray_frame
+            .publish_with_transmission(self.frame_count, tlas, transmission);
     }
 
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
@@ -250,6 +256,15 @@ impl Renderer {
     }
 
     pub(crate) fn upload_camera(&mut self, camera: &Camera) {
+        let previous_projection = match (self.previous_world_origin, self.world_origin) {
+            (Some(previous), Some(current)) => helio_core::temporal::rebase_previous_projection(
+                self.prev_view_proj,
+                current - previous,
+            ),
+            (None, None) => self.prev_view_proj,
+            // Switching coordinate spaces invalidates the old projection.
+            _ => camera.proj * camera.view,
+        };
         let uniforms = helio_core::GpuCameraUniforms::new(
             camera.view,
             camera.proj,
@@ -258,13 +273,20 @@ impl Renderer {
             camera.far,
             self.frame_count as u32,
             camera.jitter,
-            self.prev_view_proj,
+            previous_projection,
         );
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
+        self.previous_world_origin = self.world_origin;
         self.camera_data = uniforms;
         self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    /// Set the double-precision world origin for camera-relative frames.
+    /// Geometry submitted to this frame must use the same local coordinates.
+    pub fn set_world_origin(&mut self, origin: Option<glam::DVec3>) {
+        self.world_origin = origin;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -472,6 +494,14 @@ impl Renderer {
         if let Some(pass) = self.find_pass_mut::<SkyPass>() {
             pass.set_cloud_mode(mode);
             pass.reset_history();
+        }
+    }
+
+    /// Use the default sky when a scene has no authored sky component.
+    pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
+        self.fallback_sky_enabled = enabled;
+        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
+            pass.set_fallback_sky_enabled(enabled);
         }
     }
 

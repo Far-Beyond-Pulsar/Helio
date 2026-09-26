@@ -1,0 +1,71 @@
+warning: unused variable: `writer`
+   --> crates\helio-core\src\registry.rs:304:9
+    |
+304 |         writer: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_writer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reader`
+   --> crates\helio-core\src\registry.rs:332:9
+    |
+332 |         reader: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `target`
+   --> crates\helio-core\src\traits.rs:491:9
+    |
+491 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `depth`
+   --> crates\helio-core\src\traits.rs:492:9
+    |
+492 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\helio-core\src\traits.rs:493:9
+    |
+493 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
+   Compiling helio-pass-postprocess v0.1.0 (C:\Users\thiag\Documents\Codex\2026-09-25\https-github-com-far-beyond-pulsar\work\helio-voxel-v2\crates\passes\3d\helio-pass-postprocess)
+warning: unused import: `helio_core::Result as HelioResult`
+ --> crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:1:5
+  |
+1 | use helio_core::Result as HelioResult;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `noise_texture` is never read
+   --> crates\passes\3d\helio-pass-postprocess\src\lib.rs:129:5
+    |
+ 86 | pub struct PostProcessPass {
+    |            --------------- field in this struct
+...
+129 |     noise_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `pipeline_layout` is never read
+ --> crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:5:5
+  |
+3 | pub struct LutBuilder {
+  |            ---------- field in this struct
+4 |     pipeline: wgpu::ComputePipeline,
+5 |     pipeline_layout: wgpu::PipelineLayout,
+  |     ^^^^^^^^^^^^^^^
+
+warning: `helio-pass-postprocess` (lib test) generated 3 warnings (run `cargo fix --lib -p helio-pass-postprocess --tests` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 12.74s
+     Running unittests src\lib.rs (target\release\deps\helio_pass_postprocess-60ab1a5d0ac84134.exe)
+
+running 1 test
+test exposure_tests::exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.69s
+

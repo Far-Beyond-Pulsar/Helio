@@ -83,7 +83,7 @@ impl Renderer {
                 foliage_blades_per_m2: self.foliage_blades_per_m2,
                 enable_portals: self.enable_portals,
             };
-            self.graph = rebuilder(
+            let mut replacement = rebuilder(
                 &self.device,
                 &self.queue,
                 config,
@@ -92,8 +92,13 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            replacement.inherit_persistent_state(&mut self.graph);
+            self.graph = replacement;
             if let Some(hook) = &self.graph_rebuild_hook {
                 hook(&mut self.graph, &self.device);
+            }
+            if let Some(sky) = self.graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
+                sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
             }
         } else {
             self.graph.set_render_size(internal_w, internal_h);
@@ -108,6 +113,19 @@ impl Renderer {
     pub fn set_render_scale(&mut self, scale: f32) {
         self.render_scale = scale.clamp(0.25, 1.0);
         self.set_render_size(self.output_width, self.output_height);
+    }
+
+    /// Change temporal resolve when scene content becomes available after the
+    /// renderer was constructed. Rebuild even if the window size is unchanged:
+    /// the pass set and internal attachment sizes both depend on this choice.
+    pub fn set_tsr_quality(&mut self, quality: Option<helio_pass_tsr::TsrQuality>) {
+        let scale = quality.map_or(0.75, helio_pass_tsr::TsrQuality::render_scale);
+        if self.tsr_quality == quality && (self.render_scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.tsr_quality = quality;
+        self.render_scale = scale;
+        self.pending_resize = Some((self.output_width, self.output_height));
     }
 
     pub fn render_scale(&self) -> f32 {

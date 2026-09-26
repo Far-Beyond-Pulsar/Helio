@@ -1,0 +1,175 @@
+{
+  "720p": {
+    "gates": {
+      "all_flights_complete": true,
+      "no_missing_or_exhausted_hits": true,
+      "settled_cuts_match": true,
+      "arrival_improves": true,
+      "p95_within_15_percent": false,
+      "max_within_2x": true
+    },
+    "ratios": {
+      "walk": {
+        "p95_ms": 0.791049125596688,
+        "max_ms": 0.7589605211866287
+      },
+      "descent": {
+        "p95_ms": 1.960533312581871,
+        "max_ms": 1.1981204938918637
+      }
+    },
+    "cuts": {
+      "trial-control-720p": {
+        "200m": {
+          "bricks": "21832",
+          "pixel_budget": "1.4648"
+        },
+        "1km": {
+          "bricks": "22392",
+          "pixel_budget": "1.1719"
+        },
+        "orbit": {
+          "bricks": "23254",
+          "pixel_budget": "0.7500"
+        },
+        "returned_ground": {
+          "bricks": "31090",
+          "pixel_budget": "1.8311"
+        },
+        "resize_settle": {
+          "bricks": "24763",
+          "pixel_budget": "2.2888"
+        },
+        "orbital_edit": {
+          "bricks": "24453",
+          "pixel_budget": "2.2888"
+        },
+        "1m_base": {
+          "bricks": "24113",
+          "pixel_budget": "2.2888"
+        }
+      },
+      "trial-1024-720p": {
+        "200m": {
+          "bricks": "21832",
+          "pixel_budget": "1.4648"
+        },
+        "1km": {
+          "bricks": "22392",
+          "pixel_budget": "1.1719"
+        },
+        "orbit": {
+          "bricks": "23254",
+          "pixel_budget": "0.7500"
+        },
+        "returned_ground": {
+          "bricks": "31090",
+          "pixel_budget": "1.8311"
+        },
+        "resize_settle": {
+          "bricks": "24763",
+          "pixel_budget": "2.2888"
+        },
+        "orbital_edit": {
+          "bricks": "24453",
+          "pixel_budget": "2.2888"
+        },
+        "1m_base": {
+          "bricks": "24113",
+          "pixel_budget": "2.2888"
+        }
+      }
+    },
+    "arrival_ms": {
+      "trial-control-720p": 2733.0,
+      "trial-1024-720p": 767.54
+    }
+  },
+  "1080p-quality": {
+    "gates": {
+      "all_flights_complete": true,
+      "no_missing_or_exhausted_hits": true,
+      "settled_cuts_match": true,
+      "arrival_improves": true,
+      "p95_within_15_percent": false,
+      "max_within_2x": true
+    },
+    "ratios": {
+      "walk": {
+        "p95_ms": 0.8818562375560495,
+        "max_ms": 0.5261113383767733
+      },
+      "descent": {
+        "p95_ms": 1.4497801171189646,
+        "max_ms": 1.2475830425605865
+      }
+    },
+    "cuts": {
+      "trial-control-1080p-quality": {
+        "200m": {
+          "bricks": "27179",
+          "pixel_budget": "1.4648"
+        },
+        "1km": {
+          "bricks": "27862",
+          "pixel_budget": "1.1719"
+        },
+        "orbit": {
+          "bricks": "28923",
+          "pixel_budget": "0.7500"
+        },
+        "returned_ground": {
+          "bricks": "27665",
+          "pixel_budget": "2.2888"
+        },
+        "resize_settle": {
+          "bricks": "28699",
+          "pixel_budget": "2.2888"
+        },
+        "orbital_edit": {
+          "bricks": "28451",
+          "pixel_budget": "2.2888"
+        },
+        "1m_base": {
+          "bricks": "28080",
+          "pixel_budget": "2.2888"
+        }
+      },
+      "trial-1024-1080p-quality": {
+        "200m": {
+          "bricks": "27179",
+          "pixel_budget": "1.4648"
+        },
+        "1km": {
+          "bricks": "27862",
+          "pixel_budget": "1.1719"
+        },
+        "orbit": {
+          "bricks": "28923",
+          "pixel_budget": "0.7500"
+        },
+        "returned_ground": {
+          "bricks": "27665",
+          "pixel_budget": "2.2888"
+        },
+        "resize_settle": {
+          "bricks": "28699",
+          "pixel_budget": "2.2888"
+        },
+        "orbital_edit": {
+          "bricks": "28451",
+          "pixel_budget": "2.2888"
+        },
+        "1m_base": {
+          "bricks": "28080",
+          "pixel_budget": "2.2888"
+        }
+      }
+    },
+    "arrival_ms": {
+      "trial-control-1080p-quality": 2648.35,
+      "trial-1024-1080p-quality": 1378.28
+    }
+  },
+  "numeric_gates_pass": false
+}

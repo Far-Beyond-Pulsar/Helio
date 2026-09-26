@@ -1,0 +1,32 @@
+Preserved excerpts from successful tool output, not a copy of the raw log.
+The Pulsar-Native target directory was no longer present when collecting the
+final evidence files. Its source changes were still present and unchanged.
+
+Working directory: C:/Users/thiag/Documents/GitHub/Pulsar-Native
+Branch: codex/voxel-backend-integration
+Base local commit: 1f5176967, plus final voxel_backend.rs/Cargo.lock/docs changes.
+Helio submodule tested: 03290f1b9f600224461df05e81dd700950e179e6
+
+Command:
+cargo +1.98 test -j 1 -p engine_backend --lib voxel --target-dir target/voxel-fix-build -- --test-threads=1
+
+Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 14s
+Running unittests src/lib.rs (target/voxel-fix-build/debug/deps/engine_backend-76ca810e33b3fdb2.exe)
+running 9 tests
+test scene::voxel_frame::tests::projects_multiple_rows_with_generation_identity_and_rejects_bad_domains ... ok
+test scene::voxel_frame::tests::terrain_projection_preserves_source_contract_and_uses_authored_chunk_span ... ok
+test scene::voxel_source::tests::accepted_batch_completes_in_old_store_after_row_replacement ... ok
+test scene::voxel_source::tests::failed_batch_can_be_rebased_and_retried_from_new_session ... ok
+test scene::voxel_source::tests::session_submits_deformation_and_rejects_after_component_removal ... ok
+test scene::voxel_source::tests::terrain_session_publishes_registered_format_into_scenedb ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::empty_renderer_id_selects_a_unique_compatible_backend ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::exact_brush_edit_round_trips_through_the_generic_terrain_recipe ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::renderer_selection_preserves_the_world_snapshot_between_camera_frames ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 1.80s
+Process exit code: 0
+
+The same newly built binary was invoked with:
+engine_backend-76ca810e33b3fdb2.exe distant_planet_origin_has_no_gizmo_beyond_camera_far_plane --test-threads=1
+Process exit code: 0. One matching test (previous build also explicitly reported 1 passed).
+
+This does not establish interactive editor validation for the final revision.

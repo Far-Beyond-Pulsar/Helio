@@ -1,0 +1,111 @@
+diff --git a/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency.rs b/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency.rs
+index cc382ccb..ced7d18c 100644
+--- a/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency.rs
++++ b/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency.rs
+@@ -16,7 +16,7 @@ mod tests;
+ pub const BRICK_WORDS: usize = 2048; // 32^3 exact materials, or 9^3 densities + 8^3 pairs of bounds.
+ pub const BRICK_CAPACITY: usize = 65_536;
+ pub const NODE_CAPACITY: usize = 262_144;
+-pub const GENERATION_BATCH: usize = 256;
++pub const GENERATION_BATCH: usize = 1024;
+ pub const AIR: u32 = 0xffff_ffff;
+ pub const SOLID: u32 = 0xffff_fffe;
+ const BRICK: u32 = 0x8000_0000;
+@@ -494,13 +494,9 @@ impl Residency {
+         // exact brick. Charging both one slot left most of the generation
+         // budget unused in flight. Retain the previous worst-case sample
+         // budget, but fill the dispatch when its bricks are cheaper.
+-        let sample_budget = if self.stats.ready {
+-            64
+-        } else {
+-            GENERATION_BATCH
+-        } * 32
+-            * 32
+-            * 32;
++        // The job-buffer capacity is independent of the evaluation budget:
++        // raising it must not multiply cold-start exact work in one frame.
++        let sample_budget = (if self.stats.ready { 64 } else { 256 }) * 32 * 32 * 32;
+         let mut samples = 0;
+         let mut batch = Vec::new();
+         let mut references = Vec::new();
+diff --git a/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency/tests.rs b/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency/tests.rs
+index 8179c662..e0a05123 100644
+--- a/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency/tests.rs
++++ b/crates/passes/3d/helio-pass-tiny-voxel/src/engine/residency/tests.rs
+@@ -3,7 +3,12 @@ use super::*;
+ #[test]
+ fn generation_budget_counts_evaluations_without_exceeding_dispatch_capacity() {
+     let world = Arc::new(World::default());
+-    for (level, ready, expected) in [(0, true, 64), (4, true, 256), (0, false, 256)] {
++    for (level, ready, expected) in [
++        (0, true, 64),
++        (4, true, 1024),
++        (0, false, 256),
++        (4, false, 1024),
++    ] {
+         let mut residency = Residency::new(BRICK_CAPACITY);
+         residency.stats.ready = ready;
+         residency.pending = Some(Pending {
+@@ -14,7 +19,7 @@ fn generation_budget_counts_evaluations_without_exceeding_dispatch_capacity() {
+                 view: view(DVec3::ZERO),
+                 pixels: 1.0,
+             },
+-            jobs: (0..512)
++            jobs: (0..2048)
+                 .map(|slot| Job {
+                     low: [0; 3],
+                     level,
+@@ -26,7 +31,52 @@ fn generation_budget_counts_evaluations_without_exceeding_dispatch_capacity() {
+         });
+         let (batch, _, _) = residency.next_batch().unwrap();
+         assert_eq!(batch.len(), expected);
+-        assert_eq!(residency.stats.pending, 512 - expected);
++        assert_eq!(residency.stats.pending, 2048 - expected);
++    }
++}
++
++#[test]
++fn larger_coarse_batches_respect_edit_reference_storage() {
++    let mut world = World::default();
++    for _ in 0..512 {
++        world
++            .apply_edit(Edit {
++                cell: [0; 3],
++                radius: 0.05,
++                material: 0,
++            })
++            .unwrap();
++    }
++    let mut residency = Residency::new(BRICK_CAPACITY);
++    residency.stats.ready = true;
++    residency.pending = Some(Pending {
++        plan: Plan {
++            nodes: vec![],
++            leaves: vec![],
++            world: Arc::new(world),
++            view: view(DVec3::ZERO),
++            pixels: 1.0,
++        },
++        jobs: (0..1024)
++            .map(|slot| Job {
++                low: [0; 3],
++                level: 4,
++                slot,
++                pad: [0; 3],
++            })
++            .collect(),
++        cursor: 0,
++    });
++    for remaining in [512, 0] {
++        let (batch, references, _) = residency.next_batch().unwrap();
++        assert_eq!(batch.len(), 512);
++        assert_eq!(references.len(), 262_144);
++        for job in batch {
++            let start = job.pad[0] as usize;
++            let end = start + job.pad[1] as usize;
++            assert_eq!(&references[start..end], &(0..512).collect::<Vec<u32>>());
++        }
++        assert_eq!(residency.stats.pending, remaining);
+     }
+ }
+ 

@@ -1,0 +1,225 @@
+{
+  "frames": 832,
+  "complete": true,
+  "config": [
+    "VOXEL_FLIGHT_CONFIG output=1280x720 quality=Native render_scale=1"
+  ],
+  "adapter": [
+    "VOXEL_FLIGHT_ADAPTER AdapterInfo { name: \"NVIDIA GeForce RTX 3060\", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: \"0000:01:00.0\", driver: \"NVIDIA\", driver_info: \"616.64\", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }"
+  ],
+  "stages": {
+    "walk": {
+      "frames": 120,
+      "p50_ms": 20.5359,
+      "p95_ms": 24.9735,
+      "max_ms": 32.5144,
+      "refining_frames": 13
+    },
+    "200m": {
+      "frames": 60,
+      "p50_ms": 16.6246,
+      "p95_ms": 34.2283,
+      "max_ms": 36.557,
+      "refining_frames": 0
+    },
+    "1km": {
+      "frames": 60,
+      "p50_ms": 13.8381,
+      "p95_ms": 16.0102,
+      "max_ms": 17.7127,
+      "refining_frames": 0
+    },
+    "orbit": {
+      "frames": 60,
+      "p50_ms": 19.0213,
+      "p95_ms": 30.0398,
+      "max_ms": 45.643,
+      "refining_frames": 0
+    },
+    "descent": {
+      "frames": 240,
+      "p50_ms": 14.1038,
+      "p95_ms": 45.3489,
+      "max_ms": 69.4965,
+      "refining_frames": 239
+    },
+    "resize": {
+      "frames": 1,
+      "p50_ms": 276.7131,
+      "p95_ms": 276.7131,
+      "max_ms": 276.7131,
+      "refining_frames": 1
+    },
+    "orbital_edit": {
+      "frames": 30,
+      "p50_ms": 19.0397,
+      "p95_ms": 41.4368,
+      "max_ms": 55.1752,
+      "refining_frames": 0
+    },
+    "1m_base": {
+      "frames": 30,
+      "p50_ms": 17.5323,
+      "p95_ms": 19.6577,
+      "max_ms": 21.1794,
+      "refining_frames": 0
+    }
+  },
+  "settlement_ms": {
+    "ground_load": 418.62,
+    "200m": 295.03,
+    "1km": 239.42,
+    "orbit": 424.76,
+    "returned_ground": 767.54,
+    "resize_settle": 167.71,
+    "orbital_edit": 161.57,
+    "1m_base": 1831.38
+  },
+  "not_ready_after_initial_load": 0,
+  "capture_audits": 20,
+  "exhausted_hits": 0,
+  "loading_hits": 0,
+  "minimum_solid_hits": 657285,
+  "audits": [
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "1km.hits.csv"
+    },
+    {
+      "empty": 430,
+      "solid": 1015634,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "1m-base.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "200m.hits.csv"
+    },
+    {
+      "empty": 55798,
+      "solid": 865802,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-000.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-030.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-060.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-090.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-120.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-150.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-180.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-210.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 921600,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-239.hits.csv"
+    },
+    {
+      "empty": 55266,
+      "solid": 866334,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "orbit.hits.csv"
+    },
+    {
+      "empty": 277,
+      "solid": 1015787,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "orbital-edit.hits.csv"
+    },
+    {
+      "empty": 291605,
+      "solid": 724459,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "resized.hits.csv"
+    },
+    {
+      "empty": 264135,
+      "solid": 657465,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "returned-ground.hits.csv"
+    },
+    {
+      "empty": 264315,
+      "solid": 657285,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-000.hits.csv"
+    },
+    {
+      "empty": 263619,
+      "solid": 657981,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-030.hits.csv"
+    },
+    {
+      "empty": 264139,
+      "solid": 657461,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-060.hits.csv"
+    },
+    {
+      "empty": 263361,
+      "solid": 658239,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-090.hits.csv"
+    }
+  ]
+}

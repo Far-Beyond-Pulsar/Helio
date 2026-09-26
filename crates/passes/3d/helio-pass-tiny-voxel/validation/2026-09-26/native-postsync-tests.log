@@ -1,0 +1,3272 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.4.3
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling jobserver v0.1.35
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling cc v1.2.67
+   Compiling windows-link v0.2.1
+   Compiling autocfg v1.5.1
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling hashbrown v0.17.1
+   Compiling serde_derive v1.0.229
+   Compiling indexmap v2.14.0
+   Compiling typeid v1.0.3
+   Compiling libm v0.2.16
+   Compiling erased-serde v0.4.10
+   Compiling smallvec v1.15.2
+   Compiling serde v1.0.229
+   Compiling serde_fmt v1.1.0
+   Compiling value-bag-serde1 v1.13.2
+   Compiling value-bag v1.13.2
+   Compiling memchr v2.8.3
+   Compiling log v0.4.34
+   Compiling tree-sitter-language v0.1.7
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling windows-sys v0.61.2
+   Compiling bitflags v2.13.1
+   Compiling pin-project-lite v0.2.17
+   Compiling pkg-config v0.3.34
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling parking_lot_core v0.9.12
+   Compiling fixedbitset v0.4.2
+   Compiling libc v0.2.189
+   Compiling rustc-demangle v0.1.28
+   Compiling backtrace v0.3.76
+   Compiling petgraph v0.6.5
+   Compiling futures-core v0.3.34
+   Compiling version_check v0.9.5
+   Compiling parking_lot v0.12.5
+   Compiling itoa v1.0.18
+   Compiling futures-io v0.3.34
+   Compiling crossbeam-utils v0.8.22
+   Compiling thiserror v2.0.20
+   Compiling thiserror-impl v2.0.20
+   Compiling bytemuck_derive v1.12.0
+   Compiling zerocopy v0.8.56
+   Compiling bytemuck v1.25.2
+   Compiling zerocopy-derive v0.8.56
+   Compiling vcpkg v0.2.15
+   Compiling siphasher v1.0.3
+   Compiling zmij v1.0.23
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.20.1
+   Compiling slab v0.4.12
+   Compiling synstructure v0.13.2
+   Compiling bytes v1.12.1
+   Compiling futures-sink v0.3.34
+   Compiling libz-sys v1.1.29
+   Compiling arrayvec v0.7.8
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling simd-adler32 v0.3.10
+   Compiling zerofrom v0.1.8
+   Compiling crc32fast v1.5.1
+   Compiling yoke v0.8.3
+   Compiling futures-channel v0.3.34
+   Compiling displaydoc v0.2.7
+   Compiling serde_json v1.0.151
+   Compiling parking v2.2.1
+   Compiling zerovec-derive v0.11.6
+   Compiling getrandom v0.3.4
+   Compiling fastrand v2.5.0
+   Compiling adler2 v2.0.1
+   Compiling zerovec v0.11.8
+   Compiling miniz_oxide v0.8.9
+   Compiling ahash v0.8.12
+   Compiling flate2 v1.1.9
+   Compiling winapi-util v0.1.11
+   Compiling futures-macro v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling atomic-waker v1.1.2
+   Compiling hybrid-array v0.4.14
+   Compiling futures-util v0.3.34
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling tokio-macros v2.7.2
+   Compiling rand_core v0.10.1
+   Compiling tokio v1.53.1
+   Compiling tinystr v0.8.4
+   Compiling phf_shared v0.13.1
+   Compiling windows-strings v0.5.1
+   Compiling windows-result v0.4.1
+   Compiling writeable v0.6.4
+   Compiling cmov v0.5.4
+   Compiling base64 v0.22.1
+   Compiling allocator-api2 v0.2.21
+   Compiling litemap v0.8.3
+   Compiling cfg_aliases v0.2.2
+   Compiling icu_locale_core v2.3.0
+   Compiling hashbrown v0.16.1
+   Compiling ctutils v0.4.2
+   Compiling phf_generator v0.13.1
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling potential_utf v0.1.6
+   Compiling futures-lite v2.6.1
+   Compiling zerotrie v0.2.5
+   Compiling tracing-attributes v0.1.31
+   Compiling icu_properties_data v2.0.1
+   Compiling static_assertions v1.1.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling const-oid v0.10.2
+   Compiling digest v0.11.3
+   Compiling icu_provider v2.3.1
+   Compiling icu_collections v2.0.0
+   Compiling aho-corasick v1.1.5
+   Compiling concurrent-queue v2.5.0
+   Compiling getrandom v0.2.17
+   Compiling cpufeatures v0.3.0
+   Compiling regex-syntax v0.8.11
+   Compiling icu_normalizer_data v2.0.0
+   Compiling crossbeam-epoch v0.9.20
+   Compiling byteorder v1.5.0
+   Compiling regex-automata v0.4.18
+   Compiling percent-encoding v2.3.2
+   Compiling rustc-hash v2.1.3
+   Compiling icu_properties v2.0.2
+   Compiling same-file v1.0.6
+   Compiling event-listener v5.4.2
+   Compiling http v1.5.0
+   Compiling bstr v1.13.1
+   Compiling tracing-core v0.1.36
+   Compiling utf16_iter v1.0.5
+   Compiling winnow v1.0.4
+   Compiling tinyvec_macros v0.1.1
+   Compiling rustversion v1.0.23
+   Compiling crossbeam-deque v0.8.7
+   Compiling write16 v1.0.0
+   Compiling zeroize v1.9.0
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling icu_normalizer v2.0.1
+   Compiling tinyvec v1.12.0
+   Compiling tracing v0.1.44
+   Compiling globset v0.4.20
+   Compiling event-listener-strategy v0.5.4
+   Compiling hashbrown v0.14.5
+   Compiling walkdir v2.5.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling ring v0.17.14
+   Compiling winapi v0.3.9
+   Compiling async-task v4.7.1
+   Compiling either v1.18.0
+   Compiling windows_x86_64_msvc v0.48.5
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling rustls-pki-types v1.15.1
+   Compiling phf_macros v0.13.1
+   Compiling tokio-util v0.7.19
+   Compiling generic-array v0.14.9
+   Compiling semver v1.0.28
+   Compiling unicase v2.9.0
+   Compiling rustix v1.1.4
+   Compiling httparse v1.10.1
+   Compiling rustc_version v0.4.1
+   Compiling phf v0.13.1
+   Compiling async-channel v2.5.0
+   Compiling piper v0.2.5
+   Compiling errno v0.3.14
+   Compiling num-integer v0.1.47
+   Compiling core_maths v0.1.1
+   Compiling async-io v2.6.0
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+   Compiling unicode-width v0.2.2
+   Compiling untrusted v0.9.0
+   Compiling khronos_api v3.1.0
+   Compiling windows-core v0.62.2
+   Compiling blocking v1.7.0
+   Compiling windows-targets v0.52.6
+   Compiling windows-targets v0.48.5
+   Compiling idna_adapter v1.2.1
+   Compiling http-body v1.1.0
+   Compiling regex v1.13.1
+   Compiling form_urlencoded v1.2.2
+   Compiling sha2 v0.11.0
+   Compiling polling v3.11.0
+   Compiling half v2.7.1
+   Compiling pin-project-internal v1.1.13
+   Compiling utf8_iter v1.0.4
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling rustls v0.23.43
+   Compiling precomputed-hash v0.1.1
+   Compiling windows_x86_64_msvc v0.53.1
+   Compiling pin-project v1.1.13
+   Compiling idna v1.1.0
+   Compiling rustls-webpki v0.103.15
+   Compiling toml_edit v0.25.13+spec-1.1.0
+   Compiling chacha20 v0.10.1
+   Compiling slotmap v1.1.1
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling xml-rs v0.8.29
+   Compiling rustc-hash v1.1.0
+   Compiling rand_core v0.6.4
+   Compiling try-lock v0.2.5
+   Compiling subtle v2.6.1
+   Compiling raw-window-handle v0.6.2
+   Compiling anyhow v1.0.104
+   Compiling object v0.39.1
+   Compiling tower-service v0.3.3
+   Compiling mac v0.1.1
+   Compiling fnv v1.0.7
+   Compiling thiserror v1.0.69
+   Compiling h2 v0.4.19
+   Compiling futf v0.1.5
+   Compiling gl_generator v0.14.0
+   Compiling want v0.3.1
+   Compiling rand v0.8.8
+   Compiling naga-types v30.0.1
+   Compiling proc-macro-crate v3.5.0
+   Compiling rand v0.10.2
+   Compiling url v2.5.8
+   Compiling crypto-common v0.1.6
+   Compiling block-buffer v0.10.4
+   Compiling async-lock v3.4.2
+   Compiling naga v30.0.1
+   Compiling phf_shared v0.11.3
+   Compiling libloading v0.8.9
+   Compiling windows-threading v0.2.1
+   Compiling encoding_rs v0.8.35
+   Compiling thiserror-impl v1.0.69
+   Compiling utf-8 v0.7.6
+   Compiling ref-cast v1.0.27
+   Compiling ryu v1.0.23
+   Compiling bit-vec v0.9.1
+   Compiling option-ext v0.2.0
+   Compiling heck v0.5.0
+   Compiling lazy_static v1.5.0
+   Compiling ash v0.38.0+1.3.281
+   Compiling dirs-sys v0.5.0
+   Compiling bit-set v0.10.0
+   Compiling tendril v0.4.3
+   Compiling windows-future v0.3.2
+   Compiling phf_generator v0.11.3
+   Compiling digest v0.10.7
+   Compiling windows-targets v0.53.5
+   Compiling hyper v1.11.0
+   Compiling glutin_wgl_sys v0.6.1
+   Compiling windows-numerics v0.3.1
+   Compiling windows-collections v0.3.2
+   Compiling codespan-reporting v0.13.1
+   Compiling ttf-parser v0.25.1
+   Compiling mime_guess v2.0.5
+   Compiling async-executor v1.14.0
+   Compiling windows-registry v0.6.1
+   Compiling crossbeam-queue v0.3.13
+   Compiling sync_wrapper v1.0.2
+   Compiling schannel v0.1.29
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling euclid v0.22.14
+   Compiling chrono v0.4.45
+   Compiling ordered-float v5.5.0
+   Compiling profiling-procmacros v1.0.18
+   Compiling ref-cast-impl v1.0.27
+   Compiling serde_derive_internals v0.30.0
+   Compiling khronos-egl v6.0.0
+   Compiling cpufeatures v0.2.17
+   Compiling sha1_smol v1.0.1
+   Compiling tower-layer v0.3.3
+   Compiling ipnet v2.12.1
+   Compiling paste v1.0.15
+   Compiling hyper-util v0.1.20
+   Compiling schemars_derive v1.2.2
+   Compiling tower v0.5.3
+   Compiling uuid v1.25.0
+   Compiling profiling v1.0.18
+   Compiling rustls-native-certs v0.8.4
+   Compiling ar_archive_writer v0.5.3
+   Compiling windows v0.62.2
+   Compiling dirs v6.0.0
+   Compiling wgpu-types v30.0.1
+   Compiling tokio-rustls v0.26.4
+   Compiling async-process v2.5.0
+   Compiling wgpu-hal v30.0.1
+   Compiling futures-executor v0.3.34
+   Compiling fdeflate v0.3.7
+   Compiling ppv-lite86 v0.2.21
+   Compiling memmap2 v0.9.11
+   Compiling mime v0.3.17
+   Compiling weezl v0.1.12
+   Compiling unicode-segmentation v1.13.3
+   Compiling windows-link v0.1.3
+   Compiling quick-error v2.0.1
+   Compiling presser v0.3.1
+   Compiling zune-core v0.5.3
+   Compiling float-cmp v0.9.0
+   Compiling deflate64 v0.1.12
+   Compiling zstd-safe v7.2.4
+   Compiling compression-core v0.4.32
+   Compiling dyn-clone v1.0.20
+   Compiling schemars v1.2.2
+   Compiling compression-codecs v0.4.38
+   Compiling zune-jpeg v0.5.15
+   Compiling strict-num v0.1.1
+   Compiling gpu-allocator v0.28.0
+   Compiling fontdb v0.23.0
+   Compiling png v0.18.1
+   Compiling futures v0.3.34
+   Compiling hyper-rustls v0.27.9
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling shellexpand v3.1.2
+   Compiling psm v0.1.32
+   Compiling rust-embed-utils v8.12.0
+   Compiling sha2 v0.10.9
+   Compiling lyon_geom v1.0.19
+   Compiling phf_codegen v0.11.3
+   Compiling string_cache_codegen v0.5.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling http-body-util v0.1.5
+   Compiling windows-sys v0.52.0
+   Compiling num-bigint v0.4.8
+   Compiling pathfinder_simd v0.5.6
+   Compiling itertools v0.14.0
+   Compiling phf_codegen v0.13.1
+   Compiling string_cache_codegen v0.6.1
+   Compiling polycool v0.4.0
+   Compiling font-types v0.12.4
+   Compiling font-types v0.11.3
+   Compiling arrayref v0.3.9
+   Compiling rayon-core v1.13.0
+   Compiling byteorder-lite v0.1.0
+   Compiling event-listener v2.5.3
+   Compiling glow v0.17.0
+   Compiling fast-float2 v0.2.4
+   Compiling renderdoc-sys v1.1.0
+   Compiling ryu-js v1.0.3
+   Compiling unicode-script v0.5.8
+   Compiling range-alloc v0.1.5
+   Compiling serde_json_lenient v0.2.4
+   Compiling color_quant v1.1.0
+   Compiling cow-utils v0.1.3
+   Compiling boa_macros v0.21.1
+   Compiling gif v0.14.2
+   Compiling boa_string v0.21.1
+   Compiling image-webp v0.2.4
+   Compiling async-channel v1.9.0
+   Compiling tiny-skia-path v0.12.0
+   Compiling read-fonts v0.37.0
+   Compiling read-fonts v0.41.0
+   Compiling kurbo v0.13.1
+   Compiling web_atoms v0.2.6
+   Compiling markup5ever v0.12.1
+   Compiling lyon_path v1.0.19
+   Compiling rust-embed-impl v8.12.0
+   Compiling ignore v0.4.33
+   Compiling async-compression v0.4.43
+   Compiling windows-strings v0.3.1
+   Compiling windows-result v0.3.4
+   Compiling async-global-executor v2.4.1
+   Compiling async-fs v2.2.0
+   Compiling async-net v2.0.0
+   Compiling windows-sys v0.48.0
+   Compiling dirs-sys v0.3.7
+   Compiling tempfile v3.27.0
+   Compiling wgpu-core v30.0.1
+   Compiling home v0.5.12
+   Compiling kv-log-macro v1.0.7
+   Compiling stacker v0.1.25
+   Compiling filetime v0.2.29
+   Compiling pxfm v0.1.30
+   Compiling thin-vec v0.2.19
+   Compiling portable-atomic v1.15.0
+   Compiling litrs v1.0.0
+   Compiling ucd-trie v0.1.7
+   Compiling unicode-bidi-mirroring v0.4.0
+   Compiling fixedbitset v0.5.7
+   Compiling fax v0.2.7
+   Compiling pin-utils v0.1.0
+   Compiling bitflags v1.3.2
+   Compiling fastrand v1.9.0
+   Compiling unicode-ccc v0.4.0
+   Compiling waker-fn v1.2.0
+   Compiling winsafe v0.0.19
+   Compiling futures-lite v1.13.0
+   Compiling rustybuzz v0.20.1
+   Compiling which v6.0.3
+   Compiling moxcms v0.8.1
+   Compiling globwalk v0.8.1
+   Compiling async-std v1.13.2
+   Compiling tiff v0.11.3
+   Compiling futures-concurrency v7.7.1
+   Compiling document-features v0.2.12
+   Compiling boa_gc v0.21.1
+   Compiling convert_case v0.10.0
+   Compiling gpui_collections v0.2.2
+   Compiling dirs v4.0.0
+   Compiling smol v2.0.2
+   Compiling windows-registry v0.4.0
+   Compiling async_zip v0.0.17
+   Compiling rust-embed v8.12.0
+   Compiling skrifa v0.44.0
+   Compiling svgtypes v0.16.1
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling phf v0.11.3
+   Compiling string_cache v0.8.9
+   Compiling windows-sys v0.60.2
+   Compiling tokio-socks v0.5.3
+   Compiling string_cache v0.9.0
+   Compiling wio v0.2.2
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling rustls-pemfile v2.2.0
+   Compiling dashmap v6.2.1
+   Compiling wgpu v30.0.1
+   Compiling winit v0.30.13
+   Compiling device_query v2.1.0
+   Compiling simplecss v0.2.2
+   Compiling roxmltree v0.21.1
+   Compiling memoffset v0.9.1
+   Compiling imagesize v0.14.0
+   Compiling take-until v0.2.0
+   Compiling rfd v0.17.2
+   Compiling dtor-proc-macro v0.0.6
+   Compiling font-kit v0.14.3
+   Compiling shlex v1.3.0
+   Compiling dunce v1.0.5
+   Compiling convert_case v0.4.0
+   Compiling pico-args v0.5.0
+   Compiling toml_write v0.1.2
+   Compiling owned-alloc v0.2.0
+   Compiling winnow v0.7.15
+   Compiling zeno v0.3.3
+   Compiling data-url v0.3.2
+   Compiling error-code v3.4.0
+   Compiling unicode-xid v0.2.6
+   Compiling float_next_after v1.0.0
+   Compiling unicode-vo v0.1.0
+   Compiling arraydeque v0.5.1
+   Compiling yazi v0.2.1
+   Compiling anstyle v1.0.14
+   Compiling xmlwriter v0.1.0
+   Compiling virtue v0.0.18
+   Compiling usvg v0.47.0
+   Compiling bincode_derive v2.0.1
+   Compiling annotate-snippets v0.12.16
+   Compiling swash v0.2.10
+   Compiling granit-parser v0.0.7
+   Compiling lyon_tessellation v1.0.20
+   Compiling derive_more-impl v2.1.1
+   Compiling clipboard-win v5.4.1
+   Compiling toml_edit v0.22.27
+   Compiling lockfree v0.5.1 (https://github.com/tristanpoland/priority-threadpool?rev=bb1ab91#bb1ab91e)
+   Compiling derive_more v0.99.20
+   Compiling gpui_util v0.2.2
+   Compiling dtor v0.1.1
+   Compiling encoding_rs_io v0.1.8
+   Compiling zed-reqwest v0.12.15-zed
+   Compiling dwrote v0.11.5
+   Compiling rayon v1.12.0
+   Compiling pathfinder_geometry v0.5.1
+   Compiling gpui_perf v0.2.2
+   Compiling boa_interner v0.21.1
+   Compiling image v0.25.10
+   Compiling zed-async-tar v0.5.0-zed
+   Compiling dirs-sys v0.4.1
+   Compiling lyon_algorithms v1.0.20
+   Compiling harfrust v0.5.2
+   Compiling skrifa v0.40.0
+   Compiling tiny-skia v0.12.0
+   Compiling strum_macros v0.28.0
+   Compiling windows v0.48.0
+   Compiling float16 v0.1.7
+   Compiling arc-swap v1.9.2
+   Compiling tendril v0.5.1
+   Compiling rand_core v0.9.5
+   Compiling rgb v0.8.53
+   Compiling crossbeam-channel v0.5.16
+   Compiling normpath v1.5.1
+   Compiling spin v0.9.9
+   Compiling html5ever v0.27.0
+   Compiling equator-macro v0.4.2
+   Compiling gpui_derive_refineable v0.2.2
+   Compiling stacksafe-macro v1.0.3
+   Compiling smol_str v0.2.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling rangemap v1.8.0
+   Compiling num-conv v0.2.2
+   Compiling atomic v0.5.3
+   Compiling nohash-hasher v0.2.0
+   Compiling dpi v0.1.2
+   Compiling cursor-icon v1.2.0
+   Compiling inventory v0.3.24
+   Compiling grid v0.18.0
+   Compiling linebender_resource_handle v0.1.1
+   Compiling time-core v0.1.9
+   Compiling self_cell v1.3.0
+   Compiling unty v0.0.4
+   Compiling smol_str v0.3.6
+   Compiling gpui-ce v1.0.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\ui\wgpui)
+   Compiling ctor-proc-macro v0.0.7
+   Compiling float-ord v0.3.2
+   Compiling svg_fmt v0.4.5
+   Compiling pollster v0.2.5
+   Compiling sys-locale v0.3.2
+   Compiling cosmic-text v0.18.2
+   Compiling postage v0.5.0
+   Compiling serde-saphyr v0.0.29
+   Compiling etagere v0.2.15
+   Compiling ctor v0.6.3
+   Compiling bincode v2.0.1
+   Compiling time-macros v0.2.32
+   Compiling taffy v0.9.0
+   Compiling stacksafe v1.0.3
+   Compiling triomphe v0.1.16
+   Compiling gpui_refineable v0.2.2
+   Compiling equator v0.4.2
+   Compiling flume v0.12.0
+   Compiling opener v0.8.5
+   Compiling resvg v0.47.0
+   Compiling rand_chacha v0.9.0
+   Compiling markup5ever v0.39.0
+   Compiling strum v0.28.0
+   Compiling lyon v1.0.19
+   Compiling gpui_http_client v0.2.2
+   Compiling arboard v3.6.1
+   Compiling boa_ast v0.21.1
+   Compiling gpui_util_macros v0.2.2
+   Compiling gpui_sum_tree v0.2.2
+   Compiling zstd v0.13.3
+   Compiling priority-threadpool v0.1.0 (https://github.com/tristanpoland/priority-threadpool?rev=bb1ab91#bb1ab91e)
+   Compiling toml v0.8.23
+   Compiling derive_more v2.1.1
+   Compiling itertools v0.11.0
+   Compiling gpui-macros v0.2.2
+   Compiling num_enum_derive v0.7.6
+   Compiling regress v0.10.5
+   Compiling libsqlite3-sys v0.30.1
+   Compiling spin v0.10.1
+   Compiling dynify-macros v0.1.2
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.0
+   Compiling open v5.4.2
+   Compiling pollster v0.4.0
+   Compiling circular-buffer v1.2.1
+   Compiling linkme-impl v0.3.37
+   Compiling base62 v2.2.4
+   Compiling seahash v4.1.0
+   Compiling num_cpus v1.17.0
+   Compiling fluent-uri v0.1.4
+   Compiling rust-i18n-support v4.2.1
+   Compiling time v0.3.55
+warning: unused import: `Hash`
+ --> crates\ui\wgpui\src\action.rs:9:12
+  |
+9 |     hash::{Hash, Hasher},
+  |            ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Duration`
+ --> crates\ui\wgpui\src\time_ext.rs:6:9
+  |
+6 | pub use std::time::Duration;
+  |         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ElementGeometry`
+ --> crates\ui\wgpui\src\view.rs:3:5
+  |
+3 |     ElementGeometry, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
+  |     ^^^^^^^^^^^^^^^
+
+   Compiling dynify v0.1.2
+   Compiling boa_parser v0.21.1
+warning: unused import: `Hasher`
+ --> crates\ui\wgpui\src\action.rs:9:18
+  |
+9 |     hash::{Hash, Hasher},
+  |                  ^^^^^^
+
+warning: unused import: `TraversePartialTree`
+ --> crates\ui\wgpui\src\taffy.rs:9:16
+  |
+9 |     TaffyTree, TraversePartialTree as _,
+  |                ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Hash`
+  --> crates\ui\wgpui\src\elements\div.rs:40:12
+   |
+40 |     hash::{Hash, Hasher},
+   |            ^^^^
+
+warning: unused import: `Hasher`
+  --> crates\ui\wgpui\src\elements\div.rs:40:18
+   |
+40 |     hash::{Hash, Hasher},
+   |                  ^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> crates\ui\wgpui\src\app\entity_map.rs:188:10
+    |
+188 |         &*(entity.as_ref() as *const dyn Any as *const T)
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> crates\ui\wgpui\src\app\entity_map.rs:180:5
+    |
+180 |     pub unsafe fn read_unchecked<T: 'static>(&self, entity_id: EntityId) -> &T {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: `#[warn(unsafe_op_in_unsafe_fn)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning: unused variable: `logical_scroll_offset`
+   --> crates\ui\wgpui\src\elements\h_list.rs:270:13
+    |
+270 |         let mut logical_scroll_offset = *shared_scroll_offset.borrow();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_logical_scroll_offset`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `logical_scroll_offset`
+   --> crates\ui\wgpui\src\elements\uniform_list.rs:362:13
+    |
+362 |         let mut logical_scroll_offset = *shared_scroll_offset.borrow();
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_logical_scroll_offset`
+
+warning: value assigned to `current_pass_label` is never read
+    --> crates\ui\wgpui\src\platform\cross\renderer.rs:3712:33
+     |
+3712 | ...                   current_pass_label = "layer_texture";
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+3816 | ...                   current_pass_label = "main";
+     |                       --------------------------- `current_pass_label` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `asset_source`
+  --> crates\ui\wgpui\src\svg_renderer.rs:57:9
+   |
+57 |         asset_source: &Arc<dyn AssetSource>,
+   |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_asset_source`
+
+warning: unused variable: `color`
+   --> crates\ui\wgpui\src\svg_renderer.rs:176:9
+    |
+176 |         color: crate::Hsla,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_color`
+
+warning[E0133]: call to unsafe function `app::entity_map::WeakEntity::<T>::from_raw` is unsafe and requires unsafe block
+   --> crates\ui\wgpui\src\view.rs:215:9
+    |
+215 |         WeakEntity::from_raw(self.entity.downgrade())
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> crates\ui\wgpui\src\view.rs:214:5
+    |
+214 |     pub unsafe fn downgrade_unchecked<T: 'static>(&self) -> WeakEntity<T> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+
+warning[E0133]: call to unsafe function `app::entity_map::EntityMap::read_unchecked` is unsafe and requires unsafe block
+    --> crates\ui\wgpui\src\window.rs:2545:9
+     |
+2545 |         cx.entities.read_unchecked(view.entity_id())
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+    --> crates\ui\wgpui\src\window.rs:2543:5
+     |
+2543 |     pub unsafe fn read_root<'a, T: 'static>(&self, cx: &'a App) -> &'a T {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+
+warning[E0133]: call to unsafe function `view::AnyView::downgrade_unchecked` is unsafe and requires unsafe block
+    --> crates\ui\wgpui\src\window.rs:2558:20
+     |
+2558 |         let weak = view.downgrade_unchecked::<T>();
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+    --> crates\ui\wgpui\src\window.rs:2551:5
+     |
+2551 | /     pub unsafe fn update_root<T: 'static, R>(
+2552 | |         &mut self,
+2553 | |         cx: &mut App,
+2554 | |         f: impl FnOnce(&mut T, &mut Window, &mut Context<T>) -> R,
+2555 | |     ) -> R {
+     | |__________^
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+
+warning[E0133]: call to unsafe function `app::entity_map::EntityMap::lease_unchecked` is unsafe and requires unsafe block
+    --> crates\ui\wgpui\src\window.rs:2559:26
+     |
+2559 |         let mut entity = cx.entities.lease_unchecked::<T>(entity_id);
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+     = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+
+warning: unused variable: `viewport_width`
+    --> crates\ui\wgpui\src\window.rs:3709:13
+     |
+3709 |         let viewport_width = self.viewport_size.width;
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_viewport_width`
+
+warning: unused variable: `count`
+    --> crates\ui\wgpui\src\window.rs:6193:17
+     |
+6193 |             let count = GLYPH_COUNT.fetch_add(1, Ordering::Relaxed);
+     |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+
+warning: field `discriminators_by_type_id` is never read
+   --> crates\ui\wgpui\src\action.rs:237:5
+    |
+234 | pub(crate) struct ActionRegistry {
+    |                   -------------- field in this struct
+...
+237 |     discriminators_by_type_id: HashMap<TypeId, u64>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `accessibility_force_disabled` is never read
+   --> crates\ui\wgpui\src\app.rs:706:16
+    |
+634 | pub struct App {
+    |            --- field in this struct
+...
+706 |     pub(crate) accessibility_force_disabled: bool,
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `clear` is never used
+  --> crates\ui\wgpui\src\bounds_tree.rs:33:12
+   |
+22 | / impl<U> BoundsTree<U>
+23 | | where
+24 | |     U: Clone
+25 | |         + Debug
+...  |
+30 | |         + Half
+31 | |         + Default,
+   | |__________________- method in this implementation
+32 |   {
+33 |       pub fn clear(&mut self) {
+   |              ^^^^^
+
+warning: fields `drag_hover_state` and `mouse_enter_leave_state` are never read
+    --> crates\ui\wgpui\src\elements\div.rs:3860:16
+     |
+3856 | pub struct InteractiveElementState {
+     |            ----------------------- fields in this struct
+...
+3860 |     pub(crate) drag_hover_state: Option<Rc<RefCell<HashMap<TypeId, bool>>>>,
+     |                ^^^^^^^^^^^^^^^^
+3861 |     pub(crate) mouse_enter_leave_state: Option<Rc<RefCell<bool>>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `update_smooth_scroll` and `visual_scroll_offset` are never used
+   --> crates\ui\wgpui\src\elements\list.rs:480:8
+    |
+217 | impl ListState {
+    | -------------- methods in this implementation
+...
+480 |     fn update_smooth_scroll(&mut self) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+485 |     fn visual_scroll_offset(&self) -> Pixels {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `resize` is never used
+   --> crates\ui\wgpui\src\elements\wgpu_surface.rs:364:19
+    |
+ 73 | impl WgpuSurfaceHandle {
+    | ---------------------- method in this implementation
+...
+364 |     pub(crate) fn resize(&self, width: u32, height: u32) {
+    |                   ^^^^^^
+
+warning: method `set_active_layout` is never used
+   --> crates\ui\wgpui\src\inspector.rs:432:23
+    |
+239 |     impl Inspector {
+    |     -------------- method in this implementation
+...
+432 |         pub(crate) fn set_active_layout(&mut self, layout: InspectorLayoutInfo) {
+    |                       ^^^^^^^^^^^^^^^^^
+
+warning: method `attach_window` is never used
+  --> crates\ui\wgpui\src\platform.rs:99:8
+   |
+73 | pub(crate) trait Platform: 'static {
+   |                  -------- method in this trait
+...
+99 |     fn attach_window(
+   |        ^^^^^^^^^^^^^
+
+warning: methods `selected_text_range`, `marked_text_range`, `text_for_range`, and `bounds_for_range` are never used
+   --> crates\ui\wgpui\src\platform.rs:894:8
+    |
+889 | impl PlatformInputHandler {
+    | ------------------------- methods in this implementation
+...
+894 |     fn selected_text_range(&mut self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+904 |     fn marked_text_range(&mut self) -> Option<Range<usize>> {
+    |        ^^^^^^^^^^^^^^^^^
+...
+911 |     fn text_for_range(
+    |        ^^^^^^^^^^^^^^
+...
+978 |     fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: fields `kind`, `is_movable`, `is_minimizable`, and `tabbing_identifier` are never read
+    --> crates\ui\wgpui\src\platform.rs:1245:9
+     |
+1238 | pub(crate) struct WindowParams {
+     |                   ------------ fields in this struct
+...
+1245 |     pub kind: WindowKind,
+     |         ^^^^
+...
+1248 |     pub is_movable: bool,
+     |         ^^^^^^^^^^
+...
+1254 |     pub is_minimizable: bool,
+     |         ^^^^^^^^^^^^^^
+...
+1263 |     pub tabbing_identifier: Option<String>,
+     |         ^^^^^^^^^^^^^^^^^^
+     |
+     = note: `WindowParams` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated function `text_hash` is never used
+    --> crates\ui\wgpui\src\platform.rs:1934:19
+     |
+1898 | impl ClipboardString {
+     | -------------------- associated function in this implementation
+...
+1934 |     pub(crate) fn text_hash(text: &str) -> u64 {
+     |                   ^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> crates\ui\wgpui\src\platform\keystroke.rs:268:19
+    |
+266 | impl KeybindingKeystroke {
+    | ------------------------ associated function in this implementation
+267 |     #[cfg(target_os = "windows")]
+268 |     pub(crate) fn new(inner: Keystroke, display_modifiers: Modifiers, display_key: String) -> Self {
+    |                   ^^^
+
+warning: fields `atlas_target` and `atlas_target_view` are never read
+   --> crates\ui\wgpui\src\platform\cross\atlas.rs:187:5
+    |
+186 | struct WgpuAtlasState {
+    |        -------------- fields in this struct
+187 |     atlas_target: Option<wgpu::Texture>,
+    |     ^^^^^^^^^^^^
+188 |     atlas_target_view: Option<wgpu::TextureView>,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: field `wgpu_options` is never read
+  --> crates\ui\wgpui\src\platform\cross\platform.rs:71:5
+   |
+66 | pub(crate) struct CrossPlatform {
+   |                   ------------- field in this struct
+...
+71 |     wgpu_options: WgpuOptions,
+   |     ^^^^^^^^^^^^
+
+warning: associated function `create_buffers` is never used
+   --> crates\ui\wgpui\src\platform\cross\render_context.rs:341:8
+    |
+ 80 | impl WgpuContext {
+    | ---------------- associated function in this implementation
+...
+341 |     fn create_buffers(
+    |        ^^^^^^^^^^^^^^
+
+warning: function `map_attributes` is never used
+  --> crates\ui\wgpui\src\platform\cross\renderer.rs:22:10
+   |
+22 | const fn map_attributes<const N: usize>(
+   |          ^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:146:11
+    |
+145 | impl color::Hsla {
+    | ---------------- associated constant in this implementation
+146 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 4] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:171:11
+    |
+170 | impl color::GradientStop {
+    | ------------------------ associated constant in this implementation
+171 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:186:11
+    |
+185 | impl color::LinearColorStop {
+    | --------------------------- associated constant in this implementation
+186 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:201:11
+    |
+200 | impl color::Background {
+    | ---------------------- associated constant in this implementation
+201 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 9] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:256:11
+    |
+255 | impl color::TextColor {
+    | --------------------- associated constant in this implementation
+256 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 7] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:309:11
+    |
+308 | impl GlobalParams {
+    | ----------------- associated constant in this implementation
+309 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 3] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:336:11
+    |
+335 | impl geometry::Corners<ScaledPixels> {
+    | ------------------------------------ associated constant in this implementation
+336 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 4] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:365:11
+    |
+364 | impl geometry::Edges<ScaledPixels> {
+    | ---------------------------------- associated constant in this implementation
+365 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 4] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:393:11
+    |
+392 | impl Bounds {
+    | ----------- associated constant in this implementation
+393 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &[
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:418:11
+    |
+417 | impl Quad {
+    | --------- associated constant in this implementation
+418 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 22] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: struct `QuadsData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:491:8
+    |
+491 | struct QuadsData {
+    |        ^^^^^^^^^
+
+warning: struct `ShadowsData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:496:8
+    |
+496 | struct ShadowsData {
+    |        ^^^^^^^^^^^
+
+warning: struct `PathRasterizationData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:501:8
+    |
+501 | struct PathRasterizationData {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PathsData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:505:8
+    |
+505 | struct PathsData {
+    |        ^^^^^^^^^
+
+warning: struct `UnderlinesData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:526:8
+    |
+526 | struct UnderlinesData {
+    |        ^^^^^^^^^^^^^^
+
+warning: struct `MonoSpritesData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:530:8
+    |
+530 | struct MonoSpritesData {
+    |        ^^^^^^^^^^^^^^^
+
+warning: struct `PolySpritesData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:538:8
+    |
+538 | struct PolySpritesData {
+    |        ^^^^^^^^^^^^^^^
+
+warning: struct `SurfacesData` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:544:8
+    |
+544 | struct SurfacesData {
+    |        ^^^^^^^^^^^^
+
+warning: struct `PathSprite` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:552:8
+    |
+552 | struct PathSprite {
+    |        ^^^^^^^^^^
+
+warning: struct `PathRasterizationVertex` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:558:8
+    |
+558 | struct PathRasterizationVertex {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `VERTEX_ATTRIBUTES` and `layout` are never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:566:11
+    |
+565 | impl PathRasterizationVertex {
+    | ---------------------------- associated items in this implementation
+566 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 10] = &{
+    |           ^^^^^^^^^^^^^^^^^
+...
+603 |     fn layout() -> wgpu::VertexBufferLayout<'static> {
+    |        ^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:613:11
+    |
+612 | impl AtlasTextureId {
+    | ------------------- associated constant in this implementation
+613 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: struct `AtlasBounds` is never constructed
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:630:8
+    |
+630 | struct AtlasBounds {
+    |        ^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:636:11
+    |
+635 | impl AtlasBounds {
+    | ---------------- associated constant in this implementation
+636 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:653:11
+    |
+652 | impl AtlasTile {
+    | -------------- associated constant in this implementation
+653 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 6] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:686:11
+    |
+685 | impl TransformationMatrix {
+    | ------------------------- associated constant in this implementation
+686 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 2] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: associated constant `VERTEX_ATTRIBUTES` is never used
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:705:11
+    |
+704 | impl MonochromeSprite {
+    | --------------------- associated constant in this implementation
+705 |     const VERTEX_ATTRIBUTES: &'static [wgpu::VertexAttribute; 21] = &{
+    |           ^^^^^^^^^^^^^^^^^
+
+warning: field `color_targets` is never read
+   --> crates\ui\wgpui\src\platform\cross\renderer.rs:783:5
+    |
+782 | struct WgpuPipelines {
+    |        ------------- field in this struct
+783 |     color_targets: Vec<Option<wgpu::ColorTargetState>>,
+    |     ^^^^^^^^^^^^^
+
+warning: field `path_sample_count` is never read
+    --> crates\ui\wgpui\src\platform\cross\renderer.rs:1557:5
+     |
+1556 | struct RenderingParameters {
+     |        ------------------- field in this struct
+1557 |     path_sample_count: u32,
+     |     ^^^^^^^^^^^^^^^^^
+
+warning: field `texture_bounds` is never read
+    --> crates\ui\wgpui\src\platform\cross\renderer.rs:2219:5
+     |
+2210 | struct LayerTextureEntry {
+     |        ----------------- field in this struct
+...
+2219 |     texture_bounds: crate::Bounds<crate::ScaledPixels>,
+     |     ^^^^^^^^^^^^^^
+
+warning: field `surface_bind_groups` is never read
+    --> crates\ui\wgpui\src\platform\cross\renderer.rs:2270:5
+     |
+2254 | pub struct WgpuRenderer {
+     |            ------------ field in this struct
+...
+2270 |     surface_bind_groups:
+     |     ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `sprite_atlas`, `update_transparency`, and `viewport_size` are never used
+    --> crates\ui\wgpui\src\platform\cross\renderer.rs:5061:12
+     |
+2345 | impl WgpuRenderer {
+     | ----------------- methods in this implementation
+...
+5061 |     pub fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+     |            ^^^^^^^^^^^^
+...
+5075 |     pub fn update_transparency(&mut self, transparent: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+5091 |     pub fn viewport_size(&self) -> geometry::Size<DevicePixels> {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `create`, `size`, `format`, and `frame_generation` are never used
+   --> crates\ui\wgpui\src\platform\cross\surface_registry.rs:88:12
+    |
+ 71 | impl SurfaceRegistry {
+    | -------------------- methods in this implementation
+...
+ 88 |     pub fn create(
+    |            ^^^^^^
+...
+308 |     pub fn size(&self, id: SurfaceId) -> Option<(u32, u32)> {
+    |            ^^^^
+...
+314 |     pub fn format(&self, id: SurfaceId) -> Option<wgpu::TextureFormat> {
+    |            ^^^^^^
+...
+468 |     pub fn frame_generation(&self, id: SurfaceId) -> Option<u64> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: method `order` is never used
+    --> crates\ui\wgpui\src\scene.rs:1099:12
+     |
+1098 | impl LayerSlabSpan {
+     | ------------------ method in this implementation
+1099 |     pub fn order(&self) -> DrawOrder {
+     |            ^^^^^
+
+warning: field `filter_boundaries` is never read
+    --> crates\ui\wgpui\src\scene.rs:1216:5
+     |
+1191 | struct BatchIterator<'a> {
+     |        ------------- field in this struct
+...
+1216 |     filter_boundaries: &'a [FilterBoundary],
+     |     ^^^^^^^^^^^^^^^^^
+
+warning: method `live_node_count` is never used
+   --> crates\ui\wgpui\src\taffy.rs:204:12
+    |
+ 73 | impl TaffyLayoutEngine {
+    | ---------------------- method in this implementation
+...
+204 |     pub fn live_node_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^
+
+warning: field `content_offset` is never read
+  --> crates\ui\wgpui\src\window.rs:85:9
+   |
+78 | pub(crate) struct PrepaintLayerBuffer {
+   |                   ------------------- field in this struct
+...
+85 |     pub content_offset: Point<Pixels>,
+   |         ^^^^^^^^^^^^^^
+   |
+   = note: `PrepaintLayerBuffer` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `update_count` is never used
+   --> crates\ui\wgpui\src\window.rs:830:12
+    |
+612 | impl WindowInvalidator {
+    | ---------------------- method in this implementation
+...
+830 |     pub fn update_count(&self) -> usize {
+    |            ^^^^^^^^^^^^
+
+warning: method `layer_is_refilling` is never used
+    --> crates\ui\wgpui\src\window.rs:6739:19
+     |
+2426 | impl Window {
+     | ----------- method in this implementation
+...
+6739 |     pub(crate) fn layer_is_refilling(&self, key: LayerKey) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^
+
+   Compiling rust-i18n v4.2.1
+   Compiling num_enum v0.7.6
+   Compiling intrusive-collections v0.9.7
+   Compiling include-zstd-derive v0.1.3
+   Compiling rand v0.9.5
+   Compiling aligned-vec v0.6.4
+   Compiling xml5ever v0.18.1
+   Compiling small_btree v0.1.0
+   Compiling tree-sitter-c v0.24.2
+   Compiling tree-sitter-md v0.5.3 (https://github.com/tree-sitter-grammars/tree-sitter-markdown?tag=v0.5.3#f969cd3a)
+For more information about this error, try `rustc --explain E0133`.
+warning: `gpui-ce` (lib) generated 74 warnings (run `cargo fix --lib -p gpui-ce` to apply 13 suggestions)
+   Compiling tree-sitter v0.24.7
+   Compiling tree-sitter-yaml v0.7.2
+   Compiling tree-sitter-bash v0.25.1
+   Compiling tree-sitter-json v0.24.8
+   Compiling tree-sitter-proto v0.4.0
+   Compiling tree-sitter-scala v0.26.2
+   Compiling tree-sitter-css v0.25.0
+   Compiling tree-sitter-python v0.25.0
+   Compiling tree-sitter-go v0.25.0
+   Compiling tree-sitter-toml-ng v0.7.0
+   Compiling tree-sitter-c-sharp v0.23.5
+   Compiling tree-sitter-sequel v0.3.11
+   Compiling tree-sitter-rust v0.24.2
+   Compiling tree-sitter-cmake v0.7.4
+   Compiling tree-sitter-diff v0.1.0
+   Compiling tree-sitter-ruby v0.23.1
+   Compiling tree-sitter-html v0.23.2
+   Compiling tree-sitter-elixir v0.3.5
+   Compiling tree-sitter-java v0.23.5
+   Compiling tree-sitter-swift v0.7.3
+   Compiling tree-sitter-make v1.1.1
+   Compiling tree-sitter-javascript v0.25.0
+   Compiling tree-sitter-embedded-template v0.25.0
+   Compiling tree-sitter-graphql v0.1.0
+   Compiling tree-sitter-jsdoc v0.25.0
+   Compiling tree-sitter-zig v1.1.2
+   Compiling tree-sitter-cpp v0.23.4
+   Compiling tree-sitter-typescript v0.23.2
+   Compiling serde_repr v0.1.21
+   Compiling rust_decimal v1.42.1
+   Compiling xsum v0.1.6
+   Compiling glob v0.3.4
+   Compiling tag_ptr v0.1.0
+   Compiling str_indices v0.4.4
+   Compiling linkme v0.3.37
+   Compiling unicode-id v0.3.6
+   Compiling tap v1.0.1
+   Compiling markdown v1.0.0
+   Compiling boa_engine v0.21.1
+   Compiling ropey v2.0.0-beta.1
+   Compiling rust-i18n-macro v4.2.1
+   Compiling lsp-types v0.97.0
+   Compiling markup5ever_rcdom v0.3.0
+   Compiling include-zstd v0.1.3
+   Compiling xml5ever v0.39.0
+   Compiling html5ever v0.39.0
+   Compiling json5 v1.3.1
+   Compiling hashlink v0.9.1
+   Compiling instant v0.1.13
+   Compiling ui-macros v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\ui\wgpui-component\crates\ui-macros)
+   Compiling enum-iterator-derive v1.5.0
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\ui_macros-9eef4dc855ae3f3b.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\ui_macros-9eef4dc855ae3f3b.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ui-macros` (lib) generated 1 warning
+   Compiling streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling web-time v1.1.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling wgpui-base v0.6.1 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\ui\wgpui-base)
+   Compiling rusqlite v0.32.1
+   Compiling enum-iterator v2.3.0
+warning: unused imports: `Element`, `Hitbox`, and `InteractiveElement`
+ --> crates\ui\wgpui-base\src\observe.rs:2:12
+  |
+2 | use gpui::{Element, Hitbox, InteractiveElement};
+  |            ^^^^^^^  ^^^^^^  ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `StatefulInteractiveElement`
+ --> crates\ui\wgpui-base\src\number_input.rs:7:38
+  |
+7 |     ParentElement, RenderOnce, Role, StatefulInteractiveElement as _, StyleRefinement, Styled,
+  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `text_align`
+   --> crates\ui\wgpui-base\src\input\editor\display_map\text_wrapper.rs:798:9
+    |
+798 |         text_align: TextAlign,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_text_align`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `align_width`
+   --> crates\ui\wgpui-base\src\input\editor\display_map\text_wrapper.rs:799:9
+    |
+799 |         align_width: Option<Pixels>,
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_align_width`
+
+warning: unused variable: `text_align`
+   --> crates\ui\wgpui-base\src\input\editor\display_map\text_wrapper.rs:823:9
+    |
+823 |         text_align: TextAlign,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_text_align`
+
+warning: unused variable: `align_width`
+   --> crates\ui\wgpui-base\src\input\editor\display_map\text_wrapper.rs:824:9
+    |
+824 |         align_width: Option<Pixels>,
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_align_width`
+
+warning: unused variable: `value`
+   --> crates\ui\wgpui-base\src\number_input.rs:236:13
+    |
+236 |         let value = self.state.read(cx).value().parse::<f64>().ok();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_value`
+
+   Compiling mermaid-rs-renderer v0.2.2
+warning: method `next_selection_document_order` is never used
+  --> crates\ui\wgpui-base\src\global_state.rs:93:19
+   |
+25 | impl GlobalState {
+   | ---------------- method in this implementation
+...
+93 |     pub(crate) fn next_selection_document_order(&mut self) -> u64 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `init` is never used
+  --> crates\ui\wgpui-base\src\number_input.rs:17:15
+   |
+17 | pub(crate) fn init(cx: &mut App) {
+   |               ^^^^
+
+warning: function `word_range_at` is never used
+  --> crates\ui\wgpui-base\src\text_boundary.rs:55:15
+   |
+55 | pub(crate) fn word_range_at(text: &str, offset: usize) -> Option<Range<usize>> {
+   |               ^^^^^^^^^^^^^
+
+warning: function `line_range_at` is never used
+  --> crates\ui\wgpui-base\src\text_boundary.rs:67:15
+   |
+67 | pub(crate) fn line_range_at(text: &str, offset: usize) -> Range<usize> {
+   |               ^^^^^^^^^^^^^
+
+warning: function `clip_offset_left` is never used
+  --> crates\ui\wgpui-base\src\text_boundary.rs:76:4
+   |
+76 | fn clip_offset_left(text: &str, offset: usize) -> usize {
+   |    ^^^^^^^^^^^^^^^^
+
+warning: `wgpui-base` (lib) generated 12 warnings (run `cargo fix --lib -p wgpui-base` to apply 6 suggestions)
+   Compiling markup5ever_rcdom v0.39.0+unofficial
+   Compiling mathjax-svg-rs v0.4.0
+   Compiling notify v6.1.1
+   Compiling directories v5.0.1
+   Compiling owo-colors v4.3.0
+   Compiling ui v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\ui\wgpui-component\crates\ui)
+   Compiling pulsar_reflection_codegen v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\pulsar-reflection\pulsar_reflection_codegen)
+   Compiling profiling v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\profiling)
+warning: unused import: `macros::*`
+  --> crates\profiling\src\lib.rs:26:9
+   |
+26 | pub use macros::*;
+   |         ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `profiling` (lib) generated 1 warning (run `cargo fix --lib -p profiling` to apply 1 suggestion)
+   Compiling socket2 v0.5.10
+   Compiling pulsar_reflection_derive v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\pulsar-reflection\pulsar_reflection_derive)
+warning: unused import: `Expr`
+ --> crates\third-party\pulsar-reflection\pulsar_reflection_derive\src\pulsar_type.rs:3:11
+  |
+3 | use syn::{Expr, Item, ItemType, Meta, Path, parse_macro_input, punctuated::Punctuated};
+  |           ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `parse_quote`
+ --> crates\third-party\pulsar-reflection\pulsar_reflection_derive\src\struct_impl.rs:2:79
+  |
+2 | use syn::{DataStruct, Fields, Ident, ImplGenerics, TypeGenerics, WhereClause, parse_quote};
+  |                                                                               ^^^^^^^^^^^
+
+warning: function `parse_ident_expr` is never used
+ --> crates\third-party\pulsar-reflection\pulsar_reflection_derive\src\util.rs:3:8
+  |
+3 | pub fn parse_ident_expr(expr: &Expr, arg_name: &str) -> syn::Result<Ident> {
+  |        ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\pulsar_reflection_derive-e8fca2387d1497da.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\pulsar_reflection_derive-e8fca2387d1497da.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `pulsar_reflection_derive` (lib) generated 4 warnings (run `cargo fix --lib -p pulsar_reflection_derive` to apply 2 suggestions)
+   Compiling glam v0.29.3
+   Compiling pulsar_scenedb_derive v0.1.0 (https://github.com//Far-Beyond-Pulsar/SceneDB?rev=0801d2638a66b81692df6a03130c3dcf1b3f1dbf#0801d263)
+   Compiling approx v0.5.1
+   Compiling glam v0.33.5
+   Compiling libloading v0.9.0
+   Compiling ui_types_common v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\editor\ui_types_common)
+   Compiling gamma-core v0.2.0 (https://github.com/Far-Beyond-Pulsar/Gamma?rev=b4ebf98486fb716d090d35b689a4eb8a0e414cc1#b4ebf984)
+   Compiling gamma-derive v0.2.0 (https://github.com/Far-Beyond-Pulsar/Gamma?rev=b4ebf98486fb716d090d35b689a4eb8a0e414cc1#b4ebf984)
+   Compiling twox-hash v2.1.3
+   Compiling crunchy v0.2.4
+   Compiling gamma v0.2.0 (https://github.com/Far-Beyond-Pulsar/Gamma?rev=b4ebf98486fb716d090d35b689a4eb8a0e414cc1#b4ebf984)
+   Compiling plugin_editor_api v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\plugin_editor_api)
+   Compiling ui_gen_macros v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\ui_gen_macros)
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\ui_gen_macros-b505776cf6cf7b29.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\ui_gen_macros-b505776cf6cf7b29.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `ui_gen_macros` (lib) generated 1 warning
+   Compiling async-trait v0.1.92
+   Compiling glam v0.27.0
+   Compiling pulsar_reflection v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\pulsar-reflection\pulsar_reflection)
+warning: unexpected `cfg` condition value: `prims-helio`
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\mod.rs:24:7
+   |
+24 | #[cfg(feature = "prims-helio")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `feature` are: `default`, `prims-core`, `prims-glam`, `prims-gpui`, `prims-serde`, and `prims-std`
+   = help: consider adding `prims-helio` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused variable: `window`
+   --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\enum_dropdown.rs:129:53
+    |
+129 |         set_value: std::sync::Arc::new(move |value, window, cx| {
+    |                                                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_window`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type alias `RegisteredBool` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\bool.rs:24:6
+   |
+24 | type RegisteredBool = bool;
+   |      ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: type alias `RegisteredF32` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\f32.rs:22:6
+   |
+22 | type RegisteredF32 = f32;
+   |      ^^^^^^^^^^^^^
+
+warning: type alias `RegisteredF64` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\f64.rs:20:6
+   |
+20 | type RegisteredF64 = f64;
+   |      ^^^^^^^^^^^^^
+
+warning: type alias `RegisteredI32` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\i32.rs:22:6
+   |
+22 | type RegisteredI32 = i32;
+   |      ^^^^^^^^^^^^^
+
+warning: type alias `RegisteredVec3` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\vec3.rs:22:6
+   |
+22 | type RegisteredVec3 = [f32; 3];
+   |      ^^^^^^^^^^^^^^
+
+warning: type alias `RegisteredColor` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\core\color.rs:21:6
+   |
+21 | type RegisteredColor = [f32; 4];
+   |      ^^^^^^^^^^^^^^^
+
+warning: type alias `RegisteredMat4` is never used
+  --> crates\third-party\pulsar-reflection\pulsar_reflection\src\prims\glam\mat4.rs:36:6
+   |
+36 | type RegisteredMat4 = glam::Mat4;
+   |      ^^^^^^^^^^^^^^
+
+warning: `pulsar_reflection` (lib) generated 9 warnings (run `cargo fix --lib -p pulsar_reflection` to apply 1 suggestion)
+   Compiling pulsar_scenedb v0.1.0 (https://github.com//Far-Beyond-Pulsar/SceneDB?rev=0801d2638a66b81692df6a03130c3dcf1b3f1dbf#0801d263)
+   Compiling helio-core v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-core)
+warning: unused variable: `target`
+   --> crates\renderer\helio\crates\helio-core\src\traits.rs:491:9
+    |
+491 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `depth`
+   --> crates\renderer\helio\crates\helio-core\src\traits.rs:492:9
+    |
+492 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\renderer\helio\crates\helio-core\src\traits.rs:493:9
+    |
+493 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 3 warnings (run `cargo fix --lib -p helio-core` to apply 3 suggestions)
+   Compiling helio-pass-sky v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-sky)
+warning: multiple fields are never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-sky\src\lib.rs:275:5
+    |
+268 | pub struct SkyPass {
+    |            ------- fields in this struct
+...
+275 |     sim_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^
+276 |     render_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^
+...
+279 |     sampler: wgpu::Sampler,
+    |     ^^^^^^^
+280 |     volumes: [wgpu::Texture; 2],
+    |     ^^^^^^^
+...
+285 |     dummy_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+...
+292 |     raymarch_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+293 |     reproject_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^^
+294 |     upsample_pipeline: wgpu::ComputePipeline,
+    |     ^^^^^^^^^^^^^^^^^
+295 |     raymarch_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+296 |     reproject_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^^
+297 |     upsample_bgl: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+298 |     linear_sampler: wgpu::Sampler,
+299 |     nearest_sampler: wgpu::Sampler,
+    |     ^^^^^^^^^^^^^^^
+...
+331 |     sky_lut_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^^^^^
+...
+340 |     sky_bgl0: wgpu::BindGroupLayout,
+    |     ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: static variable `__ScenedbGpuPacked_SkyComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-sky\src\components.rs:19:12
+   |
+19 | pub struct SkyComponent {
+   |            ^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+19 - pub struct SkyComponent {
+19 + pub struct __SCENEDB_GPU_PACKED_SKY_COMPONENT_TYPE_INFO {
+   |
+
+warning: `helio-pass-sky` (lib) generated 2 warnings (run `cargo fix --lib -p helio-pass-sky` to apply 1 suggestion)
+   Compiling helio-mats v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-mats)
+   Compiling helio-pass-shadow-matrix v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-shadow-matrix)
+   Compiling helio-pass-radiance-cascades v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-radiance-cascades)
+   Compiling helio-pass-gbuffer v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer)
+warning: field `last_template_keys` is never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\lib.rs:88:5
+   |
+77 | pub struct GBufferPass {
+   |            ----------- field in this struct
+...
+88 |     last_template_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: static variable `__ScenedbGpuPacked_MaterialComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:32:12
+   |
+32 | pub struct MaterialComponent {
+   |            ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+32 - pub struct MaterialComponent {
+32 + pub struct __SCENEDB_GPU_PACKED_MATERIAL_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_RenderGroupComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:127:12
+    |
+127 | pub struct RenderGroupComponent {
+    |            ^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+127 - pub struct RenderGroupComponent {
+127 + pub struct __SCENEDB_GPU_PACKED_RENDER_GROUP_COMPONENT_TYPE_INFO {
+    |
+
+warning: static variable `__ScenedbGpuPacked_SubLevelActorComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:155:12
+    |
+155 | pub struct SubLevelActorComponent {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+155 - pub struct SubLevelActorComponent {
+155 + pub struct __SCENEDB_GPU_PACKED_SUB_LEVEL_ACTOR_COMPONENT_TYPE_INFO {
+    |
+
+warning: static variable `__ScenedbGpuPacked_SublevelComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:194:12
+    |
+194 | pub struct SublevelComponent {
+    |            ^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+194 - pub struct SublevelComponent {
+194 + pub struct __SCENEDB_GPU_PACKED_SUBLEVEL_COMPONENT_TYPE_INFO {
+    |
+
+warning: static variable `__ScenedbGpuPacked_SectionedObjectComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:209:12
+    |
+209 | pub struct SectionedObjectComponent {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+209 - pub struct SectionedObjectComponent {
+209 + pub struct __SCENEDB_GPU_PACKED_SECTIONED_OBJECT_COMPONENT_TYPE_INFO {
+    |
+
+warning: static variable `__ScenedbGpuPacked_StaticObjectComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-gbuffer\src\components.rs:257:12
+    |
+257 | pub struct StaticObjectComponent {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+257 - pub struct StaticObjectComponent {
+257 + pub struct __SCENEDB_GPU_PACKED_STATIC_OBJECT_COMPONENT_TYPE_INFO {
+    |
+
+   Compiling pulsar_script_vm v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_script_vm)
+warning: `helio-pass-gbuffer` (lib) generated 7 warnings (run `cargo fix --lib -p helio-pass-gbuffer` to apply 6 suggestions)
+   Compiling openxr-sys v0.13.1
+   Compiling syn v1.0.109
+   Compiling tiny-keccak v2.0.2
+   Compiling solid-rs v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+   Compiling window_manager v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\window_manager)
+warning: unused import: `AppContext`
+  --> crates\core\window_manager\src\manager.rs:11:27
+   |
+11 |     AnyWindowHandle, App, AppContext as _, EventEmitter, Global, Render, Window, WindowOptions,
+   |                           ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling pulsar_events v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_events)
+warning: `window_manager` (lib) generated 1 warning
+   Compiling engine_subsystems v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\subsystems\engine_subsystems)
+warning: unused import: `pulsar_reflection::EngineClass as _`
+ --> crates\core\plugin_editor_api\src\components.rs:1:5
+  |
+1 | use pulsar_reflection::EngineClass as _;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PropertyMetadata`
+ --> crates\core\plugin_editor_api\src\components.rs:2:38
+  |
+2 | use pulsar_reflection::{EngineClass, PropertyMetadata};
+  |                                      ^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> crates\core\plugin_editor_api\src\plugin.rs:1:5
+  |
+1 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `EditorId` and `FileTypeId`
+ --> crates\core\plugin_editor_api\src\plugin.rs:4:26
+  |
+4 | use crate::identifiers::{EditorId, FileTypeId};
+  |                          ^^^^^^^^  ^^^^^^^^^^
+
+warning: unused variable: `window`
+   --> crates\core\plugin_editor_api\src\editor_element.rs:207:28
+    |
+207 |     fn teardown(&mut self, window: &mut Window, cx: &mut App) {}
+    |                            ^^^^^^ help: if this is intentional, prefix it with an underscore: `_window`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cx`
+   --> crates\core\plugin_editor_api\src\editor_element.rs:207:49
+    |
+207 |     fn teardown(&mut self, window: &mut Window, cx: &mut App) {}
+    |                                                 ^^ help: if this is intentional, prefix it with an underscore: `_cx`
+
+warning: `extern` fn uses type `dyn EditorPluginFull`, which is not FFI-safe
+  --> crates\core\plugin_editor_api\src\plugin.rs:82:5
+   |
+82 |     unsafe extern "C" fn(theme_ptr: *const std::ffi::c_void) -> &'static mut dyn EditorPluginFull;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not FFI-safe
+   |
+   = note: trait objects have no C equivalent
+   = note: `#[warn(improper_ctypes_definitions)]` on by default
+
+   Compiling helio-pass-object-batch v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-object-batch)
+   Compiling helio-pass-light-cull v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-light-cull)
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\plugin_editor_api.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\plugin_editor_api.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `plugin_editor_api` (lib) generated 8 warnings (run `cargo fix --lib -p plugin_editor_api` to apply 6 suggestions)
+   Compiling notify-types v2.1.0
+   Compiling meshopt v0.6.2
+   Compiling serde_spanned v1.1.1
+   Compiling num-derive v0.4.2
+   Compiling heapless v0.8.0
+   Compiling ident_case v1.0.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling strsim v0.11.1
+   Compiling darling_core v0.23.0
+   Compiling pest v2.9.0
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling const-random-macro v0.1.16
+   Compiling notify v8.2.0
+   Compiling plugin_manager v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\plugin_manager)
+warning: unused import: `PathBuf`
+  --> crates\core\plugin_manager\src\tool_bridge.rs:11:23
+   |
+11 | use std::path::{Path, PathBuf};
+   |                       ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `std::result::Result` that must be used
+    --> crates\core\plugin_manager\src\lib.rs:1248:33
+     |
+1248 | ...                   std::fs::create_dir_all(parent);
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+     |
+1248 |                                 let _ = std::fs::create_dir_all(parent);
+     |                                 +++++++
+
+warning: `plugin_manager` (lib) generated 2 warnings (run `cargo fix --lib -p plugin_manager` to apply 1 suggestion)
+   Compiling binread_derive v2.1.0
+   Compiling openxr v0.21.1
+   Compiling helio-pass-portal-cull v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-portal-cull)
+   Compiling helio-pass-foliage-place v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place)
+warning: unused imports: `gpu_types::*`, `packing::*`, `placement::*`, and `quality::*`
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\lib.rs:67:20
+   |
+67 | pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
+   |                    ^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `std::result::Result` that must be used
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-portal-cull\src\lib.rs:472:13
+    |
+472 |             ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+472 |             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+    |             +++++++
+
+warning: static variable `__ScenedbGpuPacked_PortalComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-portal-cull\src\components.rs:24:12
+   |
+24 | pub struct PortalComponent {
+   |            ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+24 - pub struct PortalComponent {
+24 + pub struct __SCENEDB_GPU_PACKED_PORTAL_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_PortalViewComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-portal-cull\src\components.rs:71:12
+   |
+71 | pub struct PortalViewComponent {
+   |            ^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+71 - pub struct PortalViewComponent {
+71 + pub struct __SCENEDB_GPU_PACKED_PORTAL_VIEW_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_PortalProjectionCountsComponent_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-portal-cull\src\components.rs:117:12
+    |
+117 | pub struct PortalProjectionCountsComponent {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+117 - pub struct PortalProjectionCountsComponent {
+117 + pub struct __SCENEDB_GPU_PACKED_PORTAL_PROJECTION_COUNTS_COMPONENT_TYPE_INFO {
+    |
+
+warning: method `table_stats` is never used
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\pass.rs:664:8
+    |
+136 | impl FoliagePlacePass {
+    | --------------------- method in this implementation
+...
+664 |     fn table_stats(&self, types: &[GpuFoliageType]) -> (f32, f32) {
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: static variable `__ScenedbGpuPacked_FoliageTypeComponent_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\components.rs:9:12
+  |
+9 | pub struct FoliageTypeComponent {
+  |            ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+  |
+9 - pub struct FoliageTypeComponent {
+9 + pub struct __SCENEDB_GPU_PACKED_FOLIAGE_TYPE_COMPONENT_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_FoliageLayerComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\components.rs:41:12
+   |
+41 | pub struct FoliageLayerComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+41 - pub struct FoliageLayerComponent {
+41 + pub struct __SCENEDB_GPU_PACKED_FOLIAGE_LAYER_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_FoliageInteractorComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\components.rs:51:12
+   |
+51 | pub struct FoliageInteractorComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+51 - pub struct FoliageInteractorComponent {
+51 + pub struct __SCENEDB_GPU_PACKED_FOLIAGE_INTERACTOR_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_FoliageWindComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-place\src\components.rs:61:12
+   |
+61 | pub struct FoliageWindComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+61 - pub struct FoliageWindComponent {
+61 + pub struct __SCENEDB_GPU_PACKED_FOLIAGE_WIND_COMPONENT_TYPE_INFO {
+   |
+
+warning: `helio-pass-portal-cull` (lib) generated 4 warnings (run `cargo fix --lib -p helio-pass-portal-cull` to apply 3 suggestions)
+   Compiling helio-pass-postprocess v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-postprocess)
+warning: `helio-pass-foliage-place` (lib) generated 6 warnings (run `cargo fix --lib -p helio-pass-foliage-place` to apply 5 suggestions)
+   Compiling tool_registry v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\toolbelt\crates\tool_registry)
+warning: unused import: `helio_core::Result as HelioResult`
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:1:5
+  |
+1 | use helio_core::Result as HelioResult;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling dirs v5.0.1
+warning: field `noise_texture` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-postprocess\src\lib.rs:129:5
+    |
+ 86 | pub struct PostProcessPass {
+    |            --------------- field in this struct
+...
+129 |     noise_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `pipeline_layout` is never read
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-postprocess\src\lut_builder.rs:5:5
+  |
+3 | pub struct LutBuilder {
+  |            ---------- field in this struct
+4 |     pipeline: wgpu::ComputePipeline,
+5 |     pipeline_layout: wgpu::PipelineLayout,
+  |     ^^^^^^^^^^^^^^^
+
+warning: static variable `__ScenedbGpuPacked_PostProcessVolumeComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-postprocess\src\components.rs:13:12
+   |
+13 | pub struct PostProcessVolumeComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+13 - pub struct PostProcessVolumeComponent {
+13 + pub struct __SCENEDB_GPU_PACKED_POST_PROCESS_VOLUME_COMPONENT_TYPE_INFO {
+   |
+
+   Compiling tower-http v0.6.11
+   Compiling tool_registry_macros v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\toolbelt\crates\tool_registry_macros)
+warning: `helio-pass-postprocess` (lib) generated 4 warnings (run `cargo fix --lib -p helio-pass-postprocess` to apply 2 suggestions)
+   Compiling rustls-platform-verifier v0.7.0
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\tool_registry_macros-39482f730bec9ecd.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\tool_registry_macros-39482f730bec9ecd.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `tool_registry_macros` (lib) generated 1 warning
+   Compiling proc-macro-utils v0.10.0
+   Compiling unicode-normalization v0.1.25
+   Compiling hash32 v0.3.1
+   Compiling safe_arch v1.2.0
+   Compiling float-cmp v0.10.0
+   Compiling matrixmultiply v0.3.11
+   Compiling quark-macros v0.1.0 (https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18e)
+   Compiling windows_x86_64_msvc v0.34.0
+   Compiling bumpalo v3.20.3
+   Compiling zip v2.4.2
+   Compiling zopfli v0.8.3
+   Compiling quark v0.1.0 (https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18e)
+   Compiling wide v1.6.1
+   Compiling manyhow-macros v0.11.4
+   Compiling stringprep v0.1.5
+   Compiling engine_fs v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\engine_fs)
+   Compiling reqwest v0.13.4
+   Compiling helio-pass-volumetric-fog v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-volumetric-fog)
+warning: static variable `__ScenedbGpuPacked_FogComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-volumetric-fog\src\components.rs:19:12
+   |
+19 | pub struct FogComponent {
+   |            ^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+19 - pub struct FogComponent {
+19 + pub struct __SCENEDB_GPU_PACKED_FOG_COMPONENT_TYPE_INFO {
+   |
+
+warning: `helio-pass-volumetric-fog` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-volumetric-fog` to apply 1 suggestion)
+   Compiling directories v6.0.0
+   Compiling pulsar-config v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\third-party\pulsar-config)
+   Compiling helio-pass-portal-instances v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-portal-instances)
+   Compiling binread v2.2.0
+   Compiling helio-xr v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-xr)
+   Compiling const-random v0.1.18
+   Compiling darling_macro v0.23.0
+   Compiling pest_meta v2.9.0
+   Compiling helio-pass-forward-lit v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-forward-lit)
+warning: field `last_shared_keys` is never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-forward-lit\src\lib.rs:53:5
+   |
+43 | pub struct ForwardLitPass {
+   |            -------------- field in this struct
+...
+53 |     last_shared_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: static variable `__ScenedbGpuPacked_LightComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-forward-lit\src\components.rs:44:12
+   |
+44 | pub struct LightComponent {
+   |            ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+44 - pub struct LightComponent {
+44 + pub struct __SCENEDB_GPU_PACKED_LIGHT_COMPONENT_TYPE_INFO {
+   |
+
+   Compiling helio-pass-corona v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-corona)
+warning: `helio-pass-forward-lit` (lib) generated 2 warnings (run `cargo fix --lib -p helio-pass-forward-lit` to apply 1 suggestion)
+   Compiling helio-pass-hiz v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-hiz)
+warning: field `max_sort_steps` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-corona\src\lib.rs:137:5
+    |
+ 80 | pub struct CoronaPass {
+    |            ---------- field in this struct
+...
+137 |     max_sort_steps: u32, // capacity of sort_steps_buf in step count
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: static variable `__ScenedbGpuPacked_CoronaEmitterComponent_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-corona\src\components.rs:8:12
+  |
+8 | pub struct CoronaEmitterComponent {
+  |            ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+  |
+8 - pub struct CoronaEmitterComponent {
+8 + pub struct __SCENEDB_GPU_PACKED_CORONA_EMITTER_COMPONENT_TYPE_INFO {
+  |
+
+   Compiling helio-pass-billboard v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-billboard)
+warning: `helio-pass-corona` (lib) generated 2 warnings (run `cargo fix --lib -p helio-pass-corona` to apply 1 suggestion)
+   Compiling helio-pass-tsr v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-tsr)
+warning: static variable `__ScenedbGpuPacked_BillboardComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-billboard\src\components\billboard.rs:15:12
+   |
+15 | pub struct BillboardComponent {
+   |            ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+15 - pub struct BillboardComponent {
+15 + pub struct __SCENEDB_GPU_PACKED_BILLBOARD_COMPONENT_TYPE_INFO {
+   |
+
+warning: fields `internal_width` and `internal_height` are never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-tsr\src\lib.rs:185:5
+    |
+150 | pub struct TsrPass {
+    |            ------- fields in this struct
+...
+185 |     internal_width: u32,
+    |     ^^^^^^^^^^^^^^
+186 |     internal_height: u32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-tsr` (lib) generated 1 warning
+   Compiling lz4_flex v0.11.6
+warning: `helio-pass-billboard` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-billboard` to apply 1 suggestion)
+   Compiling keyring v3.6.3
+   Compiling hmac v0.13.0
+   Compiling md-5 v0.11.0
+   Compiling num-complex v0.4.6
+   Compiling dotenvy v0.15.7
+   Compiling helio-bake-types v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-bake-types)
+   Compiling bit_field v0.10.3
+   Compiling fallible-iterator v0.2.0
+   Compiling rawpointer v0.2.1
+   Compiling postgres-protocol v0.6.12
+   Compiling uasset v0.6.0 (https://github.com/Far-Beyond-Pulsar/UASSET#a7a61fd3)
+   Compiling helio v0.19.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio)
+   Compiling pulsar_auth v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_auth)
+warning: unused imports: `Pod` and `Zeroable`
+ --> crates\renderer\helio\crates\helio\src\material.rs:1:16
+  |
+1 | use bytemuck::{Pod, Zeroable};
+  |                ^^^  ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `DebugBatch` and `DebugVertex`
+  --> crates\renderer\helio\crates\helio\src\renderer\mod.rs:18:17
+   |
+18 | pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};
+   |                 ^^^^^^^^^^                                                     ^^^^^^^^^^^
+
+warning: unused variable: `rc_min`
+   --> crates\renderer\helio\crates\helio\src\renderer\render.rs:324:13
+    |
+324 |         let rc_min = [
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rc_min`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rc_max`
+   --> crates\renderer\helio\crates\helio\src\renderer\render.rs:329:13
+    |
+329 |         let rc_max = [
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rc_max`
+
+warning: value assigned to `representative` is never read
+   --> crates\renderer\helio\crates\helio\src\renderer\render.rs:892:34
+    |
+892 |           let mut representative = self.default_xr_camera(near_far.0, near_far.1);
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+913 | /             representative = match (&self.xr_camera, pose) {
+914 | |                 (Some(template), _) => {
+915 | |                     let mut cam = template.clone();
+916 | |                     cam.view = pose.view_matrix();
+...   |
+924 | |                 _ => self.default_xr_camera(near_far.0, near_far.1),
+925 | |             };
+    | |_____________- `representative` is overwritten here before the previous value is read
+    |
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `select_hdr_surface_format` is never used
+  --> crates\renderer\helio\crates\helio\src\renderer\config.rs:36:8
+   |
+36 | pub fn select_hdr_surface_format(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `clear` is never used
+   --> crates\renderer\helio\crates\helio\src\renderer\debug.rs:550:12
+    |
+254 | impl DebugPass {
+    | -------------- method in this implementation
+...
+550 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: method `execute_on_target` is never used
+   --> crates\renderer\helio\crates\helio\src\renderer\debug.rs:600:12
+    |
+560 | impl DebugPass {
+    | -------------- method in this implementation
+...
+600 |     pub fn execute_on_target(
+    |            ^^^^^^^^^^^^^^^^^
+
+   Compiling simba v0.10.2
+warning: `helio` (lib) generated 8 warnings (run `cargo fix --lib -p helio` to apply 4 suggestions)
+   Compiling rand_chacha v0.3.1
+   Compiling pest_generator v2.9.0
+   Compiling darling v0.23.0
+   Compiling dlv-list v0.5.2
+   Compiling pulsar_settings v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_settings)
+   Compiling manyhow v0.11.4
+   Compiling pulsar_world_registry v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_world_registry)
+   Compiling pulsar-multiplayer-core v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar-multiplayer-core)
+   Compiling rust-discord-activity v0.3.1 (https://github.com/Far-Beyond-Pulsar/Discord-RPC-RS?rev=2f07922277bc3632fd124e46d28008fc542367fc#2f079222)
+   Compiling windows-sys v0.59.0
+   Compiling num-rational v0.4.2
+   Compiling termcolor v1.4.1
+   Compiling nalgebra-macros v0.3.0
+   Compiling mysql_common v0.35.5
+   Compiling mysql-common-derive v0.32.2
+   Compiling nalgebra v0.35.0
+   Compiling engine_state v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\engine_state)
+warning: unused `Result` that must be used
+   --> crates\core\engine_state\src\context.rs:391:9
+    |
+391 |         GLOBAL_CONTEXT.set(self);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+391 |         let _ = GLOBAL_CONTEXT.set(self);
+    |         +++++++
+
+warning: `engine_state` (lib) generated 1 warning
+   Compiling solid-usd v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+   Compiling windows v0.34.0
+   Compiling ordered-multimap v0.7.3
+   Compiling pest_derive v2.9.0
+   Compiling solid-unreal v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+   Compiling postgres-types v0.2.14
+   Compiling helio-pass-water-sim v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-water-sim)
+   Compiling solid-gltf v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+warning: variable does not need to be mutable
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:111:9
+    |
+111 |     let mut add_face =
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `CLIPMAP_GRID_SNAP` is never used
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:46:7
+   |
+46 | const CLIPMAP_GRID_SNAP: f32 = 0.25;
+   |       ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `MAX_CLIPMAP_VERTS` is never used
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:47:7
+   |
+47 | const MAX_CLIPMAP_VERTS: u64 = 2048;
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_CLIPMAP_INDICES` is never used
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:48:7
+   |
+48 | const MAX_CLIPMAP_INDICES: u64 = 12288;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ClipmapRingDef` is never constructed
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:50:8
+   |
+50 | struct ClipmapRingDef {
+   |        ^^^^^^^^^^^^^^
+
+warning: constant `CLIPMAP_RINGS` is never used
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:58:7
+   |
+58 | const CLIPMAP_RINGS: [ClipmapRingDef; 5] = [
+   |       ^^^^^^^^^^^^^
+
+warning: function `generate_ring` is never used
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:248:4
+    |
+248 | fn generate_ring(
+    |    ^^^^^^^^^^^^^
+
+warning: field `sim_array_view_b` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\lib.rs:366:16
+    |
+354 | pub struct WaterSimPass {
+    |            ------------ field in this struct
+...
+366 |     pub(crate) sim_array_view_b: wgpu::TextureView,
+    |                ^^^^^^^^^^^^^^^^
+
+warning: static variable `__ScenedbGpuPacked_WaterVolumeComponent_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\components.rs:8:12
+  |
+8 | pub struct WaterVolumeComponent {
+  |            ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+  |
+8 - pub struct WaterVolumeComponent {
+8 + pub struct __SCENEDB_GPU_PACKED_WATER_VOLUME_COMPONENT_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_WaterHitboxComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-water-sim\src\components.rs:45:12
+   |
+45 | pub struct WaterHitboxComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+45 - pub struct WaterHitboxComponent {
+45 + pub struct __SCENEDB_GPU_PACKED_WATER_HITBOX_COMPONENT_TYPE_INFO {
+   |
+
+warning: `helio-pass-water-sim` (lib) generated 10 warnings (run `cargo fix --lib -p helio-pass-water-sim` to apply 3 suggestions)
+   Compiling solid-fbx v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+   Compiling solid-obj v0.1.0 (https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f3)
+   Compiling helio-pass-indirect-dispatch v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-indirect-dispatch)
+   Compiling helio-pass-deferred-light v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-deferred-light)
+   Compiling ui_auth v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\editor\ui_auth)
+warning: static variable `__ScenedbGpuPacked_ReflectionCaptureComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-deferred-light\src\components.rs:29:12
+   |
+29 | pub struct ReflectionCaptureComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+29 - pub struct ReflectionCaptureComponent {
+29 + pub struct __SCENEDB_GPU_PACKED_REFLECTION_CAPTURE_COMPONENT_TYPE_INFO {
+   |
+
+warning: `helio-pass-deferred-light` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-deferred-light` to apply 1 suggestion)
+   Compiling sha1 v0.10.7
+   Compiling hashlink v0.11.1
+   Compiling libgit2-sys v0.18.8+1.9.7
+   Compiling btoi v0.4.3
+   Compiling engine_class_derive v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\engine_class_derive)
+   Compiling derive_utils v0.15.1
+   Compiling whoami v2.1.3
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\engine_class_derive-833f25964295e704.dll.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target/voxel-validation-20260926\debug\deps\engine_class_derive-833f25964295e704.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `engine_class_derive` (lib) generated 1 warning
+   Compiling encode_unicode v1.0.0
+   Compiling saturating v0.1.0
+   Compiling mysql v26.0.1
+   Compiling yaml-rust2 v0.11.1
+   Compiling console v0.15.11
+   Compiling tokio-postgres v0.7.18
+   Compiling io-enum v1.2.1
+   Compiling json5 v0.4.1
+   Compiling ui_common v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\editor\ui_common)
+warning: unused import: `ui::scroll::Scrollable`
+ --> crates\editor\ui_common\src\command_palette\generic_palette.rs:5:5
+  |
+5 | use ui::scroll::Scrollable;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `StyledExt as _`
+  --> crates\editor\ui_common\src\locale_picker.rs:10:73
+   |
+10 |     set_locale, v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+   |                                                                         ^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> crates\editor\ui_common\src\menu\mod.rs:3:5
+  |
+3 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused imports: `h_flex` and `v_flex`
+  --> crates\editor\ui_common\src\menu\mod.rs:14:5
+   |
+14 |     h_flex, locale,
+   |     ^^^^^^
+...
+18 |     v_flex, ActiveTheme as _, ContextModal as _, IconName, PixelsExt, Sizable as _, Theme,
+   |     ^^^^^^
+
+warning: unused imports: `Bounds` and `WindowOptions`
+ --> crates\editor\ui_common\src\open_window.rs:6:34
+  |
+6 | use gpui::{App, AppContext as _, Bounds, UpdateGlobal as _, WindowBounds, WindowOptions};
+  |                                  ^^^^^^                                   ^^^^^^^^^^^^^
+
+warning: unused import: `ButtonVariants as _`
+ --> crates\editor\ui_common\src\properties_inspector.rs:6:22
+  |
+6 |     button::{Button, ButtonVariants as _},
+  |                      ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `StyledExt as _`
+  --> crates\editor\ui_common\src\theme_dropdown.rs:13:61
+   |
+13 |     v_flex, ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeConfig,
+   |                                                             ^^^^^^^^^^^^^^
+
+warning: unused import: `StatefulInteractiveElement`
+ --> crates\editor\ui_common\src\menu\mod.rs:8:60
+  |
+8 |     MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+  |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `name` is never read
+  --> crates\editor\ui_common\src\command_palette\generic_palette.rs:17:5
+   |
+16 | struct CategoryState {
+   |        ------------- field in this struct
+17 |     name: String,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `id` is never read
+  --> crates\editor\ui_common\src\command_palette\palette_manager.rs:19:5
+   |
+18 | struct PaletteEntry {
+   |        ------------ field in this struct
+19 |     id: PaletteId,
+   |     ^^
+
+warning: field `theme_switcher` is never read
+    --> crates\editor\ui_common\src\menu\mod.rs:1267:5
+     |
+1263 | pub struct AppTitleBar {
+     |            ----------- field in this struct
+...
+1267 |     theme_switcher: Entity<ThemeSwitcher>,
+     |     ^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> crates\editor\ui_common\src\asset_picker.rs:229:13
+    |
+229 |             smol::block_on(tx.send(rgba));
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+229 |             let _ = smol::block_on(tx.send(rgba));
+    |             +++++++
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+   --> crates\editor\ui_common\src\menu\dev_popover.rs:167:9
+    |
+167 |         drop(theme);
+    |         ^^^^^-----^
+    |              |
+    |              argument has type `&Theme`
+    |
+    = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+    |
+167 -         drop(theme);
+167 +         let _ = theme;
+    |
+
+warning: unused `std::result::Result` that must be used
+  --> crates\editor\ui_common\src\profile_dropdown.rs:83:21
+   |
+83 | /                     this.update(cx, |this, cx| {
+84 | |                         this.avatar_image = maybe_image;
+85 | |                         cx.notify();
+86 | |                     });
+   | |______________________^
+   |
+   = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+   |
+83 |                     let _ = this.update(cx, |this, cx| {
+   |                     +++++++
+
+warning: `ui_common` (lib) generated 14 warnings (run `cargo fix --lib -p ui_common` to apply 7 suggestions)
+   Compiling helio-pass-occlusion-cull v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-occlusion-cull)
+   Compiling helio-asset-compat v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-asset-compat)
+warning: struct `AnimationState` is never constructed
+  --> crates\renderer\helio\crates\helio-asset-compat\src\animation_system.rs:11:12
+   |
+11 | pub struct AnimationState {
+   |            ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `new`, `play`, `stop`, `update`, and `get_matrices` are never used
+  --> crates\renderer\helio\crates\helio-asset-compat\src\animation_system.rs:31:12
+   |
+29 | impl AnimationState {
+   | ------------------- associated items in this implementation
+30 |     /// Create a new animation state from a skin and animations
+31 |     pub fn new(skin: Skin, animations: Vec<Animation>) -> Self {
+   |            ^^^
+...
+45 |     pub fn play(&mut self, animation_index: usize, looping: bool) {
+   |            ^^^^
+...
+55 |     pub fn stop(&mut self) {
+   |            ^^^^
+...
+60 |     pub fn update(&mut self, delta_time: f32) {
+   |            ^^^^^^
+...
+71 |     pub fn get_matrices(&self) -> &[Mat4] {
+   |            ^^^^^^^^^^^^
+
+warning: `helio-asset-compat` (lib) generated 2 warnings
+   Compiling win-sys v0.3.1
+   Compiling rust-ini v0.21.3
+   Compiling glamx v0.3.0
+   Compiling rstar v0.13.0
+   Compiling pulsar_scene_model v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_scene_model)
+warning: static variable `__ScenedbGpuPacked_Transform_TYPE_INFO` should have an upper case name
+  --> crates\core\pulsar_scene_model\src\components.rs:43:12
+   |
+43 | pub struct Transform {
+   |            ^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+43 - pub struct Transform {
+43 + pub struct __SCENEDB_GPU_PACKED_TRANSFORM_TYPE_INFO {
+   |
+
+warning: `pulsar_scene_model` (lib) generated 1 warning (run `cargo fix --lib -p pulsar_scene_model` to apply 1 suggestion)
+   Compiling convert_case v0.6.0
+   Compiling named_pipe v0.4.1
+   Compiling ron v0.12.2
+   Compiling sha1 v0.11.0
+   Compiling pem v3.0.6
+   Compiling helio-voxel-data v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-voxel-data)
+   Compiling ena v0.14.4
+   Compiling serde-untagged v0.1.9
+   Compiling number_prefix v0.4.0
+   Compiling helio-pass-tiny-voxel v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-tiny-voxel)
+   Compiling lru v0.12.5
+   Compiling bufstream v0.1.4
+   Compiling pathdiff v0.2.3
+   Compiling downcast-rs v2.0.2
+   Compiling data-encoding v2.11.1
+   Compiling tungstenite v0.30.0
+   Compiling parry3d v0.30.2
+   Compiling config v0.15.25
+   Compiling indicatif v0.17.11
+   Compiling helio_component v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-component)
+warning: unused imports: `Deserialize` and `Serialize`
+  --> crates\renderer\helio\crates\helio-component\src\components\water_volume_component.rs:34:13
+   |
+34 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `voxel_component_runtime::*`
+  --> crates\renderer\helio\crates\helio-component\src\components\mod.rs:22:9
+   |
+22 | pub use voxel_component_runtime::*;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static variable `__ScenedbGpuPacked_FoliageComponentGpuMirror_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\foliage_component\component.rs:20:12
+   |
+20 | pub struct FoliageComponent {
+   |            ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+20 - pub struct FoliageComponent {
+20 + pub struct __SCENEDB_GPU_PACKED_FOLIAGE_COMPONENT_GPU_MIRROR_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_LightComponentGpuMirror_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\light_component\component.rs:19:12
+   |
+19 | pub struct LightComponent {
+   |            ^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+19 - pub struct LightComponent {
+19 + pub struct __SCENEDB_GPU_PACKED_LIGHT_COMPONENT_GPU_MIRROR_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_AttenuationLightPropsGpuMirror_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\helio-component\src\components\light_component\sub_props\attenuation.rs:7:12
+  |
+7 | pub struct AttenuationLightProps {
+  |            ^^^^^^^^^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+7 - pub struct AttenuationLightProps {
+7 + pub struct __SCENEDB_GPU_PACKED_ATTENUATION_LIGHT_PROPS_GPU_MIRROR_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_ColorLightPropsGpuMirror_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\helio-component\src\components\light_component\sub_props\color.rs:7:12
+  |
+7 | pub struct ColorLightProps {
+  |            ^^^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+7 - pub struct ColorLightProps {
+7 + pub struct __SCENEDB_GPU_PACKED_COLOR_LIGHT_PROPS_GPU_MIRROR_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_GeneralLightPropsGpuMirror_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\helio-component\src\components\light_component\sub_props\general.rs:9:12
+  |
+9 | pub struct GeneralLightProps {
+  |            ^^^^^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+9 - pub struct GeneralLightProps {
+9 + pub struct __SCENEDB_GPU_PACKED_GENERAL_LIGHT_PROPS_GPU_MIRROR_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_IntensityLightPropsGpuMirror_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\helio-component\src\components\light_component\sub_props\intensity.rs:9:12
+  |
+9 | pub struct IntensityLightProps {
+  |            ^^^^^^^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+9 - pub struct IntensityLightProps {
+9 + pub struct __SCENEDB_GPU_PACKED_INTENSITY_LIGHT_PROPS_GPU_MIRROR_TYPE_INFO {
+  |
+
+warning: static variable `__ScenedbGpuPacked_ShadowLightPropsGpuMirror_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\light_component\sub_props\shadows.rs:27:12
+   |
+27 | pub struct ShadowLightProps {
+   |            ^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+27 - pub struct ShadowLightProps {
+27 + pub struct __SCENEDB_GPU_PACKED_SHADOW_LIGHT_PROPS_GPU_MIRROR_TYPE_INFO {
+   |
+
+warning: static variable `IntensityUnits_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\helio-component\src\components\light_component\types.rs:5:10
+  |
+5 | pub enum IntensityUnits {
+  |          ^^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+5 - pub enum IntensityUnits {
+5 + pub enum INTENSITY_UNITS_TYPE_INFO {
+  |
+
+warning: static variable `MobileQualityLevel_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\light_component\types.rs:20:10
+   |
+20 | pub enum MobileQualityLevel {
+   |          ^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+20 - pub enum MobileQualityLevel {
+20 + pub enum MOBILE_QUALITY_LEVEL_TYPE_INFO {
+   |
+
+warning: static variable `ShadowCacheMode_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\light_component\types.rs:34:10
+   |
+34 | pub enum ShadowCacheMode {
+   |          ^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+34 - pub enum ShadowCacheMode {
+34 + pub enum SHADOW_CACHE_MODE_TYPE_INFO {
+   |
+
+warning: static variable `LightType_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\light_component\types.rs:48:10
+   |
+48 | pub enum LightType {
+   |          ^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+48 - pub enum LightType {
+48 + pub enum LIGHT_TYPE_TYPE_INFO {
+   |
+
+warning: static variable `ExposureMode_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\post_process_volume_component.rs:44:10
+   |
+44 | pub enum ExposureMode {
+   |          ^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+44 - pub enum ExposureMode {
+44 + pub enum EXPOSURE_MODE_TYPE_INFO {
+   |
+
+warning: static variable `TonemapOperator_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\post_process_volume_component.rs:55:10
+   |
+55 | pub enum TonemapOperator {
+   |          ^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+55 - pub enum TonemapOperator {
+55 + pub enum TONEMAP_OPERATOR_TYPE_INFO {
+   |
+
+warning: static variable `FogMode_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\post_process_volume_component.rs:71:10
+   |
+71 | pub enum FogMode {
+   |          ^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+71 - pub enum FogMode {
+71 + pub enum FOG_MODE_TYPE_INFO {
+   |
+
+warning: static variable `HdrOutputMode_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\post_process_volume_component.rs:86:10
+   |
+86 | pub enum HdrOutputMode {
+   |          ^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+86 - pub enum HdrOutputMode {
+86 + pub enum HDR_OUTPUT_MODE_TYPE_INFO {
+   |
+
+warning: static variable `__ScenedbGpuPacked_ReflectionCaptureGpuComponent_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\reflection_capture_component.rs:53:12
+   |
+53 | pub struct ReflectionCaptureGpuComponent {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+53 - pub struct ReflectionCaptureGpuComponent {
+53 + pub struct __SCENEDB_GPU_PACKED_REFLECTION_CAPTURE_GPU_COMPONENT_TYPE_INFO {
+   |
+
+warning: static variable `ReflectionCaptureShape_TYPE_INFO` should have an upper case name
+  --> crates\renderer\helio\crates\helio-component\src\components\reflection_capture_component.rs:88:10
+   |
+88 | pub enum ReflectionCaptureShape {
+   |          ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+88 - pub enum ReflectionCaptureShape {
+88 + pub enum REFLECTION_CAPTURE_SHAPE_TYPE_INFO {
+   |
+
+warning: static variable `ReflectionCaptureMobility_TYPE_INFO` should have an upper case name
+   --> crates\renderer\helio\crates\helio-component\src\components\reflection_capture_component.rs:105:10
+    |
+105 | pub enum ReflectionCaptureMobility {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: convert the identifier to upper case
+    |
+105 - pub enum ReflectionCaptureMobility {
+105 + pub enum REFLECTION_CAPTURE_MOBILITY_TYPE_INFO {
+    |
+
+warning: `helio_component` (lib) generated 20 warnings (run `cargo fix --lib -p helio_component` to apply 20 suggestions)
+   Compiling shared_memory v0.12.4
+   Compiling helio-pass-transparent v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-transparent)
+warning: constant `MAX_LIGHTS` is never used
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-transparent\src\lib.rs:20:7
+   |
+20 | const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
+   |       ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `last_shared_keys` is never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-transparent\src\lib.rs:57:5
+   |
+47 | pub struct TransparentPass {
+   |            --------------- field in this struct
+...
+57 |     last_shared_keys: Vec<u32>,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: `helio-pass-transparent` (lib) generated 2 warnings
+   Compiling engine_backend v0.1.34 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\engine_backend)
+   Compiling postgres v0.19.14
+   Compiling colored v2.2.0
+   Compiling helio-pass-ssr v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-ssr)
+   Compiling rstar v0.12.2
+   Compiling helio-pass-foliage-gbuffer v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-foliage-gbuffer)
+warning: field `blades_per_tile` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-foliage-gbuffer\src\lib.rs:508:5
+    |
+471 | pub struct FoliageGBufferPass {
+    |            ------------------ field in this struct
+...
+508 |     blades_per_tile: u32,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-foliage-gbuffer` (lib) generated 1 warning
+   Compiling helio-pass-virtual-geometry v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-virtual-geometry)
+   Compiling helio-pass-hlfs v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-hlfs)
+   Compiling helio-pass-shadow-dirty v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-shadow-dirty)
+   Compiling helio-pass-shadow-cull v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-shadow-cull)
+   Compiling helio-pass-shadow v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-shadow)
+   Compiling helio-pass-decal v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-decal)
+warning: static variable `__ScenedbGpuPacked_DecalComponent_TYPE_INFO` should have an upper case name
+ --> crates\renderer\helio\crates\passes\3d\helio-pass-decal\src\components.rs:8:12
+  |
+8 | pub struct DecalComponent {
+  |            ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+  |
+8 - pub struct DecalComponent {
+8 + pub struct __SCENEDB_GPU_PACKED_DECAL_COMPONENT_TYPE_INFO {
+  |
+
+warning: `helio-pass-decal` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-decal` to apply 1 suggestion)
+   Compiling helio-pass-perf-overlay v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay)
+warning: type `MaterialTimingEntry` is more private than the item `PerfOverlayShared::get_material_timings`
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:366:5
+    |
+366 |     pub fn get_material_timings(&self) -> &[MaterialTimingEntry] {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `PerfOverlayShared::get_material_timings` is reachable at visibility `pub`
+    |
+note: but type `MaterialTimingEntry` is only usable at visibility `pub(crate)`
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\lib.rs:92:1
+    |
+ 92 | pub(crate) struct MaterialTimingEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `MaterialTimingEntry` is more private than the item `MaterialProfiler::get_timing_table`
+    --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:1147:5
+     |
+1147 |     pub fn get_timing_table(&self) -> &[MaterialTimingEntry] {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `MaterialProfiler::get_timing_table` is reachable at visibility `pub`
+     |
+note: but type `MaterialTimingEntry` is only usable at visibility `pub(crate)`
+    --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\lib.rs:92:1
+     |
+  92 | pub(crate) struct MaterialTimingEntry {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `color_snapshot_prev` is never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:19:16
+   |
+11 | pub struct PerfOverlayShared {
+   |            ----------------- field in this struct
+...
+19 |     pub(crate) color_snapshot_prev: wgpu::Texture,
+   |                ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `test_texture` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-perf-overlay\src\rendering.rs:837:16
+    |
+833 | pub struct MaterialProfiler {
+    |            ---------------- field in this struct
+...
+837 |     pub(crate) test_texture: wgpu::Texture,
+    |                ^^^^^^^^^^^^
+
+warning: `helio-pass-perf-overlay` (lib) generated 4 warnings
+   Compiling helio-pass-debug-overlay v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-debug-overlay)
+warning: unused variable: `cols`
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:102:13
+    |
+102 |         let cols = DEFAULT_COLS;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_cols`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rows`
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:103:13
+    |
+103 |         let rows = DEFAULT_ROWS;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_rows`
+
+warning: field `font_texture` is never read
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-debug-overlay\src\lib.rs:306:5
+    |
+296 | pub struct DebugOverlayPass {
+    |            ---------------- field in this struct
+...
+306 |     font_texture: wgpu::Texture,
+    |     ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-debug-overlay` (lib) generated 3 warnings (run `cargo fix --lib -p helio-pass-debug-overlay` to apply 2 suggestions)
+   Compiling helio-pass-simple-cube v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-simple-cube)
+   Compiling helio-pass-dof v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-dof)
+warning: unused doc comment
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-dof\src\lib.rs:196:9
+    |
+196 | /         /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
+197 | |         /// The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
+    | |_____________________________________________________________________________________^
+198 | /         let uniform_entry =
+199 | |             |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
+200 | |                 binding,
+201 | |                 visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
+...   |
+207 | |                 count: None,
+208 | |             };
+    | |______________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `bokeh_tex`, `gather_pl`, `composite_pl`, and `format` are never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-dof\src\lib.rs:49:5
+   |
+34 | pub struct DofPass {
+   |            ------- fields in this struct
+...
+49 |     bokeh_tex: wgpu::Texture,
+   |     ^^^^^^^^^
+...
+61 |     gather_pl: wgpu::PipelineLayout,
+   |     ^^^^^^^^^
+62 |     composite_pl: wgpu::PipelineLayout,
+   |     ^^^^^^^^^^^^
+...
+80 |     format: wgpu::TextureFormat,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-dof` (lib) generated 2 warnings
+   Compiling helio-pass-flare v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-flare)
+warning: field `format` is never read
+  --> crates\renderer\helio\crates\passes\3d\helio-pass-flare\src\lib.rs:55:5
+   |
+32 | pub struct LensFlarePass {
+   |            ------------- field in this struct
+...
+55 |     format: wgpu::TextureFormat,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-flare` (lib) generated 1 warning
+   Compiling helio-pass-planar-reflection v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-planar-reflection)
+warning: unused variable: `frame`
+   --> crates\renderer\helio\crates\passes\3d\helio-pass-planar-reflection\src\lib.rs:229:27
+    |
+229 |     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_frame`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-pass-planar-reflection` (lib) generated 1 warning (run `cargo fix --lib -p helio-pass-planar-reflection` to apply 1 suggestion)
+   Compiling helio-pass-fxaa v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\passes\3d\helio-pass-fxaa)
+   Compiling ez_logging v0.1.4
+   Compiling PebbleVault v0.7.0
+   Compiling helio-default-graphs v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\helio-default-graphs)
+warning: variable does not need to be mutable
+   --> crates\renderer\helio\crates\helio-default-graphs\src\lib.rs:211:13
+    |
+211 |         let mut sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `lights_buf`
+   --> crates\renderer\helio\crates\helio-default-graphs\src\lib.rs:381:9
+    |
+381 |     let lights_buf = scene_buffer_or_dummy(
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lights_buf`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `helio-default-graphs` (lib) generated 2 warnings (run `cargo fix --lib -p helio-default-graphs` to apply 2 suggestions)
+   Compiling scenedb-inspector-agent v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\renderer\helio\crates\scenedb-inspector-agent)
+   Compiling pulsar_scene v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\subsystems\pulsar_scene)
+warning: use of deprecated unit struct `loader::SceneLoader`: runtime scene loading must hydrate the shared WorldSceneStore instead (engine_backend::scene::RuntimeLevel); this direct-to-renderer path is for import/legacy conversion only
+  --> crates\subsystems\pulsar_scene\src\lib.rs:46:73
+   |
+46 | pub use loader::{build_transform_parts, component_instances_from_props, SceneLoader};
+   |                                                                         ^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated struct `loader::SceneLoader`: runtime scene loading must hydrate the shared WorldSceneStore instead (engine_backend::scene::RuntimeLevel); this direct-to-renderer path is for import/legacy conversion only
+  --> crates\subsystems\pulsar_scene\src\loader.rs:71:6
+   |
+71 | impl SceneLoader {
+   |      ^^^^^^^^^^^
+
+warning: `pulsar_scene` (lib) generated 2 warnings
+   Compiling git2 v0.21.0
+   Compiling rapier3d v0.35.3
+   Compiling async-tungstenite v0.35.0
+   Compiling pulsar_class v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_class)
+   Compiling pulsar_script_object_model v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_script_object_model)
+   Compiling pulsar_lsp v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_lsp)
+   Compiling pulsar_pie_abi v0.1.0 (C:\Users\thiag\Documents\GitHub\Pulsar-Native\crates\core\pulsar_pie_abi)
+warning: unused import: `BufferKey`
+  --> crates\core\engine_backend\src\scene\helio_bridge.rs:12:5
+   |
+12 |     BufferKey, EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore,
+   |     ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::*`
+   --> crates\core\engine_backend\src\scene\helio_bridge.rs:515:9
+    |
+515 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `glam::Mat4`
+  --> crates\core\engine_backend\src\scene\mod.rs:98:5
+   |
+98 | use glam::Mat4;
+   |     ^^^^^^^^^^
+
+warning: use of deprecated struct `helio_pass_gbuffer::SublevelComponent`: legacy movable sublevel projection; use SubLevelIndex and SubLevelActorComponent
+   --> crates\core\engine_backend\src\scene\helio_bridge.rs:362:39
+    |
+362 |         .query::<&helio_pass_gbuffer::SublevelComponent>()
+    |                                       ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated struct `helio_pass_gbuffer::SublevelComponent`: legacy movable sublevel projection; use SubLevelIndex and SubLevelActorComponent
+   --> crates\core\engine_backend\src\scene\helio_bridge.rs:413:25
+    |
+413 |     helio_pass_gbuffer::SublevelComponent::register_gpu_columns_growable(
+    |                         ^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+   --> crates\core\engine_backend\src\subsystems\render\helio_renderer\interaction.rs:599:19
+    |
+599 |             Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, 0.1, 10000.0),
+    |                   ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+    --> crates\core\engine_backend\src\subsystems\render\helio_renderer\renderer.rs:1221:19
+     |
+1221 |             Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, width / height, 0.1, 10_000.0);
+     |                   ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::look_at_rh`: use the `glam::camera::rh::view::look_at_mat4` function instead
+    --> crates\core\engine_backend\src\subsystems\render\helio_renderer\renderer.rs:1223:26
+     |
+1223 |         let view = Mat4::look_at_rh(camera_position, camera_position + forward, Vec3::Y);
+     |                          ^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+    --> crates\core\engine_backend\src\subsystems\render\helio_renderer\renderer.rs:1293:32
+     |
+1293 |         let projection = Mat4::perspective_rh(
+     |                                ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `glam::Mat4::look_at_rh`: use the `glam::camera::rh::view::look_at_mat4` function instead
+    --> crates\core\engine_backend\src\subsystems\render\helio_renderer\renderer.rs:1300:26
+     |
+1300 |         let view = Mat4::look_at_rh(camera_position, camera_position + forward, Vec3::Y);
+     |                          ^^^^^^^^^^
+
+warning: unused import: `SinkExt`
+ --> crates\core\engine_backend\src\subsystems\networking\multiuser.rs:3:15
+  |
+3 | use futures::{SinkExt, StreamExt};
+  |               ^^^^^^^
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:625:21
+    |
+625 |         let first = unsafe { pie_lock_world(userdata) };
+    |                     ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:628:22
+    |
+628 |         let second = unsafe { pie_lock_world(userdata) };
+    |                      ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:634:9
+    |
+634 |         unsafe { pie_unlock_world(userdata) };
+    |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:635:21
+    |
+635 |         let third = unsafe { pie_lock_world(userdata) };
+    |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:640:9
+    |
+640 |         unsafe { pie_unlock_world(userdata) };
+    |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:643:9
+    |
+643 |         unsafe { pie_unlock_world(userdata) };
+    |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:644:22
+    |
+644 |         let fourth = unsafe { pie_lock_world(userdata) };
+    |                      ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+   --> crates\core\engine_backend\src\services\pie_host.rs:646:9
+    |
+646 |         unsafe { pie_unlock_world(userdata) };
+    |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `userdata`
+   --> crates\core\engine_backend\src\services\pie_host.rs:664:13
+    |
+664 |         let userdata = &bridge as *const PieWorldBridge as *mut c_void;
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_userdata`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\core\engine_backend\src\lib.rs:106:13
+    |
+106 |         for mut ss in subsystems {
+    |             ----^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `variable_overrides` is never read
+   --> crates\core\engine_backend\src\services\core_project_builder.rs:566:5
+    |
+561 | struct LevelPrefabEntry {
+    |        ---------------- field in this struct
+...
+566 |     variable_overrides: std::collections::HashMap<String, serde_json::Value>,
+    |     ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `start_time` is never read
+  --> crates\core\engine_backend\src\services\gpu_renderer.rs:63:5
+   |
+60 | pub struct GpuRenderer {
+   |            ----------- field in this struct
+...
+63 |     start_time: Instant,
+   |     ^^^^^^^^^^
+
+warning: field `workspace_root` is never read
+  --> crates\core\engine_backend\src\services\lsp_completion_provider.rs:23:5
+   |
+17 | pub struct GlobalRustAnalyzerCompletionProvider {
+   |            ------------------------------------ field in this struct
+...
+23 |     workspace_root: PathBuf,
+   |     ^^^^^^^^^^^^^^
+
+warning: method `mode` is never used
+  --> crates\core\engine_backend\src\subsystems\render\helio_renderer\interaction.rs:79:12
+   |
+78 | impl SceneInteraction {
+   | --------------------- method in this implementation
+79 |     pub fn mode(&self) -> GizmoType {
+   |            ^^^^
+
+warning: methods `add_actor_private`, `get_actor_private`, `remove_actor_private`, `create_or_load_region_private`, `transfer_player_private`, and `query_region_private` are never used
+   --> crates\core\engine_backend\src\subsystems\world\mod.rs:94:8
+    |
+ 44 | impl World {
+    | ---------- methods in this implementation
+...
+ 94 |     fn add_actor_private(
+    |        ^^^^^^^^^^^^^^^^^
+...
+151 |     fn get_actor_private(&self, object_id: Uuid) -> Option<Arc<Actor>> {
+    |        ^^^^^^^^^^^^^^^^^
+...
+168 |     fn remove_actor_private(&mut self, id: Uuid) -> Option<Actor> {
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+204 |     fn create_or_load_region_private(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+246 |     fn transfer_player_private(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+290 |     fn query_region_private(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> crates\core\engine_backend\src\subsystems\networking\git_sync.rs:127:17
+    |
+127 |                 virtual_fs::write_file(&gitignore_path, default_ignore.as_bytes());
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+127 |                 let _ = virtual_fs::write_file(&gitignore_path, default_ignore.as_bytes());
+    |                 +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\core\engine_backend\src\subsystems\networking\git_sync.rs:395:17
+    |
+395 |                 serialize_tree(repo, &subtree, objects);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+395 |                 let _ = serialize_tree(repo, &subtree, objects);
+    |                 +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\core\engine_backend\src\subsystems\networking\git_sync.rs:513:13
+    |
+513 |             virtual_fs::create_dir_all(parent);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+513 |             let _ = virtual_fs::create_dir_all(parent);
+    |             +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\core\engine_backend\src\subsystems\networking\git_sync.rs:515:9
+    |
+515 |         virtual_fs::write_file(path, content);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+515 |         let _ = virtual_fs::write_file(path, content);
+    |         +++++++
+
+warning: linker stdout: Criando biblioteca C:\Users\thiag\Documents\GitHub\Pulsar-Native\target\voxel-validation-20260926\debug\deps\engine_backend-d01486ec4234232c.lib e objeto C:\Users\thiag\Documents\GitHub\Pulsar-Native\target\voxel-validation-20260926\debug\deps\engine_backend-d01486ec4234232c.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `engine_backend` (lib test) generated 31 warnings (run `cargo fix --lib -p engine_backend --tests` to apply 5 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 28m 26s
+     Running unittests src\lib.rs (target/voxel-validation-20260926\debug\deps\engine_backend-d01486ec4234232c.exe)
+
+running 9 tests
+test scene::voxel_frame::tests::projects_multiple_rows_with_generation_identity_and_rejects_bad_domains ... ok
+test scene::voxel_frame::tests::terrain_projection_preserves_source_contract_and_uses_authored_chunk_span ... ok
+test scene::voxel_source::tests::accepted_batch_completes_in_old_store_after_row_replacement ... ok
+test scene::voxel_source::tests::failed_batch_can_be_rebased_and_retried_from_new_session ... ok
+test scene::voxel_source::tests::session_submits_deformation_and_rejects_after_component_removal ... ok
+test scene::voxel_source::tests::terrain_session_publishes_registered_format_into_scenedb ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::empty_renderer_id_selects_a_unique_compatible_backend ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::exact_brush_edit_round_trips_through_the_generic_terrain_recipe ... ok
+test subsystems::render::helio_renderer::voxel_backend::tests::renderer_selection_preserves_the_world_snapshot_between_camera_frames ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out; finished in 1.77s
+

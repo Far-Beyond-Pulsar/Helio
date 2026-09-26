@@ -724,12 +724,11 @@ impl RenderPass for DofPass {
             self.bg_key_composite = Some(composite_key);
         }
 
-        // ── Copy DOF block → compute encoder before dispatches ─────────
-        // The postprocess uniform buffer lives on the render-encoder timeline.
-        // Compute dispatches run on a separate encoder that submits first,
-        // so we must copy here (on the compute encoder) to avoid a race.
+        // The depth, postprocess uniforms and pre_dof color are produced on
+        // the graphics timeline. Keep these dependent compute dispatches on
+        // that encoder; the early compute encoder would read last-frame data.
         {
-            let ce = ctx.compute_encoder_ptr;
+            let ce = ctx.encoder_ptr;
             unsafe { &mut *ce }.copy_buffer_to_buffer(
                 pp_buf,
                 DOF_BLOCK_OFFSET,
@@ -741,7 +740,7 @@ impl RenderPass for DofPass {
 
         // ── Pass 1: CoC pre-pass ────────────────────────────────────────
         {
-            let ce = ctx.compute_encoder_ptr;
+            let ce = ctx.encoder_ptr;
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("DOF CoC"),
                 timestamp_writes: None,
@@ -755,7 +754,7 @@ impl RenderPass for DofPass {
 
         // ── Pass 2: Gather ─────────────────────────────────────────────
         {
-            let ce = ctx.compute_encoder_ptr;
+            let ce = ctx.encoder_ptr;
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("DOF Gather"),
                 timestamp_writes: None,

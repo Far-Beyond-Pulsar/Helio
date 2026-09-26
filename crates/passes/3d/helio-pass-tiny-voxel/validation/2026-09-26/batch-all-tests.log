@@ -1,0 +1,32 @@
+
+running 27 tests
+test chunks::tests::reuse_local_edits_eviction_and_world_snapshots_keep_canonical_materials ... ok
+test engine::residency::tests::cached_classification_matches_fresh_after_append_undo_and_replacement ... ok
+test engine::residency::tests::generation_budget_counts_evaluations_without_exceeding_dispatch_capacity ... ok
+test engine::residency::tests::larger_coarse_batches_respect_edit_reference_storage ... ok
+test engine::residency::tests::selection_flight_benchmark ... ignored, CPU selection benchmark; reports cold and cached identical cuts
+test engine::residency::tests::zoom_and_roll_require_new_selection ... ok
+test engine::terrain::tests::far_traversal_matches_voxels_and_exits_at_planetary_boundaries ... ok
+test engine::terrain::tests::generated_exact_brick_matches_cpu_after_overlapping_edits ... ok
+test journal::tests::shutdown_drains_append_and_replacement_journals ... ok
+test landforms::snapshot::tests::integer_cell_address_and_sphere_boundary ... ok
+test landforms::snapshot::tests::snapshot_quantization_and_input_limits ... ok
+test landforms::snapshot::tests::snapshot_rejects_corruption_and_noncanonical_data ... ok
+test landforms::snapshot::tests::snapshot_roundtrip_and_content_identity ... ok
+test landforms::tests::nested_spherical_directions_keep_their_identity ... ok
+test landforms::tests::shared_sphere_topology_closes_edges_and_corners ... ok
+test picking::tests::deep_planetary_excavations_activate_the_exact_near_cache ... ok
+test picking::tests::precise_selection_and_single_voxel_destruction_across_scales_and_hemispheres ... ok
+test picking::tests::selection_reaches_remote_construction_and_rejects_sky ... ok
+test world::tests::camera_air_clearance_does_not_cross_voxels_or_ordered_edits ... ok
+test world::tests::coarse_cells_crossing_storage_bricks_invalidate_and_replay ... ok
+test world::tests::configurable_cells_preserve_planet_scale_and_exact_remote_editing ... ok
+test world::tests::destruction_and_construction_replay_in_order_at_planet_scale ... ok
+test world::tests::earth_coordinates_retain_ten_centimeter_neighbors ... ok
+test world::tests::ground_spawn_clears_planetary_construction ... ok
+test world::tests::ground_spawn_has_support_and_headroom ... ok
+test world::tests::journals_roundtrip_and_reject_edits_from_different_terrain ... ok
+test world::tests::spatial_index_matches_ordered_replay_for_overlapping_edits ... ok
+
+test result: ok. 26 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 10.31s
+

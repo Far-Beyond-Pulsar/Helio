@@ -1,0 +1,2654 @@
+{
+  "frames": 1008,
+  "complete": true,
+  "config": [
+    "VOXEL_FLIGHT_CONFIG output=640x360 quality=Native render_scale=1"
+  ],
+  "adapter": [
+    "VOXEL_FLIGHT_ADAPTER AdapterInfo { name: \"NVIDIA GeForce RTX 3060\", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: \"0000:01:00.0\", driver: \"NVIDIA\", driver_info: \"616.64\", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }"
+  ],
+  "stages": {
+    "walk": {
+      "frames": 120,
+      "p50_ms": 10.9999,
+      "p95_ms": 17.3275,
+      "max_ms": 27.881,
+      "refining_frames": 8
+    },
+    "200m": {
+      "frames": 60,
+      "p50_ms": 8.7142,
+      "p95_ms": 11.0137,
+      "max_ms": 11.5678,
+      "refining_frames": 0
+    },
+    "1km": {
+      "frames": 60,
+      "p50_ms": 7.3832,
+      "p95_ms": 9.9102,
+      "max_ms": 11.0874,
+      "refining_frames": 0
+    },
+    "orbit": {
+      "frames": 60,
+      "p50_ms": 7.7617,
+      "p95_ms": 10.0344,
+      "max_ms": 11.4406,
+      "refining_frames": 0
+    },
+    "descent": {
+      "frames": 240,
+      "p50_ms": 10.113,
+      "p95_ms": 29.0656,
+      "max_ms": 39.5049,
+      "refining_frames": 239
+    },
+    "resize": {
+      "frames": 1,
+      "p50_ms": 335.2933,
+      "p95_ms": 335.2933,
+      "max_ms": 335.2933,
+      "refining_frames": 1
+    },
+    "orbital_edit": {
+      "frames": 30,
+      "p50_ms": 15.2627,
+      "p95_ms": 64.072,
+      "max_ms": 83.1784,
+      "refining_frames": 0
+    },
+    "1m_base": {
+      "frames": 30,
+      "p50_ms": 9.5677,
+      "p95_ms": 13.1387,
+      "max_ms": 13.6979,
+      "refining_frames": 0
+    }
+  },
+  "settlement_ms": {
+    "ground_load": 639.2,
+    "200m": 341.62,
+    "1km": 150.12,
+    "orbit": 65.29,
+    "returned_ground": 416.53,
+    "resize_settle": 245.07,
+    "orbital_edit": 96.65,
+    "1m_base": 2668.44
+  },
+  "not_ready_after_initial_load": 0,
+  "capture_audits": 367,
+  "exhausted_hits": 0,
+  "loading_hits": 0,
+  "minimum_solid_hits": 163941,
+  "audits": [
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "1km.hits.csv"
+    },
+    {
+      "empty": 143,
+      "solid": 278641,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "1m-base.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "200m.hits.csv"
+    },
+    {
+      "empty": 14140,
+      "solid": 216260,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-000.hits.csv"
+    },
+    {
+      "empty": 11141,
+      "solid": 219259,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-001.hits.csv"
+    },
+    {
+      "empty": 8834,
+      "solid": 221566,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-002.hits.csv"
+    },
+    {
+      "empty": 6073,
+      "solid": 224327,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-003.hits.csv"
+    },
+    {
+      "empty": 4471,
+      "solid": 225929,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-004.hits.csv"
+    },
+    {
+      "empty": 2893,
+      "solid": 227507,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-005.hits.csv"
+    },
+    {
+      "empty": 1940,
+      "solid": 228460,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-006.hits.csv"
+    },
+    {
+      "empty": 1200,
+      "solid": 229200,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-007.hits.csv"
+    },
+    {
+      "empty": 515,
+      "solid": 229885,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-008.hits.csv"
+    },
+    {
+      "empty": 186,
+      "solid": 230214,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-009.hits.csv"
+    },
+    {
+      "empty": 3,
+      "solid": 230397,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-010.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-011.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-012.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-013.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-014.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-015.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-016.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-017.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-018.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-019.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-020.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-021.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-022.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-023.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-024.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-025.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-026.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-027.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-028.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-029.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-030.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-031.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-032.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-033.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-034.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-035.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-036.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-037.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-038.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-039.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-040.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-041.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-042.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-043.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-044.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-045.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-046.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-047.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-048.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-049.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-050.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-051.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-052.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-053.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-054.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-055.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-056.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-057.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-058.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-059.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-060.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-061.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-062.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-063.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-064.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-065.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-066.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-067.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-068.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-069.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-070.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-071.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-072.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-073.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-074.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-075.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-076.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-077.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-078.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-079.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-080.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-081.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-082.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-083.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-084.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-085.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-086.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-087.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-088.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-089.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-090.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-091.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-092.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-093.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-094.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-095.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-096.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-097.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-098.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-099.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-100.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-101.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-102.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-103.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-104.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-105.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-106.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-107.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-108.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-109.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-110.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-111.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-112.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-113.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-114.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-115.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-116.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-117.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-118.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-119.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-120.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-121.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-122.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-123.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-124.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-125.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-126.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-127.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-128.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-129.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-130.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-131.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-132.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-133.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-134.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-135.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-136.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-137.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-138.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-139.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-140.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-141.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-142.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-143.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-144.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-145.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-146.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-147.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-148.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-149.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-150.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-151.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-152.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-153.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-154.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-155.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-156.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-157.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-158.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-159.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-160.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-161.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-162.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-163.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-164.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-165.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-166.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-167.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-168.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-169.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-170.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-171.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-172.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-173.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-174.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-175.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-176.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-177.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-178.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-179.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-180.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-181.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-182.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-183.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-184.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-185.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-186.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-187.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-188.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-189.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-190.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-191.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-192.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-193.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-194.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-195.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-196.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-197.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-198.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-199.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-200.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-201.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-202.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-203.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-204.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-205.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-206.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-207.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-208.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-209.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-210.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-211.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-212.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-213.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-214.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-215.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-216.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-217.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-218.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-219.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-220.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-221.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-222.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-223.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-224.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-225.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-226.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-227.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-228.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-229.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-230.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-231.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-232.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-233.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-234.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-235.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-236.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-237.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-238.hits.csv"
+    },
+    {
+      "empty": 0,
+      "solid": 230400,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "descent-239.hits.csv"
+    },
+    {
+      "empty": 13872,
+      "solid": 216528,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "orbit.hits.csv"
+    },
+    {
+      "empty": 70,
+      "solid": 278714,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "orbital-edit.hits.csv"
+    },
+    {
+      "empty": 80353,
+      "solid": 198431,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "resized.hits.csv"
+    },
+    {
+      "empty": 65979,
+      "solid": 164421,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "returned-ground.hits.csv"
+    },
+    {
+      "empty": 66404,
+      "solid": 163996,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-000.hits.csv"
+    },
+    {
+      "empty": 66016,
+      "solid": 164384,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-001.hits.csv"
+    },
+    {
+      "empty": 66284,
+      "solid": 164116,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-002.hits.csv"
+    },
+    {
+      "empty": 65930,
+      "solid": 164470,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-003.hits.csv"
+    },
+    {
+      "empty": 66182,
+      "solid": 164218,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-004.hits.csv"
+    },
+    {
+      "empty": 66459,
+      "solid": 163941,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-005.hits.csv"
+    },
+    {
+      "empty": 66105,
+      "solid": 164295,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-006.hits.csv"
+    },
+    {
+      "empty": 66373,
+      "solid": 164027,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-007.hits.csv"
+    },
+    {
+      "empty": 66001,
+      "solid": 164399,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-008.hits.csv"
+    },
+    {
+      "empty": 66255,
+      "solid": 164145,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-009.hits.csv"
+    },
+    {
+      "empty": 65888,
+      "solid": 164512,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-010.hits.csv"
+    },
+    {
+      "empty": 66166,
+      "solid": 164234,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-011.hits.csv"
+    },
+    {
+      "empty": 66436,
+      "solid": 163964,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-012.hits.csv"
+    },
+    {
+      "empty": 66085,
+      "solid": 164315,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-013.hits.csv"
+    },
+    {
+      "empty": 66341,
+      "solid": 164059,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-014.hits.csv"
+    },
+    {
+      "empty": 65982,
+      "solid": 164418,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-015.hits.csv"
+    },
+    {
+      "empty": 66239,
+      "solid": 164161,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-016.hits.csv"
+    },
+    {
+      "empty": 65865,
+      "solid": 164535,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-017.hits.csv"
+    },
+    {
+      "empty": 66136,
+      "solid": 164264,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-018.hits.csv"
+    },
+    {
+      "empty": 66416,
+      "solid": 163984,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-019.hits.csv"
+    },
+    {
+      "empty": 66065,
+      "solid": 164335,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-020.hits.csv"
+    },
+    {
+      "empty": 66317,
+      "solid": 164083,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-021.hits.csv"
+    },
+    {
+      "empty": 65950,
+      "solid": 164450,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-022.hits.csv"
+    },
+    {
+      "empty": 66216,
+      "solid": 164184,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-023.hits.csv"
+    },
+    {
+      "empty": 65836,
+      "solid": 164564,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-024.hits.csv"
+    },
+    {
+      "empty": 66117,
+      "solid": 164283,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-025.hits.csv"
+    },
+    {
+      "empty": 65740,
+      "solid": 164660,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-026.hits.csv"
+    },
+    {
+      "empty": 66036,
+      "solid": 164364,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-027.hits.csv"
+    },
+    {
+      "empty": 66294,
+      "solid": 164106,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-028.hits.csv"
+    },
+    {
+      "empty": 65925,
+      "solid": 164475,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-029.hits.csv"
+    },
+    {
+      "empty": 66181,
+      "solid": 164219,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-030.hits.csv"
+    },
+    {
+      "empty": 65811,
+      "solid": 164589,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-031.hits.csv"
+    },
+    {
+      "empty": 66089,
+      "solid": 164311,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-032.hits.csv"
+    },
+    {
+      "empty": 65714,
+      "solid": 164686,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-033.hits.csv"
+    },
+    {
+      "empty": 66007,
+      "solid": 164393,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-034.hits.csv"
+    },
+    {
+      "empty": 66260,
+      "solid": 164140,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-035.hits.csv"
+    },
+    {
+      "empty": 65894,
+      "solid": 164506,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-036.hits.csv"
+    },
+    {
+      "empty": 66147,
+      "solid": 164253,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-037.hits.csv"
+    },
+    {
+      "empty": 65779,
+      "solid": 164621,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-038.hits.csv"
+    },
+    {
+      "empty": 66077,
+      "solid": 164323,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-039.hits.csv"
+    },
+    {
+      "empty": 65697,
+      "solid": 164703,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-040.hits.csv"
+    },
+    {
+      "empty": 65972,
+      "solid": 164428,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-041.hits.csv"
+    },
+    {
+      "empty": 66209,
+      "solid": 164191,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-042.hits.csv"
+    },
+    {
+      "empty": 65867,
+      "solid": 164533,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-043.hits.csv"
+    },
+    {
+      "empty": 66117,
+      "solid": 164283,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-044.hits.csv"
+    },
+    {
+      "empty": 65762,
+      "solid": 164638,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-045.hits.csv"
+    },
+    {
+      "empty": 66049,
+      "solid": 164351,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-046.hits.csv"
+    },
+    {
+      "empty": 65673,
+      "solid": 164727,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-047.hits.csv"
+    },
+    {
+      "empty": 65933,
+      "solid": 164467,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-048.hits.csv"
+    },
+    {
+      "empty": 66178,
+      "solid": 164222,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-049.hits.csv"
+    },
+    {
+      "empty": 65832,
+      "solid": 164568,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-050.hits.csv"
+    },
+    {
+      "empty": 66086,
+      "solid": 164314,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-051.hits.csv"
+    },
+    {
+      "empty": 65735,
+      "solid": 164665,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-052.hits.csv"
+    },
+    {
+      "empty": 66018,
+      "solid": 164382,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-053.hits.csv"
+    },
+    {
+      "empty": 65647,
+      "solid": 164753,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-054.hits.csv"
+    },
+    {
+      "empty": 65905,
+      "solid": 164495,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-055.hits.csv"
+    },
+    {
+      "empty": 66152,
+      "solid": 164248,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-056.hits.csv"
+    },
+    {
+      "empty": 65809,
+      "solid": 164591,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-057.hits.csv"
+    },
+    {
+      "empty": 66056,
+      "solid": 164344,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-058.hits.csv"
+    },
+    {
+      "empty": 65693,
+      "solid": 164707,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-059.hits.csv"
+    },
+    {
+      "empty": 65996,
+      "solid": 164404,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-060.hits.csv"
+    },
+    {
+      "empty": 65623,
+      "solid": 164777,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-061.hits.csv"
+    },
+    {
+      "empty": 65878,
+      "solid": 164522,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-062.hits.csv"
+    },
+    {
+      "empty": 66121,
+      "solid": 164279,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-063.hits.csv"
+    },
+    {
+      "empty": 65788,
+      "solid": 164612,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-064.hits.csv"
+    },
+    {
+      "empty": 66037,
+      "solid": 164363,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-065.hits.csv"
+    },
+    {
+      "empty": 65663,
+      "solid": 164737,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-066.hits.csv"
+    },
+    {
+      "empty": 65959,
+      "solid": 164441,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-067.hits.csv"
+    },
+    {
+      "empty": 65594,
+      "solid": 164806,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-068.hits.csv"
+    },
+    {
+      "empty": 65848,
+      "solid": 164552,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-069.hits.csv"
+    },
+    {
+      "empty": 66091,
+      "solid": 164309,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-070.hits.csv"
+    },
+    {
+      "empty": 65747,
+      "solid": 164653,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-071.hits.csv"
+    },
+    {
+      "empty": 66006,
+      "solid": 164394,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-072.hits.csv"
+    },
+    {
+      "empty": 65637,
+      "solid": 164763,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-073.hits.csv"
+    },
+    {
+      "empty": 65932,
+      "solid": 164468,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-074.hits.csv"
+    },
+    {
+      "empty": 65551,
+      "solid": 164849,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-075.hits.csv"
+    },
+    {
+      "empty": 65823,
+      "solid": 164577,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-076.hits.csv"
+    },
+    {
+      "empty": 66066,
+      "solid": 164334,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-077.hits.csv"
+    },
+    {
+      "empty": 65726,
+      "solid": 164674,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-078.hits.csv"
+    },
+    {
+      "empty": 65976,
+      "solid": 164424,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-079.hits.csv"
+    },
+    {
+      "empty": 65612,
+      "solid": 164788,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-080.hits.csv"
+    },
+    {
+      "empty": 65912,
+      "solid": 164488,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-081.hits.csv"
+    },
+    {
+      "empty": 65510,
+      "solid": 164890,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-082.hits.csv"
+    },
+    {
+      "empty": 65789,
+      "solid": 164611,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-083.hits.csv"
+    },
+    {
+      "empty": 66041,
+      "solid": 164359,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-084.hits.csv"
+    },
+    {
+      "empty": 65704,
+      "solid": 164696,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-085.hits.csv"
+    },
+    {
+      "empty": 65960,
+      "solid": 164440,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-086.hits.csv"
+    },
+    {
+      "empty": 65581,
+      "solid": 164819,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-087.hits.csv"
+    },
+    {
+      "empty": 65879,
+      "solid": 164521,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-088.hits.csv"
+    },
+    {
+      "empty": 65471,
+      "solid": 164929,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-089.hits.csv"
+    },
+    {
+      "empty": 65748,
+      "solid": 164652,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-090.hits.csv"
+    },
+    {
+      "empty": 65998,
+      "solid": 164402,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-091.hits.csv"
+    },
+    {
+      "empty": 65639,
+      "solid": 164761,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-092.hits.csv"
+    },
+    {
+      "empty": 65928,
+      "solid": 164472,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-093.hits.csv"
+    },
+    {
+      "empty": 65538,
+      "solid": 164862,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-094.hits.csv"
+    },
+    {
+      "empty": 65809,
+      "solid": 164591,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-095.hits.csv"
+    },
+    {
+      "empty": 65404,
+      "solid": 164996,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-096.hits.csv"
+    },
+    {
+      "empty": 65719,
+      "solid": 164681,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-097.hits.csv"
+    },
+    {
+      "empty": 65976,
+      "solid": 164424,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-098.hits.csv"
+    },
+    {
+      "empty": 65611,
+      "solid": 164789,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-099.hits.csv"
+    },
+    {
+      "empty": 65897,
+      "solid": 164503,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-100.hits.csv"
+    },
+    {
+      "empty": 65503,
+      "solid": 164897,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-101.hits.csv"
+    },
+    {
+      "empty": 65782,
+      "solid": 164618,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-102.hits.csv"
+    },
+    {
+      "empty": 65378,
+      "solid": 165022,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-103.hits.csv"
+    },
+    {
+      "empty": 65683,
+      "solid": 164717,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-104.hits.csv"
+    },
+    {
+      "empty": 65950,
+      "solid": 164450,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-105.hits.csv"
+    },
+    {
+      "empty": 65589,
+      "solid": 164811,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-106.hits.csv"
+    },
+    {
+      "empty": 65871,
+      "solid": 164529,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-107.hits.csv"
+    },
+    {
+      "empty": 65470,
+      "solid": 164930,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-108.hits.csv"
+    },
+    {
+      "empty": 65752,
+      "solid": 164648,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-109.hits.csv"
+    },
+    {
+      "empty": 65356,
+      "solid": 165044,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-110.hits.csv"
+    },
+    {
+      "empty": 65658,
+      "solid": 164742,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-111.hits.csv"
+    },
+    {
+      "empty": 65920,
+      "solid": 164480,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-112.hits.csv"
+    },
+    {
+      "empty": 65569,
+      "solid": 164831,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-113.hits.csv"
+    },
+    {
+      "empty": 65836,
+      "solid": 164564,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-114.hits.csv"
+    },
+    {
+      "empty": 65432,
+      "solid": 164968,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-115.hits.csv"
+    },
+    {
+      "empty": 65716,
+      "solid": 164684,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-116.hits.csv"
+    },
+    {
+      "empty": 65331,
+      "solid": 165069,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-117.hits.csv"
+    },
+    {
+      "empty": 65640,
+      "solid": 164760,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-118.hits.csv"
+    },
+    {
+      "empty": 65903,
+      "solid": 164497,
+      "exhausted": 0,
+      "loading": 0,
+      "file": "walk-119.hits.csv"
+    }
+  ]
+}

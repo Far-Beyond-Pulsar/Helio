@@ -1,0 +1,307 @@
+{
+  "source_revision": "fcfb4d850542696c3d8adc71f270d33bda6f7398",
+  "pulsar_runtime_revision": "89860371084b634e3ce7c93862948a241cb362e7",
+  "pulsar_ci_test_revision": "0ef469994aa9d8d71f332df6b5396455241b3cb9",
+  "flight_exe_sha256": "51A4BD308D5725EEA426469E6715BFA72185E1BE77E01C4E3A47DF6568E87E0F",
+  "candidate": {
+    "base": "fcfb4d850542696c3d8adc71f270d33bda6f7398",
+    "patch": "batch-candidate.patch",
+    "flight_exe_sha256": "5FE396E3C1665CD3F940927F8B43DB03F9E747045DAB1A850F0C89CB5CA71AE5",
+    "retained": false,
+    "reason": "Descent p95 exceeded the predeclared 15 percent regression gate at both resolutions."
+  },
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "E97602AB9CAC70102245345C5AB0FC9830DF8B17F1072B188265A662A3A547AE"
+    },
+    {
+      "path": "background-gpu.csv",
+      "sha256": "D6ED49C7E4CBA2C63C6584DB17F99D671D71ECE50B7F90FC99589F06AC7DA9E1"
+    },
+    {
+      "path": "batch-all-tests.log",
+      "sha256": "CCC00DD2816D239A20FCA6CC3AD6418AE26E7EAC3C8B594E9EF2798DE668B802"
+    },
+    {
+      "path": "batch-candidate.patch",
+      "sha256": "1FE779F916ADB6073CBF994FBA24E51B1DE2A5C41BD0CB0F4285CCE0B9F67297"
+    },
+    {
+      "path": "batch-trial-comparison.json",
+      "sha256": "38D7F56666F6D83D6802603D850BEC36883C2B11521277E7A1095F8B40BE0037"
+    },
+    {
+      "path": "batch-trial-protocol.md",
+      "sha256": "C03A6103F65FA221519DE341B80429DBB2BC90B12855FDA35C3304391C1CA818"
+    },
+    {
+      "path": "compare-batch-trial.py",
+      "sha256": "739CB7B2898474E6063E10D7E2E16971B5E62054704F786FF7EC007740AAC19E"
+    },
+    {
+      "path": "final-movement-idle/audits.csv",
+      "sha256": "0BCCED7ADDDF6F29EE7A6B4360DB8BEA641541E3BC45F477804C8F5E7DC20FA3"
+    },
+    {
+      "path": "final-movement-idle/descent-239.png",
+      "sha256": "7CB2737B27AE97C0829CE27E6BAE236F76252050595FD1161E3258078C0AEB4E"
+    },
+    {
+      "path": "final-movement-idle/frames.csv",
+      "sha256": "6DF0ED701CC38F5E5B853ECF9A6C79702B269813589FEB192C87615FB5724D74"
+    },
+    {
+      "path": "final-movement-idle/summary.json",
+      "sha256": "91C70D323B06DF8FFA0F46F65153FDCFC7EA7AF695AA7BA714A0F5C99CB58B22"
+    },
+    {
+      "path": "final-movement-idle/walk-000.png",
+      "sha256": "37761F577BCD65A04B5562572CFA65B6D773B4A52CF254CFB68864CF2D01C83C"
+    },
+    {
+      "path": "final-movement-idle.log",
+      "sha256": "8B9F341C8F299A7BB71029FD18F3E70B07EE5187838342A391D55A2594F94AC3"
+    },
+    {
+      "path": "final-retained-tests.log",
+      "sha256": "B5B0378EB97E7265A232E113300E2E44DB87C5DE958C29708C6E1ED26ABE933C"
+    },
+    {
+      "path": "graph-tests-postsync.log",
+      "sha256": "A52F18F4EA6517BCBF88C8B2EE420E84913A8AADA628E8E940547709648FA531"
+    },
+    {
+      "path": "movement-viewer-final.png",
+      "sha256": "30B4C4A05C986E40BE81929E58CC66B30989691FD9536CC5721D774E669B0F90"
+    },
+    {
+      "path": "native-ci-linux-summary.txt",
+      "sha256": "789CF2856242EF1BF2AAF9BE351A3AA74E3140BB85CEA706CD207793F37B860C"
+    },
+    {
+      "path": "native-fs-policy-minimal.log",
+      "sha256": "98644D32DA22F7A8B150465E78E8A36F70ABB4CFF00835B0D1A422CCF63F9A13"
+    },
+    {
+      "path": "native-postsync-gizmo.log",
+      "sha256": "5FB7FFF71EFDA7C4B9BCB6F22298C25B5CB811CF287F6DC46F6D28C5C16CF21C"
+    },
+    {
+      "path": "native-postsync-tests.log",
+      "sha256": "D8A2F8F9C70B27C8515E0626DB9F88A578D6C3A91D49A6D97CE6E5495BC9C252"
+    },
+    {
+      "path": "postsync-1080p-quality/audits.csv",
+      "sha256": "3B78C2726667E42A5C0E4E4B4091E0250AFBEBBDD0951DE663D22E4A6EF60929"
+    },
+    {
+      "path": "postsync-1080p-quality/frames.csv",
+      "sha256": "5E0E075C008A207079ACCF60C3DB595386771321ECC2F001EF5758279E75C6EE"
+    },
+    {
+      "path": "postsync-1080p-quality/summary.json",
+      "sha256": "5A6AB404EB9882B247CD88F95CEAEB626F359EAD5BFF7E3B2EFE007FF63E5585"
+    },
+    {
+      "path": "postsync-1080p-quality.log",
+      "sha256": "0E88179CAB557B548ABA844A330AF8AF068F6D169A235BC8F767183D1F536D00"
+    },
+    {
+      "path": "postsync-720p/audits.csv",
+      "sha256": "DE73EE71CCB10ADF93522E487073022BC709205C2BE1CB06C1C95FC83CDC56C9"
+    },
+    {
+      "path": "postsync-720p/descent-120.png",
+      "sha256": "D34E1B50262F0DBD92F4C296C12C971C23B45F0F4D4B6BF12ED074654D35EF42"
+    },
+    {
+      "path": "postsync-720p/frames.csv",
+      "sha256": "ED94147F436B0AC56C7C62EB806BFDF02A9D51AA20A4EFDE6EFE99FF748F8235"
+    },
+    {
+      "path": "postsync-720p/orbital-edit.png",
+      "sha256": "DE3DBF2FA69258D6CD49C2CE88ED9688F837148EBEC650B6A4B6CC3B5CA52E78"
+    },
+    {
+      "path": "postsync-720p/summary.json",
+      "sha256": "B2B339D38087C890304EB0FDA7EA7524F98EA47E55E4BB6535FCB74DEF5E3D39"
+    },
+    {
+      "path": "postsync-720p.log",
+      "sha256": "0A91C134B0E3D0D28A34A0EDF0DE3D15130605DCDA0D2EFF7410572752EC225C"
+    },
+    {
+      "path": "postsync-movement/audits.csv",
+      "sha256": "598223AEBF84CF77F736536D60B7A07C5AB297A731145D1CA100BF7FC30255DE"
+    },
+    {
+      "path": "postsync-movement/frames.csv",
+      "sha256": "A10B9853C6D11915B89CC08DD5703AFE96ED5D0D8D5A4A90284362798C332F10"
+    },
+    {
+      "path": "postsync-movement/summary.json",
+      "sha256": "9B9FEE8B11EA1B556AFE4CB8628D229C4CC29769C420F10EB54D42768EFD4A16"
+    },
+    {
+      "path": "postsync-movement.log",
+      "sha256": "2C5EE29CA1FBDFA1D029B584B07182F3C09109CBC3C7E5B388DFA8AA5BE93538"
+    },
+    {
+      "path": "run-batch-trial.ps1",
+      "sha256": "1012C498D497BE155CA094A372F66377DB951E3101A3AC38688A29FEB10CD8ED"
+    },
+    {
+      "path": "summarize.py",
+      "sha256": "97AA688AE24BD043208A42951C28589B906533C18F8EECCBE3E6D2F0B1AAFDB3"
+    },
+    {
+      "path": "trial-1024-1080p-quality/audits.csv",
+      "sha256": "87F5871858BE29484D93BE151FBC7E229E679CC2583965B3CE1E23FD0443D936"
+    },
+    {
+      "path": "trial-1024-1080p-quality/descent-120.png",
+      "sha256": "D6CC0BE1B1674204C4F361A0E8F3360A51CEBE0AFCD996A2B1F927749B915BFD"
+    },
+    {
+      "path": "trial-1024-1080p-quality/frames.csv",
+      "sha256": "8BDB2C47906DF0C2936FE023F94A5718F9ADB4EF6AE87A194F8890DCEA4316EA"
+    },
+    {
+      "path": "trial-1024-1080p-quality/orbital-edit.png",
+      "sha256": "10B4DCD60BEB2B719974D0C6BB570CF9113CDF2CC553A739B3A77A0BDC4E3283"
+    },
+    {
+      "path": "trial-1024-1080p-quality/returned-ground.png",
+      "sha256": "16A229106401B44D45A339B2867B5405DD59F9BC06A62D7F18D26817CFB05E97"
+    },
+    {
+      "path": "trial-1024-1080p-quality/summary.json",
+      "sha256": "2B3E2BCBE5F10E2BFEABAD13A513E37B548BF824424A46C3B7029D60DE61CADA"
+    },
+    {
+      "path": "trial-1024-1080p-quality-gpu-before.csv",
+      "sha256": "42F95F46826E4222CB8B6C92156EE5BA2124BEA88B47E4E9E90C4CD9F8B60DBA"
+    },
+    {
+      "path": "trial-1024-1080p-quality-run.json",
+      "sha256": "A08EDD5779B7379E0B7FD5D9D27716C9A888BF94F3AE28FA032408E3B7CBD18F"
+    },
+    {
+      "path": "trial-1024-1080p-quality.log",
+      "sha256": "00BD428731052493D02BB21B58674B0A5FEFCBFD2F98EC586DFF107DBCDCA5C6"
+    },
+    {
+      "path": "trial-1024-720p/audits.csv",
+      "sha256": "0BC63549305A55BA26A199EEA91BEC5C416285748AA7999939550BAE861F01FD"
+    },
+    {
+      "path": "trial-1024-720p/descent-120.png",
+      "sha256": "9A4EC34A0CBACC24DA67F9404AF3DE7B21B493D27990FEC881ADD969DFBDAE55"
+    },
+    {
+      "path": "trial-1024-720p/frames.csv",
+      "sha256": "72ACBC14A18CC50408D834358777CCE210D251A3C132BD571A7014F4EE9F5DDD"
+    },
+    {
+      "path": "trial-1024-720p/orbital-edit.png",
+      "sha256": "A61082AA4610C1F03F252638C475EEE133A902A7E0A4E79598BDF1F7B6315BA2"
+    },
+    {
+      "path": "trial-1024-720p/returned-ground.png",
+      "sha256": "50C4ED893F82BF95CA9572244C4D58A66D7F5EBEE78FC6B40FDCC5CE125992F8"
+    },
+    {
+      "path": "trial-1024-720p/summary.json",
+      "sha256": "DEF574D47DC2438A940F42DE1FB9A07240489213885FD01426A93C5C2C50F2F1"
+    },
+    {
+      "path": "trial-1024-720p-gpu-before.csv",
+      "sha256": "E3F79B5072AA6455217D40ABBA710D95190D159804953184BE29554B5DF9D8E3"
+    },
+    {
+      "path": "trial-1024-720p-run.json",
+      "sha256": "FE167015D28E4845F6759CF70E0E34D3ED31BF4B3CC1EDC26BF7C4375CE4FCA7"
+    },
+    {
+      "path": "trial-1024-720p.log",
+      "sha256": "3DF21489F24C45F5A0A1311FC941BF4FD9F19641141D016D0B891B369AF48B43"
+    },
+    {
+      "path": "trial-control-1080p-quality/audits.csv",
+      "sha256": "E27E340DCCFEE9AEF2CC7B31F404CD3D860CA08290714D229EE0B03F49446689"
+    },
+    {
+      "path": "trial-control-1080p-quality/descent-120.png",
+      "sha256": "A3786E45F7430D4D32FD1248671D4DDBD82B092D2AB595AF710978E1D2688DAF"
+    },
+    {
+      "path": "trial-control-1080p-quality/frames.csv",
+      "sha256": "B9608844852142E50A56B2E78C7CFCDA1E69A8A645013026B2F88B5F65764B0A"
+    },
+    {
+      "path": "trial-control-1080p-quality/orbital-edit.png",
+      "sha256": "19DDC67B9EAFA1137E009B0448AE6B8DA15C06A92FA91F456EB7FD8AFACDFB22"
+    },
+    {
+      "path": "trial-control-1080p-quality/returned-ground.png",
+      "sha256": "3B82E2E30C15ECFAABE0CB9F97D36DDDB79B6BCE682CA8E2CA548A39481D900A"
+    },
+    {
+      "path": "trial-control-1080p-quality/summary.json",
+      "sha256": "9D8E335D4AA39B4943DF0D6FC8FFD9FAE40344E0EEBCC65AEDCCED2A653FCBF0"
+    },
+    {
+      "path": "trial-control-1080p-quality-gpu-before.csv",
+      "sha256": "4971435D7494D9A3CB0737EDDBA2965EA2651425AFA9968AE8E6ACE6313BAB4E"
+    },
+    {
+      "path": "trial-control-1080p-quality-run.json",
+      "sha256": "962A3D90498D92A0EF76487EBB52D05FF24E01357BF904E243C4B055BFD9BF0A"
+    },
+    {
+      "path": "trial-control-1080p-quality.log",
+      "sha256": "3493E79DB147CFCBA1A72EDA38B737666CA2513A510A40F17BFD188B5D6A37E7"
+    },
+    {
+      "path": "trial-control-720p/audits.csv",
+      "sha256": "AEBA9D053CB3EA839F1B0C98AFE9A5B66856E507CF08D6C36E229E69E8F16965"
+    },
+    {
+      "path": "trial-control-720p/descent-120.png",
+      "sha256": "4586A288B54774165F2D202482F809E89D5145E430129DB71BD74E6C49F2080E"
+    },
+    {
+      "path": "trial-control-720p/frames.csv",
+      "sha256": "1415D92093FB033428B016FA3CCD44675C73455AB3C6B7EF5FCD0F780B80583C"
+    },
+    {
+      "path": "trial-control-720p/orbital-edit.png",
+      "sha256": "1140F561CC00A6D0A58C2C9E24E8D931F858EC9D739B4CA20A1C306DD530B714"
+    },
+    {
+      "path": "trial-control-720p/returned-ground.png",
+      "sha256": "B40EF75E4A276F6B4B338CD1BC0432F6DD79B7DD35F95A9AD1B0D7A94C483D65"
+    },
+    {
+      "path": "trial-control-720p/summary.json",
+      "sha256": "177D7176B8E4468808DD80839166EAD3C50D0F21678C1E35B7EB796032AF5992"
+    },
+    {
+      "path": "trial-control-720p-gpu-before.csv",
+      "sha256": "5F4DA80B7E1714F412BC44A5E019CE644D6924CA122F06EBEFDA210DCD92CB7D"
+    },
+    {
+      "path": "trial-control-720p-run.json",
+      "sha256": "0D1B1DCE1E35B55F45164BB122FA6E5F5124E9C17E34257C13B5824641B0777D"
+    },
+    {
+      "path": "trial-control-720p.log",
+      "sha256": "C291B7123309E276250ECFBDA4A36D8412B1A77F9CF8F31D29714E45F8425B08"
+    },
+    {
+      "path": "upstream-gpu-tests-postsync.log",
+      "sha256": "69E8682C3E973F93F2978EDB5267CDC3C1A3C93D99C41AADBD1B7F90890BEE0B"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+Extracted with terminal color escapes removed from https://github.com/Far-Beyond-Pulsar/Pulsar-Native/actions/runs/36265526403/job/108469339563
+Source 0ef469994aa9d8d71f332df6b5396455241b3cb9
+2026-09-26T19:24:55.3042584Z         PASS [   0.053s] ( 143/1717) engine_fs::workspace_feature_policy workspace_engine_fs_callers_declare_their_minimum_surface
+2026-09-26T19:25:33.6126824Z         PASS [   0.109s] (1315/1717) ui_level_editor level_editor::core::scene_edit::hlfs_cathedral::default_level_loads_the_cathedral
+2026-09-26T19:25:40.6441139Z      Summary [  46.704s] 1717 tests run: 1717 passed, 3 skipped
