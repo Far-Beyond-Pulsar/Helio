@@ -1,0 +1,272 @@
+VOXEL_FLIGHT_ADAPTER AdapterInfo { name: "NVIDIA GeForce RTX 3060", vendor: 4318, device: 9476, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "616.64", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+VOXEL_FLIGHT_CONFIG output=640x360 quality=Native render_scale=1
+[RenderGraph] 42 passes, 0 chain(s):
+   0. ObjectBatch                  W: object_batch  R: –
+             
+   1. ShadowMatrix                 W: –  R: –
+             
+   2. ShadowDirty                  W: –  R: object_batch
+             
+   3. ShadowCull                   W: –  R: object_batch
+             
+   4. Shadow                       W: shadow_atlas,shadow_sampler,static_shadow_atlas  R: object_batch
+             
+   5. Sky                          W: sky_lut,pre_aa,cloud_quarter_color,cloud_quarter_data,cloud_history  R: gbuffer_velocity,pre_aa
+             
+   6. IndirectDispatch             W: indirect_dispatch  R: object_batch
+             
+   7. HiZBuild                     W: hiz,hiz_min,hiz_sampler,static_hiz,static_hiz_sampler  R: depth
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via hiz,static_hiz,static_hiz_sampler)
+             
+   8. OcclusionCull                W: culled_batch  R: hiz,static_hiz,static_hiz_sampler,object_batch,indirect_dispatch
+             
+   9. PortalCull                   W: –  R: object_batch
+             
+  10. PerfOverlay Color Analyzer   W: –  R: –
+             
+  11. LightCull                    W: tile_light_lists,tile_light_counts  R: –
+             
+  12. RadianceCascades             W: rc_cascades,rc_history  R: hiz,pre_aa,render_environment
+             
+  13. GBuffer                      W: gbuffer_albedo,gbuffer_normal,gbuffer_orm,gbuffer_emissive,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity  R: material_textures,render_environment,object_batch,culled_batch
+             
+  14. PortalMask                   W: portal_mask  R: –
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via portal_mask)
+             
+  15. PortalInstance               W: –  R: gbuffer,portal_mask,object_batch,material_textures
+             
+  16. VirtualGeometry              W: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra  R: gbuffer,material_textures,render_environment,vg,hiz
+             
+  17. PerfOverlay Color Analyzer   W: –  R: –
+             
+  18. TinyVoxelGBuffer             W: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity,directional_visibility  R: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via gbuffer)
+             
+  19. DecalApply                   W: gbuffer  R: gbuffer,hiz,material_textures
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via gbuffer)
+             
+  20. DeferredLight                W: pre_aa  R: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,depth,shadow_atlas,static_shadow_atlas,shadow_sampler,ssao,sky_lut,tile_light_lists,tile_light_counts,render_environment,water_caustics,pre_aa,rc_view,baked_lightmap,baked_lightmap_sampler,ssr_trace,planar_reflection,ies_textures
+             
+  21. PerfOverlay Cost Analyzer    W: –  R: –
+             
+  22. PerfOverlay Color Analyzer   W: –  R: –
+             
+  23. Billboard                    W: pre_aa  R: pre_aa,full_res_depth,billboards,depth
+             
+  24. PerfOverlay Color Analyzer   W: –  R: –
+             
+  25. Corona                       W: pre_aa  R: pre_aa,full_res_depth,corona_emitters,depth
+             
+  26. PerfOverlay Color Analyzer   W: –  R: –
+             
+  27. PortalEditorOverlay          W: pre_aa  R: pre_aa,depth
+             
+  28. PerfOverlay Color Analyzer   W: –  R: –
+             
+  29. WaterSim                     W: water_sim_texture,water_sim_sampler,water_caustics,pre_aa,water_output  R: gbuffer,depth,pre_aa,water_caustics,hiz_min
+             
+  30. PerfOverlay Color Analyzer   W: –  R: –
+             
+  31. DebugDraw                    W: –  R: –
+             
+  32. PostProcessVolumeBlendPass   W: –  R: –
+             
+  33. VolumetricFogPass            W: fog_accum  R: –
+             
+  34. TransparentPass              W: –  R: depth,cluster_light_grid,object_batch,culled_batch
+             
+  35. LensFlare                    W: pre_aa  R: depth
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via pre_aa)
+             
+  36. TSR                          W: tsr_color  R: pre_aa
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via tsr_color)
+             
+  37. PostProcess                  W: pre_dof  R: tsr_color,fog_accum,color_grading_lut,gbuffer_velocity
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via pre_dof)
+             
+  38. DofPass                      W: –  R: pre_dof,depth
+             
+  39. PerfOverlay Color Analyzer   W: –  R: –
+             
+  40. PerfOverlay                  W: –  R: –
+             
+  41. DebugDraw                    W: –  R: –
+             
+VOXEL_PLAN nodes=62081 bricks=27276 pixel_budget=0.938 selection_ms=53.98 classified=82761 cached=50339
+VOXEL_FLIGHT_SETTLED stage=ground_load load_ms=701.80
+VOXEL_PLAN nodes=62001 bricks=27256 pixel_budget=0.938 selection_ms=23.49 classified=408 cached=132673
+VOXEL_PLAN nodes=61841 bricks=27170 pixel_budget=0.938 selection_ms=23.85 classified=320 cached=132610
+VOXEL_PLAN nodes=61729 bricks=27131 pixel_budget=0.938 selection_ms=15.17 classified=376 cached=132452
+VOXEL_PLAN nodes=44289 bricks=19069 pixel_budget=0.750 selection_ms=9.60 classified=5952 cached=38337
+VOXEL_FLIGHT_SETTLED stage=200m load_ms=347.39
+VOXEL_FLIGHT_STEADY stage=200m p50_ms=10.863 p95_ms=16.032 max_ms=21.100
+VOXEL_PLAN nodes=35193 bricks=14928 pixel_budget=0.750 selection_ms=5.39 classified=2600 cached=32593
+VOXEL_FLIGHT_SETTLED stage=1km load_ms=170.68
+VOXEL_FLIGHT_STEADY stage=1km p50_ms=8.206 p95_ms=10.695 max_ms=11.042
+VOXEL_PLAN nodes=17569 bricks=6760 pixel_budget=0.750 selection_ms=3.14 classified=1512 cached=16057
+VOXEL_FLIGHT_SETTLED stage=orbit load_ms=91.81
+VOXEL_FLIGHT_STEADY stage=orbit p50_ms=9.747 p95_ms=12.653 max_ms=15.950
+VOXEL_PLAN nodes=17889 bricks=6885 pixel_budget=0.750 selection_ms=3.97 classified=152 cached=17737
+VOXEL_PLAN nodes=18001 bricks=6949 pixel_budget=0.750 selection_ms=3.02 classified=136 cached=17865
+VOXEL_PLAN nodes=18097 bricks=7038 pixel_budget=0.750 selection_ms=2.88 classified=128 cached=17969
+VOXEL_PLAN nodes=18793 bricks=7320 pixel_budget=0.750 selection_ms=2.97 classified=152 cached=18641
+VOXEL_PLAN nodes=19545 bricks=7555 pixel_budget=0.750 selection_ms=3.62 classified=248 cached=19297
+VOXEL_PLAN nodes=20137 bricks=7792 pixel_budget=0.750 selection_ms=3.31 classified=208 cached=19929
+VOXEL_PLAN nodes=20641 bricks=7977 pixel_budget=0.750 selection_ms=3.26 classified=288 cached=20353
+VOXEL_PLAN nodes=20849 bricks=8040 pixel_budget=0.750 selection_ms=4.18 classified=160 cached=20689
+VOXEL_PLAN nodes=20945 bricks=8109 pixel_budget=0.750 selection_ms=3.22 classified=200 cached=20745
+VOXEL_PLAN nodes=21009 bricks=8139 pixel_budget=0.750 selection_ms=1.93 classified=144 cached=20865
+VOXEL_PLAN nodes=21377 bricks=8278 pixel_budget=0.750 selection_ms=2.75 classified=208 cached=21169
+VOXEL_PLAN nodes=21521 bricks=8303 pixel_budget=0.750 selection_ms=5.84 classified=176 cached=21345
+VOXEL_PLAN nodes=21761 bricks=8396 pixel_budget=0.750 selection_ms=4.49 classified=216 cached=21545
+VOXEL_PLAN nodes=21913 bricks=8434 pixel_budget=0.750 selection_ms=3.36 classified=264 cached=21649
+VOXEL_PLAN nodes=21929 bricks=8432 pixel_budget=0.750 selection_ms=3.61 classified=232 cached=21697
+VOXEL_PLAN nodes=21697 bricks=8280 pixel_budget=0.750 selection_ms=3.15 classified=208 cached=21489
+VOXEL_PLAN nodes=21841 bricks=8415 pixel_budget=0.750 selection_ms=3.98 classified=144 cached=21697
+VOXEL_PLAN nodes=22009 bricks=8524 pixel_budget=0.750 selection_ms=3.16 classified=200 cached=21809
+VOXEL_PLAN nodes=22353 bricks=8722 pixel_budget=0.750 selection_ms=4.81 classified=264 cached=22089
+VOXEL_PLAN nodes=22369 bricks=8710 pixel_budget=0.750 selection_ms=5.16 classified=168 cached=22201
+VOXEL_PLAN nodes=22449 bricks=8806 pixel_budget=0.750 selection_ms=3.88 classified=200 cached=22249
+VOXEL_PLAN nodes=22257 bricks=8796 pixel_budget=0.750 selection_ms=3.91 classified=144 cached=22113
+VOXEL_PLAN nodes=21961 bricks=8667 pixel_budget=0.750 selection_ms=3.45 classified=120 cached=21841
+VOXEL_PLAN nodes=22689 bricks=8988 pixel_budget=0.750 selection_ms=4.49 classified=200 cached=22489
+VOXEL_PLAN nodes=23137 bricks=9140 pixel_budget=0.750 selection_ms=2.67 classified=272 cached=22865
+VOXEL_PLAN nodes=23601 bricks=9311 pixel_budget=0.750 selection_ms=3.44 classified=352 cached=23249
+VOXEL_PLAN nodes=23849 bricks=9438 pixel_budget=0.750 selection_ms=4.06 classified=288 cached=23561
+VOXEL_PLAN nodes=23865 bricks=9472 pixel_budget=0.750 selection_ms=4.16 classified=336 cached=23529
+VOXEL_PLAN nodes=23441 bricks=9328 pixel_budget=0.750 selection_ms=3.76 classified=224 cached=23217
+VOXEL_PLAN nodes=23977 bricks=9681 pixel_budget=0.750 selection_ms=4.24 classified=248 cached=23729
+VOXEL_PLAN nodes=24705 bricks=10281 pixel_budget=0.750 selection_ms=4.24 classified=464 cached=24241
+VOXEL_PLAN nodes=24801 bricks=10605 pixel_budget=0.750 selection_ms=4.37 classified=448 cached=24353
+VOXEL_PLAN nodes=24937 bricks=10868 pixel_budget=0.750 selection_ms=6.57 classified=424 cached=24513
+VOXEL_PLAN nodes=25489 bricks=11202 pixel_budget=0.750 selection_ms=5.23 classified=456 cached=25033
+VOXEL_PLAN nodes=27417 bricks=12093 pixel_budget=0.750 selection_ms=5.05 classified=856 cached=26561
+VOXEL_PLAN nodes=28441 bricks=12421 pixel_budget=0.750 selection_ms=3.93 classified=728 cached=27713
+VOXEL_PLAN nodes=28601 bricks=12347 pixel_budget=0.750 selection_ms=6.44 classified=384 cached=28217
+VOXEL_PLAN nodes=30297 bricks=13186 pixel_budget=0.750 selection_ms=4.20 classified=432 cached=29865
+VOXEL_PLAN nodes=31633 bricks=13725 pixel_budget=0.750 selection_ms=4.13 classified=520 cached=31113
+VOXEL_PLAN nodes=32329 bricks=13955 pixel_budget=0.750 selection_ms=4.75 classified=328 cached=32001
+VOXEL_PLAN nodes=32241 bricks=13807 pixel_budget=0.750 selection_ms=5.79 classified=144 cached=32097
+VOXEL_PLAN nodes=32729 bricks=13853 pixel_budget=0.750 selection_ms=4.33 classified=96 cached=32633
+VOXEL_PLAN nodes=33577 bricks=14272 pixel_budget=0.750 selection_ms=3.63 classified=136 cached=33441
+VOXEL_PLAN nodes=34417 bricks=14711 pixel_budget=0.750 selection_ms=4.91 classified=56 cached=34361
+VOXEL_PLAN nodes=34729 bricks=14727 pixel_budget=0.750 selection_ms=5.81 classified=48 cached=34681
+VOXEL_PLAN nodes=35081 bricks=14940 pixel_budget=0.750 selection_ms=7.78 classified=0 cached=35081
+VOXEL_PLAN nodes=35089 bricks=14857 pixel_budget=0.750 selection_ms=6.09 classified=168 cached=34921
+VOXEL_PLAN nodes=35521 bricks=14991 pixel_budget=0.750 selection_ms=8.16 classified=176 cached=35345
+VOXEL_PLAN nodes=36761 bricks=15520 pixel_budget=0.750 selection_ms=8.16 classified=352 cached=36409
+VOXEL_PLAN nodes=37729 bricks=15944 pixel_budget=0.750 selection_ms=7.11 classified=520 cached=37209
+VOXEL_PLAN nodes=38249 bricks=16161 pixel_budget=0.750 selection_ms=6.42 classified=392 cached=37857
+VOXEL_PLAN nodes=38513 bricks=16128 pixel_budget=0.750 selection_ms=5.44 classified=192 cached=38321
+VOXEL_PLAN nodes=39185 bricks=16570 pixel_budget=0.750 selection_ms=5.74 classified=80 cached=39105
+VOXEL_PLAN nodes=41009 bricks=17475 pixel_budget=0.750 selection_ms=8.18 classified=256 cached=40753
+VOXEL_PLAN nodes=41681 bricks=17827 pixel_budget=0.750 selection_ms=5.79 classified=176 cached=41505
+VOXEL_PLAN nodes=42529 bricks=18341 pixel_budget=0.750 selection_ms=5.27 classified=160 cached=42369
+VOXEL_PLAN nodes=43105 bricks=18527 pixel_budget=0.750 selection_ms=7.34 classified=48 cached=43057
+VOXEL_PLAN nodes=43369 bricks=18707 pixel_budget=0.750 selection_ms=7.84 classified=16 cached=43353
+VOXEL_PLAN nodes=43969 bricks=18921 pixel_budget=0.750 selection_ms=8.59 classified=16 cached=43953
+VOXEL_PLAN nodes=45289 bricks=19793 pixel_budget=0.750 selection_ms=6.76 classified=264 cached=45025
+VOXEL_PLAN nodes=48929 bricks=21597 pixel_budget=0.750 selection_ms=8.65 classified=1272 cached=47657
+VOXEL_PLAN nodes=55145 bricks=25574 pixel_budget=0.750 selection_ms=10.82 classified=2064 cached=53081
+VOXEL_PLAN nodes=36897 bricks=15356 pixel_budget=0.750 selection_ms=6.26 classified=184 cached=36713
+VOXEL_PLAN nodes=62081 bricks=27276 pixel_budget=0.938 selection_ms=19.22 classified=0 cached=133100
+VOXEL_FLIGHT_SETTLED stage=returned_ground load_ms=460.78
+[RenderGraph] 42 passes, 0 chain(s):
+   0. ObjectBatch                  W: object_batch  R: –
+             
+   1. ShadowMatrix                 W: –  R: –
+             
+   2. ShadowDirty                  W: –  R: object_batch
+             
+   3. ShadowCull                   W: –  R: object_batch
+             
+   4. Shadow                       W: shadow_atlas,shadow_sampler,static_shadow_atlas  R: object_batch
+             
+   5. Sky                          W: sky_lut,pre_aa,cloud_quarter_color,cloud_quarter_data,cloud_history  R: gbuffer_velocity,pre_aa
+             
+   6. IndirectDispatch             W: indirect_dispatch  R: object_batch
+             
+   7. HiZBuild                     W: hiz,hiz_min,hiz_sampler,static_hiz,static_hiz_sampler  R: depth
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via hiz,static_hiz,static_hiz_sampler)
+             
+   8. OcclusionCull                W: culled_batch  R: hiz,static_hiz,static_hiz_sampler,object_batch,indirect_dispatch
+             
+   9. PortalCull                   W: –  R: object_batch
+             
+  10. PerfOverlay Color Analyzer   W: –  R: –
+             
+  11. LightCull                    W: tile_light_lists,tile_light_counts  R: –
+             
+  12. RadianceCascades             W: rc_cascades,rc_history  R: hiz,pre_aa,render_environment
+             
+  13. GBuffer                      W: gbuffer_albedo,gbuffer_normal,gbuffer_orm,gbuffer_emissive,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity  R: material_textures,render_environment,object_batch,culled_batch
+             
+  14. PortalMask                   W: portal_mask  R: –
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via portal_mask)
+             
+  15. PortalInstance               W: –  R: gbuffer,portal_mask,object_batch,material_textures
+             
+  16. VirtualGeometry              W: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra  R: gbuffer,material_textures,render_environment,vg,hiz
+             
+  17. PerfOverlay Color Analyzer   W: –  R: –
+             
+  18. TinyVoxelGBuffer             W: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity,directional_visibility  R: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,gbuffer_velocity
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via gbuffer)
+             
+  19. DecalApply                   W: gbuffer  R: gbuffer,hiz,material_textures
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via gbuffer)
+             
+  20. DeferredLight                W: pre_aa  R: gbuffer,gbuffer_lightmap_uv,gbuffer_sss,gbuffer_extra,depth,shadow_atlas,static_shadow_atlas,shadow_sampler,ssao,sky_lut,tile_light_lists,tile_light_counts,render_environment,water_caustics,pre_aa,rc_view,baked_lightmap,baked_lightmap_sampler,ssr_trace,planar_reflection,ies_textures
+             
+  21. PerfOverlay Cost Analyzer    W: –  R: –
+             
+  22. PerfOverlay Color Analyzer   W: –  R: –
+             
+  23. Billboard                    W: pre_aa  R: pre_aa,full_res_depth,billboards,depth
+             
+  24. PerfOverlay Color Analyzer   W: –  R: –
+             
+  25. Corona                       W: pre_aa  R: pre_aa,full_res_depth,corona_emitters,depth
+             
+  26. PerfOverlay Color Analyzer   W: –  R: –
+             
+  27. PortalEditorOverlay          W: pre_aa  R: pre_aa,depth
+             
+  28. PerfOverlay Color Analyzer   W: –  R: –
+             
+  29. WaterSim                     W: water_sim_texture,water_sim_sampler,water_caustics,pre_aa,water_output  R: gbuffer,depth,pre_aa,water_caustics,hiz_min
+             
+  30. PerfOverlay Color Analyzer   W: –  R: –
+             
+  31. DebugDraw                    W: –  R: –
+             
+  32. PostProcessVolumeBlendPass   W: –  R: –
+             
+  33. VolumetricFogPass            W: fog_accum  R: –
+             
+  34. TransparentPass              W: –  R: depth,cluster_light_grid,object_batch,culled_batch
+             
+  35. LensFlare                    W: pre_aa  R: depth
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via pre_aa)
+             
+  36. TSR                          W: tsr_color  R: pre_aa
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via tsr_color)
+             
+  37. PostProcess                  W: pre_dof  R: tsr_color,fog_accum,color_grading_lut,gbuffer_velocity
+    .   NOT CHAINED — both must implement render_pass_descriptor. (fusable via pre_dof)
+             
+  38. DofPass                      W: –  R: pre_dof,depth
+             
+  39. PerfOverlay Color Analyzer   W: –  R: –
+             
+  40. PerfOverlay                  W: –  R: –
+             
+  41. DebugDraw                    W: –  R: –
+             
+VOXEL_PLAN nodes=71537 bricks=31600 pixel_budget=0.938 selection_ms=34.68 classified=8384 cached=133976
+VOXEL_FLIGHT_SETTLED stage=resize_settle load_ms=273.17
+VOXEL_PLAN nodes=70833 bricks=31103 pixel_budget=0.938 selection_ms=25.20 classified=449 cached=141478
+VOXEL_FLIGHT_SETTLED stage=orbital_edit load_ms=94.64
+VOXEL_PLAN nodes=70465 bricks=30692 pixel_budget=0.938 selection_ms=69.27 classified=91443 cached=50844
+VOXEL_FLIGHT_SETTLED stage=1m_base load_ms=2132.00
+VOXEL_FLIGHT_COMPLETE frames=1006

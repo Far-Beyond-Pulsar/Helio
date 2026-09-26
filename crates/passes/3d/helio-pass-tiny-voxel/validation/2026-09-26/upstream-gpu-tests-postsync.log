@@ -1,0 +1,51 @@
+   Compiling helio-core v0.1.0 (C:\Users\thiag\Documents\Codex\2026-09-25\https-github-com-far-beyond-pulsar\work\helio-voxel-v2\crates\helio-core)
+warning: unused variable: `writer`
+   --> crates\helio-core\src\registry.rs:304:9
+    |
+304 |         writer: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_writer`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `reader`
+   --> crates\helio-core\src\registry.rs:332:9
+    |
+332 |         reader: &'static str,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_reader`
+
+warning: unused variable: `target`
+   --> crates\helio-core\src\traits.rs:491:9
+    |
+491 |         target: &'a wgpu::TextureView,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_target`
+
+warning: unused variable: `depth`
+   --> crates\helio-core\src\traits.rs:492:9
+    |
+492 |         depth: &'a wgpu::TextureView,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_depth`
+
+warning: unused variable: `resources`
+   --> crates\helio-core\src\traits.rs:493:9
+    |
+493 |         resources: &'a crate::ResourceRegistry<'a>,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_resources`
+
+warning: `helio-core` (lib) generated 5 warnings (run `cargo fix --lib -p helio-core` to apply 5 suggestions)
+   Compiling helio-pass-shadow-matrix v0.1.0 (C:\Users\thiag\Documents\Codex\2026-09-25\https-github-com-far-beyond-pulsar\work\helio-voxel-v2\crates\passes\3d\helio-pass-shadow-matrix)
+   Compiling helio-pass-light-cull v0.1.0 (C:\Users\thiag\Documents\Codex\2026-09-25\https-github-com-far-beyond-pulsar\work\helio-voxel-v2\crates\passes\3d\helio-pass-light-cull)
+    Finished `release` profile [optimized] target(s) in 39.40s
+     Running unittests src\lib.rs (target\release\deps\helio_pass_light_cull-9a9e592fb4e7f8ea.exe)
+
+running 1 test
+test tests::sparse_light_ids_reach_every_tile_and_deleted_lights_disappear ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s
+
+     Running unittests src\lib.rs (target\release\deps\helio_pass_shadow_matrix-eb6300951587e137.exe)
+
+running 1 test
+test tests::empty_sparse_rows_cannot_write_shadow_slot_zero ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.12s
+
