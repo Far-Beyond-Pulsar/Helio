@@ -308,6 +308,75 @@ fn canonical_integer_brush_boundaries_and_validation() {
 }
 
 #[test]
+fn canonical_bounds_match_gpu_and_cover_exact_edited_cells() {
+    let field = helio_pass_tiny_voxel::landforms::default_field().clone();
+    let mut probes = Vec::new();
+    let mut sites = Vec::new();
+    // Search actual surface cells on all octants, axes and atlas seams.
+    for z in -1..=1 {
+        for y in -1..=1 {
+            for x in -1..=1 {
+                if [x, y, z] == [0; 3] {
+                    continue;
+                }
+                let direction = glam::DVec3::new(x as f64, y as f64, z as f64).normalize();
+                let mut low = 60_000_000.0;
+                let mut high = 68_000_000.0;
+                for _ in 0..40 {
+                    let middle = (low + high) * 0.5;
+                    let c = (direction * middle).floor().as_ivec3().to_array();
+                    if field.sample_cell(c).unwrap().material == 0 {
+                        high = middle;
+                    } else {
+                        low = middle;
+                    }
+                }
+                let c = (direction * high).floor().as_ivec3().to_array();
+                sites.push(c);
+                for edge in [1, 2, 4, 8, 32, 128, 1024, 16384] {
+                    for offset in [-edge, 0, edge] {
+                        probes.push(around(std::array::from_fn(|a| c[a] + offset), edge));
+                    }
+                }
+            }
+        }
+    }
+    probes.extend(regions(&vec![[0; 4]; 65536], &sites));
+    let mut edited = field.clone();
+    for c in &sites {
+        for (radius, material) in [(96, 3), (32, 0), (1, 2)] {
+            edited
+                .push_edit(VoxelEdit::new(*c, radius, material).unwrap())
+                .unwrap();
+        }
+    }
+    let (device, info) = gpu::Device::new();
+    eprintln!("BOUND_CERTIFICATES device={info}");
+    for (name, field) in [("procedural", field), ("nested_edits", edited)] {
+        let output = device.run(&field, true, bytemuck::cast_slice(&probes), probes.len());
+        let output: Vec<[u32; 4]> = output
+            .chunks_exact(4)
+            .map(|s| s.try_into().unwrap())
+            .collect();
+        for (i, r) in probes.iter().enumerate() {
+            assert_eq!(output[i], certificate(&field, *r), "{name} region={i}");
+        }
+        let report = check_regions(&field, &probes, &output);
+        eprintln!("BOUND_CERTIFICATES {name} {report}");
+        assert_eq!(
+            report["errors_invalid_height_occupancy"],
+            serde_json::json!([0, 0, 0])
+        );
+        for count in report["classification_counts_mixed_air_solid"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(count.as_u64().unwrap() > 0);
+        }
+    }
+}
+
+#[test]
 #[ignore = "new volume, edit-order and certificate qualification; frozen HELIO_VOXEL_FIELD protocol required"]
 fn new_voxel_field_matches_integer_oracle_and_edited_regions() {
     let root = PathBuf::from(std::env::var_os("HELIO_VOXEL_FIELD").expect("HELIO_VOXEL_FIELD"));

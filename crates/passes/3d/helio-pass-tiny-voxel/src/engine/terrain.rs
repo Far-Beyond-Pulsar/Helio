@@ -39,7 +39,7 @@ pub struct StoredTerrain {
     bounds: wgpu::ComputePipeline,
     trace: wgpu::ComputePipeline,
     trace_shader: wgpu::ShaderModule,
-    diagnostic_trace: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
+    diagnostic_trace: [std::sync::OnceLock<wgpu::ComputePipeline>; 4],
     visibility: wgpu::ComputePipeline,
     surface: wgpu::RenderPipeline,
     sun: wgpu::Texture,
@@ -322,7 +322,22 @@ impl StoredTerrain {
         encoder: &mut wgpu::CommandEncoder,
         accelerated: bool,
     ) -> wgpu::Buffer {
-        let pipeline = self.diagnostic_trace[usize::from(accelerated)].get_or_init(|| {
+        self.encode_ray_work(encoder, accelerated, false)
+    }
+    /// Replay rays from terrain hits, irrespective of later mesh coverage.
+    /// Each record is a blocker hit followed by counters and the ray origin.
+    /// This does not measure shadow fidelity or exact GPU execution offsets.
+    pub fn encode_sun_trace_work(&self, encoder: &mut wgpu::CommandEncoder) -> wgpu::Buffer {
+        self.encode_ray_work(encoder, false, true)
+    }
+    fn encode_ray_work(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        accelerated: bool,
+        sunlight: bool,
+    ) -> wgpu::Buffer {
+        let index = usize::from(accelerated) + 2 * usize::from(sunlight);
+        let pipeline = self.diagnostic_trace[index].get_or_init(|| {
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("voxel traversal work diagnostic"),
@@ -332,6 +347,7 @@ impl StoredTerrain {
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &[
                             ("STORED_TRACE_WORK", 1.0),
+                            ("STORED_WORK_SUN", f64::from(sunlight)),
                             ("STORED_SKIP_EMPTY", if accelerated { 1.0 } else { 0.0 }),
                         ],
                         ..Default::default()
@@ -749,6 +765,19 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
     primary_hits[i*2u+1u]=reference_density(n,ro,rd);
 }
 
+@compute @workgroup_size(1)
+fn test_corner_rays(@builtin(global_invocation_id) id:vec3<u32>) {
+    // Sunlight ray recorded during walking frame 27. Neighbouring ulps cover
+    // both ownership orders of the nearly simultaneous Y/Z leaf crossing.
+    var ro=vec3<f32>(-32.1799,-1.8997903,-86.789925);
+    if id.x>0u {
+        let axis=(id.x-1u)%3u;
+        ro[axis]=bitcast<f32>(bitcast<u32>(ro[axis])+id.x/3u-10u);
+    }
+    let rd=vec3<f32>(0.42399913,0.84799826,0.31799936);
+    primary_hits[id.x]=stored_trace(ro,rd,100.0);
+}
+
 "#
             );
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -924,6 +953,50 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                     drop(bytes);
                     readback.unmap();
                 }
+            }
+            // An entirely empty, explicitly subdivided region must terminate
+            // regardless of whether its leaves contain empty stored bricks.
+            let mut nodes = vec![residency::Node {
+                low: [-384, 63_717_504, -896], level: 2, child: 0,
+            }];
+            for index in 0..9 {
+                let n = nodes[index];
+                nodes[index].child = nodes.len() as u32;
+                for octant in 0..8 {
+                    nodes.push(residency::Node {
+                        low: std::array::from_fn(|a| n.low[a] + ((octant >> a) & 1) * (16 << n.level)),
+                        level: n.level - 1,
+                        child: residency::AIR,
+                    });
+                }
+            }
+            terrain.upload_nodes(&nodes);
+            let eye = World::default().ground_spawn(0.0, 0.0, 3.0) + glam::DVec3::new(1.08, 0.0, -0.81);
+            let origin = crate::world::render_origin(eye);
+            params.origin[..3].copy_from_slice(&origin);
+            params.fraction = std::array::from_fn(|a| if a < 3 { (eye[a] / 0.1 - f64::from(origin[a])) as f32 } else { 0.0 });
+            queue.write_buffer(&terrain.uniform, 0, bytemuck::bytes_of(&params));
+            let corner = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("near-coincident empty leaf crossings"),
+                layout: None, module: &shader, entry_point: Some("test_corner_rays"),
+                compilation_options: Default::default(), cache: None,
+            });
+            let group = terrain.group(&corner.get_bind_group_layout(0), &[
+                (0, &terrain.uniform), (9, &terrain.hits), (24, &terrain.nodes),
+                (25, &terrain.materials), (28, &terrain.exact_occupied),
+            ]);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            terrain.compute(&mut encoder, &corner, &[group], [64, 1, 1]);
+            encoder.copy_buffer_to_buffer(&terrain.hits, 0, &readback, 0, 64 * 32);
+            queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            readback.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let bytes = readback.slice(..).get_mapped_range().unwrap();
+            for (i, hit) in bytemuck::cast_slice::<u8, u32>(&bytes)[..64*8].chunks_exact(8).enumerate() {
+                assert_eq!(hit[3] & 3, 0, "empty corner ray {i} must exit, not exhaust at {}", f32::from_bits(hit[7]));
+                assert!(f32::from_bits(hit[7]) > 7.0);
             }
         });
     }

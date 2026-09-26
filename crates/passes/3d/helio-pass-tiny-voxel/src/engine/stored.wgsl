@@ -6,6 +6,7 @@ struct BrickJob { low:vec3<i32>,level:u32,slot:u32,pad0:u32,pad1:u32,pad2:u32 }
 // A separately dispatched diagnostic specialization. These counters are
 // eliminated from the normal pipeline and never alter the visible hit buffer.
 override STORED_TRACE_WORK:bool=false;
+override STORED_WORK_SUN:bool=false;
 // Experimental until repeated full-flight tail-time gates pass.
 override STORED_SKIP_EMPTY:bool=false;
 var<private> stored_work:vec3<u32>;
@@ -247,7 +248,7 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
         }
         if t>end-start || any(cell<n.low) || any(cell>=high) {return Hit(vec3<i32>(0),0u,rd,end);}
     }
-    return Hit(cell,2u,rd,start+t);
+    return Hit(cell,2u|(n.level<<2u),rd,start+t);
 }
 // Camera-relative origin is in metres, keeping exact nearby addresses out of
 // Earth-sized floats. Coarse distant cells have a bounded projected size.
@@ -327,6 +328,11 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
         if t>=limit {return Hit(vec3<i32>(0),0u,rd,limit);}
         let previous_cell=cell;
         cell=p.origin.xyz+vec3<i32>(floor(p.fraction.xyz+(ro+rd*(t+max(0.000002,abs(t)*0.0000002)))*10.0));
+        // A secondary ray can cross two planes almost simultaneously. Adding
+        // its camera-relative origin may round the other coordinate behind
+        // a boundary already crossed, cycling between adjacent leaves. Keep
+        // ownership monotone on every axis without moving the ray or its t.
+        cell=select(min(cell,previous_cell),max(cell,previous_cell),rd>=vec3<f32>(0.0));
         // Crossing ownership is integer state. A rounded ray position must not
         // select the same leaf repeatedly at a boundary.
         cell[axis]=n.low[axis]+select(-1,i32(32u<<n.level),rd[axis]>=0.0);
@@ -350,6 +356,23 @@ fn stored_primary(@builtin(global_invocation_id) id:vec3<u32>) {
 fn stored_primary_work(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=vec2<u32>(p.screen.xy)) {return;}
     let index=id.x+id.y*u32(p.screen.x);
+    if STORED_WORK_SUN {
+        let source=diagnostic_rays[index];
+        let sun=normalize(p.lighting.xyz);
+        let normal=stored_normal(source.status);
+        let level=(source.status>>2u)&31u;
+        let footprint=source.distance*p.up.w*2.0/p.screen.y;
+        let offset=select(0.0,footprint*0.25,level>0u);
+        let origin=source.normal*source.distance+normal*max(0.0001,source.distance*0.00000012)+sun*offset;
+        var blocker=Hit(vec3<i32>(0),0u,sun,0.0);
+        if (source.status&3u)==1u && dot(normal,sun)>0.0 {
+            blocker=stored_trace(origin,sun,p.settings.x);
+        }
+        primary_hits[index*2u]=blocker;
+        blocker.cell=vec3<i32>(stored_work);blocker.normal=origin;
+        primary_hits[index*2u+1u]=blocker;
+        return;
+    }
     // Replay the exact primary direction bits. Re-normalizing a camera ray in
     // another specialization can differ by a few ulps and move an edge hit.
     let rd=diagnostic_rays[index].normal;

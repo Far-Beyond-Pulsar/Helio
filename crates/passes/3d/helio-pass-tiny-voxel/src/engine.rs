@@ -108,6 +108,14 @@ impl LazyEngineVoxelPass {
         )
     }
 
+    /// Replay sunlight rays with leaf/exact/far counters outside frame timing.
+    pub fn encode_sun_trace_work(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<wgpu::Buffer> {
+        Some(self.active.as_ref()?.terrain.encode_sun_trace_work(encoder))
+    }
+
     /// Keep a host viewport ticking while a selected cut is being planned or
     /// uploaded. A removed source has no reason to keep an idle viewport awake.
     pub fn needs_frame(&self) -> bool {

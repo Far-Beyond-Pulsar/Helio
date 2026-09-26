@@ -247,6 +247,9 @@ fn detail(c: [i32; 3], seed: u32) -> i32 {
         + scale(noise(c, 7, seed ^ 311) - 32768, 40)
 }
 fn noise_range(low: [i32; 3], high: [i32; 3], shift: u32, seed: u32) -> [i32; 2] {
+    if let Some(range) = single_cell_noise_range(low, high, shift, seed) {
+        return range;
+    }
     let middle = std::array::from_fn::<_, 3, _>(|a| low[a] + (high[a] - low[a]) / 2);
     let displacement = (0..3)
         .map(|a| (middle[a] - low[a]).max(high[a] - middle[a]) as u32)
@@ -267,6 +270,58 @@ fn noise_range(low: [i32; 3], high: [i32; 3], shift: u32, seed: u32) -> [i32; 2]
         (value + error as i32).min(65535),
     ]
 }
+/// Bound the actual lattice coefficients when the entire query stays in one
+/// interpolation cell. Fixed-point lerp is monotone in each endpoint. For
+/// fixed endpoints it is monotone in t (in either direction), so evaluating
+/// both fraction endpoints encloses every intermediate integer evaluation.
+fn single_cell_noise_range(
+    low: [i32; 3],
+    high: [i32; 3],
+    shift: u32,
+    seed: u32,
+) -> Option<[i32; 2]> {
+    let size = 1i32 << shift;
+    let offsets = [
+        seed.wrapping_mul(0x9e3779b9) ^ 0xa341316c,
+        seed.wrapping_mul(0x85ebca6b) ^ 0xc8013ea4,
+        seed.wrapping_mul(0xc2b2ae35) ^ 0xad90777d,
+    ]
+    .map(|v| (v & (size as u32 - 1)) as i32);
+    let p = std::array::from_fn::<_, 3, _>(|a| low[a] + offsets[a]);
+    let q = std::array::from_fn::<_, 3, _>(|a| high[a] + offsets[a]);
+    let base = p.map(|v| v.div_euclid(size));
+    if base != q.map(|v| v.div_euclid(size)) {
+        return None;
+    }
+    let fraction = |v: i32| {
+        let t = (v.rem_euclid(size) as u64 * 2 + 1) << (15 - shift);
+        ((t * t * (3 * 65536 - 2 * t)) >> 32) as u32
+    };
+    let t0 = p.map(fraction);
+    let t1 = q.map(fraction);
+    let mut values = std::array::from_fn::<_, 8, _>(|i| {
+        let v = (hash(
+            [
+                base[0] + (i & 1) as i32,
+                base[1] + ((i >> 1) & 1) as i32,
+                base[2] + ((i >> 2) & 1) as i32,
+            ],
+            seed,
+        ) & 65535) as i32;
+        [v, v]
+    });
+    for axis in 0..3 {
+        for i in 0..(4 >> axis) {
+            let a = values[i * 2];
+            let b = values[i * 2 + 1];
+            values[i] = [
+                lerp(a[0], b[0], t0[axis]).min(lerp(a[0], b[0], t1[axis])),
+                lerp(a[1], b[1], t0[axis]).max(lerp(a[1], b[1], t1[axis])),
+            ];
+        }
+    }
+    Some(values[0])
+}
 fn detail_range(low: [i32; 3], high: [i32; 3], seed: u32) -> [i32; 2] {
     let a = noise_range(low, high, 14, seed ^ 73).map(|v| scale(v - 32768, 8000));
     let ridge = noise_range(low, high, 10, seed ^ 191).map(|v| v - 32768);
@@ -280,3 +335,7 @@ fn detail_range(low: [i32; 3], high: [i32; 3], seed: u32) -> [i32; 2] {
     let c = noise_range(low, high, 7, seed ^ 311).map(|v| scale(v - 32768, 40));
     [a[0] + b[0] + c[0], a[1] + b[1] + c[1]]
 }
+
+#[cfg(test)]
+#[path = "volume_bounds_tests.rs"]
+mod bounds_tests;

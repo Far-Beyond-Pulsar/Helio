@@ -148,6 +148,31 @@ pub(super) fn save_trace_work(
     }
 }
 
+pub(super) fn save_sun_work(device: &wgpu::Device, buffer: &wgpu::Buffer, path: &Path) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let bytes = buffer.slice(..).get_mapped_range().unwrap();
+    let mut csv = File::create(path.with_extension("sun-work.csv")).unwrap();
+    writeln!(csv, "pixel,status,level,leaf_visits,exact_steps,far_steps,cell_x,cell_y,cell_z,distance,origin_x,origin_y,origin_z,ray_x,ray_y,ray_z").unwrap();
+    let mut maxima = [0u32; 3];
+    let mut failed = 0;
+    for (pixel, row) in bytes.chunks_exact(64).enumerate() {
+        let word = |i: usize| u32::from_le_bytes(row[i*4..i*4+4].try_into().unwrap());
+        let work = [word(8), word(9), word(10)];
+        maxima = std::array::from_fn(|a| maxima[a].max(work[a]));
+        if word(3) & 3 != 2 { continue; }
+        failed += 1;
+        writeln!(csv, "{pixel},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            word(3)&3, (word(3)>>2)&31, work[0], work[1], work[2],
+            word(0) as i32, word(1) as i32, word(2) as i32, f32::from_bits(word(7)),
+            f32::from_bits(word(12)), f32::from_bits(word(13)), f32::from_bits(word(14)),
+            f32::from_bits(word(4)), f32::from_bits(word(5)), f32::from_bits(word(6))).unwrap();
+    }
+    eprintln!("VOXEL_SUN_WORK capture={} failed={failed} max_leaf={} max_exact={} max_far={}", path.display(), maxima[0], maxima[1], maxima[2]);
+}
+
 pub(super) struct FlightProfiler {
     labels: BTreeMap<u64, (usize, String)>,
     graph_frames: BTreeMap<u64, u64>,

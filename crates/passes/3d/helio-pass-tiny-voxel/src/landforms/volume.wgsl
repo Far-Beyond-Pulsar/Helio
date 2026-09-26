@@ -71,10 +71,36 @@ fn vf_sample(c:vec3<i32>)->VFSample {
 }
 
 fn vf_noise_range(low:vec3<i32>,high:vec3<i32>,shift:u32,seed:u32)->vec2<i32> {
+    let size=1u<<shift;
+    let offsets=vec3<i32>((vec3<u32>(seed)*vec3<u32>(0x9e3779b9u,0x85ebca6bu,0xc2b2ae35u)
+        ^vec3<u32>(0xa341316cu,0xc8013ea4u,0xad90777du))&vec3<u32>(size-1u));
+    let p=low+offsets;let q=high+offsets;
+    let base=p>>vec3<u32>(shift);
+    if all(base==(q>>vec3<u32>(shift))) {
+        let raw0=(vec3<u32>(p-base*i32(size))*2u+vec3<u32>(1u))<<vec3<u32>(15u-shift);
+        let raw1=(vec3<u32>(q-base*i32(size))*2u+vec3<u32>(1u))<<vec3<u32>(15u-shift);
+        let t0=vec3<u32>(vf_smooth(raw0.x),vf_smooth(raw0.y),vf_smooth(raw0.z));
+        let t1=vec3<u32>(vf_smooth(raw1.x),vf_smooth(raw1.y),vf_smooth(raw1.z));
+        var values:array<vec2<i32>,8>;
+        for(var i=0u;i<8u;i++) {
+            let v=i32(vf_hash(base+vec3<i32>(i32(i&1u),i32((i>>1u)&1u),i32((i>>2u)&1u)),seed)&65535u);
+            values[i]=vec2<i32>(v);
+        }
+        // Mirror the CPU's conservative interval lerp, including signed
+        // fixed-point rounding; do not bound only the eight sampled corners.
+        for(var axis=0u;axis<3u;axis++) {
+            for(var i=0u;i<(4u>>axis);i++) {
+                let a=values[i*2u];let b=values[i*2u+1u];
+                values[i]=vec2<i32>(
+                    min(vf_lerp(a.x,b.x,t0[axis]),vf_lerp(a.x,b.x,t1[axis])),
+                    max(vf_lerp(a.y,b.y,t0[axis]),vf_lerp(a.y,b.y,t1[axis])));
+            }
+        }
+        return values[0];
+    }
     let middle=low+(high-low)/2;
     let distance=max(middle-low,high-middle);
     let displacement=u32(distance.x+distance.y+distance.z);
-    let size=1u<<shift;
     if 3u*displacement>=2u*size {return vec2<i32>(0,65535);}
     let value=vf_noise(middle,shift,seed);
     if displacement==0u {return vec2<i32>(value);}

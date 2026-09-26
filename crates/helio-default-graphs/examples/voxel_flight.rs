@@ -15,6 +15,8 @@
 //! HELIO_VOXEL_FLIGHT_SUN=1 also traces directional terrain visibility.
 //! HELIO_VOXEL_FLIGHT_CANONICAL=1 compares settled captures with exact CPU
 //! rays on the authored grid. This is a fidelity diagnostic, not a timing run.
+//! HELIO_VOXEL_FLIGHT_SUN_WORK=1 separately replays sunlight rays and saves
+//! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
 #[path = "voxel_flight/profiling.rs"]
 mod profiling;
 #[path = "voxel_flight/canonical.rs"]
@@ -330,6 +332,20 @@ impl Flight {
             )
         });
         let mut work_buffers = Vec::new();
+        let sun_work = if self.raytraced_sun
+            && std::env::var_os("HELIO_VOXEL_FLIGHT_SUN_WORK").is_some()
+        {
+            let work = self.renderer.find_pass::<LazyEngineVoxelPass>().unwrap()
+                .encode_sun_trace_work(&mut encoder).unwrap();
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sunlight work diagnostic readback"),
+                size: work.size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&work, 0, &staging, 0, work.size());
+            Some(staging)
+        } else { None };
         if trace_work {
             for (skip, name) in [(true, "work"), (false, "reference-work")] {
                 let work = self
@@ -390,6 +406,9 @@ impl Flight {
             profiling::save_trace_work(&self.device, &work, &hit_data, path, name);
         }
         if let Some(visibility) = visibility {
+            if let Some(work) = sun_work {
+                profiling::save_sun_work(&self.device, &work, path);
+            }
             visibility.save(&self.device, path);
         }
         let mut counts = [0usize; 4];
