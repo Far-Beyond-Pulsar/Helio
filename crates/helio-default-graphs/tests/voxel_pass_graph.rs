@@ -134,7 +134,7 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
                 settings: [10_000.0, 0.0, 0.0, 0.0],
             },
             world: Arc::new(World::default()),
-            raytraced_sun: false,
+            raytraced_sun: true,
         });
         let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.render(&camera, &view).unwrap();

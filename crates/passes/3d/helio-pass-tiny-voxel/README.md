@@ -25,6 +25,14 @@ cargo run -p helio-default-graphs --release --example voxel_flight -- target/vox
 
 Set `HELIO_VOXEL_FLIGHT_RECORD=1` for a separate visual run. Open its `movement.html` to play or scrub every walking and descent frame. Playback speed is illustrative, not measured FPS. Readback changes worker scheduling, so do not compare its residency timing with an unrecorded run. Each capture includes a hit-status audit; the example rejects traversal exhaustion and missing terrain after initial loading. Its first-frame magenta sentinel checks final graph composition.
 
+`HELIO_VOXEL_FLIGHT_PROFILE=1` also writes `gpu.csv` and `memory.csv`. GPU samples identify the frame that produced them, including the graph clock restarting after resize. The whole graph scope is not a sum of child passes. Logical terrain allocations exclude driver/allocator overhead, shared graph attachments, diagnostic allocations and CPU caches. `frames.csv` separates CPU submission from the synchronized GPU wait. The last pending readbacks and those discarded with a rebuilt graph may be absent; `examples/voxel_flight/analyze.py` reports those gaps rather than relabeling old results.
+
+`HELIO_VOXEL_FLIGHT_TRACE_WORK=1` replays captured primary rays outside frame timing and records leaf/exact/far iteration counts. It checks the full hit against both accelerated and unaccelerated traversal of the same resident cut using the original ray direction bits. This diagnoses empty-space work and protects traversal changes; it does not establish that the sampled far field matches canonical terrain.
+
 The current far representation is not a filtered reduction of exact edited leaves. That fidelity gap, refinement latency and visual aliasing must be measured independently of the exact CPU query and generation tests. This backend is not yet qualified for AAA quality or seamless exact-detail arrival.
 
 See the [26 September validation report](VALIDATION_2026_09_26.md) for current source provenance, measurements with the separate GPU job paused, movement captures and the rejected larger-batch experiment. The [preceding report](VALIDATION_2026_09_25.md) records the implementation checks and earlier measurements.
+
+The active [planet terrain goal](PLANET_TERRAIN_GOAL.md) records required behavior and acceptance targets. The [empty-brick experiment](EMPTY_BRICK_EXPERIMENT.md) records the current optimization protocol and its correctness findings.
+
+`HELIO_VOXEL_FLIGHT_SUN=1` enables directional terrain visibility and rejects exhausted/invalid sunlight values in each capture. `HELIO_VOXEL_FLIGHT_AUDIT_WALK=N` audits one chosen walking frame; `HELIO_VOXEL_FLIGHT_HOLD_WALK=1` holds the last pose for a diagnostic repeat. These options perturb the workload and must be reported with measurements. Empty-brick skipping remains experimental and disabled by default; see the [profiling checkpoint](VALIDATION_2026_09_26_GOAL.md) for failed optimization trials and the retained boundary correction.

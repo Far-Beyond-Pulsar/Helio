@@ -4,6 +4,7 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use std::sync::{Arc, Mutex};
 mod residency;
 mod terrain;
+pub use terrain::TerrainMemoryStats;
 
 pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba8Unorm,
@@ -37,6 +38,7 @@ pub type SharedVoxelFrame = Arc<Mutex<Option<EngineVoxelFrame>>>;
 pub struct LazyEngineVoxelPass {
     source: SharedVoxelFrame,
     active: Option<EngineVoxelPass>,
+    stage_profiling: bool,
 }
 
 impl LazyEngineVoxelPass {
@@ -44,6 +46,7 @@ impl LazyEngineVoxelPass {
         Self {
             source,
             active: None,
+            stage_profiling: false,
         }
     }
 
@@ -63,6 +66,41 @@ impl LazyEngineVoxelPass {
 
     pub fn primary_hit_buffer(&self) -> Option<&wgpu::Buffer> {
         self.active.as_ref()?.terrain.primary_hit_buffer()
+    }
+
+    pub fn visibility_diagnostics(&self) -> Option<&wgpu::Texture> {
+        self.active.as_ref()?.visibility_diagnostics()
+    }
+
+    /// Enable timestamp scopes without forcing the lazy terrain allocation.
+    pub fn set_stage_profiling(&mut self, enabled: bool) {
+        self.stage_profiling = enabled;
+        if let Some(pass) = &mut self.active {
+            pass.set_stage_profiling(enabled);
+        }
+    }
+
+    pub fn stage_profiler(&self) -> Option<&helio_core::profiling::GpuProfiler> {
+        self.active.as_ref()?.stage_profiler()
+    }
+
+    pub fn memory_stats(&self) -> Option<TerrainMemoryStats> {
+        Some(self.active.as_ref()?.terrain.memory_stats())
+    }
+
+    /// Optional capture-time diagnostic; never writes visible terrain hits.
+    /// `accelerated=false` selects stack traversal without empty-brick skipping.
+    pub fn encode_trace_work(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        accelerated: bool,
+    ) -> Option<wgpu::Buffer> {
+        Some(
+            self.active
+                .as_ref()?
+                .terrain
+                .encode_trace_work(encoder, accelerated),
+        )
     }
 
     /// Keep a host viewport ticking while a selected cut is being planned or
@@ -92,6 +130,9 @@ impl RenderPass for LazyEngineVoxelPass {
             return false;
         }
         self.active = previous.active.take();
+        if let Some(pass) = &mut self.active {
+            pass.set_stage_profiling(self.stage_profiling);
+        }
         self.active.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
@@ -137,13 +178,15 @@ impl RenderPass for LazyEngineVoxelPass {
         if !has_source {
             self.active = None;
         } else if self.active.is_none() {
-            self.active = Some(EngineVoxelPass::with_frame_source(
+            let mut pass = EngineVoxelPass::with_frame_source(
                 ctx.device,
                 ctx.queue,
                 ctx.width,
                 ctx.height,
                 Arc::clone(&self.source),
-            ));
+            );
+            pass.set_stage_profiling(self.stage_profiling);
+            self.active = Some(pass);
         }
         Ok(())
     }

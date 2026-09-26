@@ -6,6 +6,17 @@ use crate::{GpuEdit, Params, World, SHADER};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+/// Logical allocations owned by the terrain, excluding driver padding, shared
+/// graph attachments, optional profiler buffers, allocator overhead and CPU
+/// caches. This is not process VRAM.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct TerrainMemoryStats {
+    pub buffers_bytes: u64,
+    pub textures_bytes: u64,
+    pub material_capacity_bytes: u64,
+    pub primary_hits_bytes: u64,
+}
+
 /// The sole engine terrain backend: budgeted brick production and stored rays.
 pub struct StoredTerrain {
     pub(crate) device: wgpu::Device,
@@ -16,6 +27,7 @@ pub struct StoredTerrain {
     residency: Residency,
     nodes: wgpu::Buffer,
     materials: wgpu::Buffer,
+    exact_occupied: wgpu::Buffer,
     jobs: wgpu::Buffer,
     edits: wgpu::Buffer,
     edit_references: wgpu::Buffer,
@@ -26,6 +38,8 @@ pub struct StoredTerrain {
     generate: wgpu::ComputePipeline,
     bounds: wgpu::ComputePipeline,
     trace: wgpu::ComputePipeline,
+    trace_shader: wgpu::ShaderModule,
+    diagnostic_trace: [std::sync::OnceLock<wgpu::ComputePipeline>; 2],
     visibility: wgpu::ComputePipeline,
     surface: wgpu::RenderPipeline,
     sun: wgpu::Texture,
@@ -89,6 +103,10 @@ impl StoredTerrain {
         source = source.replace(
             "var<storage,read_write> stored_materials",
             "var<storage,read> stored_materials",
+        );
+        source = source.replace(
+            "var<storage,read_write> exact_occupied",
+            "var<storage,read> exact_occupied",
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stored voxel terrain"),
@@ -191,6 +209,7 @@ impl StoredTerrain {
             size,
             world: Arc::new(World::default()),
             generation_world: None,
+            exact_occupied: buffer(device, "exact voxel brick occupancy", capacity as u64 * 4),
             residency: Residency::new(capacity),
             nodes: buffer(
                 device,
@@ -224,6 +243,8 @@ impl StoredTerrain {
             generate: compute("generate_bricks"),
             bounds: compute("bound_bricks"),
             trace: compute("stored_primary"),
+            trace_shader: shader.clone(),
+            diagnostic_trace: std::array::from_fn(|_| std::sync::OnceLock::new()),
             visibility: compute("stored_visibility"),
             surface,
             sun,
@@ -264,8 +285,83 @@ impl StoredTerrain {
     pub fn stats(&self) -> residency::Stats {
         self.residency.stats
     }
+    pub fn memory_stats(&self) -> TerrainMemoryStats {
+        let buffers_bytes = [
+            &self.nodes,
+            &self.materials,
+            &self.exact_occupied,
+            &self.jobs,
+            &self.edits,
+            &self.edit_references,
+            &self.field_settings,
+            &self.heights,
+            &self.uniform,
+            &self.hits,
+        ]
+        .iter()
+        .map(|buffer| buffer.size())
+        .sum();
+        TerrainMemoryStats {
+            buffers_bytes,
+            textures_bytes: u64::from(self.size[0]) * u64::from(self.size[1]) * 8 + 16,
+            material_capacity_bytes: self.materials.size(),
+            primary_hits_bytes: self.hits.size(),
+        }
+    }
     pub fn primary_hit_buffer(&self) -> Option<&wgpu::Buffer> {
         Some(&self.hits)
+    }
+    /// Re-run the current primary rays with work counters into a separate
+    /// buffer. Each 64-byte record contains the complete original hit followed
+    /// by a copy whose first three words are leaf/exact/far iteration counts.
+    /// Disable acceleration to compare against voxel-by-voxel
+    /// walking through the identical cut and camera, without streaming drift.
+    /// This expensive diagnostic is outside normal rendering and timings.
+    pub fn encode_trace_work(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        accelerated: bool,
+    ) -> wgpu::Buffer {
+        let pipeline = self.diagnostic_trace[usize::from(accelerated)].get_or_init(|| {
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("voxel traversal work diagnostic"),
+                    layout: None,
+                    module: &self.trace_shader,
+                    entry_point: Some("stored_primary_work"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[
+                            ("STORED_TRACE_WORK", 1.0),
+                            ("STORED_SKIP_EMPTY", if accelerated { 1.0 } else { 0.0 }),
+                        ],
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+        });
+        let output = buffer(
+            &self.device,
+            "voxel work diagnostic output",
+            self.hits.size() * 2,
+        );
+        let inputs = self.group(
+            &pipeline.get_bind_group_layout(0),
+            &[
+                (0, &self.uniform),
+                (9, &output),
+                (24, &self.nodes),
+                (25, &self.materials),
+                (28, &self.exact_occupied),
+                (29, &self.hits),
+            ],
+        );
+        self.compute(
+            encoder,
+            pipeline,
+            &[inputs],
+            [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1],
+        );
+        output
     }
     pub fn sun(&self) -> &wgpu::Texture {
         &self.sun
@@ -400,7 +496,11 @@ impl StoredTerrain {
                 );
                 let bounds_group = self.group(
                     &self.bounds.get_bind_group_layout(0),
-                    &[(25, &self.materials), (26, &self.jobs)],
+                    &[
+                        (25, &self.materials),
+                        (26, &self.jobs),
+                        (28, &self.exact_occupied),
+                    ],
                 );
                 self.compute(
                     encoder,
@@ -428,6 +528,7 @@ impl StoredTerrain {
                 (9, &self.hits),
                 (24, &self.nodes),
                 (25, &self.materials),
+                (28, &self.exact_occupied),
             ],
         );
         let cameras = self.group(&self.trace.get_bind_group_layout(1), &[(0, camera)]);
@@ -497,6 +598,7 @@ impl StoredTerrain {
                     (9, &self.hits),
                     (24, &self.nodes),
                     (25, &self.materials),
+                    (28, &self.exact_occupied),
                 ],
             );
             let direction = self.direction.create_view(&Default::default());
@@ -647,7 +749,11 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
             });
             let bounds_group = terrain.group(
                 &terrain.bounds.get_bind_group_layout(0),
-                &[(25, &terrain.materials), (26, &terrain.jobs)],
+                &[
+                    (25, &terrain.materials),
+                    (26, &terrain.jobs),
+                    (28, &terrain.exact_occupied),
+                ],
             );
             let trace_group = terrain.group(
                 &trace.get_bind_group_layout(0),
@@ -656,6 +762,7 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                     (9, &terrain.hits),
                     (24, &terrain.nodes),
                     (25, &terrain.materials),
+                    (28, &terrain.exact_occupied),
                 ],
             );
             let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -739,7 +846,11 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                     queue.write_buffer(&terrain.uniform, 0, bytemuck::bytes_of(&params));
                     let bounds_group = terrain.group(
                         &terrain.bounds.get_bind_group_layout(0),
-                        &[(25, &terrain.materials), (26, &terrain.jobs)],
+                        &[
+                            (25, &terrain.materials),
+                            (26, &terrain.jobs),
+                            (28, &terrain.exact_occupied),
+                        ],
                     );
                     let trace_group = terrain.group(
                         &trace.get_bind_group_layout(0),
@@ -871,13 +982,23 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                 );
                 let readback = device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
-                    size: 8192,
+                    size: 8196,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 let mut encoder = device.create_command_encoder(&Default::default());
                 terrain.compute(&mut encoder, &terrain.generate, &[group], [32, 1, 1]);
+                let bounds = terrain.group(
+                    &terrain.bounds.get_bind_group_layout(0),
+                    &[
+                        (25, &terrain.materials),
+                        (26, &terrain.jobs),
+                        (28, &terrain.exact_occupied),
+                    ],
+                );
+                terrain.compute(&mut encoder, &terrain.bounds, &[bounds], [8, 1, 1]);
                 encoder.copy_buffer_to_buffer(&terrain.materials, 0, &readback, 0, 8192);
+                encoder.copy_buffer_to_buffer(&terrain.exact_occupied, 0, &readback, 8192, 4);
                 queue.submit([encoder.finish()]);
                 let (tx, rx) = std::sync::mpsc::channel();
                 readback
@@ -887,6 +1008,7 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                 rx.recv().unwrap().unwrap();
                 let bytes = readback.slice(..).get_mapped_range().unwrap();
                 let words: &[u32] = bytemuck::cast_slice(&bytes);
+                assert_eq!(words[2048], words[..2048].iter().fold(0, |a, b| a | b));
                 let mut counts = [0usize; 4];
                 for i in 0..32768usize {
                     let cell = [
@@ -903,6 +1025,97 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                     counts[0] > 0 && counts[1] > 0 && counts[3] > 0,
                     "test must cover air, terrain and added material: {counts:?}"
                 );
+            }
+            // A reused slot must lose its old certificate after destruction.
+            // The last material in the final word also exercises all lanes of
+            // the complete reduction, rather than just the first samples.
+            terrain.upload_nodes(&[residency::Node {
+                low,
+                level: 0,
+                child: 0x8000_0000,
+            }]);
+            let mut params: Params = bytemuck::Zeroable::zeroed();
+            params.origin[..3].copy_from_slice(&low.map(|v| v + 16));
+            params.fraction = [0.5; 4];
+            params.settings[3] = 1.0;
+            queue.write_buffer(&terrain.uniform, 0, bytemuck::bytes_of(&params));
+            let source = format!(
+                "{SHADER}\n{}\n{}",
+                include_str!("stored.wgsl"),
+                r#"
+@compute @workgroup_size(1)
+fn certificate_rays(@builtin(global_invocation_id) id:vec3<u32>) {
+    let i=id.x;
+    var rd=vec3<f32>(f32(i%3u)-1.0,f32((i/3u)%3u)-1.0,f32((i/9u)%3u)-1.0);
+    if i==13u {rd.x=1.0;}
+    primary_hits[i]=stored_trace(vec3<f32>(0.0),normalize(rd),10.0);
+}
+"#
+            );
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("exact empty brick certificate rays"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let trace = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &shader,
+                entry_point: Some("certificate_rays"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            for tail in [0u32, 3 << 30, 0] {
+                let mut payload = [0u32; 2048];
+                payload[2047] = tail;
+                queue.write_buffer(&terrain.materials, 0, bytemuck::cast_slice(&payload));
+                let bounds = terrain.group(
+                    &terrain.bounds.get_bind_group_layout(0),
+                    &[
+                        (25, &terrain.materials),
+                        (26, &terrain.jobs),
+                        (28, &terrain.exact_occupied),
+                    ],
+                );
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 4 + 27 * 32,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                terrain.compute(&mut encoder, &terrain.bounds, &[bounds], [8, 1, 1]);
+                let rays = terrain.group(
+                    &trace.get_bind_group_layout(0),
+                    &[
+                        (0, &terrain.uniform),
+                        (9, &terrain.hits),
+                        (24, &terrain.nodes),
+                        (25, &terrain.materials),
+                        (28, &terrain.exact_occupied),
+                    ],
+                );
+                terrain.compute(&mut encoder, &trace, &[rays], [27, 1, 1]);
+                encoder.copy_buffer_to_buffer(&terrain.exact_occupied, 0, &readback, 0, 4);
+                encoder.copy_buffer_to_buffer(&terrain.hits, 0, &readback, 4, 27 * 32);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = readback.slice(..).get_mapped_range().unwrap();
+                assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), tail);
+                let hits: &[u32] = bytemuck::cast_slice(&bytes[4..]);
+                for (ray, hit) in hits.chunks_exact(8).enumerate() {
+                    let expected = u32::from(tail != 0 && ray == 26);
+                    assert_eq!(hit[3] & 3, expected, "certificate ray={ray}, tail={tail}");
+                    assert!(f32::from_bits(hit[7]).is_finite());
+                    if expected != 0 {
+                        assert_eq!(&hit[..3], &low.map(|v| (v + 31) as u32));
+                        assert_eq!((hit[3] >> 8) & 3, 3);
+                    }
+                }
             }
         });
     }

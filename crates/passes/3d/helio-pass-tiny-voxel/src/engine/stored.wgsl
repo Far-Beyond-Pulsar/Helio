@@ -3,12 +3,20 @@
 // per visible pixel; neither camera nor sunlight traversal evaluates the recipe.
 struct StoredNode { low:vec3<i32>,level:u32,child:u32 }
 struct BrickJob { low:vec3<i32>,level:u32,slot:u32,pad0:u32,pad1:u32,pad2:u32 }
+// A separately dispatched diagnostic specialization. These counters are
+// eliminated from the normal pipeline and never alter the visible hit buffer.
+override STORED_TRACE_WORK:bool=false;
+// Experimental until repeated full-flight tail-time gates pass.
+override STORED_SKIP_EMPTY:bool=false;
+var<private> stored_work:vec3<u32>;
 // Four-word root header (low.xyz, level), followed by one child link per
 // node. Bounds and levels are implicit in the complete octree topology.
 @group(0) @binding(24) var<storage,read> stored_nodes:array<u32>;
 @group(0) @binding(25) var<storage,read_write> stored_materials:array<u32>;
 @group(0) @binding(26) var<storage,read> brick_jobs:array<BrickJob>;
 @group(0) @binding(27) var<storage,read> brick_edits:array<u32>;
+@group(0) @binding(28) var<storage,read_write> exact_occupied:array<u32>;
+@group(0) @binding(29) var<storage,read> diagnostic_rays:array<Hit>;
 
 @compute @workgroup_size(64)
 fn generate_bricks(@builtin(global_invocation_id) id:vec3<u32>) {
@@ -46,9 +54,28 @@ fn generate_bricks(@builtin(global_invocation_id) id:vec3<u32>) {
 // After generation, cache one maximum per interpolation cell and per brick.
 // Negative maxima certify empty space independently of ray direction.
 var<workgroup> brick_maxima:array<f32,64>;
+var<workgroup> brick_occupied:array<u32,64>;
 @compute @workgroup_size(64)
 fn bound_bricks(@builtin(global_invocation_id) id:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let job=brick_jobs[id.y];
+    if job.level==0u {
+        if group.x!=0u {return;}
+        // CPU field bounds conservatively retain mixed candidates. The final
+        // generated payload often proves the whole exact brick empty. Publish
+        // that certificate beside the immutable payload; never sample a ray
+        // or a subset of cells to decide whether it can be skipped.
+        var occupied=0u;
+        for(var i=lane;i<2048u;i+=64u) {
+            occupied|=stored_materials[job.slot*2048u+i];
+        }
+        brick_occupied[lane]=occupied;workgroupBarrier();
+        for(var offset=32u;offset>0u;offset/=2u) {
+            if lane<offset {brick_occupied[lane]|=brick_occupied[lane+offset];}
+            workgroupBarrier();
+        }
+        if lane==0u {exact_occupied[job.slot]=brick_occupied[0];}
+        return;
+    }
     if group.x==0u {
         var maximum=-3.402823e38;
         if job.level>0u {
@@ -149,6 +176,7 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
     let spacing=f32(stride*4);
     var grid:DensityGrid;grid.q=vec3<i32>(-1);var grid_exit=0.0;
     for(var iteration=0u;iteration<16384u;iteration++) {
+        if STORED_TRACE_WORK {stored_work.z+=1u;}
         let sampled=voxel_sample(cell,base_step);
         let position=vec3<f32>(sampled-n.low)/spacing;
         // Integer ownership matters at a negative crossing: converting a
@@ -232,6 +260,7 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
     var node_index=0u;var node_level=root.level;
     var ancestors:array<u32,28>;
     for(var visited=0u;visited<2048u;visited++) {
+        if STORED_TRACE_WORK {stored_work.x+=1u;}
         let epsilon=max(0.000002,abs(t)*0.0000002);
         if any(cell<root.low) || any(cell>=root.low+vec3<i32>(i32(32u<<root.level))) {return Hit(vec3<i32>(0),0u,rd,t);}
         // Retain the descent path. Adjacent bricks usually share almost all
@@ -262,13 +291,14 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
                 if (hit.status&3u)!=0u {return hit;}
             }
             t=box.far;
-        } else if n.child!=0xffffffffu {
+        } else if n.child!=0xffffffffu && (!STORED_SKIP_EMPTY || exact_occupied[n.child&0x7fffffffu]!=0u) {
             var q=clamp(vec3<i32>(floor((rd*(t+epsilon)-lo)/voxel)),vec3<i32>(0),vec3<i32>(31));
             let step=select(vec3<i32>(-1),vec3<i32>(1),rd>=vec3<f32>(0.0));
             let inverse=1.0/select(vec3<f32>(1e-30),rd,abs(rd)>vec3<f32>(1e-30));
             var next=(lo+(vec3<f32>(q)+select(vec3<f32>(0.0),vec3<f32>(1.0),rd>=vec3<f32>(0.0)))*voxel)*inverse;
             let stride=voxel*abs(inverse);
             for(var crossing=0u;crossing<97u;crossing++) {
+                if STORED_TRACE_WORK {stored_work.y+=1u;}
                 let material=stored_material(n.child&0x7fffffffu,q);
                 if material!=0u {
                     let hit_cell=voxel_sample(n.low+q*i32(1u<<n.level),i32(max(p.settings.w,1.0)));
@@ -286,7 +316,12 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
         let exits=max(lo*inverse,(lo+32.0*voxel)*inverse);
         var axis=0u;if exits.y<exits.x {axis=1u;}if exits.z<exits[axis] {axis=2u;}
         normal=vec3<f32>(0.0);normal[axis]=select(1.0,-1.0,rd[axis]>=0.0);
-        t=max(box.far,t);
+        // Re-anchor at the shared brick boundary. Accumulated fine-DDA
+        // increments can overshoot this plane by a few ulps; carrying that
+        // residue into a later density brick changes its entry anchor and
+        // can select another voxel. Empty-region skips and full walks must
+        // enter the next leaf with exactly the same parameter.
+        t=box.far;
         if t>=limit {return Hit(vec3<i32>(0),0u,rd,limit);}
         let previous_cell=cell;
         cell=p.origin.xyz+vec3<i32>(floor(p.fraction.xyz+(ro+rd*(t+max(0.000002,abs(t)*0.0000002)))*10.0));
@@ -306,7 +341,21 @@ fn stored_primary(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=vec2<u32>(p.screen.xy)) {return;}
     let rd=stored_ray(id.xy);var hit=Hit(vec3<i32>(0),3u,rd,0.0);
     if p.settings.z>0.0 {hit=stored_trace(vec3<f32>(0.0),rd,p.settings.x);}
-    primary_hits[id.x+id.y*u32(p.screen.x)]=hit;
+    let index=id.x+id.y*u32(p.screen.x);
+    primary_hits[index]=hit;
+}
+@compute @workgroup_size(8,8)
+fn stored_primary_work(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=vec2<u32>(p.screen.xy)) {return;}
+    let index=id.x+id.y*u32(p.screen.x);
+    // Replay the exact primary direction bits. Re-normalizing a camera ray in
+    // another specialization can differ by a few ulps and move an edge hit.
+    let rd=diagnostic_rays[index].normal;
+    var hit=Hit(vec3<i32>(0),3u,rd,0.0);
+    if p.settings.z>0.0 {hit=stored_trace(vec3<f32>(0.0),rd,p.settings.x);}
+    primary_hits[index*2u]=hit;
+    hit.cell=vec3<i32>(stored_work);
+    primary_hits[index*2u+1u]=hit;
 }
 @vertex fn stored_fullscreen(@builtin(vertex_index) v:u32)->@builtin(position) vec4<f32> {
     return vec4<f32>(f32((v<<1u)&2u)*2.0-1.0,1.0-f32(v&2u)*2.0,0.0,1.0);

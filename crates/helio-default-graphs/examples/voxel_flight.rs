@@ -4,6 +4,17 @@
 //! completion, exclude readback/PNG encoding, and do not include presentation.
 //! Set HELIO_VOXEL_FLIGHT_RECORD=1 for every walking/descent frame and a local
 //! animation viewer. Recording changes worker scheduling; time an unrecorded run.
+//! HELIO_VOXEL_FLIGHT_PROFILE=1 exports frame-identified GPU stages and logical
+//! terrain allocations. Profiled runs are diagnostic, separate from acceptance timing.
+//! HELIO_VOXEL_FLIGHT_TRACE_WORK=1 replays captured primary rays with iteration
+//! counters. These capture-time diagnostics also perturb worker scheduling.
+//! HELIO_VOXEL_FLIGHT_AUDIT_WALK=N audits only walking step N (0..119),
+//! preserving normal scheduling before a selected problem frame.
+//! HELIO_VOXEL_FLIGHT_HOLD_WALK=1 repeats the last walking pose for 300 frames
+//! to distinguish motion-dependent work from persistent GPU timing changes.
+//! HELIO_VOXEL_FLIGHT_SUN=1 also traces directional terrain visibility.
+#[path = "voxel_flight/profiling.rs"]
+mod profiling;
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
@@ -21,7 +32,7 @@ use std::{
     io::Write,
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Flight {
@@ -34,6 +45,8 @@ struct Flight {
     size: [u32; 2],
     frame: usize,
     csv: fs::File,
+    profiler: Option<profiling::FlightProfiler>,
+    raytraced_sun: bool,
 }
 impl Flight {
     async fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality) -> Self {
@@ -98,8 +111,12 @@ impl Flight {
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedVoxelFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
-        let factory: VoxelPassFactory =
-            Arc::new(move |_, _, _, _| Box::new(LazyEngineVoxelPass::new(pass_source.clone())));
+        let profile = std::env::var_os("HELIO_VOXEL_FLIGHT_PROFILE").is_some();
+        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
+            let mut pass = LazyEngineVoxelPass::new(pass_source.clone());
+            pass.set_stage_profiling(profile);
+            Box::new(pass)
+        });
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm)
             .with_tsr_quality(quality);
         config.enable_foliage = false;
@@ -119,7 +136,7 @@ impl Flight {
         renderer.set_fallback_sky_enabled(true);
         let target = Self::target(&device, size);
         let mut csv = fs::File::create(output.join("frames.csv")).unwrap();
-        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget").unwrap();
+        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns").unwrap();
         Self {
             device,
             queue,
@@ -130,6 +147,8 @@ impl Flight {
             size,
             frame: 0,
             csv,
+            profiler: profile.then(|| profiling::FlightProfiler::new(output)),
+            raytraced_sun: std::env::var_os("HELIO_VOXEL_FLIGHT_SUN").is_some(),
         }
     }
     fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
@@ -149,6 +168,10 @@ impl Flight {
         })
     }
     fn draw(&mut self, stage: &str, eye: DVec3, forward: Vec3) -> f64 {
+        let start_unix_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let start = Instant::now();
         let forward = forward.normalize();
@@ -176,7 +199,7 @@ impl Flight {
                 settings: [30_000_000.0, 0.0, 1.0, 0.0],
             },
             world: self.world.clone(),
-            raytraced_sun: false,
+            raytraced_sun: self.raytraced_sun,
         });
         // Camera matrices never contain Earth-sized f32 translations.
         self.renderer.set_world_origin(Some(eye));
@@ -193,6 +216,7 @@ impl Flight {
         self.renderer
             .render(&camera, &self.target.create_view(&Default::default()))
             .unwrap();
+        let cpu_submit_ms = start.elapsed().as_secs_f64() * 1000.0;
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
@@ -214,7 +238,7 @@ impl Flight {
         }
         writeln!(
             self.csv,
-            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4}",
+            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{}",
             self.frame,
             stage,
             eye.x,
@@ -228,9 +252,15 @@ impl Flight {
             stats.generated,
             stats.reused,
             stats.bricks,
-            stats.pixel_budget
+            stats.pixel_budget,
+            cpu_submit_ms,
+            ms - cpu_submit_ms,
+            start_unix_ns
         )
         .unwrap();
+        if let Some(profiler) = &mut self.profiler {
+            profiler.record(&self.renderer, self.frame, stage);
+        }
         self.frame += 1;
         ms
     }
@@ -257,6 +287,12 @@ impl Flight {
         );
     }
     fn capture(&self, path: &Path) -> Vec<u8> {
+        self.capture_options(
+            path,
+            std::env::var_os("HELIO_VOXEL_FLIGHT_TRACE_WORK").is_some(),
+        )
+    }
+    fn capture_options(&self, path: &Path, trace_work: bool) -> Vec<u8> {
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel flight readback"),
@@ -278,6 +314,36 @@ impl Flight {
             mapped_at_creation: false,
         });
         encoder.copy_buffer_to_buffer(hits, 0, &hit_buffer, 0, hits.size());
+        let visibility = self.raytraced_sun.then(|| {
+            profiling::VisibilityAudit::encode(
+                &self.device,
+                &mut encoder,
+                self.renderer
+                    .find_pass::<LazyEngineVoxelPass>()
+                    .unwrap()
+                    .visibility_diagnostics()
+                    .expect("sunlight audit texture"),
+            )
+        });
+        let mut work_buffers = Vec::new();
+        if trace_work {
+            for (skip, name) in [(true, "work"), (false, "reference-work")] {
+                let work = self
+                    .renderer
+                    .find_pass::<LazyEngineVoxelPass>()
+                    .unwrap()
+                    .encode_trace_work(&mut encoder, skip)
+                    .unwrap();
+                let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("voxel traversal diagnostic readback"),
+                    size: work.size(),
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&work, 0, &staging, 0, work.size());
+                work_buffers.push((staging, name));
+            }
+        }
         encoder.copy_texture_to_buffer(
             self.target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -310,6 +376,12 @@ impl Flight {
             .unwrap();
         rx.recv().unwrap().unwrap();
         let hit_data = hit_buffer.slice(..).get_mapped_range().unwrap();
+        for (work, name) in work_buffers {
+            profiling::save_trace_work(&self.device, &work, &hit_data, path, name);
+        }
+        if let Some(visibility) = visibility {
+            visibility.save(&self.device, path);
+        }
         let mut counts = [0usize; 4];
         for hit in hit_data.chunks_exact(32) {
             counts[(u32::from_le_bytes(hit[12..16].try_into().unwrap()) & 3) as usize] += 1;
@@ -367,6 +439,15 @@ fn main() {
     };
     let mut flight = pollster::block_on(Flight::new(output, size, quality));
     let record = std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some();
+    let audit_walk = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_WALK")
+        .ok()
+        .map(|s| {
+            let step = s
+                .parse::<usize>()
+                .expect("audit walk step must be an integer");
+            assert!(step < 120, "audit walk step must be below 120");
+            step
+        });
     let validation = flight
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
@@ -395,10 +476,19 @@ fn main() {
         .clear_user_effects(&flight.device);
     flight.settle("ground_load", ground, forward);
     for i in 0..120 {
-        let eye = ground + DVec3::new(i as f64 * 0.04, 0.0, -i as f64 * 0.03);
+        let eye = ground + DVec3::new(i as f64 * 0.04, 0.0, -(i as f64) * 0.03);
         flight.draw("walk", eye, forward);
+        if audit_walk == Some(i) {
+            flight.capture_options(&output.join(format!("audit-walk-{i:03}.png")), true);
+        }
         if record || i % 30 == 0 {
             flight.capture(&output.join(format!("walk-{i:03}.png")));
+        }
+    }
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_HOLD_WALK").is_some() {
+        let eye = ground + DVec3::new(119.0 * 0.04, 0.0, -119.0 * 0.03);
+        for _ in 0..300 {
+            flight.draw("walk_hold", eye, forward);
         }
     }
     for (name, altitude) in [("200m", 200.0), ("1km", 1_000.0), ("orbit", 300_000.0)] {
