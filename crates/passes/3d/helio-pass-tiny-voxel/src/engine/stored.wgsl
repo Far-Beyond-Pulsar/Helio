@@ -16,7 +16,7 @@ fn generate_bricks(@builtin(global_invocation_id) id:vec3<u32>) {
     if job.level>0u {
         if id.x>=729u {return;}
         let q=vec3<i32>(i32(id.x%9u),i32((id.x/9u)%9u),i32(id.x/81u));
-        let c=job.low+q*(stride*4);
+        let c=voxel_sample(job.low+q*(stride*4),i32(max(job.pad2,1u)));
         var density=base_sample(c,vec3<f32>(0.0)).density;var material=1u;
         for(var e=0u;e<job.pad1;e++) {
             let edit=edits[brick_edits[job.pad0+e]];
@@ -31,7 +31,7 @@ fn generate_bricks(@builtin(global_invocation_id) id:vec3<u32>) {
     for(var v=0u;v<16u;v++) {
         let i=id.x*16u+v;
         let q=vec3<i32>(i32(i%32u),i32((i/32u)%32u),i32(i/1024u));
-        let c=job.low+q*stride+vec3<i32>((stride-1)/2);
+        let c=voxel_sample(job.low+q*stride+vec3<i32>((stride-1)/2),i32(max(job.pad2,1u)));
         var material=0u;var replaced=false;var remaining=job.pad1;
         while remaining>0u {
             remaining-=1u;let edit=edits[brick_edits[job.pad0+remaining]];
@@ -131,6 +131,7 @@ fn stored_density_value(grid:DensityGrid,f:vec3<f32>)->f32 {
     return mix(y.x,y.y,f.z);
 }
 fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)->Hit {
+    let base_step=i32(max(p.settings.w,1.0));
     // The traversal parameter is local to this brick. At orbital distances,
     // adding 10 cm to a camera-distance f32 can be a no-op.
     let entry=p.fraction.xyz+(ro+rd*start)*10.0;
@@ -148,7 +149,8 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
     let spacing=f32(stride*4);
     var grid:DensityGrid;grid.q=vec3<i32>(-1);var grid_exit=0.0;
     for(var iteration=0u;iteration<16384u;iteration++) {
-        let position=vec3<f32>(cell-n.low)/spacing;
+        let sampled=voxel_sample(cell,base_step);
+        let position=vec3<f32>(sampled-n.low)/spacing;
         // Integer ownership matters at a negative crossing: converting a
         // multi-million-cell offset to f32 can round boundary-1 back up.
         let q=(cell-n.low)>>vec3<u32>(n.level+2u);
@@ -180,15 +182,15 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
             // Enter a real 10 cm cube, even when its occupancy comes from the
             // distant density approximation. Coarse sample spacing is never a
             // rendered cube size.
-            let low=(vec3<f32>(cell-anchor)-fraction)*0.1;
-            let bounds=stored_box(low,0.1,rd);
-            return Hit(cell,0x80000001u|(n.level<<2u)|(material<<8u)|(stored_face(bounds.normal)<<28u),rd,start+max(0.0,bounds.near));
+            let low=(vec3<f32>(voxel_low(cell,base_step)-anchor)-fraction)*0.1;
+            let bounds=stored_box(low,f32(base_step)*0.1,rd);
+            return Hit(sampled,0x80000001u|(n.level<<2u)|(material<<8u)|(stored_face(bounds.normal)<<28u),rd,start+max(0.0,bounds.near));
         }
         let sample_position=(vec3<f32>(cell-anchor)-fraction)*0.1;
         // Bound movement along this ray, including the displacement from the
         // sampled voxel corner and the next corner's quantization error.
         let offset=rd*t-sample_position;
-        let error=dot(grid.gradient,max(abs(offset),abs(offset-vec3<f32>(0.100001))));
+        let error=dot(grid.gradient,max(abs(offset),abs(offset-vec3<f32>(f32(base_step)*0.1+0.000001))));
         let safe=((-value-error)/grid.rate)*0.95;
         // The derivative bound applies only inside this interpolation cell.
         let exit_margin=max(0.09,abs(grid_exit)*0.0000002);
@@ -269,7 +271,7 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
             for(var crossing=0u;crossing<97u;crossing++) {
                 let material=stored_material(n.child&0x7fffffffu,q);
                 if material!=0u {
-                    let hit_cell=n.low+q*i32(1u<<n.level);
+                    let hit_cell=voxel_sample(n.low+q*i32(1u<<n.level),i32(max(p.settings.w,1.0)));
                     return Hit(hit_cell,0x80000001u|(n.level<<2u)|(material<<8u)|(stored_face(normal)<<28u),rd,t);
                 }
                 var axis=0u;if next.y<next.x {axis=1u;}if next.z<next[axis] {axis=2u;}

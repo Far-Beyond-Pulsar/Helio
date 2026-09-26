@@ -624,6 +624,26 @@ impl RenderGraph {
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 
+    /// Preserve opt-in streaming state when rebuilding a graph on this device.
+    /// New pass configuration and graph resources remain authoritative.
+    pub fn inherit_persistent_state(&mut self, previous: &mut RenderGraph) {
+        let mut used = std::collections::HashSet::new();
+        for pass in &mut self.passes {
+            if let Some((index, old)) =
+                previous.passes.iter_mut().enumerate().find(|(index, old)| {
+                    !used.contains(index)
+                        && pass.name() == old.name()
+                        && pass.as_any().type_id() == old.as_any().type_id()
+                })
+            {
+                used.insert(index);
+                if pass.inherit_persistent_state(old.as_mut()) {
+                    pass.on_resize(&self.device, self.internal_w, self.internal_h);
+                }
+            }
+        }
+    }
+
     /// Find the index of the first pass matching type `T`.
     pub fn pass_index_of<T: RenderPass + 'static>(&self) -> Option<usize> {
         self.passes

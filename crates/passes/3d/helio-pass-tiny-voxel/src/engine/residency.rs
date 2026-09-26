@@ -10,6 +10,8 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{mpsc, Arc, Mutex},
 };
+#[cfg(test)]
+mod tests;
 
 pub const BRICK_WORDS: usize = 2048; // 32^3 exact materials, or 9^3 densities + 8^3 pairs of bounds.
 pub const BRICK_CAPACITY: usize = 65_536;
@@ -29,7 +31,7 @@ impl Key {
         32 << self.level
     }
     fn overlaps(self, edit: Edit) -> bool {
-        let r = i64::from(edit.radius_units().div_ceil(2));
+        let r = i64::from(edit.radius_units().div_ceil(2)) + 9;
         (0..3).all(|a| {
             i64::from(self.low[a]) <= i64::from(edit.cell[a]) + r
                 && i64::from(self.low[a]) + i64::from(self.side()) + i64::from(self.level > 0)
@@ -86,6 +88,8 @@ impl View {
     fn changed(self, other: Self) -> bool {
         self.eye.distance(other.eye) > 1.6
             || self.forward.dot(other.forward) < 0.999
+            || self.up.dot(other.up) < 0.999
+            || self.tan != other.tan
             || self.height != other.height
             || self.aspect != other.aspect
     }
@@ -113,18 +117,17 @@ impl View {
 }
 
 fn classify(world: &World, key: Key) -> u32 {
-    let high = key.low.map(|v| v + key.side() - 1);
+    let low = world.sample_cell(key.low);
+    let high = world.sample_cell(key.low.map(|v| v + key.side() - 1));
     let closest = DVec3::from_array(std::array::from_fn(|a| {
-        0i32.clamp(key.low[a], high[a]) as f64 * 0.1
+        0i32.clamp(low[a], high[a]) as f64 * 0.1
     }));
     let mut class = if closest.length() > crate::world::procedural_outer_radius() + 0.1 {
         RegionClass::AllAir
     } else {
-        crate::landforms::default_field()
-            .classify(key.low, high)
-            .map_or(RegionClass::Mixed, |b| b.classification)
+        world.classify_region(low, high)
     };
-    for i in world.region_edits(key.low, high) {
+    for i in world.region_edits(low, high) {
         let e = world.edits[i];
         let target = if e.material == 0 {
             RegionClass::AllAir
@@ -132,10 +135,10 @@ fn classify(world: &World, key: Key) -> u32 {
             RegionClass::AllSolid
         };
         let far = std::array::from_fn(|a| {
-            if (i64::from(key.low[a]) - i64::from(e.cell[a])).abs()
+            if (i64::from(low[a]) - i64::from(e.cell[a])).abs()
                 > (i64::from(high[a]) - i64::from(e.cell[a])).abs()
             {
-                key.low[a]
+                low[a]
             } else {
                 high[a]
             }
@@ -156,7 +159,61 @@ fn classify(world: &World, key: Key) -> u32 {
         RegionClass::Mixed => 0,
     }
 }
-fn build(world: Arc<World>, view: View, max_leaves: usize) -> Plan {
+/// Classification is view independent. Keep the certified regions across
+/// camera moves and capacity retries instead of resampling the same planet.
+/// Edits invalidate intersecting keys, including undo and recipe replacement.
+#[derive(Default)]
+struct SelectionCache {
+    regions: HashMap<Key, u32>,
+    edits: Vec<Edit>,
+    classified: usize,
+    reused: usize,
+    voxel_step: u32,
+}
+impl SelectionCache {
+    fn reconcile(&mut self, world: &World) {
+        if self.voxel_step != world.voxel_step() {
+            self.regions.clear();
+            self.voxel_step = world.voxel_step();
+        }
+        self.classified = 0;
+        self.reused = 0;
+        let common = self
+            .edits
+            .iter()
+            .zip(&world.edits)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if common != self.edits.len() || common != world.edits.len() {
+            let changes: Vec<_> = self.edits[common..]
+                .iter()
+                .chain(&world.edits[common..])
+                .copied()
+                .collect();
+            self.regions
+                .retain(|key, _| !changes.iter().any(|edit| key.overlaps(*edit)));
+            self.edits.clone_from(&world.edits);
+        }
+        // Bound CPU memory independently of travel distance. A cold cache
+        // affects selection cost only; never occupancy or published geometry.
+        if self.regions.len() > NODE_CAPACITY * 2 {
+            self.regions.retain(|key, _| key.level >= 10);
+        }
+    }
+    fn classify(&mut self, world: &World, key: Key) -> u32 {
+        if let Some(&kind) = self.regions.get(&key) {
+            self.reused += 1;
+            return kind;
+        }
+        let kind = classify(world, key);
+        self.regions.insert(key, kind);
+        self.classified += 1;
+        kind
+    }
+}
+
+fn build(world: Arc<World>, view: View, max_leaves: usize, cache: &mut SelectionCache) -> Plan {
+    cache.reconcile(&world);
     // Retry selection at a coarser pixel budget if a pathological surface would
     // exceed physical storage. Report that budget; never silently omit leaves.
     let mut level = 22;
@@ -193,7 +250,7 @@ fn build(world: Arc<World>, view: View, max_leaves: usize) -> Plan {
                 low: n.low,
                 level: n.level,
             };
-            let kind = classify(&world, key);
+            let kind = cache.classify(&world, key);
             if kind != 0 {
                 plan.nodes[index].child = kind;
                 continue;
@@ -234,6 +291,7 @@ struct Entry {
     slot: usize,
     edits: Arc<Vec<Edit>>,
     touched: u64,
+    voxel_step: u32,
 }
 struct Pending {
     plan: Plan,
@@ -243,6 +301,8 @@ struct Pending {
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct Stats {
     pub ready: bool,
+    /// Published terrain exists, but the requested view or world is newer.
+    pub refining: bool,
     pub nodes: usize,
     pub bricks: usize,
     pub pending: usize,
@@ -262,27 +322,34 @@ pub struct Residency {
     pending: Option<Pending>,
     active_world: Option<Arc<World>>,
     active_view: Option<View>,
-    current_view: Option<View>,
     requested: bool,
     clock: u64,
     pub stats: Stats,
 }
 impl Residency {
+    pub fn active_voxel_step(&self) -> u32 {
+        self.active_world
+            .as_ref()
+            .map_or(1, |world| world.voxel_step())
+    }
     pub fn new(capacity: usize) -> Self {
         let (tx, rx) = mpsc::sync_channel::<(Arc<World>, View)>(1);
         let (done, result) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("voxel-selection".into())
             .spawn(move || {
+                let mut cache = SelectionCache::default();
                 while let Ok((world, view)) = rx.recv() {
                     let start = std::time::Instant::now();
-                    let plan = build(world, view, capacity / 2 - 1024);
+                    let plan = build(world, view, capacity / 2 - 1024, &mut cache);
                     eprintln!(
-                        "VOXEL_PLAN nodes={} bricks={} pixel_budget={:.3} selection_ms={:.2}",
+                        "VOXEL_PLAN nodes={} bricks={} pixel_budget={:.3} selection_ms={:.2} classified={} cached={}",
                         plan.nodes.len(),
                         plan.leaves.len(),
                         plan.pixels,
-                        start.elapsed().as_secs_f64() * 1000.0
+                        start.elapsed().as_secs_f64() * 1000.0,
+                        cache.classified,
+                        cache.reused,
                     );
                     if done.send(plan).is_err() {
                         break;
@@ -300,7 +367,6 @@ impl Residency {
             pending: None,
             active_world: None,
             active_view: None,
-            current_view: None,
             requested: false,
             clock: 0,
             stats: Stats::default(),
@@ -351,9 +417,10 @@ impl Residency {
                 let mut jobs = Vec::new();
                 for &(index, key) in &plan.leaves {
                     let valid = self.entries.get(&key).is_some_and(|e| {
-                        changes[&(Arc::as_ptr(&e.edits) as usize)]
-                            .iter()
-                            .all(|e| !key.overlaps(*e))
+                        e.voxel_step == plan.world.voxel_step()
+                            && changes[&(Arc::as_ptr(&e.edits) as usize)]
+                                .iter()
+                                .all(|e| !key.overlaps(*e))
                     });
                     let slot = if valid {
                         let e = self.entries.get_mut(&key).unwrap();
@@ -374,6 +441,7 @@ impl Residency {
                                 slot,
                                 edits: edits.clone(),
                                 touched: self.clock,
+                                voxel_step: plan.world.voxel_step(),
                             },
                         ) {
                             // The old slot stays pinned until tree publication.
@@ -387,7 +455,7 @@ impl Residency {
                             low: key.low,
                             level: key.level,
                             slot: slot as u32,
-                            pad: [0; 3],
+                            pad: [0, 0, plan.world.voxel_step()],
                         });
                         slot
                     };
@@ -402,21 +470,18 @@ impl Residency {
             }
         }
         let view = View::new(params);
-        let relocated = self
-            .current_view
-            .is_some_and(|previous| previous.eye.distance(view.eye) > 128.0);
-        self.current_view = Some(view);
-        // A teleport cannot display the old distant approximation as local
-        // gameplay terrain. Keep the complete tree, but prepare the new arrival
-        // under the same loading contract as the first visit.
-        if relocated {
-            self.stats.ready = false;
-        }
+        // Every published cut covers the complete world, including outside the
+        // selected frustum. Keep rendering it during flight and teleports while
+        // the replacement refines the arrival. Hiding it on each >128 m step
+        // made sustained orbital descent display only the loading surface.
+        // Picking/collision still use the authoritative CPU world; `ready`
+        // means a complete visual cut exists, not that refinement has caught up.
         let changed = self
             .active_world
             .as_ref()
             .is_none_or(|w| !Arc::ptr_eq(w, world))
             || self.active_view.is_none_or(|v| v.changed(view));
+        self.stats.refining = changed;
         if self.pending.is_none() && !self.requested && changed {
             self.requested = self.requests.try_send((world.clone(), view)).is_ok();
         }
@@ -468,13 +533,7 @@ impl Residency {
                 self.free.push(slot);
             }
         }
-        // A completed older request may belong to the pre-teleport location.
-        // Publish it as reusable data, but keep arrival loading until the cut
-        // prepared for the current location is available.
-        self.stats.ready = self.stats.ready
-            || self
-                .current_view
-                .is_some_and(|view| view.eye.distance(pending.plan.view.eye) <= 128.0);
+        self.stats.ready = true;
         self.stats.nodes = pending.plan.nodes.len();
         self.stats.bricks = pending.plan.leaves.len();
         self.stats.pixel_budget = pending.plan.pixels;

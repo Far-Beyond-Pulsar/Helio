@@ -329,6 +329,15 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// - **O(1)**: Returns a static string (no allocations)
     fn name(&self) -> &'static str;
 
+    /// Move pass-owned persistent data from the same pass in a replaced graph.
+    /// Called on the replacement before its first frame, on the same device.
+    /// Opt-in implementations must check source/configuration compatibility and
+    /// must not retain bindings to the old graph's pooled resources. Return true
+    /// when state moved; the graph then calls `on_resize` for the new dimensions.
+    fn inherit_persistent_state(&mut self, _previous: &mut dyn RenderPass) -> bool {
+        false
+    }
+
     /// Whether this pass needs a current scene acceleration structure.
     fn requires_ray_tracing(&self) -> bool {
         false

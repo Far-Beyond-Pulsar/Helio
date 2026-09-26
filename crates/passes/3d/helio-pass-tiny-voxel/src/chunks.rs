@@ -48,7 +48,8 @@ impl Chunk {
 
     fn intersects(&self, edit: Edit) -> bool {
         let low = self.key.map(|v| i64::from(v) * i64::from(SIDE));
-        let r = i64::from(edit.radius_units().div_ceil(2));
+        // A configurable base cell can straddle the fixed storage-brick edge.
+        let r = i64::from(edit.radius_units().div_ceil(2)) + 9;
         (0..3).all(|a| {
             low[a] <= i64::from(edit.cell[a]) + r
                 && low[a] + i64::from(SIDE - 1) >= i64::from(edit.cell[a]) - r
@@ -61,13 +62,15 @@ impl Chunk {
         // A final edit covering this complete chunk replaces its prior contents.
         if let Some(&i) = edits.last() {
             let e = world.edits[i];
+            let sample_low = world.sample_cell(low);
+            let sample_high = world.sample_cell(high);
             let far = std::array::from_fn(|a| {
-                if (i64::from(high[a]) - i64::from(e.cell[a])).abs()
-                    > (i64::from(low[a]) - i64::from(e.cell[a])).abs()
+                if (i64::from(sample_high[a]) - i64::from(e.cell[a])).abs()
+                    > (i64::from(sample_low[a]) - i64::from(e.cell[a])).abs()
                 {
-                    high[a]
+                    sample_high[a]
                 } else {
-                    low[a]
+                    sample_low[a]
                 }
             });
             if e.contains(far) {
@@ -78,9 +81,7 @@ impl Chunk {
                 };
             }
         }
-        let class = crate::landforms::default_field()
-            .classify(low, high)
-            .map_or(RegionClass::Mixed, |v| v.classification);
+        let class = world.classify_region(low, high);
         if edits.is_empty() && class != RegionClass::Mixed {
             return Self {
                 key,
@@ -96,9 +97,7 @@ impl Chunk {
                     low[1] + ((i >> 2) & 3) as i32 * 8,
                     low[2] + (i >> 4) as i32 * 8,
                 ];
-                *class = crate::landforms::default_field()
-                    .classify(lo, lo.map(|v| v + 7))
-                    .map_or(RegionClass::Mixed, |b| b.classification);
+                *class = world.classify_region(lo, lo.map(|v| v + 7));
             }
         }
         let mut values = vec![0u32; CELLS];
@@ -106,7 +105,7 @@ impl Chunk {
             let x = i % 32;
             let y = (i / 32) % 32;
             let z = i / 1024;
-            let cell = [low[0] + x as i32, low[1] + y as i32, low[2] + z as i32];
+            let cell = world.sample_cell([low[0] + x as i32, low[1] + y as i32, low[2] + z as i32]);
             *value = edits
                 .iter()
                 .rev()

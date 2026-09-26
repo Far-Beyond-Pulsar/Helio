@@ -57,6 +57,14 @@ impl LazyEngineVoxelPass {
             .map_or(0, EngineVoxelPass::chunk_jobs_pending)
     }
 
+    pub fn stats(&self) -> Option<residency::Stats> {
+        self.active.as_ref().map(|pass| pass.terrain.stats())
+    }
+
+    pub fn primary_hit_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.active.as_ref()?.terrain.primary_hit_buffer()
+    }
+
     /// Keep a host viewport ticking while a selected cut is being planned or
     /// uploaded. A removed source has no reason to keep an idle viewport awake.
     pub fn needs_frame(&self) -> bool {
@@ -75,6 +83,16 @@ impl LazyEngineVoxelPass {
 impl RenderPass for LazyEngineVoxelPass {
     fn name(&self) -> &'static str {
         "TinyVoxelGBuffer"
+    }
+    fn inherit_persistent_state(&mut self, previous: &mut dyn RenderPass) -> bool {
+        let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else {
+            return false;
+        };
+        if !Arc::ptr_eq(&self.source, &previous.source) {
+            return false;
+        }
+        self.active = previous.active.take();
+        self.active.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
         &[
@@ -197,7 +215,7 @@ impl EngineVoxelPass {
 
     pub fn needs_frame(&self) -> bool {
         let stats = self.terrain.stats();
-        !stats.ready || stats.planning || stats.pending > 0
+        !stats.ready || stats.refining || stats.planning || stats.pending > 0
     }
     pub fn set_stage_profiling(&mut self, enabled: bool) {
         self.terrain.set_stage_profiling(enabled);

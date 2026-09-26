@@ -804,7 +804,7 @@ fn build_default_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
+        ).with_intermediate_output()));
     } else {
         graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
     }
@@ -817,6 +817,12 @@ fn build_default_graph_internal(
         config.surface_format,
         user_effects,
     );
+    // Postprocess/DOF own the final target. Resolve into an HDR intermediate
+    // and consume it here; otherwise postprocess overwrites TSR with pre_aa,
+    // discarding temporal accumulation while retaining camera jitter.
+    if config.tsr_quality.is_some() {
+        pp = pp.with_tsr_input();
+    }
     // Enable pre_dof output so the DofPass can read the post-processed image.
     pp.set_output_to_pre_dof(true);
     graph.add_pass(Box::new(pp));

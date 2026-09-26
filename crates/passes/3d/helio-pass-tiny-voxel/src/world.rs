@@ -5,6 +5,9 @@ pub const RADIUS: f64 = 6_371_000.0;
 pub const VOXEL: f64 = 0.1;
 pub const MAX_EDITS: usize = 65_536;
 pub const GENERATOR_REVISION: u32 = 5;
+fn default_voxel_step() -> u32 {
+    1
+}
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
@@ -15,6 +18,10 @@ pub struct Edit {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct World {
+    /// Voxel edge in canonical decimetres. The planet and edit coordinates
+    /// retain their physical size when the author chooses a coarser base grid.
+    #[serde(default = "default_voxel_step")]
+    voxel_step: u32,
     #[serde(default)]
     pub generator_revision: u32,
     #[serde(default)]
@@ -28,6 +35,7 @@ pub struct World {
 impl Default for World {
     fn default() -> Self {
         Self {
+            voxel_step: 1,
             generator_revision: GENERATOR_REVISION,
             landform_id: crate::landforms::DEFAULT_LANDFORM_ID.into(),
             edits: Vec::new(),
@@ -104,6 +112,45 @@ pub fn center(c: [i32; 3]) -> DVec3 {
     (glam::IVec3::from_array(c).as_dvec3() + DVec3::splat(0.5)) * VOXEL
 }
 impl World {
+    pub fn voxel_step(&self) -> u32 {
+        self.voxel_step
+    }
+    pub fn voxel_size(&self) -> f64 {
+        f64::from(self.voxel_step) * VOXEL
+    }
+    /// Select a base grid from 10 cm to 1 m, in 10 cm increments. This changes
+    /// the authored cells, never the render LOD or the size of the planet.
+    /// Existing brushes retain their physical coordinates and are resampled.
+    pub fn set_voxel_size(&mut self, metres: f64) -> Result<(), String> {
+        let step = (metres / VOXEL).round();
+        if !metres.is_finite()
+            || !(1.0..=10.0).contains(&step)
+            || (step * VOXEL - metres).abs() > 1e-9
+        {
+            return Err(
+                "tiny voxel size must be 0.1 through 1.0 metres in 0.1 metre increments".into(),
+            );
+        }
+        if self.voxel_step != step as u32 {
+            self.voxel_step = step as u32;
+            self.chunks = Default::default();
+            self.chunks.reconcile(&self.edits);
+        }
+        Ok(())
+    }
+    pub fn sample_cell(&self, cell: [i32; 3]) -> [i32; 3] {
+        let step = self.voxel_step as i32;
+        cell.map(|v| v.div_euclid(step) * step + (step - 1) / 2)
+    }
+    pub(crate) fn classify_region(
+        &self,
+        low: [i32; 3],
+        high: [i32; 3],
+    ) -> crate::landforms::RegionClass {
+        crate::landforms::default_field()
+            .classify(self.sample_cell(low), self.sample_cell(high))
+            .map_or(crate::landforms::RegionClass::Mixed, |b| b.classification)
+    }
     pub fn ground_spawn(&self, x: f64, z: f64, clearance: f64) -> DVec3 {
         let mut outer = procedural_outer_radius();
         if let Some((minimum, maximum)) = self.edit_index.bounds {
@@ -150,6 +197,9 @@ impl World {
             .validate_recipe()
     }
     fn validate_recipe(mut self) -> Result<Self, String> {
+        if !(1..=10).contains(&self.voxel_step) {
+            return Err("invalid tiny voxel base grid".into());
+        }
         if (self.generator_revision != GENERATOR_REVISION
             || self.landform_id != crate::landforms::DEFAULT_LANDFORM_ID)
             && !self.edits.is_empty()
@@ -180,12 +230,14 @@ impl World {
         std::fs::rename(temp, path).map_err(|e| e.to_string())
     }
     pub fn density(&self, c: [i32; 3]) -> f64 {
+        let c = self.sample_cell(c);
         RADIUS - center(c).length() + f64::from(terrain_units(c)) * 0.05
     }
     /// Conservative empty radius around a point, using certified field regions
     /// and ordered edits. Useful for camera near-plane placement;
     /// a one-metre allowance covers cell extents and numeric approximation.
     pub fn air_clearance(&self, position: DVec3) -> f64 {
+        let guard = 1.0 + self.voxel_size();
         let c = cell_of(position);
         if self.material(c) != 0 {
             return 0.0;
@@ -194,9 +246,9 @@ impl World {
         let mut safe = if let Some(i) = latest {
             self.edits[i].canonical_radius() * 0.9999996
                 - position.distance(center(self.edits[i].cell))
-                - 1.0
+                - guard
         } else {
-            procedural_air_radius(c, -self.density(c)) - 1.0
+            procedural_air_radius(c, -self.density(c)) - guard
         };
         for e in self
             .edits
@@ -205,7 +257,7 @@ impl World {
             .filter(|e| e.material != 0)
         {
             safe = safe
-                .min(position.distance(center(e.cell)) - e.canonical_radius() * 1.0000004 - 1.0);
+                .min(position.distance(center(e.cell)) - e.canonical_radius() * 1.0000004 - guard);
         }
         safe.max(0.0)
     }
@@ -233,6 +285,7 @@ impl World {
         self.edit_index.reconcile(&self.edits);
     }
     pub fn latest_edit(&self, c: [i32; 3]) -> Option<usize> {
+        let c = self.sample_cell(c);
         if self.edit_index.len() != self.edits.len() {
             return self.edits.iter().rposition(|e| e.contains(c));
         }
@@ -242,14 +295,20 @@ impl World {
         if self.edit_index.len() == self.edits.len() {
             return self.chunks.material(self, c);
         }
-        self.latest_edit(c)
-            .map_or_else(|| base_material(c), |i| self.edits[i].material)
+        self.latest_edit(c).map_or_else(
+            || base_material(self.sample_cell(c)),
+            |i| self.edits[i].material,
+        )
     }
     pub(crate) fn region_edits(&self, low: [i32; 3], high: [i32; 3]) -> Vec<usize> {
         if self.edit_index.len() != self.edits.len() {
             return (0..self.edits.len()).collect();
         }
-        self.edit_index.region(low, high)
+        let margin = self.voxel_step as i32 - 1;
+        self.edit_index.region(
+            low.map(|v| v.saturating_sub(margin)),
+            high.map(|v| v.saturating_add(margin)),
+        )
     }
     pub fn cast(&self, origin: DVec3, dir: DVec3, max: f64) -> Option<([i32; 3], [i32; 3])> {
         self.cast_hit(origin, dir, max)
@@ -271,10 +330,11 @@ impl World {
         accelerated: bool,
     ) -> Option<([i32; 3], [i32; 3], f64)> {
         let mut t = 0.0;
-        let mut last = cell_of(origin);
+        let guard = 1.0 + self.voxel_size();
+        let mut last = self.sample_cell(cell_of(origin));
         while t < max {
             let p = origin + dir * t;
-            let c = cell_of(p);
+            let c = self.sample_cell(cell_of(p));
             if self.material(c) != 0 {
                 return Some((c, last, t));
             }
@@ -285,9 +345,9 @@ impl World {
                     self.edits[i].canonical_radius()
                         - center(c).distance(center(self.edits[i].cell))
                         - self.edits[i].canonical_radius() * 0.0000004
-                        - 1.0
+                        - guard
                 } else {
-                    procedural_air_radius(c, -self.density(c)) - 1.0
+                    procedural_air_radius(c, -self.density(c)) - guard
                 };
                 for e in self
                     .edits
@@ -296,7 +356,9 @@ impl World {
                     .filter(|e| e.material != 0)
                 {
                     safe = safe.min(
-                        center(c).distance(center(e.cell)) - e.canonical_radius() * 1.0000004 - 1.0,
+                        center(c).distance(center(e.cell))
+                            - e.canonical_radius() * 1.0000004
+                            - guard,
                     );
                 }
                 if safe > 0.1 {
@@ -304,12 +366,13 @@ impl World {
                     continue;
                 }
             }
-            let local = p / VOXEL - glam::IVec3::from_array(c).as_dvec3();
+            let low = c.map(|v| v.div_euclid(self.voxel_step as i32) * self.voxel_step as i32);
+            let local = p / VOXEL - glam::IVec3::from_array(low).as_dvec3();
             let mut step = f64::INFINITY;
             for a in 0..3 {
                 if dir[a].abs() > 1e-12 {
                     let edge = if dir[a] > 0.0 {
-                        1.0 - local[a]
+                        f64::from(self.voxel_step) - local[a]
                     } else {
                         local[a]
                     };
@@ -325,6 +388,77 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn configurable_cells_preserve_planet_scale_and_exact_remote_editing() {
+        let original = World::default();
+        let eye = original.ground_spawn(-17.03, -256.03, 5.0);
+        let original_hit = original.raycast(eye, -DVec3::Y, 20.0).unwrap();
+        for step in 1..=10 {
+            let mut world = World::default();
+            world.set_voxel_size(f64::from(step) * 0.1).unwrap();
+            let (cell, _, distance) = world.raycast(eye, -DVec3::Y, 20.0).unwrap();
+            assert!(
+                (distance - original_hit.2).abs() < 2.0,
+                "base grid must not scale the planet"
+            );
+            assert_eq!(world.sample_cell(cell), cell);
+            let remote = eye + DVec3::Y * 300_000.0;
+            assert_eq!(
+                world.raycast(remote, -DVec3::Y, f64::INFINITY).unwrap().0,
+                cell
+            );
+            world
+                .apply_edit(Edit {
+                    cell,
+                    radius: 0.05,
+                    material: 0,
+                })
+                .unwrap();
+            let next = world.raycast(remote, -DVec3::Y, f64::INFINITY).unwrap();
+            assert_ne!(next.0, cell);
+            assert!(next.2 - (distance + 300_000.0) >= world.voxel_size() - 0.00001);
+            let restored =
+                World::from_recipe_json(&serde_json::to_string(&world).unwrap()).unwrap();
+            assert_eq!(restored.voxel_step(), step);
+            assert_eq!(restored.material(cell), 0);
+        }
+        let mut world = World::default();
+        for invalid in [f64::NAN, f64::INFINITY, 0.0, 0.09, 0.15, 1.1] {
+            assert!(world.set_voxel_size(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn coarse_cells_crossing_storage_bricks_invalidate_and_replay() {
+        let mut world = World::default();
+        world.set_voxel_size(1.0).unwrap();
+        for x in [-33, -1, 31, 63] {
+            let query = [x, 70_000_003, -1];
+            let cell = world.sample_cell(query);
+            assert_eq!(world.material(query), 0); // Populate the air chunk first.
+            world
+                .apply_edit(Edit {
+                    cell,
+                    radius: 0.05,
+                    material: 3,
+                })
+                .unwrap();
+            assert_eq!(
+                world.material(query),
+                3,
+                "cross-brick material at {query:?}"
+            );
+            assert_eq!(world.material(cell), 3);
+            world
+                .apply_edit(Edit {
+                    cell,
+                    radius: 0.05,
+                    material: 0,
+                })
+                .unwrap();
+            assert_eq!(world.material(query), 0);
+        }
+    }
     #[test]
     fn camera_air_clearance_does_not_cross_voxels_or_ordered_edits() {
         let mut world = World::default();

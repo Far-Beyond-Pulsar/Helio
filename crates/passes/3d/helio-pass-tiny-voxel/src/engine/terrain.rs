@@ -417,6 +417,7 @@ impl StoredTerrain {
             }
         }
         let mut p = *params;
+        p.settings[3] = self.residency.active_voxel_step() as f32;
         p.settings[2] = if self.residency.stats.ready { 1.0 } else { 0.0 };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&p));
@@ -845,61 +846,64 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                 0,
                 bytemuck::cast_slice(&[0u32, 1u32]),
             );
-            queue.write_buffer(
-                &terrain.jobs,
-                0,
-                bytemuck::bytes_of(&residency::Job {
-                    low,
-                    level: 0,
-                    slot: 0,
-                    pad: [0, 2, 0],
-                }),
-            );
-            let group = terrain.group(
-                &terrain.generate.get_bind_group_layout(0),
-                &[
-                    (1, &terrain.edits),
-                    (20, &terrain.field_settings),
-                    (21, &terrain.heights),
-                    (25, &terrain.materials),
-                    (26, &terrain.jobs),
-                    (27, &terrain.edit_references),
-                ],
-            );
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: 8192,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&Default::default());
-            terrain.compute(&mut encoder, &terrain.generate, &[group], [32, 1, 1]);
-            encoder.copy_buffer_to_buffer(&terrain.materials, 0, &readback, 0, 8192);
-            queue.submit([encoder.finish()]);
-            let (tx, rx) = std::sync::mpsc::channel();
-            readback
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            rx.recv().unwrap().unwrap();
-            let bytes = readback.slice(..).get_mapped_range().unwrap();
-            let words: &[u32] = bytemuck::cast_slice(&bytes);
-            let mut counts = [0usize; 4];
-            for i in 0..32768usize {
-                let cell = [
-                    low[0] + (i % 32) as i32,
-                    low[1] + (i / 32 % 32) as i32,
-                    low[2] + (i / 1024) as i32,
-                ];
-                let gpu = (words[i / 16] >> ((i % 16) * 2)) & 3;
-                let cpu = world.material(cell);
-                assert_eq!(gpu, cpu, "generated material at {cell:?}");
-                counts[gpu as usize] += 1;
+            for step in [1, 2, 3, 5, 10] {
+                world.set_voxel_size(f64::from(step) * 0.1).unwrap();
+                queue.write_buffer(
+                    &terrain.jobs,
+                    0,
+                    bytemuck::bytes_of(&residency::Job {
+                        low,
+                        level: 0,
+                        slot: 0,
+                        pad: [0, 2, step],
+                    }),
+                );
+                let group = terrain.group(
+                    &terrain.generate.get_bind_group_layout(0),
+                    &[
+                        (1, &terrain.edits),
+                        (20, &terrain.field_settings),
+                        (21, &terrain.heights),
+                        (25, &terrain.materials),
+                        (26, &terrain.jobs),
+                        (27, &terrain.edit_references),
+                    ],
+                );
+                let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: 8192,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                terrain.compute(&mut encoder, &terrain.generate, &[group], [32, 1, 1]);
+                encoder.copy_buffer_to_buffer(&terrain.materials, 0, &readback, 0, 8192);
+                queue.submit([encoder.finish()]);
+                let (tx, rx) = std::sync::mpsc::channel();
+                readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                rx.recv().unwrap().unwrap();
+                let bytes = readback.slice(..).get_mapped_range().unwrap();
+                let words: &[u32] = bytemuck::cast_slice(&bytes);
+                let mut counts = [0usize; 4];
+                for i in 0..32768usize {
+                    let cell = [
+                        low[0] + (i % 32) as i32,
+                        low[1] + (i / 32 % 32) as i32,
+                        low[2] + (i / 1024) as i32,
+                    ];
+                    let gpu = (words[i / 16] >> ((i % 16) * 2)) & 3;
+                    let cpu = world.material(cell);
+                    assert_eq!(gpu, cpu, "generated material at {cell:?}, step={step}");
+                    counts[gpu as usize] += 1;
+                }
+                assert!(
+                    counts[0] > 0 && counts[1] > 0 && counts[3] > 0,
+                    "test must cover air, terrain and added material: {counts:?}"
+                );
             }
-            assert!(
-                counts[0] > 0 && counts[1] > 0 && counts[3] > 0,
-                "test must cover air, terrain and added material: {counts:?}"
-            );
         });
     }
 }

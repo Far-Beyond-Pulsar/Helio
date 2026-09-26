@@ -83,7 +83,7 @@ impl Renderer {
                 foliage_blades_per_m2: self.foliage_blades_per_m2,
                 enable_portals: self.enable_portals,
             };
-            self.graph = rebuilder(
+            let mut replacement = rebuilder(
                 &self.device,
                 &self.queue,
                 config,
@@ -92,6 +92,8 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            replacement.inherit_persistent_state(&mut self.graph);
+            self.graph = replacement;
             if let Some(hook) = &self.graph_rebuild_hook {
                 hook(&mut self.graph, &self.device);
             }

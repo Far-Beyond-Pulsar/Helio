@@ -12,6 +12,14 @@ struct Hit { cell:vec3<i32>, status:u32, normal:vec3<f32>, distance:f32 }
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var<storage,read> edits:array<Edit>;
 @group(0) @binding(9) var<storage,read_write> primary_hits:array<Hit>;
+// Integer Euclidean division preserves the authored grid in both hemispheres.
+// Floating division here would lose 10 cm addresses on an Earth-sized planet.
+fn voxel_low(c:vec3<i32>,step:i32)->vec3<i32> {
+    return (c/step-select(vec3<i32>(0),vec3<i32>(1),(c%step)<vec3<i32>(0)))*step;
+}
+fn voxel_sample(c:vec3<i32>,step:i32)->vec3<i32> {
+    return voxel_low(c,step)+vec3<i32>((step-1)/2);
+}
 fn hash(c:vec3<i32>, seed:u32)->u32 {
     let q=bitcast<vec3<u32>>(c);
     var h=q.x*0x8da6b343u ^ q.y*0xd8163841u ^ q.z*0xcb1ab31fu ^ seed;
