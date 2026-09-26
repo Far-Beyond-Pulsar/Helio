@@ -13,8 +13,12 @@
 //! HELIO_VOXEL_FLIGHT_HOLD_WALK=1 repeats the last walking pose for 300 frames
 //! to distinguish motion-dependent work from persistent GPU timing changes.
 //! HELIO_VOXEL_FLIGHT_SUN=1 also traces directional terrain visibility.
+//! HELIO_VOXEL_FLIGHT_CANONICAL=1 compares settled captures with exact CPU
+//! rays on the authored grid. This is a fidelity diagnostic, not a timing run.
 #[path = "voxel_flight/profiling.rs"]
 mod profiling;
+#[path = "voxel_flight/canonical.rs"]
+mod canonical;
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
@@ -376,6 +380,12 @@ impl Flight {
             .unwrap();
         rx.recv().unwrap().unwrap();
         let hit_data = hit_buffer.slice(..).get_mapped_range().unwrap();
+        if canonical::requested(path) {
+            let pass = self.renderer.find_pass::<LazyEngineVoxelPass>().unwrap();
+            assert!(!pass.needs_frame(), "canonical audit requires settled residency");
+            let frame = self.source.lock().unwrap().as_ref().unwrap().clone();
+            canonical::save(&hit_data, pass.primary_hit_extent().unwrap(), &frame, path);
+        }
         for (work, name) in work_buffers {
             profiling::save_trace_work(&self.device, &work, &hit_data, path, name);
         }

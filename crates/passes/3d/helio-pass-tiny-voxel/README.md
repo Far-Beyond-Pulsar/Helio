@@ -29,6 +29,8 @@ Set `HELIO_VOXEL_FLIGHT_RECORD=1` for a separate visual run. Open its `movement.
 
 `HELIO_VOXEL_FLIGHT_TRACE_WORK=1` replays captured primary rays outside frame timing and records leaf/exact/far iteration counts. It checks the full hit against both accelerated and unaccelerated traversal of the same resident cut using the original ray direction bits. This diagnoses empty-space work and protects traversal changes; it does not establish that the sampled far field matches canonical terrain.
 
+`HELIO_VOXEL_FLIGHT_CANONICAL=1` compares 144 actual primary rays with the exact editable volume at each of six settled flight poses. The [canonical fidelity audit](CANONICAL_FIDELITY_2026_09_26.md) records the brick-entry correction and the remaining far-field differences. Sparse ray agreement does not establish pixel coverage or silhouette fidelity.
+
 The current far representation is not a filtered reduction of exact edited leaves. That fidelity gap, refinement latency and visual aliasing must be measured independently of the exact CPU query and generation tests. This backend is not yet qualified for AAA quality or seamless exact-detail arrival.
 
 See the [26 September validation report](VALIDATION_2026_09_26.md) for current source provenance, measurements with the separate GPU job paused, movement captures and the rejected larger-batch experiment. The [preceding report](VALIDATION_2026_09_25.md) records the implementation checks and earlier measurements.

@@ -721,6 +721,22 @@ fn reference_density(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>)->Hit {
 fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
     let n=StoredNode(vec3<i32>(bitcast<i32>(stored_nodes[0]),bitcast<i32>(stored_nodes[1]),bitcast<i32>(stored_nodes[2])),stored_nodes[3],stored_nodes[4]);
     let side=i32(32u<<n.level);let i=id.x;
+    if p.lighting.w>0.0 {
+        // Enter from above the brick, then hit the known plane's exact voxel
+        // boundary. Recentring a clamped entry by half a cell changes distance
+        // even when the returned voxel identity is correct.
+        let point=vec3<f32>(f32(side)*0.5+0.37,f32(side)+7.37+f32(i)*0.131,f32(side)*0.5+0.73);
+        let ro=(vec3<f32>(n.low-p.origin.xyz)+point-p.fraction.xyz)*0.1;
+        let rd=vec3<f32>(0.0,-1.0,0.0);
+        let low=(vec3<f32>(n.low-p.origin.xyz)-p.fraction.xyz)*0.1-ro;
+        let interval=stored_box(low,f32(side)*0.1,rd);
+        let last_solid=i32(floor(3.173*f32(4u<<n.level)));
+        let expected_cell=n.low+vec3<i32>(i32(floor(point.x)),last_solid,i32(floor(point.z)));
+        let expected_distance=(point.y-f32(last_solid+1))*0.1;
+        primary_hits[i*2u]=stored_density_hit(n,ro,rd,interval.near,interval.far);
+        primary_hits[i*2u+1u]=Hit(expected_cell,1u,rd,expected_distance);
+        return;
+    }
     let start_cell=n.low+vec3<i32>(i32(i*37u+3u)%side,i32(i*53u+7u)%side,i32(i*71u+11u)%side);
     let ro=(vec3<f32>(start_cell-p.origin.xyz)+vec3<f32>(0.37,0.51,0.73)-p.fraction.xyz)*0.1;
     var direction=vec3<f32>(f32(i%3u)-1.0,f32((i/3u)%3u)-1.0,f32((i/9u)%3u)-1.0);
@@ -806,7 +822,7 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                 cache: None,
             });
             for level in [1, 4, 8] {
-                for field in 0..5 {
+                for field in 0..6 {
                     let samples: Vec<u32> = (0..729)
                         .map(|i| {
                             let x = (i % 9) as f32;
@@ -823,7 +839,8 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                                     }
                                 }
                                 3 => -0.7,
-                                _ => 0.7,
+                                4 => 0.7,
+                                _ => 3.173 - y,
                             };
                             (density.to_bits() & 0xffff_fffc) | 1
                         })
@@ -843,6 +860,7 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                     queue.write_buffer(&terrain.jobs, 0, bytemuck::bytes_of(&job));
                     queue.write_buffer(&terrain.materials, 0, bytemuck::cast_slice(&samples));
                     params.origin[..3].copy_from_slice(&low);
+                    params.lighting[3] = f32::from(field == 5);
                     queue.write_buffer(&terrain.uniform, 0, bytemuck::bytes_of(&params));
                     let bounds_group = terrain.group(
                         &terrain.bounds.get_bind_group_layout(0),
@@ -892,6 +910,15 @@ fn test_density_rays(@builtin(global_invocation_id) id:vec3<u32>) {
                                 &expected[..3],
                                 "first voxel: {level}/{field}/{ray}"
                             );
+                            if field == 5 {
+                                let actual_distance = f32::from_bits(actual[7]);
+                                let expected_distance = f32::from_bits(expected[7]);
+                                let tolerance = 0.00001 * (1u32 << level) as f32;
+                                assert!(
+                                    (actual_distance - expected_distance).abs() <= tolerance,
+                                    "entry changed ray distance: level={level} ray={ray} actual={actual_distance} expected={expected_distance}"
+                                );
+                            }
                         }
                     }
                     drop(bytes);

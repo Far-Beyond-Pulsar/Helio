@@ -68,6 +68,11 @@ impl LazyEngineVoxelPass {
         self.active.as_ref()?.terrain.primary_hit_buffer()
     }
 
+    /// Internal render dimensions of the primary hit buffer, before upscaling.
+    pub fn primary_hit_extent(&self) -> Option<[u32; 2]> {
+        Some(self.active.as_ref()?.terrain.size)
+    }
+
     pub fn visibility_diagnostics(&self) -> Option<&wgpu::Texture> {
         self.active.as_ref()?.visibility_diagnostics()
     }

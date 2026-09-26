@@ -165,9 +165,11 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
     let stride=i32(1u<<n.level);let high=n.low+vec3<i32>(32*stride);
     let requested_anchor=p.origin.xyz+vec3<i32>(floor(entry));
     let anchor=clamp(requested_anchor,n.low,high-1);
-    // Orbital f32 rounding may put the entry one cell outside its selected
-    // brick. Project that approximate entry inside, before local traversal.
-    let fraction=select(fract(entry),vec3<f32>(0.5),anchor!=requested_anchor);
+    // Clamp the integer anchor, not the ray. At a negative boundary crossing,
+    // an entry on the high plane belongs to high-1 with fraction 1. Recentring
+    // that fraction at 0.5 displaced every subsequent hit by half a voxel.
+    // Keep the integer correction separate so it survives orbital f32 spacing.
+    let fraction=fract(entry)+vec3<f32>(requested_anchor-anchor);
     var t=0.0;
     var cell=anchor+vec3<i32>(floor(fraction+rd*0.00002));
     cell=clamp(cell,n.low,high-1);
