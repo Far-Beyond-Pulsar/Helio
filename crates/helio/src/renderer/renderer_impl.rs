@@ -403,6 +403,12 @@ impl Renderer {
         self.graph.profiler().timing_snapshot()
     }
 
+    /// Process-local identity for the timing snapshot's graph profiler.
+    /// Combine this with a GPU frame index to disambiguate graph rebuilds.
+    pub fn profiling_instance_id(&self) -> u64 {
+        self.graph.profiler().instance_id()
+    }
+
     /// GPU time across the graph's compute and graphics work, excluding CPU
     /// work and presentation. Unlike a legacy per-pass sum, this is `None`
     /// until a completed whole-graph timing scope is available.
