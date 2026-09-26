@@ -248,7 +248,7 @@ impl Flight {
             start.elapsed().as_secs_f64() * 1000.0
         );
     }
-    fn capture(&self, path: &Path) {
+    fn capture(&self, path: &Path) -> Vec<u8> {
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("voxel flight readback"),
@@ -257,6 +257,19 @@ impl Flight {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let hits = self
+            .renderer
+            .find_pass::<LazyEngineVoxelPass>()
+            .unwrap()
+            .primary_hit_buffer()
+            .unwrap();
+        let hit_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("voxel flight hit audit"),
+            size: hits.size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(hits, 0, &hit_buffer, 0, hits.size());
         encoder.copy_texture_to_buffer(
             self.target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -278,6 +291,42 @@ impl Flight {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         rx.recv().unwrap().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        hit_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                tx.send(r).unwrap();
+            });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let hit_data = hit_buffer.slice(..).get_mapped_range().unwrap();
+        let mut counts = [0usize; 4];
+        for hit in hit_data.chunks_exact(32) {
+            counts[(u32::from_le_bytes(hit[12..16].try_into().unwrap()) & 3) as usize] += 1;
+        }
+        fs::write(
+            path.with_extension("hits.csv"),
+            format!(
+                "empty,solid,exhausted,loading\n{},{},{},{}\n",
+                counts[0], counts[1], counts[2], counts[3]
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            counts[2],
+            0,
+            "{}: voxel traversal exhausted",
+            path.display()
+        );
+        if path.file_stem().unwrap() != "composition-sentinel" {
+            assert!(
+                counts[1] > 0 && counts[3] == 0,
+                "{}: terrain missing: {counts:?}",
+                path.display()
+            );
+        }
         let data = buffer.slice(..).get_mapped_range().unwrap();
         let pixels: Vec<u8> = data
             .chunks(row as usize)
@@ -291,6 +340,7 @@ impl Flight {
             image::ColorType::Rgba8,
         )
         .unwrap();
+        pixels
     }
 }
 
@@ -308,6 +358,27 @@ fn main() {
         .push_error_scope(wgpu::ErrorFilter::Validation);
     let ground = flight.world.ground_spawn(0.0, 0.0, 3.0);
     let forward = Vec3::new(0.0, -0.15, -1.0);
+    // A known final-stage effect must survive DOF on the very first frame.
+    // This catches the real composition regression, even when every isolated
+    // TSR/postprocess shader and GPU validation test passes.
+    flight
+        .renderer
+        .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
+        .unwrap()
+        .set_user_shader(Some("vec3<f32>(1.0, 0.0, 1.0)"));
+    flight.draw("ground_load", ground, forward);
+    let sentinel = flight.capture(&output.join("composition-sentinel.png"));
+    assert!(
+        sentinel
+            .chunks_exact(4)
+            .all(|p| p[0] >= 250 && p[1] <= 5 && p[2] >= 250),
+        "the final postprocess result did not survive full graph composition"
+    );
+    flight
+        .renderer
+        .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
+        .unwrap()
+        .clear_user_effects(&flight.device);
     flight.settle("ground_load", ground, forward);
     for i in 0..120 {
         let eye = ground + DVec3::new(i as f64 * 0.04, 0.0, -i as f64 * 0.03);
@@ -373,21 +444,34 @@ fn main() {
     // Destroy a target from orbit, then inspect its local geometry through the
     // same full graph. Editing is not clipped to the camera draw distance.
     let target_eye = ground + DVec3::new(0.0, 300_000.0, -8.0);
-    let (cell, _, distance) = flight.world.raycast(target_eye, -DVec3::Y, f64::INFINITY).unwrap();
+    let (cell, _, distance) = flight
+        .world
+        .raycast(target_eye, -DVec3::Y, f64::INFINITY)
+        .unwrap();
     assert!(distance > 290_000.0);
     let mut edited = (*flight.world).clone();
-    edited.apply_edit(helio_pass_tiny_voxel::world::Edit { cell, radius: 4.0, material: 0 }).unwrap();
+    edited
+        .apply_edit(helio_pass_tiny_voxel::world::Edit {
+            cell,
+            radius: 4.0,
+            material: 0,
+        })
+        .unwrap();
     assert_eq!(edited.material(cell), 0);
     flight.world = Arc::new(edited);
     let inspect = Vec3::new(0.0, -0.4, -1.0);
     flight.settle("orbital_edit", ground, inspect);
-    for _ in 0..30 { flight.draw("orbital_edit", ground, inspect); }
+    for _ in 0..30 {
+        flight.draw("orbital_edit", ground, inspect);
+    }
     flight.capture(&output.join("orbital-edit.png"));
     let mut coarse = (*flight.world).clone();
     coarse.set_voxel_size(1.0).unwrap();
     flight.world = Arc::new(coarse);
     flight.settle("1m_base", ground, inspect);
-    for _ in 0..30 { flight.draw("1m_base", ground, inspect); }
+    for _ in 0..30 {
+        flight.draw("1m_base", ground, inspect);
+    }
     flight.capture(&output.join("1m-base.png"));
     let error = pollster::block_on(validation.pop());
     assert!(error.is_none(), "GPU validation errors: {error:?}");

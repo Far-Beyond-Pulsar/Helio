@@ -629,16 +629,15 @@ impl RenderGraph {
     pub fn inherit_persistent_state(&mut self, previous: &mut RenderGraph) {
         let mut used = std::collections::HashSet::new();
         for pass in &mut self.passes {
-            if let Some((index, old)) =
-                previous.passes.iter_mut().enumerate().find(|(index, old)| {
-                    !used.contains(index)
-                        && pass.name() == old.name()
-                        && pass.as_any().type_id() == old.as_any().type_id()
-                })
-            {
-                used.insert(index);
-                if pass.inherit_persistent_state(old.as_mut()) {
+            for (index, old) in previous.passes.iter_mut().enumerate() {
+                if !used.contains(&index)
+                    && pass.name() == old.name()
+                    && pass.as_any().type_id() == old.as_any().type_id()
+                    && pass.inherit_persistent_state(old.as_mut())
+                {
+                    used.insert(index);
                     pass.on_resize(&self.device, self.internal_w, self.internal_h);
+                    break;
                 }
             }
         }
@@ -2132,4 +2131,3 @@ impl RenderGraph {
             .resize(self.passes.len(), self.chain_generation);
     }
 }
-

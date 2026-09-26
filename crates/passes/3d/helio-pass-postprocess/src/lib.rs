@@ -862,6 +862,10 @@ impl PostProcessPass {
     /// include the cinematic bokeh DOF pass.
     pub fn set_output_to_pre_dof(&mut self, enable: bool) {
         self.output_to_pre_dof = enable;
+        if !enable {
+            self.pre_dof_tex = None;
+            self.pre_dof_view = None;
+        }
     }
 
     /// Gate bloom compute dispatches on/off.
@@ -1130,11 +1134,29 @@ impl PostProcessPass {
             (self.height >> (mip + 1)).max(1),
         )
     }
+
+    fn ensure_pre_dof_target(&mut self, device: &wgpu::Device) {
+        if !self.output_to_pre_dof || self.pre_dof_view.is_some() { return; }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess Pre-DOF"),
+            size: wgpu::Extent3d { width: self.width.max(1), height: self.height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.pre_dof_view = Some(texture.create_view(&Default::default()));
+        self.pre_dof_tex = Some(texture);
+    }
 }
 
 impl RenderPass for PostProcessPass {
     fn name(&self) -> &'static str {
         "PostProcess"
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        if self.output_to_pre_dof { &["pre_dof"] } else { &[] }
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -1187,33 +1209,16 @@ impl RenderPass for PostProcessPass {
         self.bloom_extract_bg = None;
         self.first_frame = true;
 
-        // Recreate pre_dof texture on resize
-        if self.output_to_pre_dof {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("PostProcess Pre-DOF"),
-                size: wgpu::Extent3d {
-                    width: width.max(1),
-                    height: height.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.pre_dof_tex = Some(tex);
-            self.pre_dof_view = Some(view);
-        } else {
-            self.pre_dof_tex = None;
-            self.pre_dof_view = None;
-        }
+        self.pre_dof_tex = None;
+        self.pre_dof_view = None;
+        self.ensure_pre_dof_target(device);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Enabling the output after construction does not imply a resize.
+        // Allocate before the first frame, otherwise DOF falls back to pre_aa
+        // and overwrites both postprocessing and temporal reconstruction.
+        self.ensure_pre_dof_target(ctx.device);
         if self.first_frame {
             self.first_frame = false;
             let initial: f32 = 0.18;

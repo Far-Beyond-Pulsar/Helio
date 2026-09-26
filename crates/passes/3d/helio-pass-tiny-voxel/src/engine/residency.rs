@@ -489,15 +489,30 @@ impl Residency {
     }
     pub fn next_batch(&mut self) -> Option<(Vec<Job>, Vec<u32>, Arc<World>)> {
         let p = self.pending.as_mut()?;
-        let budget = if self.stats.ready {
+        // A sampled distant brick evaluates 729 cells, versus 32768 for an
+        // exact brick. Charging both one slot left most of the generation
+        // budget unused in flight. Retain the previous worst-case sample
+        // budget, but fill the dispatch when its bricks are cheaper.
+        let sample_budget = if self.stats.ready {
             64
         } else {
             GENERATION_BATCH
-        };
+        } * 32
+            * 32
+            * 32;
+        let mut samples = 0;
         let mut batch = Vec::new();
         let mut references = Vec::new();
-        while p.cursor < p.jobs.len() && batch.len() < budget {
+        while p.cursor < p.jobs.len() && batch.len() < GENERATION_BATCH {
             let mut job = p.jobs[p.cursor];
+            let cost = if job.level == 0 {
+                32 * 32 * 32
+            } else {
+                9 * 9 * 9
+            };
+            if samples + cost > sample_budget {
+                break;
+            }
             let side = 32i32 << job.level;
             let edits = p.plan.world.region_edits(
                 job.low,
@@ -510,6 +525,7 @@ impl Residency {
             job.pad[1] = edits.len() as u32;
             references.extend(edits.into_iter().map(|i| i as u32));
             batch.push(job);
+            samples += cost;
             p.cursor += 1;
         }
         self.stats.generated += batch.len() as u64;

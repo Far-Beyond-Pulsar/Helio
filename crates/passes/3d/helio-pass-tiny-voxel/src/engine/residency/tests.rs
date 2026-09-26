@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn generation_budget_counts_evaluations_without_exceeding_dispatch_capacity() {
+    let world = Arc::new(World::default());
+    for (level, ready, expected) in [(0, true, 64), (4, true, 256), (0, false, 256)] {
+        let mut residency = Residency::new(BRICK_CAPACITY);
+        residency.stats.ready = ready;
+        residency.pending = Some(Pending {
+            plan: Plan {
+                nodes: vec![],
+                leaves: vec![],
+                world: world.clone(),
+                view: view(DVec3::ZERO),
+                pixels: 1.0,
+            },
+            jobs: (0..512)
+                .map(|slot| Job {
+                    low: [0; 3],
+                    level,
+                    slot,
+                    pad: [0; 3],
+                })
+                .collect(),
+            cursor: 0,
+        });
+        let (batch, _, _) = residency.next_batch().unwrap();
+        assert_eq!(batch.len(), expected);
+        assert_eq!(residency.stats.pending, 512 - expected);
+    }
+}
+
 fn view(eye: DVec3) -> View {
     let forward = DVec3::new(0.0, -0.15, -1.0).normalize();
     let right = forward.cross(DVec3::Y).normalize();
