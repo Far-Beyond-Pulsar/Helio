@@ -102,7 +102,9 @@ impl CpuProfiler {
     /// feature-gated behavior as RAII scopes.
     pub(crate) fn record_external(&mut self, name: &'static str, duration: Duration) {
         #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
-        self.timings.insert(name, duration);
+        {
+            *self.timings.entry(name).or_default() += duration;
+        }
         #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
         let _ = (name, duration);
     }
@@ -200,7 +202,23 @@ impl Drop for ScopeGuard<'_> {
         #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
         {
             let elapsed = self.start.elapsed();
-            self.profiler.timings.insert(self.name, elapsed);
+            *self.profiler.timings.entry(self.name).or_default() += elapsed;
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "profiling"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_execute_and_repeated_labels_accumulate() {
+        let mut profiler = CpuProfiler::new();
+        profiler.record_external("pass", Duration::from_millis(2));
+        { let _scope = profiler.scope("pass"); }
+        profiler.record_external("pass", Duration::from_millis(3));
+        assert!(profiler.get_timings()["pass"] >= Duration::from_millis(5));
+        profiler.clear();
+        assert!(profiler.get_timings().is_empty());
     }
 }

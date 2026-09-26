@@ -7,8 +7,8 @@
 //! into a flat storage array.
 //!
 //! CPU cost: O(1) — one dispatch with ceil(num_tiles / 256) workgroups.
-//! GPU cost: O(num_tiles × num_lights) in the worst case; in practice much
-//!           less because most lights are spatially sparse.
+//! GPU cost: O(sparse_capacity) when light data changes, plus
+//! O(num_tiles × active_lights). Empty entity slots are never scanned per tile.
 //!
 //! Tile data layout (per tile slot of MAX_LIGHTS_PER_TILE entries):
 //!   tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]  = light_index_i
@@ -87,10 +87,24 @@ struct Transform {
     scale:    array<f32, 3>,
 }
 @group(0) @binding(3) var<storage, read> transforms: array<Transform>;
-// Parallel to `lights` when `params.light_mode_direct_index == 0` -- entry
-// `i` is the real SceneDB entity index `lights[i]` was built from this frame.
-// Ignored (identity) when `light_mode_direct_index == 1`.
+// Count followed by active sparse light indices. Output indices remain in the
+// original SceneDB address space consumed by deferred/forward shading.
 @group(0) @binding(4) var<storage, read> light_entity_indices: array<u32>;
+
+struct ActiveLights {
+    count: atomic<u32>,
+    indices: array<u32>,
+}
+@group(0) @binding(7) var<storage, read_write> active_lights: ActiveLights;
+
+@compute @workgroup_size(256)
+fn compact_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= min(params.num_lights, arrayLength(&lights)) { return; }
+    if lights[i].color_intensity.w <= 0.0 { return; }
+    let slot = atomicAdd(&active_lights.count, 1u);
+    active_lights.indices[slot] = i;
+}
 
 // Output: flat arrays, one slot per tile
 @group(0) @binding(5) var<storage, read_write> tile_light_lists:  array<u32>;
@@ -172,7 +186,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Iterate all lights and test each against this tile's frustum.
     var count = 0u;
-    for (var i = 0u; i < params.num_lights; i++) {
+    for (var active_slot = 0u; active_slot < light_entity_indices[0]; active_slot++) {
+        let i = light_entity_indices[active_slot + 1u];
         let light = lights[i];
 
         // Skip never-written slots. The direct-index path always iterates

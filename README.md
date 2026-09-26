@@ -32,8 +32,22 @@ The fastest way to see something is to run one of the demos:
 ```sh
 cargo run -p examples --bin indoor_cathedral --release
 cargo run -p examples --bin outdoor_city --release
+cargo run -p examples --bin two_million_dynamic --release
 cargo run --bin web                # build every demo to WASM and serve it locally
 ```
+
+`two_million_dynamic` creates two million instanced cubes as static objects,
+records a baseline, then promotes them to dynamic objects in 100,000-object
+steps. Each step waits three seconds for the renderer to settle and records a
+frame sample window. The default run writes `two_million_dynamic.sqlite`.
+Set `HELIO_INITIAL_FRAMES`, `HELIO_DYNAMIC_STEP`, `HELIO_STABILIZE_SECONDS`,
+`HELIO_SAMPLE_FRAMES`, or `HELIO_PERF_DB` to tune a run. The SQLite database
+contains indexed `runs`, `checkpoints`, and `frames` tables plus
+`profiler_frames` and `pass_timings`. The latter two are populated from
+Helio's `RenderTimingSnapshot`: every render-graph pass has CPU and GPU
+milliseconds, and each profiler frame records GPU availability, frame lag,
+readback drops, and query overflows. GPU timings are asynchronous, so use the
+stored GPU frame index/lag when correlating them with frame samples.
 
 To wire the renderer up to your own window, the shape of it is always the same. You ask Helio which GPU features and limits it needs for the adapter you have, create a config and a scene, build a graph, and hand all of it to `Renderer::new`. From then on you call `render` once per frame with a camera and a surface view.
 

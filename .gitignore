@@ -30,3 +30,10 @@ hlfs.md
 assets/sprites.png
 frame_100.png
 frame_100_depth.png
+*.sqlite
+two_million_dynamic_profiled.sqlite-shm
+two_million_dynamic_profiled.sqlite-wal
+two_million_exact_after_batch.sqlite-shm
+two_million_exact_after_batch.sqlite-wal
+two_million_verified.sqlite-shm
+two_million_verified.sqlite-wal

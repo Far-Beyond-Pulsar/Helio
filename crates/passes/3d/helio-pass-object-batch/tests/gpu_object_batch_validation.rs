@@ -395,6 +395,32 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
 }
 
 #[test]
+fn large_identical_batch_is_partitioned_without_losing_instances() {
+    let mut rng = Rng(123);
+    let row = make_row(&mut rng, 1, 1, &[(0, 0)]);
+    let materials = [TestMaterial::zeroed()];
+    // Two complete chunks plus a partial final chunk; zeros exercise sparse
+    // gather before splitting the live sorted stream.
+    let mut rows = vec![row; 10_003];
+    rows.extend(vec![dead_row(); 13]);
+    let gpu = pollster::block_on(run_gpu(&rows, &materials)).expect("GPU required");
+    assert_eq!(gpu.group_count, 3);
+    assert_eq!(gpu.instances.len(), 10_003);
+    let mut next = 0;
+    for (draw, indirect) in gpu.draw_calls.iter().zip(&gpu.indirect) {
+        let &(index_count, first_index, vertex_offset, first_instance, count) = draw;
+        assert_eq!(first_instance, next);
+        assert!(count > 0 && count <= 4096);
+        assert_eq!(*indirect, (index_count, count, first_index, vertex_offset, first_instance));
+        next += count;
+    }
+    assert_eq!(next, 10_003);
+    assert!(gpu.instances.iter().all(|id| *id == (row.mesh_slot, row.material_slot)));
+    assert_eq!(gpu.shadow_static_count + gpu.shadow_movable_count, 10_003);
+    assert_eq!(gpu.opaque, vec![(0, 0, 0, 3)]);
+}
+
+#[test]
 fn gpu_object_batch_matches_cpu_reference() {
     const N: usize = 4000;
     let mut rng = Rng(0xB16B_00B5_5CA1_AB1E);

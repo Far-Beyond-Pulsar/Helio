@@ -305,8 +305,10 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
 
     let light = lights[light_idx];
 
-    // Skip shadow computation if light doesn't cast shadows
-    if light.shadow_index == 0xFFFFFFFFu { return; }
+    // SceneDB is entity-indexed. An unused row is all zeros, including
+    // shadow_index=0 and light_type=directional: without a liveness check
+    // every empty row computes invalid cascades and races on shadow slot 0.
+    if light.color_intensity.w <= 0.0 || light.shadow_index == 0xFFFFFFFFu { return; }
 
     // Compute matrices based on light type
     if light.light_type == LIGHT_TYPE_POINT {

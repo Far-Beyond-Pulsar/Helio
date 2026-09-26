@@ -296,6 +296,16 @@ impl Renderer {
             {
                 pp_pass.set_bloom_active(bloom_visible);
             }
+            if let Some(fog_pass) = self
+                .graph
+                .find_pass_mut::<helio_pass_volumetric_fog::VolumetricFogPass>()
+            {
+                // A graph contains the fog pass for stable resource wiring, but
+                // an empty scene does not need its ~2.65M-froxel compute work.
+                // A volume may enable fog even when the camera defaults do not,
+                // so keep the pass active whenever SceneDB has PP volumes.
+                fog_pass.set_active(has_pp_volumes || camera.postprocess_settings.fog_enabled);
+            }
         }
 
         // Keep every pass's `RenderPass::set_editor_mode` in sync every
@@ -643,6 +653,9 @@ impl Renderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Renderer Target Clear"),
                 });
+        self.graph
+            .profiler_mut()
+            .begin_gpu_pass(&mut clear_encoder, "__renderer_target_clear");
         {
             let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Renderer Target Clear Pass"),
@@ -666,6 +679,9 @@ impl Renderer {
             });
         }
         clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
+        self.graph
+            .profiler_mut()
+            .end_gpu_pass(&mut clear_encoder, "__renderer_target_clear");
         {
             helio_core::cpu_scope!("Helio: queue.submit (target clear)");
             self.queue.submit(std::iter::once(clear_encoder.finish()));
