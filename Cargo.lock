@@ -1069,6 +1069,7 @@ dependencies = [
  "pollster 0.4.0",
  "pulsar_scenedb",
  "rapier3d 0.24.0",
+ "rusqlite",
  "salva3d",
  "scenedb-inspector-agent",
  "wgpu",
@@ -1494,6 +1495,7 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-tsr",
+ "helio-pass-volumetric-fog",
  "helio-xr",
  "image",
  "log",
@@ -1877,6 +1879,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "pollster 0.4.0",
  "pulsar_scenedb",
  "wgpu",
 ]
@@ -2043,6 +2046,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -2261,6 +2265,10 @@ dependencies = [
 [[package]]
 name = "helio-voxel-data"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "helio-wasm"

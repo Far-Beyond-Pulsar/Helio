@@ -11,6 +11,9 @@ pub use gpu_types::*;
 
 const WORKGROUP_SIZE: u32 = 64;
 
+#[cfg(test)]
+mod tests;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadowMatrixUniforms {

@@ -465,6 +465,12 @@ fn same_draw_group(a: StaticObjectRow, b: StaticObjectRow) -> bool {
     return a.mesh_slot == b.mesh_slot && a.material_slot == b.material_slot;
 }
 
+// Downstream frustum/occlusion kernels assign one workgroup to each draw.
+// An unbounded run of identical mesh/material rows otherwise serializes
+// millions of instances onto 64 lanes. Split sorted runs at fixed block
+// boundaries; material ranges still coalesce the resulting adjacent draws.
+const MAX_INSTANCES_PER_DRAW: u32 = 4096u;
+
 @compute @workgroup_size(WG)
 fn cs_group_local_scan(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -474,7 +480,7 @@ fn cs_group_local_scan(
     let has_elem = gid.x < fu_gls.count;
     var is_start = 0u;
     if has_elem {
-        if gid.x == 0u {
+        if gid.x % MAX_INSTANCES_PER_DRAW == 0u {
             is_start = 1u;
         } else {
             let cur = static_objects_gls[sorted_indices_gls[gid.x]];
@@ -545,7 +551,7 @@ fn cs_group_write(
     if i >= fu_gw.count {
         return;
     }
-    var is_start = i == 0u;
+    var is_start = i % MAX_INSTANCES_PER_DRAW == 0u;
     if !is_start {
         let cur = static_objects_gw[sorted_indices_gw[i]];
         let prev = static_objects_gw[sorted_indices_gw[i - 1u]];

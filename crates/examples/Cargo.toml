@@ -208,6 +208,18 @@ name = "one_million_cubes"
 path = "one_million_cubes.rs"
 
 [[bin]]
+name = "two_million_dynamic"
+path = "two_million_dynamic.rs"
+
+
+
+
+
+
+
+
+
+[[bin]]
 name = "dof_demo"
 path = "dof_demo.rs"
 
@@ -283,6 +295,7 @@ egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 pollster = { workspace = true }
+rusqlite = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
 
 [[bin]]

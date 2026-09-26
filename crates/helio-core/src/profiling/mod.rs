@@ -321,6 +321,10 @@ impl Profiler {
         self.gpu.supported()
     }
 
+    pub(crate) const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Updates the reusable host-facing snapshot after a frame has submitted.
     pub fn update_snapshot(
         &mut self,
@@ -356,6 +360,11 @@ impl Profiler {
         let gpu_timings = self.gpu.get_last_timings();
         let mut gpu_cursor = 0;
         for name in pass_names {
+            // Both CPU and GPU collectors aggregate by label. Repeated graph
+            // labels must not export that aggregate multiple times.
+            if self.snapshot.passes.iter().any(|pass| pass.name == name) {
+                continue;
+            }
             let cpu_ms = self.cpu.get_timings().get(name).map(|duration| {
                 has_cpu = true;
                 let milliseconds = duration.as_secs_f64() as f32 * 1_000.0;
@@ -388,14 +397,40 @@ impl Profiler {
                 gpu_ms,
             });
         }
+        // Preserve GPU scopes that are not graph pass names. These include
+        // renderer-owned command buffers and the graph envelope itself; they
+        // are essential for explaining queue backpressure and must not vanish
+        // from the exported snapshot.
+        for timing in gpu_timings {
+            if !self.snapshot.passes.iter().any(|pass| pass.name == timing.name) {
+                self.snapshot.passes.push(RenderPassTiming {
+                    name: timing.name,
+                    cpu_ms: None,
+                    gpu_ms: Some(timing.duration_ns as f32 / 1_000_000.0),
+                });
+            }
+        }
         self.snapshot.total_cpu_ms = has_cpu.then_some(total_cpu_ms);
         self.gpu_frame_ms = gpu_timings
             .iter()
             .find(|t| t.name == "__graph_frame")
             .map(|t| t.duration_ns as f32 / 1_000_000.0);
-        self.snapshot.total_gpu_ms = self
-            .gpu_frame_ms
-            .or_else(|| has_gpu.then_some(total_gpu_ms));
+        let graph_gpu_ms: f32 = gpu_timings
+            .iter()
+            .filter(|timing| {
+                timing.name == "__graph_compute" || timing.name == "__graph_graphics"
+            })
+            .map(|timing| timing.duration_ns as f32 / 1_000_000.0)
+            .sum();
+        if graph_gpu_ms > 0.0 {
+            self.gpu_frame_ms = Some(graph_gpu_ms);
+        }
+        self.snapshot.total_gpu_ms = if graph_gpu_ms > 0.0 {
+            Some(graph_gpu_ms)
+        } else {
+            self.gpu_frame_ms
+                .or_else(|| has_gpu.then_some(total_gpu_ms))
+        };
     }
 
     /// Returns the latest snapshot without allocation or synchronization.
@@ -455,7 +490,7 @@ impl Profiler {
             println!(
                 "  {:<30} {:>8.2}ms",
                 "TOTAL GPU",
-                total_gpu as f64 / 1_000_000.0
+                self.gpu_frame_ms.map(f64::from).unwrap_or(total_gpu as f64 / 1_000_000.0)
             );
         }
 
@@ -523,7 +558,9 @@ impl Profiler {
             }
         }
 
-        (pass_timings, total_cpu_ms, total_gpu_ms)
+        // Graph envelopes contain the pass scopes. Do not count both in the
+        // aggregate exported to Pulsar's overlay/flame-graph consumers.
+        (pass_timings, total_cpu_ms, self.gpu_frame_ms.unwrap_or(total_gpu_ms))
     }
 }
 
@@ -577,4 +614,60 @@ pub struct RenderTimingSnapshot {
     pub readback_drops: u64,
     pub query_overflows: u64,
     pub passes: Vec<RenderPassTiming>,
+}
+
+#[cfg(all(test, feature = "profiling"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dual_encoder_scopes_and_repeated_labels_export_once() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false,
+            }).await.expect("GPU required for timestamp regression test");
+            let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+                required_limits: adapter.limits(), ..Default::default()
+            }).await.unwrap();
+            let mut profiler = Profiler::new(&device, &queue);
+            let mut graphics = device.create_command_encoder(&Default::default());
+            let mut compute = device.create_command_encoder(&Default::default());
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None, size: 1024 * 1024, usage: wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            profiler.begin_gpu_pass(&mut graphics, "__graph_graphics");
+            profiler.begin_gpu_pass(&mut compute, "__graph_compute");
+            for _ in 0..2 {
+                profiler.begin_gpu_pass(&mut graphics, "compute_on_graphics");
+                profiler.begin_gpu_pass(&mut compute, "compute_on_graphics");
+                graphics.clear_buffer(&buffer, 0, None);
+                profiler.end_gpu_pass(&mut compute, "compute_on_graphics");
+                profiler.end_gpu_pass(&mut graphics, "compute_on_graphics");
+            }
+            profiler.end_gpu_pass(&mut graphics, "__graph_graphics");
+            profiler.end_gpu_pass(&mut compute, "__graph_compute");
+            profiler.resolve_gpu_queries(&mut graphics, 7);
+            queue.submit([compute.finish(), graphics.finish()]);
+            profiler.read_gpu_timestamps_blocking(&device);
+            profiler.update_snapshot(8, ["compute_on_graphics", "compute_on_graphics"].into_iter());
+            let snapshot = profiler.timing_snapshot();
+            assert_eq!(snapshot.gpu_frame_index, Some(7));
+            assert_eq!(snapshot.gpu_lag_frames, Some(1));
+            assert_eq!(snapshot.query_overflows, 0);
+            assert_eq!(snapshot.passes.iter().filter(|p| p.name == "compute_on_graphics").count(), 1);
+            let span: f32 = snapshot.passes.iter().filter(|p| p.name.starts_with("__graph_"))
+                .map(|p| p.gpu_ms.unwrap()).sum();
+            let pass = snapshot.passes.iter().find(|p| p.name == "compute_on_graphics").unwrap();
+            assert!(pass.gpu_ms.unwrap() > 0.0);
+            assert!(span >= pass.gpu_ms.unwrap());
+            assert_eq!(snapshot.total_gpu_ms, Some(span));
+            assert_eq!(profiler.gpu_frame_ms(), Some(span));
+            assert_eq!(profiler.export_timings().2, span);
+        });
+    }
 }

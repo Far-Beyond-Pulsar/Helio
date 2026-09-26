@@ -782,6 +782,12 @@ impl RenderGraph {
         &self.profiler
     }
 
+    /// Mutable profiler access for renderer-owned command buffers that are
+    /// submitted outside the graph (for example the target clear).
+    pub fn profiler_mut(&mut self) -> &mut Profiler {
+        &mut self.profiler
+    }
+
     /// Collect an owned snapshot of all resource and pass data for a debug
     /// overlay or inspector.
     pub fn collect_frame_debug_data(&self) -> FrameDebugData {
@@ -1264,10 +1270,12 @@ impl RenderGraph {
         #[cfg(not(target_arch = "wasm32"))]
         drop(encoders_scope);
 
-        // Compute is submitted first, graphics second. Span BOTH command
-        // buffers; per-pass markers on compute alone omit all graphics work.
+        // Compute and graphics are submitted as separate command buffers. Keep
+        // their frame spans separate: a timestamp that begins on one encoder
+        // and ends on the other includes queue/encoder gaps and is not a GPU
+        // work duration.
         self.profiler
-            .begin_gpu_pass(&mut compute_encoder, "__graph_frame");
+            .begin_gpu_pass(&mut compute_encoder, "__graph_compute");
         registry.reset_tracking("RenderGraph");
         // Builds bind groups for every pass every frame.
         let reflected_groups: Vec<Vec<wgpu::BindGroup>> = {
@@ -1307,6 +1315,8 @@ impl RenderGraph {
 
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
         let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
+        self.profiler
+            .begin_gpu_pass(&mut encoder, "__graph_graphics");
 
         if !use_parallel_recording {
             // Raw pointer, not a borrow: `self.passes.iter_mut()` below holds
@@ -1321,19 +1331,22 @@ impl RenderGraph {
             for (pass_index, pass) in self.passes.iter_mut().enumerate() {
                 if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                     let pass_name = pass.name();
-                    self.profiler
-                        .begin_gpu_pass(&mut compute_encoder, pass_name);
-
-                    if let Some(desc) = pass.render_pass_descriptor_with_pool_and_storage(
+                    let execute_start = std::time::Instant::now();
+                    let desc = pass.render_pass_descriptor_with_pool_and_storage(
                         target,
                         depth,
                         &*registry,
                         &self.pool,
                         &mut self.frame_storage,
-                    ) {
+                    );
+                    if let Some(desc) = desc {
+                        self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
                         pass_encoder.execute_bundles(std::iter::once(bundle));
                     } else {
+                        self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut ctx = PassContext {
                             encoder_ptr: &mut encoder as *mut _,
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
@@ -1369,7 +1382,9 @@ impl RenderGraph {
                     }
 
                     self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
+                    self.profiler.end_gpu_pass(&mut encoder, pass_name);
                     pass.publish(registry);
+                    self.profiler.record_external_cpu_timing(pass_name, execute_start.elapsed());
                     continue;
                 }
 
@@ -1422,19 +1437,22 @@ impl RenderGraph {
 
                 // execute()
                 let pass_name = pass.name();
-                self.profiler
-                    .begin_gpu_pass(&mut compute_encoder, pass_name);
+                let execute_start = std::time::Instant::now();
 
                 // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
-                if let Some(desc) = pass.render_pass_descriptor_with_pool_and_storage(
+                let desc = pass.render_pass_descriptor_with_pool_and_storage(
                     target,
                     depth,
                     &*registry,
                     &self.pool,
                     &mut self.frame_storage,
-                ) {
+                );
+                if let Some(desc) = desc {
+                    self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                    self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                     let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
-                    let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
+                    let is_chained = !self.profiler.is_enabled()
+                        && cache.map_or(false, |c| !c.chain_range.is_empty());
 
                     if is_chained {
                         let c = cache.unwrap();
@@ -1593,6 +1611,8 @@ impl RenderGraph {
                         }
                     }
                 } else {
+                    self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                    self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                     let bridged = self
                         .chain_membership
                         .get(pass_index)
@@ -1641,9 +1661,14 @@ impl RenderGraph {
                     pass.execute(&mut ctx)?;
                 }
 
+                // execute() may record raw commands on either encoder even
+                // without a render-pass descriptor. Close the nested scopes
+                // in reverse order; the profiler sums both stream durations.
                 self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
+                self.profiler.end_gpu_pass(&mut encoder, pass_name);
 
                 pass.publish(registry);
+                self.profiler.record_external_cpu_timing(pass_name, execute_start.elapsed());
             }
         }
 
@@ -1652,7 +1677,9 @@ impl RenderGraph {
                 std::mem::ManuallyDrop::drop(&mut rp);
             }
         }
-        self.profiler.end_gpu_pass(&mut encoder, "__graph_frame");
+        self.profiler.end_gpu_pass(&mut encoder, "__graph_graphics");
+        self.profiler
+            .end_gpu_pass(&mut compute_encoder, "__graph_compute");
         // Resolve after the final graphics timestamp, not before graphics runs.
         self.profiler
             .resolve_gpu_queries(&mut encoder, self.frame_count);

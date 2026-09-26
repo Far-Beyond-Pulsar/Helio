@@ -76,6 +76,10 @@ struct FogGlobals {
 }
 
 pub struct VolumetricFogPass {
+    /// Whether this frame can contribute fog. The graph owns the pass even when
+    /// the scene has no fog, so avoid dispatching the full froxel grid in that
+    /// common case.
+    active: bool,
     timing_query: Option<wgpu::QuerySet>,
     classify_pipeline: wgpu::ComputePipeline,
     inject_pipeline: wgpu::ComputePipeline,
@@ -367,6 +371,7 @@ impl VolumetricFogPass {
             ..Default::default()
         });
         Self {
+            active: true,
             timing_query: None,
             classify_pipeline,
             active_media_buf,
@@ -397,6 +402,13 @@ impl VolumetricFogPass {
             temporal_blend: TEMPORAL_BLEND,
             time: 0.0,
         }
+    }
+
+    /// Enable the expensive froxel work only when camera fog or a scene volume
+    /// can contribute to the frame. The default is enabled for compatibility;
+    /// the renderer updates this once per frame after resolving scene buffers.
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 
     /// Weight of the current frame in the temporal blend, 0..1.
@@ -480,6 +492,9 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if !self.active {
+            return Ok(());
+        }
         let Some(postprocess_buf) = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
             return Ok(());
         };

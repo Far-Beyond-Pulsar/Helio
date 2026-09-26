@@ -84,9 +84,13 @@ pub fn new_scene_db_with_gpu_mirror(
 /// no-op unless the inspector launched this process, so it is always safe to
 /// call. `scenedb_inspector_agent::install_world` only *installs* the bridge;
 /// the host must publish after each flush for the inspector to see any data.
-pub fn flush_scene_db(scene_db: &pulsar_scenedb::SceneDb, queue: &wgpu::Queue) {
-    scene_db.world.flush_gpu_mirror(queue);
+pub fn flush_scene_db(
+    scene_db: &pulsar_scenedb::SceneDb,
+    queue: &wgpu::Queue,
+) -> Option<pulsar_scenedb::gpu::SyncStats> {
+    let stats = scene_db.world.flush_gpu_mirror(queue);
     scene_db.world.publish_inspector_snapshot();
+    stats
 }
 
 /// The `SceneDbHandle` (`GpuMirrorHandle`) to pass to `RendererBuilder::new`
@@ -626,12 +630,31 @@ pub fn spawn_object_with_movability(
     movability: Option<helio::Movability>,
 ) -> SceneResult<Entity> {
     let entity = spawn_object(world, mesh, material, transform, radius)?;
-    // Passes that cache per-object state read this component; absent means
-    // they keep their least-restrictive behaviour.
     if let Some(movability) = movability {
-        world.insert(entity, movability);
+        set_object_movability(world, entity, movability)?;
     }
     Ok(entity)
+}
+
+/// Keep the CPU mobility promise and the GPU shadow partition flag in sync.
+pub fn set_object_movability(
+    world: &mut World,
+    entity: Entity,
+    movability: helio::Movability,
+) -> SceneResult<()> {
+    {
+        let Some(mut object) = world.get_mut::<StaticObjectComponent>(entity) else {
+            return Err("object entity has no StaticObjectComponent");
+        };
+        let flag = helio_pass_object_batch::INSTANCE_FLAG_MOVABLE;
+        if movability.can_move() {
+            object.flags |= flag;
+        } else {
+            object.flags &= !flag;
+        }
+    }
+    world.insert(entity, movability);
+    Ok(())
 }
 
 /// Move a previously spawned object by updating its authoritative SceneDB row.

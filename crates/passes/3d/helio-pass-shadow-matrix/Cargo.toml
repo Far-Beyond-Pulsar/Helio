@@ -7,3 +7,6 @@ edition = "2021"
 helio-core = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+pollster = { workspace = true }

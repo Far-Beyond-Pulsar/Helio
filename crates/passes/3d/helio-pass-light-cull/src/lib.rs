@@ -25,6 +25,9 @@ pub const MAX_LIGHTS_PER_TILE: u32 = 64;
 /// iterate its live `BufferHandle::row_capacity()`, never this constant.
 pub const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
+#[cfg(test)]
+mod tests;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GPU-side uniform mirroring LightCullParams in the WGSL shader.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,6 +53,10 @@ pub struct LightCullPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
+    compact_pipeline: wgpu::ComputePipeline,
+    active_indices: wgpu::Buffer,
+    compact_bind_group: Option<wgpu::BindGroup>,
+    compact_key: Option<(u64, u64, u32)>,
     /// Storage buffer: u32 per light-slot per tile.
     /// Size: num_tiles * MAX_LIGHTS_PER_TILE * 4 bytes.
     pub tile_light_lists: wgpu::Buffer,
@@ -188,6 +195,23 @@ impl LightCullPass {
             cache: None,
         });
 
+        // Separate layout: the compaction output is writable here and read-only
+        // in the tile kernel. Never bind the same buffer with conflicting usage.
+        let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("LightCull Compact Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("compact_lights"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let active_indices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Active light indices"),
+            size: 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("LightCull Params"),
             size: std::mem::size_of::<LightCullParams>() as u64,
@@ -215,6 +239,10 @@ impl LightCullPass {
             pipeline,
             bgl,
             params_buf,
+            compact_pipeline,
+            active_indices,
+            compact_bind_group: None,
+            compact_key: None,
             tile_light_lists,
             tile_light_counts,
             bind_group: None,
@@ -317,6 +345,19 @@ impl RenderPass for LightCullPass {
         // Every allocated row: the buffer grows with the scene and unused
         // rows are zeroed.
         let num_lights = scene_lights.map_or(0, |lights| lights.row_capacity());
+        let required_bytes = (u64::from(num_lights) + 1) * 4;
+        if self.active_indices.size() < required_bytes {
+            self.active_indices = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Active light indices"),
+                size: required_bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.compact_bind_group = None;
+            self.compact_key = None;
+            self.bind_group_key = None;
+            self.cull_cache_key = None;
+        }
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
             num_tiles_y: ctx.height.div_ceil(TILE_SIZE),
@@ -338,7 +379,7 @@ impl RenderPass for LightCullPass {
         let lights_buf = scene_lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
-        let light_entity_indices_buf = ctx.camera;
+        let light_entity_indices_buf = &self.active_indices;
         let movable_light_count = scene_lights_handle.map_or(0, |lights| lights.row_capacity());
 
         if !use_direct_index && movable_light_count == 0 {
@@ -348,6 +389,8 @@ impl RenderPass for LightCullPass {
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
+            self.compact_key = None;
+            self.compact_bind_group = None;
             return Ok(());
         }
 
@@ -367,6 +410,35 @@ impl RenderPass for LightCullPass {
         let lights_gen = scene_lights_handle
             .map(|h| (h.epoch, h.content_generation))
             .unwrap_or((0, 0));
+
+        let compact_key = (lights_gen.0, lights_gen.1, movable_light_count);
+        if self.compact_key != Some(compact_key) {
+            if self.compact_bind_group.is_none()
+                || self.compact_key.map(|key| key.0) != Some(lights_gen.0)
+            {
+                self.compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("LightCull Compact BG"),
+                    layout: &self.compact_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: lights_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.active_indices.as_entire_binding() },
+                    ],
+                }));
+            }
+            let encoder = unsafe { &mut *ctx.encoder_ptr };
+            encoder.clear_buffer(&self.active_indices, 0, Some(4));
+            if movable_light_count > 0 {
+                let mut compact = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("LightCull Compact"),
+                    timestamp_writes: None,
+                });
+                compact.set_pipeline(&self.compact_pipeline);
+                compact.set_bind_group(0, self.compact_bind_group.as_ref().unwrap(), &[]);
+                compact.dispatch_workgroups(movable_light_count.div_ceil(256), 1, 1);
+            }
+            self.compact_key = Some(compact_key);
+        }
 
         let cache_key = (
             camera_gen,

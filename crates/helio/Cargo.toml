@@ -18,6 +18,7 @@ helio-pass-portal-cull = { workspace = true }
 helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-postprocess = { workspace = true }
+helio-pass-volumetric-fog = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-billboard = { workspace = true }
