@@ -1,0 +1,13 @@
+
+running 1 test
+SELECTION_FLIGHT step=0 cold_ms=94.467 cached_ms=102.722 nodes=70641 bricks=31090 classified=148420 reused=206287
+SELECTION_FLIGHT step=1 cold_ms=93.325 cached_ms=38.009 nodes=70625 bricks=31068 classified=840 reused=353741
+SELECTION_FLIGHT step=2 cold_ms=94.016 cached_ms=42.886 nodes=70585 bricks=31025 classified=880 reused=353509
+SELECTION_FLIGHT step=3 cold_ms=91.920 cached_ms=49.146 nodes=69873 bricks=29870 classified=40358 reused=250207
+SELECTION_FLIGHT step=4 cold_ms=66.703 cached_ms=37.852 nodes=70569 bricks=30254 classified=29841 reused=186671
+SELECTION_FLIGHT step=5 cold_ms=17.639 cached_ms=24.939 nodes=39289 bricks=14917 classified=12383 reused=26906
+SELECTION_FLIGHT step=6 cold_ms=107.467 cached_ms=49.614 nodes=70641 bricks=31090 classified=0 reused=354707
+test engine::residency::tests::selection_flight_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.93s
+

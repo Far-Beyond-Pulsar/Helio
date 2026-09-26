@@ -32,6 +32,9 @@ for name in sys.argv[1:]:
             continue
         hit = next(csv.DictReader(path.open()))
         hits.append({**{k: int(v) for k, v in hit.items()}, 'file': path.name})
+    if not hits:
+        for row in csv.DictReader((directory / 'audits.csv').open()):
+            hits.append({k: v if k == 'file' else int(v) for k, v in row.items()})
     result = {
         'frames': len(rows),
         'complete': 'VOXEL_FLIGHT_COMPLETE' in log,
