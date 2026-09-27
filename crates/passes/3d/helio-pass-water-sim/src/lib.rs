@@ -1,5 +1,6 @@
 pub mod pipeline;
 pub mod simulation;
+mod liveness;
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -433,6 +434,13 @@ pub struct WaterSimPass {
     pub(crate) blit_bg_key: Option<usize>,
 
     pub(crate) water_output_view: Option<wgpu::TextureView>,
+    /// Whether any `"water_volumes"` row is live, from an async readback.
+    pub(crate) volume_liveness: liveness::VolumeLiveness,
+    /// This frame produced `water_output` and republished it as `pre_aa`.
+    /// False when no volume is live: the screen-space passes (scene blit,
+    /// surface, underwater tint) would only copy `pre_aa` unchanged, so they
+    /// are skipped and downstream passes keep reading the original `pre_aa`.
+    pub(crate) screen_active: bool,
 
     pub(crate) caustics_bg_key: Option<(usize, usize)>,
     pub(crate) caustics_bg: Option<wgpu::BindGroup>,
@@ -605,13 +613,18 @@ impl RenderPass for WaterSimPass {
         frame.write(helio_core::ResourceKey::new("water_sim_texture"), view, "WaterSim");
         let sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&self.output_sampler) };
         frame.write(helio_core::ResourceKey::new("water_sim_sampler"), sampler, "WaterSim");
-        if let Some(view) = &self.water_output_view {
+        if let Some(view) = self.water_output_view.as_ref().filter(|_| self.screen_active) {
             let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
             frame.write(helio_core::ResourceKey::new("pre_aa"), view, "WaterSim");
         }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.volume_liveness.update(
+            ctx.device,
+            ctx.queue,
+            ctx.scene_buffers.get(BufferKey::of("water_volumes")),
+        );
         self.sim_time += self.wave_speed / 60.0;
         let step_dt = 1.0 / 120.0;
         for ci in 0..CASCADE_COUNT {
@@ -1047,6 +1060,18 @@ impl RenderPass for WaterSimPass {
                 pass.draw_indexed(0..self.caustics_index_count, 0, 0..1);
                 drop(pass);
             }
+        }
+
+        // Everything below is screen-space and only reproduces `pre_aa` when
+        // no volume is live. Skip it rather than copying the full-resolution
+        // image. The simulation and caustics above are fixed-size and keep
+        // running so their state is unchanged when a volume appears.
+        self.screen_active = ctx
+            .scene_buffers
+            .get(BufferKey::of("water_volumes"))
+            .is_some_and(|handle| self.volume_liveness.maybe_live(handle));
+        if !self.screen_active {
+            return Ok(());
         }
 
         // ---- 6. Blit pre_aa -> water_output (scene baseline) -----------------
